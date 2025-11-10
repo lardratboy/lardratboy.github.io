@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dithering Explorer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f0f0f0;
+            min-height: 100vh;
+            position: relative;
+        }
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .image-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+        .image-container {
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+        }
+        canvas {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ddd;
+        }
+        label {
+            margin-right: 10px;
+        }
+        select, input {
+            margin-right: 20px;
+        }
+        .drop-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            pointer-events: none;
+        }
+        .drop-overlay.active {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .drop-message {
+            color: white;
+            font-size: 24px;
+            padding: 40px;
+            border: 4px dashed white;
+            border-radius: 20px;
+            background: rgba(0, 0, 0, 0.5);
+        }
+        .initial-message {
+            text-align: center;
+            padding: 40px;
+            background: white;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="drop-overlay">
+        <div class="drop-message">
+            Drop image here to process
+        </div>
+    </div>
+
+    <div class="controls">
+        <input type="file" id="imageInput" accept="image/*">
+        <select id="ditheringMethod">
+            <option value="floydSteinberg">Floyd-Steinberg</option>
+            <option value="ordered">Ordered (4x4)</option>
+        </select>
+        <label>Red Levels: <input type="number" id="redLevels" value="4" min="2" max="256"></label>
+        <label>Green Levels: <input type="number" id="greenLevels" value="4" min="2" max="256"></label>
+        <label>Blue Levels: <input type="number" id="blueLevels" value="4" min="2" max="256"></label>
+    </div>
+
+    <div id="initialMessage" class="initial-message">
+        Drag and drop an image anywhere on the page, or click the file input above to begin
+    </div>
+
+    <div class="image-grid">
+        <div class="image-container">
+            <h3>Original</h3>
+            <canvas id="original"></canvas>
+        </div>
+        <div class="image-container">
+            <h3>Dithered (Composite)</h3>
+            <canvas id="dithered"></canvas>
+        </div>
+        <div class="image-container">
+            <h3>Red Channel</h3>
+            <canvas id="redChannel"></canvas>
+        </div>
+        <div class="image-container">
+            <h3>Red Channel Difference</h3>
+            <canvas id="redDiff"></canvas>
+        </div>
+        <div class="image-container">
+            <h3>Green Channel</h3>
+            <canvas id="greenChannel"></canvas>
+        </div>
+        <div class="image-container">
+            <h3>Green Channel Difference</h3>
+            <canvas id="greenDiff"></canvas>
+        </div>
+        <div class="image-container">
+            <h3>Blue Channel</h3>
+            <canvas id="blueChannel"></canvas>
+        </div>
+        <div class="image-container">
+            <h3>Blue Channel Difference</h3>
+            <canvas id="blueDiff"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // Constants
+        const ORDERED_MATRIX_4X4 = [
+            [ 0, 8, 2, 10],
+            [12, 4, 14, 6],
+            [ 3, 11, 1, 9],
+            [15, 7, 13, 5]
+        ];
+
+        // Canvas and context references
+        const canvases = {
+            original: document.getElementById('original'),
+            dithered: document.getElementById('dithered'),
+            redChannel: document.getElementById('redChannel'),
+            greenChannel: document.getElementById('greenChannel'),
+            blueChannel: document.getElementById('blueChannel'),
+            redDiff: document.getElementById('redDiff'),
+            greenDiff: document.getElementById('greenDiff'),
+            blueDiff: document.getElementById('blueDiff')
+        };
+        const contexts = Object.fromEntries(
+            Object.entries(canvases).map(([key, canvas]) => [key, canvas.getContext('2d')]));
+
+        // Input elements
+        const imageInput = document.getElementById('imageInput');
+        const ditheringMethod = document.getElementById('ditheringMethod');
+        const redLevels = document.getElementById('redLevels');
+        const greenLevels = document.getElementById('greenLevels');
+        const blueLevels = document.getElementById('blueLevels');
+        const dropOverlay = document.querySelector('.drop-overlay');
+        const initialMessage = document.getElementById('initialMessage');
+
+        // Event listeners
+        imageInput.addEventListener('change', handleImageUpload);
+        ditheringMethod.addEventListener('change', processImage);
+        redLevels.addEventListener('change', processImage);
+        greenLevels.addEventListener('change', processImage);
+        blueLevels.addEventListener('change', processImage);
+
+        // Drag and drop event listeners
+        document.addEventListener('dragenter', handleDragEnter);
+        document.addEventListener('dragover', handleDragOver);
+        document.addEventListener('dragleave', handleDragLeave);
+        document.addEventListener('drop', handleDrop);
+
+        let originalImageData = null;
+        let dragCounter = 0;
+
+        function handleDragEnter(e) {
+            e.preventDefault();
+            dragCounter++;
+            dropOverlay.classList.add('active');
+        }
+
+        function handleDragOver(e) {
+            e.preventDefault();
+        }
+
+        function handleDragLeave(e) {
+            e.preventDefault();
+            dragCounter--;
+            if (dragCounter === 0) {
+                dropOverlay.classList.remove('active');
+            }
+        }
+
+        function handleDrop(e) {
+            e.preventDefault();
+            dragCounter = 0;
+            dropOverlay.classList.remove('active');
+
+            const dt = e.dataTransfer;
+            const files = dt.files;
+
+            if (files.length > 0) {
+                const file = files[0];
+                if (file.type.startsWith('image/')) {
+                    processFile(file);
+                }
+            }
+        }
+
+        function processFile(file) {
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const img = new Image();
+                img.onload = function() {
+                    // Hide initial message
+                    initialMessage.style.display = 'none';
+
+                    // Set all canvases to the same size
+                    Object.values(canvases).forEach(canvas => {
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                    });
+
+                    // Draw original image
+                    contexts.original.drawImage(img, 0, 0);
+                    originalImageData = contexts.original.getImageData(0, 0, img.width, img.height);
+                    processImage();
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function handleImageUpload(e) {
+            const file = e.target.files[0];
+            if (file) {
+                processFile(file);
+            }
+        }
+
+        function quantize(value, levels) {
+            const step = 255 / (levels - 1);
+            return Math.round(Math.round(value / step) * step);
+        }
+
+        function floydSteinbergDither(imageData, rLevels, gLevels, bLevels) {
+            const width = imageData.width;
+            const height = imageData.height;
+            const data = new Uint8ClampedArray(imageData.data);
+            
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const idx = (y * width + x) * 4;
+                    
+                    // For each color channel
+                    for (let c = 0; c < 3; c++) {
+                        const oldPixel = data[idx + c];
+                        const levels = c === 0 ? rLevels : c === 1 ? gLevels : bLevels;
+                        const newPixel = quantize(oldPixel, levels);
+                        const error = oldPixel - newPixel;
+                        
+                        data[idx + c] = newPixel;
+
+                        // Distribute error
+                        if (x + 1 < width)
+                            data[idx + 4 + c] += error * 7/16;
+                        if (y + 1 < height) {
+                            if (x > 0)
+                                data[idx + (-4 + width * 4) + c] += error * 3/16;
+                            data[idx + width * 4 + c] += error * 5/16;
+                            if (x + 1 < width)
+                                data[idx + (4 + width * 4) + c] += error * 1/16;
+                        }
+                    }
+                }
+            }
+            
+            return new ImageData(data, width, height);
+        }
+
+        function orderedDither(imageData, rLevels, gLevels, bLevels) {
+            const width = imageData.width;
+            const height = imageData.height;
+            const data = new Uint8ClampedArray(imageData.data);
+            const matrixSize = ORDERED_MATRIX_4X4.length;
+            
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const idx = (y * width + x) * 4;
+                    const threshold = ORDERED_MATRIX_4X4[y % matrixSize][x % matrixSize] / 16;
+                    
+                    // For each color channel
+                    for (let c = 0; c < 3; c++) {
+                        const levels = c === 0 ? rLevels : c === 1 ? gLevels : bLevels;
+                        const step = 255 / (levels - 1);
+                        const value = data[idx + c] / 255;
+                        data[idx + c] = Math.round(Math.round((value + threshold / (levels - 1)) * (levels - 1)) * step);
+                    }
+                }
+            }
+            
+            return new ImageData(data, width, height);
+        }
+
+        function extractChannel(imageData, channel) {
+            const width = imageData.width;
+            const height = imageData.height;
+            const data = new Uint8ClampedArray(imageData.data);
+            
+            for (let i = 0; i < data.length; i += 4) {
+                const value = data[i + channel];
+                data[i] = value;
+                data[i + 1] = value;
+                data[i + 2] = value;
+            }
+            
+            return new ImageData(data, width, height);
+        }
+
+        function calculateDifference(original, dithered, channel) {
+            const width = original.width;
+            const height = original.height;
+            const data = new Uint8ClampedArray(original.data.length);
+            
+            for (let i = 0; i < data.length; i += 4) {
+                const diff = Math.abs(original.data[i + channel] - dithered.data[i + channel]);
+                data[i] = diff;
+                data[i + 1] = diff;
+                data[i + 2] = diff;
+                data[i + 3] = 255;
+            }
+            
+            return new ImageData(data, width, height);
+        }
+
+        function processImage() {
+            if (!originalImageData) return;
+
+            const rLevels = parseInt(redLevels.value);
+            const gLevels = parseInt(greenLevels.value);
+            const bLevels = parseInt(blueLevels.value);
+
+            // Apply dithering
+            const ditheredData = ditheringMethod.value === 'floydSteinberg' 
+                ? floydSteinbergDither(originalImageData, rLevels, gLevels, bLevels)
+                : orderedDither(originalImageData, rLevels, gLevels, bLevels);
+
+            // Draw composite dithered image
+            contexts.dithered.putImageData(ditheredData, 0, 0);
+
+            // Process and draw individual channels
+            for (let [channel, idx] of [['red', 0], ['green', 1], ['blue', 2]]) {
+                // Draw channel view
+                const originalChannel = extractChannel(originalImageData, idx);
+                const ditheredChannel = extractChannel(ditheredData, idx);
+                contexts[channel + 'Channel'].putImageData(ditheredChannel, 0, 0);
+
+                // Draw difference view
+                const diffChannel = calculateDifference(originalImageData, ditheredData, idx);
+                contexts[channel + 'Diff'].putImageData(diffChannel, 0, 0);
+            }
+        }
+    </script>
+</body>
+</html>
