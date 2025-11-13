@@ -393,24 +393,65 @@
 
         <!-- Visualization Section -->
         <div class="visualization" id="visualization" style="display: none;">
-            <h3>Transformation Results</h3>
+            <h3>Transformation Results - Color Channels</h3>
 
+            <!-- Row 1: Original and Coefficient Visualizations -->
             <div class="canvas-grid">
                 <div class="canvas-item">
                     <h4>Original Image</h4>
                     <canvas id="originalCanvas"></canvas>
                 </div>
                 <div class="canvas-item">
-                    <h4>Wavelet Coefficients (Visualized)</h4>
-                    <canvas id="coeffCanvas"></canvas>
+                    <h4>Red Channel Coefficients</h4>
+                    <canvas id="coeffCanvasR"></canvas>
                 </div>
                 <div class="canvas-item">
-                    <h4>After Thresholding</h4>
-                    <canvas id="thresholdCanvas"></canvas>
+                    <h4>Green Channel Coefficients</h4>
+                    <canvas id="coeffCanvasG"></canvas>
                 </div>
                 <div class="canvas-item">
-                    <h4>Reconstructed (Compressed)</h4>
-                    <canvas id="reconstructedCanvas"></canvas>
+                    <h4>Blue Channel Coefficients</h4>
+                    <canvas id="coeffCanvasB"></canvas>
+                </div>
+            </div>
+
+            <!-- Row 2: Thresholded Visualizations -->
+            <div class="canvas-grid">
+                <div class="canvas-item">
+                    <h4>Red After Thresholding</h4>
+                    <canvas id="thresholdCanvasR"></canvas>
+                </div>
+                <div class="canvas-item">
+                    <h4>Green After Thresholding</h4>
+                    <canvas id="thresholdCanvasG"></canvas>
+                </div>
+                <div class="canvas-item">
+                    <h4>Blue After Thresholding</h4>
+                    <canvas id="thresholdCanvasB"></canvas>
+                </div>
+                <div class="canvas-item">
+                    <h4>Composite After Thresholding</h4>
+                    <canvas id="thresholdCanvasComposite"></canvas>
+                </div>
+            </div>
+
+            <!-- Row 3: Reconstructed Images -->
+            <div class="canvas-grid">
+                <div class="canvas-item">
+                    <h4>Red Reconstructed</h4>
+                    <canvas id="reconstructedCanvasR"></canvas>
+                </div>
+                <div class="canvas-item">
+                    <h4>Green Reconstructed</h4>
+                    <canvas id="reconstructedCanvasG"></canvas>
+                </div>
+                <div class="canvas-item">
+                    <h4>Blue Reconstructed</h4>
+                    <canvas id="reconstructedCanvasB"></canvas>
+                </div>
+                <div class="canvas-item">
+                    <h4>Final Composite (Compressed)</h4>
+                    <canvas id="reconstructedCanvasComposite"></canvas>
                 </div>
             </div>
 
@@ -519,9 +560,17 @@
         const stats = document.getElementById('stats');
 
         const originalCanvas = document.getElementById('originalCanvas');
-        const coeffCanvas = document.getElementById('coeffCanvas');
-        const thresholdCanvas = document.getElementById('thresholdCanvas');
-        const reconstructedCanvas = document.getElementById('reconstructedCanvas');
+        const coeffCanvasR = document.getElementById('coeffCanvasR');
+        const coeffCanvasG = document.getElementById('coeffCanvasG');
+        const coeffCanvasB = document.getElementById('coeffCanvasB');
+        const thresholdCanvasR = document.getElementById('thresholdCanvasR');
+        const thresholdCanvasG = document.getElementById('thresholdCanvasG');
+        const thresholdCanvasB = document.getElementById('thresholdCanvasB');
+        const thresholdCanvasComposite = document.getElementById('thresholdCanvasComposite');
+        const reconstructedCanvasR = document.getElementById('reconstructedCanvasR');
+        const reconstructedCanvasG = document.getElementById('reconstructedCanvasG');
+        const reconstructedCanvasB = document.getElementById('reconstructedCanvasB');
+        const reconstructedCanvasComposite = document.getElementById('reconstructedCanvasComposite');
 
         // Update slider displays
         levelsSlider.addEventListener('input', (e) => {
@@ -574,47 +623,50 @@
                     const levels = parseInt(levelsSlider.value);
                     const threshold = parseFloat(thresholdSlider.value);
 
-                    // Get grayscale data for processing
                     const width = originalImage.width;
                     const height = originalImage.height;
-                    const grayscale = rgbaToGrayscale(originalImageData);
 
-                    // Apply Haar wavelet transform
-                    const coefficients = haarTransform2D(grayscale, width, height, levels);
+                    // Extract RGB channels
+                    const channels = extractRGBChannels(originalImageData);
 
-                    // Count coefficients before thresholding
-                    const totalCoeffs = coefficients.length;
-                    const nonZeroBefore = coefficients.filter(c => Math.abs(c) > 0.001).length;
+                    // Process each channel
+                    const results = {
+                        r: processChannel(channels.r, width, height, levels, threshold),
+                        g: processChannel(channels.g, width, height, levels, threshold),
+                        b: processChannel(channels.b, width, height, levels, threshold)
+                    };
 
-                    // Apply thresholding
-                    const thresholdedCoeffs = applyThreshold(coefficients, threshold);
+                    // Calculate overall statistics
+                    const totalCoeffs = results.r.coefficients.length * 3;
+                    const totalNonZeroBefore = results.r.nonZeroBefore + results.g.nonZeroBefore + results.b.nonZeroBefore;
+                    const totalNonZeroAfter = results.r.nonZeroAfter + results.g.nonZeroAfter + results.b.nonZeroAfter;
+                    const totalEliminated = totalNonZeroBefore - totalNonZeroAfter;
+                    const compressionRatio = ((totalEliminated / totalCoeffs) * 100).toFixed(2);
 
-                    // Count after thresholding
-                    const nonZeroAfter = thresholdedCoeffs.filter(c => Math.abs(c) > 0.001).length;
-                    const zerosAdded = nonZeroBefore - nonZeroAfter;
-                    const compressionRatio = ((zerosAdded / totalCoeffs) * 100).toFixed(2);
-
-                    // Inverse transform to reconstruct
-                    const reconstructed = inverseHaarTransform2D(thresholdedCoeffs, width, height, levels);
-
-                    // Calculate quality metrics
-                    const mse = calculateMSE(grayscale, reconstructed);
-                    const psnr = calculatePSNR(mse);
+                    // Calculate composite PSNR
+                    const compositeMSE = (results.r.mse + results.g.mse + results.b.mse) / 3;
+                    const compositePSNR = calculatePSNR(compositeMSE);
 
                     // Visualize results
-                    visualizeResults(originalImageData, coefficients, thresholdedCoeffs, reconstructed, width, height);
+                    visualizeChannelResults(originalImageData, results, width, height);
 
                     // Update stats
                     stats.innerHTML = `
-                        <h4>Compression Statistics</h4>
+                        <h4>Compression Statistics - All Channels</h4>
                         <p><strong>Original Dimensions:</strong> ${width} × ${height} pixels</p>
                         <p><strong>Decomposition Levels:</strong> ${levels}</p>
                         <p><strong>Threshold Value:</strong> ${threshold}</p>
-                        <p><strong>Total Coefficients:</strong> ${totalCoeffs.toLocaleString()}</p>
-                        <p><strong>Non-zero Before Threshold:</strong> ${nonZeroBefore.toLocaleString()}</p>
-                        <p><strong>Non-zero After Threshold:</strong> ${nonZeroAfter.toLocaleString()}</p>
-                        <p><strong>Coefficients Eliminated:</strong> ${zerosAdded.toLocaleString()} (${compressionRatio}%)</p>
-                        <p><strong>Peak Signal-to-Noise Ratio (PSNR):</strong> ${psnr.toFixed(2)} dB</p>
+                        <p><strong>Total Coefficients (RGB):</strong> ${totalCoeffs.toLocaleString()}</p>
+                        <p><strong>Non-zero Before Threshold:</strong> ${totalNonZeroBefore.toLocaleString()}</p>
+                        <p><strong>Non-zero After Threshold:</strong> ${totalNonZeroAfter.toLocaleString()}</p>
+                        <p><strong>Coefficients Eliminated:</strong> ${totalEliminated.toLocaleString()} (${compressionRatio}%)</p>
+                        <p><strong>Composite PSNR:</strong> ${compositePSNR.toFixed(2)} dB</p>
+                        <div style="margin-top: 15px; padding-top: 15px; border-top: 2px solid #667eea;">
+                            <p><strong>Per-Channel PSNR:</strong></p>
+                            <p style="color: #dc3545;">• Red: ${results.r.psnr.toFixed(2)} dB (${results.r.compressionRatio}% eliminated)</p>
+                            <p style="color: #28a745;">• Green: ${results.g.psnr.toFixed(2)} dB (${results.g.compressionRatio}% eliminated)</p>
+                            <p style="color: #007bff;">• Blue: ${results.b.psnr.toFixed(2)} dB (${results.b.compressionRatio}% eliminated)</p>
+                        </div>
                         <p style="margin-top: 10px; padding-top: 10px; border-top: 2px solid #667eea;">
                             <em>Higher PSNR = better quality. PSNR > 30 dB is generally considered good quality.</em>
                         </p>
@@ -631,7 +683,61 @@
             }, 50);
         }
 
-        // Convert RGBA to grayscale
+        // Extract RGB channels from image data
+        function extractRGBChannels(imageData) {
+            const data = imageData.data;
+            const numPixels = imageData.width * imageData.height;
+
+            const r = new Float32Array(numPixels);
+            const g = new Float32Array(numPixels);
+            const b = new Float32Array(numPixels);
+
+            for (let i = 0; i < numPixels; i++) {
+                r[i] = data[i * 4];
+                g[i] = data[i * 4 + 1];
+                b[i] = data[i * 4 + 2];
+            }
+
+            return { r, g, b };
+        }
+
+        // Process a single channel through Haar transform
+        function processChannel(channelData, width, height, levels, threshold) {
+            // Apply Haar wavelet transform
+            const coefficients = haarTransform2D(channelData, width, height, levels);
+
+            // Count coefficients before thresholding
+            const totalCoeffs = coefficients.length;
+            const nonZeroBefore = coefficients.filter(c => Math.abs(c) > 0.001).length;
+
+            // Apply thresholding
+            const thresholdedCoeffs = applyThreshold(coefficients, threshold);
+
+            // Count after thresholding
+            const nonZeroAfter = thresholdedCoeffs.filter(c => Math.abs(c) > 0.001).length;
+            const zerosAdded = nonZeroBefore - nonZeroAfter;
+            const compressionRatio = ((zerosAdded / totalCoeffs) * 100).toFixed(2);
+
+            // Inverse transform to reconstruct
+            const reconstructed = inverseHaarTransform2D(thresholdedCoeffs, width, height, levels);
+
+            // Calculate quality metrics
+            const mse = calculateMSE(channelData, reconstructed);
+            const psnr = calculatePSNR(mse);
+
+            return {
+                coefficients,
+                thresholdedCoeffs,
+                reconstructed,
+                nonZeroBefore,
+                nonZeroAfter,
+                compressionRatio,
+                mse,
+                psnr
+            };
+        }
+
+        // Convert RGBA to grayscale (kept for compatibility)
         function rgbaToGrayscale(imageData) {
             const data = imageData.data;
             const grayscale = new Float32Array(imageData.width * imageData.height);
@@ -805,39 +911,139 @@
             return 10 * Math.log10((maxPixel * maxPixel) / mse);
         }
 
-        // Visualize all results
-        function visualizeResults(originalData, coefficients, thresholdedCoeffs, reconstructed, width, height) {
+        // Visualize all channel results
+        function visualizeChannelResults(originalData, results, width, height) {
             // Original image
             originalCanvas.width = width;
             originalCanvas.height = height;
             const origCtx = originalCanvas.getContext('2d');
             origCtx.putImageData(originalData, 0, 0);
 
-            // Wavelet coefficients (visualized)
-            coeffCanvas.width = width;
-            coeffCanvas.height = height;
-            visualizeCoefficients(coeffCanvas, coefficients, width, height);
+            // Red channel coefficients
+            coeffCanvasR.width = width;
+            coeffCanvasR.height = height;
+            visualizeCoefficients(coeffCanvasR, results.r.coefficients, width, height);
 
-            // Thresholded coefficients
-            thresholdCanvas.width = width;
-            thresholdCanvas.height = height;
-            visualizeCoefficients(thresholdCanvas, thresholdedCoeffs, width, height);
+            // Green channel coefficients
+            coeffCanvasG.width = width;
+            coeffCanvasG.height = height;
+            visualizeCoefficients(coeffCanvasG, results.g.coefficients, width, height);
 
-            // Reconstructed image
-            reconstructedCanvas.width = width;
-            reconstructedCanvas.height = height;
-            const reconCtx = reconstructedCanvas.getContext('2d');
+            // Blue channel coefficients
+            coeffCanvasB.width = width;
+            coeffCanvasB.height = height;
+            visualizeCoefficients(coeffCanvasB, results.b.coefficients, width, height);
+
+            // Red thresholded
+            thresholdCanvasR.width = width;
+            thresholdCanvasR.height = height;
+            visualizeCoefficients(thresholdCanvasR, results.r.thresholdedCoeffs, width, height);
+
+            // Green thresholded
+            thresholdCanvasG.width = width;
+            thresholdCanvasG.height = height;
+            visualizeCoefficients(thresholdCanvasG, results.g.thresholdedCoeffs, width, height);
+
+            // Blue thresholded
+            thresholdCanvasB.width = width;
+            thresholdCanvasB.height = height;
+            visualizeCoefficients(thresholdCanvasB, results.b.thresholdedCoeffs, width, height);
+
+            // Composite thresholded (combined RGB visualization)
+            thresholdCanvasComposite.width = width;
+            thresholdCanvasComposite.height = height;
+            visualizeCompositeCoefficients(thresholdCanvasComposite, results.r.thresholdedCoeffs,
+                results.g.thresholdedCoeffs, results.b.thresholdedCoeffs, width, height);
+
+            // Red reconstructed
+            reconstructedCanvasR.width = width;
+            reconstructedCanvasR.height = height;
+            visualizeSingleChannel(reconstructedCanvasR, results.r.reconstructed, width, height, 'r');
+
+            // Green reconstructed
+            reconstructedCanvasG.width = width;
+            reconstructedCanvasG.height = height;
+            visualizeSingleChannel(reconstructedCanvasG, results.g.reconstructed, width, height, 'g');
+
+            // Blue reconstructed
+            reconstructedCanvasB.width = width;
+            reconstructedCanvasB.height = height;
+            visualizeSingleChannel(reconstructedCanvasB, results.b.reconstructed, width, height, 'b');
+
+            // Composite reconstructed (full color)
+            reconstructedCanvasComposite.width = width;
+            reconstructedCanvasComposite.height = height;
+            const reconCtx = reconstructedCanvasComposite.getContext('2d');
             const reconImageData = reconCtx.createImageData(width, height);
 
-            for (let i = 0; i < reconstructed.length; i++) {
-                const value = Math.max(0, Math.min(255, Math.round(reconstructed[i])));
-                reconImageData.data[i * 4] = value;
-                reconImageData.data[i * 4 + 1] = value;
-                reconImageData.data[i * 4 + 2] = value;
+            for (let i = 0; i < results.r.reconstructed.length; i++) {
+                reconImageData.data[i * 4] = Math.max(0, Math.min(255, Math.round(results.r.reconstructed[i])));
+                reconImageData.data[i * 4 + 1] = Math.max(0, Math.min(255, Math.round(results.g.reconstructed[i])));
+                reconImageData.data[i * 4 + 2] = Math.max(0, Math.min(255, Math.round(results.b.reconstructed[i])));
                 reconImageData.data[i * 4 + 3] = 255;
             }
 
             reconCtx.putImageData(reconImageData, 0, 0);
+        }
+
+        // Visualize a single channel in its color
+        function visualizeSingleChannel(canvas, channelData, width, height, channel) {
+            const ctx = canvas.getContext('2d');
+            const imageData = ctx.createImageData(width, height);
+
+            for (let i = 0; i < channelData.length; i++) {
+                const value = Math.max(0, Math.min(255, Math.round(channelData[i])));
+
+                if (channel === 'r') {
+                    imageData.data[i * 4] = value;
+                    imageData.data[i * 4 + 1] = 0;
+                    imageData.data[i * 4 + 2] = 0;
+                } else if (channel === 'g') {
+                    imageData.data[i * 4] = 0;
+                    imageData.data[i * 4 + 1] = value;
+                    imageData.data[i * 4 + 2] = 0;
+                } else if (channel === 'b') {
+                    imageData.data[i * 4] = 0;
+                    imageData.data[i * 4 + 1] = 0;
+                    imageData.data[i * 4 + 2] = value;
+                }
+                imageData.data[i * 4 + 3] = 255;
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+        }
+
+        // Visualize composite coefficients in color
+        function visualizeCompositeCoefficients(canvas, rCoeffs, gCoeffs, bCoeffs, width, height) {
+            const ctx = canvas.getContext('2d');
+            const imageData = ctx.createImageData(width, height);
+
+            // Find min and max for each channel
+            function findMinMax(coeffs) {
+                let min = Infinity, max = -Infinity;
+                for (let i = 0; i < coeffs.length; i++) {
+                    if (coeffs[i] < min) min = coeffs[i];
+                    if (coeffs[i] > max) max = coeffs[i];
+                }
+                return { min, max, range: max - min };
+            }
+
+            const rStats = findMinMax(rCoeffs);
+            const gStats = findMinMax(gCoeffs);
+            const bStats = findMinMax(bCoeffs);
+
+            for (let i = 0; i < rCoeffs.length; i++) {
+                const rNorm = rStats.range > 0 ? ((rCoeffs[i] - rStats.min) / rStats.range) * 255 : 128;
+                const gNorm = gStats.range > 0 ? ((gCoeffs[i] - gStats.min) / gStats.range) * 255 : 128;
+                const bNorm = bStats.range > 0 ? ((bCoeffs[i] - bStats.min) / bStats.range) * 255 : 128;
+
+                imageData.data[i * 4] = Math.round(rNorm);
+                imageData.data[i * 4 + 1] = Math.round(gNorm);
+                imageData.data[i * 4 + 2] = Math.round(bNorm);
+                imageData.data[i * 4 + 3] = 255;
+            }
+
+            ctx.putImageData(imageData, 0, 0);
         }
 
         // Visualize wavelet coefficients
