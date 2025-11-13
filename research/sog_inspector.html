@@ -609,11 +609,82 @@
                     }
                 }
 
+                // Calculate AABB and normalize point cloud
+                const normalizedData = this.normalizePointCloud(positions);
+
                 return {
-                    positions: new Float32Array(positions),
+                    positions: new Float32Array(normalizedData.positions),
                     colors: new Float32Array(colors),
                     scales: new Float32Array(scales),
-                    count: count
+                    count: count,
+                    aabb: normalizedData.aabb,
+                    normalizationInfo: normalizedData.info
+                };
+            }
+
+            normalizePointCloud(positions) {
+                // Calculate AABB (Axis-Aligned Bounding Box)
+                let minX = Infinity, minY = Infinity, minZ = Infinity;
+                let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+                for (let i = 0; i < positions.length; i += 3) {
+                    const x = positions[i];
+                    const y = positions[i + 1];
+                    const z = positions[i + 2];
+
+                    minX = Math.min(minX, x);
+                    minY = Math.min(minY, y);
+                    minZ = Math.min(minZ, z);
+
+                    maxX = Math.max(maxX, x);
+                    maxY = Math.max(maxY, y);
+                    maxZ = Math.max(maxZ, z);
+                }
+
+                const aabb = {
+                    min: { x: minX, y: minY, z: minZ },
+                    max: { x: maxX, y: maxY, z: maxZ }
+                };
+
+                // Calculate center of AABB
+                const centerX = (minX + maxX) / 2;
+                const centerY = (minY + maxY) / 2;
+                const centerZ = (minZ + maxZ) / 2;
+
+                // Calculate extent (size) of AABB
+                const extentX = maxX - minX;
+                const extentY = maxY - minY;
+                const extentZ = maxZ - minZ;
+                const maxExtent = Math.max(extentX, extentY, extentZ);
+
+                // Normalize positions to fit in a unit cube centered at origin
+                // Scale factor to fit within [-1, 1] range
+                const scale = maxExtent > 0 ? 2.0 / maxExtent : 1.0;
+
+                const normalizedPositions = [];
+                for (let i = 0; i < positions.length; i += 3) {
+                    // Translate to center at origin
+                    let x = positions[i] - centerX;
+                    let y = positions[i + 1] - centerY;
+                    let z = positions[i + 2] - centerZ;
+
+                    // Scale to unit cube
+                    x *= scale;
+                    y *= scale;
+                    z *= scale;
+
+                    normalizedPositions.push(x, y, z);
+                }
+
+                return {
+                    positions: normalizedPositions,
+                    aabb: aabb,
+                    info: {
+                        center: { x: centerX, y: centerY, z: centerZ },
+                        extent: { x: extentX, y: extentY, z: extentZ },
+                        maxExtent: maxExtent,
+                        scale: scale
+                    }
                 };
             }
         }
@@ -724,17 +795,14 @@
                 pointCloud = createPointCloud(decodedData);
                 scene.add(pointCloud);
 
-                // Center camera on point cloud
-                const box = new THREE.Box3().setFromObject(pointCloud);
-                const center = box.getCenter(new THREE.Vector3());
-                const size = box.getSize(new THREE.Vector3());
-                const maxDim = Math.max(size.x, size.y, size.z);
+                // Position camera for normalized point cloud (centered at origin, unit scale)
+                // Point cloud is now in [-1, 1] range, so we can use a fixed camera position
                 const fov = camera.fov * (Math.PI / 180);
-                let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-                cameraZ *= 2; // Add some padding
+                let cameraZ = Math.abs(1.0 / Math.tan(fov / 2));
+                cameraZ *= 2.5; // Add padding for comfortable viewing
 
-                camera.position.set(center.x, center.y, center.z + cameraZ);
-                controls.target.copy(center);
+                camera.position.set(0, 0, cameraZ);
+                controls.target.set(0, 0, 0);
                 controls.update();
 
                 updateInfo(parsedData.meta);
@@ -768,16 +836,13 @@
         document.getElementById('resetView').addEventListener('click', () => {
             if (!pointCloud) return;
 
-            const box = new THREE.Box3().setFromObject(pointCloud);
-            const center = box.getCenter(new THREE.Vector3());
-            const size = box.getSize(new THREE.Vector3());
-            const maxDim = Math.max(size.x, size.y, size.z);
+            // Reset to default view for normalized point cloud
             const fov = camera.fov * (Math.PI / 180);
-            let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-            cameraZ *= 2;
+            let cameraZ = Math.abs(1.0 / Math.tan(fov / 2));
+            cameraZ *= 2.5; // Add padding for comfortable viewing
 
-            camera.position.set(center.x, center.y, center.z + cameraZ);
-            controls.target.copy(center);
+            camera.position.set(0, 0, cameraZ);
+            controls.target.set(0, 0, 0);
             controls.update();
 
             showStatus('✓ View reset', 'success');
