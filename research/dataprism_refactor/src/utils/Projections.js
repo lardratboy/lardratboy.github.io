@@ -4,7 +4,7 @@
  */
 
 import { BVH } from '../spatial/BVH.js';
-import { HilbertCurve3D } from '../spatial/HilbertCurve3D.js';
+import { HilbertCurve3D } from './HilbertCurve3D.js';
 
 /**
  * Apply projection transformation to 3D points
