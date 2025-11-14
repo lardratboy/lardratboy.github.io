@@ -10,6 +10,6 @@ codepen.io - tools
 * Image Color Isolation Tool - [https://codepen.io/lardratboy/full/jEbrVer](https://codepen.io/lardratboy/full/jEbrVer)
 * Color Histogram Tool - [https://codepen.io/lardratboy/full/JoGPKpj](https://codepen.io/lardratboy/full/JoGPKpj)
 
-## More projects
+## More
 
-* [Misc tools](sub.html)
+* [more](more.html)
