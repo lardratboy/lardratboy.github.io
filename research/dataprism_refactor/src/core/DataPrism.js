@@ -6,11 +6,11 @@
  * as 3D point clouds with various projection and quantization options.
  */
 
-import BVH from '../spatial/BVH.js';
-import HilbertCurve3D from '../utils/HilbertCurve3D.js';
-import createInstancedBVHBoxes from '../rendering/BVHVisualization.js';
-import applyProjection from '../utils/Projections.js';
-import quantizeProcessDataAs from '../processing/DataProcessor.js';
+import { BVH } from '../spatial/BVH.js';
+import { HilbertCurve3D } from '../utils/HilbertCurve3D.js';
+import { createInstancedBVHBoxes } from '../rendering/BVHVisualization.js';
+import { applyProjection } from '../utils/Projections.js';
+import { quantizeProcessDataAs } from '../processing/DataProcessor.js';
 import { DATA_TYPES } from '../utils/Constants.js';
 
 /**
