@@ -469,7 +469,7 @@
       <div id="game-score">0</div>
     </div>
     <div id="info-panel">
-      Click groups of 2+ matching crystals • Charge all mega-crystals to win!
+      Match shapes to create combos • Charge all mega-crystals to win!
     </div>
     <div id="gameOver" class="overlay">
       <h2>Energy Depleted!</h2>
@@ -654,23 +654,26 @@
 
     // --- CRYSTAL CLASS ---
     class Crystal {
-      constructor(x, y, z, size, color, row, col) {
-        this.geometry = new THREE.OctahedronGeometry(size, 0);
+      constructor(x, y, z, size, shapeData, row, col) {
+        this.geometry = shapeData.geometryFactory(size);
         this.material = new THREE.MeshPhongMaterial({
-          color: color,
+          color: shapeData.color,
           shininess: 100,
           specular: 0xffffff,
-          emissive: color,
+          emissive: shapeData.color,
           emissiveIntensity: 0.2
         });
         this.mesh = new THREE.Mesh(this.geometry, this.material);
         this.mesh.position.set(x, y, z);
-        this.mesh.rotation.set(
-          Math.random() * Math.PI,
-          Math.random() * Math.PI,
-          Math.random() * Math.PI
-        );
-        this.color = color;
+        if (shapeData.name !== 'Sphere') {
+          this.mesh.rotation.set(
+            Math.random() * Math.PI,
+            Math.random() * Math.PI,
+            Math.random() * Math.PI
+          );
+        }
+        this.color = shapeData.color;
+        this.shapeType = shapeData.name;
         this.row = row;
         this.col = col;
         this.size = size;
@@ -744,10 +747,14 @@
           shininess: 100,
           specular: 0xffffff,
           emissive: 0xffaa00,
-          emissiveIntensity: 0.5
+          emissiveIntensity: 0.5,
+          transparent: true,
+          opacity: 0.3,
+          depthWrite: false
         });
         this.mesh = new THREE.Mesh(this.geometry, this.material);
         this.mesh.position.set(x, y, z);
+        this.mesh.renderOrder = 1;
         this.chargeLevel = 0;
         this.maxCharge = 100;
       }
@@ -756,6 +763,7 @@
         this.chargeLevel = Math.min(this.maxCharge, this.chargeLevel + amount);
         const chargeRatio = this.chargeLevel / this.maxCharge;
         this.material.emissiveIntensity = 0.5 + chargeRatio * 0.5;
+        this.material.opacity = 0.3 + chargeRatio * 0.4; // Get more visible as charged
 
         // Change color as it charges
         const hue = chargeRatio * 0.33; // 0 (red/gold) to 0.33 (green)
@@ -860,12 +868,13 @@
         this.comboCount = 0;
         this.comboTimer = null;
 
-        this.crystalColors = [
-          0x00ffff, // Cyan
-          0xff00ff, // Magenta
-          0xffff00, // Yellow
-          0x00ff00, // Green
-          0xff0066  // Pink
+        // Shape atlas matching the original game - shape determines color
+        this.shapeAtlas = [
+          { name: 'Sphere', color: 0x00ffff, geometryFactory: s => new THREE.SphereGeometry(s * 1.1, 20, 16) },
+          { name: 'Cube', color: 0xff00ff, geometryFactory: s => new THREE.BoxGeometry(s * 1.5, s * 1.5, s * 1.5) },
+          { name: 'Tetra', color: 0xffff00, geometryFactory: s => new THREE.TetrahedronGeometry(s * 1.4) },
+          { name: 'Octa', color: 0x00ff00, geometryFactory: s => new THREE.OctahedronGeometry(s * 1.5) },
+          { name: 'Icosa', color: 0xff0066, geometryFactory: s => new THREE.IcosahedronGeometry(s * 1.25) }
         ];
 
         this.isAnimating = false;
@@ -976,8 +985,11 @@
         const boardHeight = this.gridSize * this.spacing;
 
         const fovInRadians = THREE.MathUtils.degToRad(this.camera.fov);
-        const dist = (Math.max(boardWidth, boardHeight) / 2) / Math.tan(fovInRadians / 2);
-        this.camera.position.z = dist * 1.2;
+        const distH = (boardHeight / 2) / Math.tan(fovInRadians / 2);
+        const distW = (boardWidth / 2) / (Math.tan(fovInRadians / 2) * this.camera.aspect);
+
+        // Ensure camera is far enough for both dimensions with extra padding
+        this.camera.position.z = Math.max(distH, distW) * 1.3;
         this.camera.lookAt(0, 0, 0);
 
         const offset = -((this.gridSize - 1) * this.spacing) / 2;
@@ -1063,14 +1075,14 @@
           this.megaCrystals.push({ ...pos, charged: false });
         }
 
-        // Generate crystals
+        // Generate crystals with shape-based colors
         for (let i = 0; i < this.gridSize; i++) {
           for (let j = 0; j < this.gridSize; j++) {
-            const color = this.crystalColors[Math.floor(Math.random() * this.crystalColors.length)];
+            const shapeData = this.shapeAtlas[Math.floor(Math.random() * this.shapeAtlas.length)];
             const x = offset + j * 1.0;
             const y = offset + (this.gridSize - 1 - i) * 1.0;
 
-            const crystal = new Crystal(x, y, 0, 0.4, color, i, j);
+            const crystal = new Crystal(x, y, 0, 0.4, shapeData, i, j);
             this.crystals[i][j] = crystal;
             this.scene.add(crystal.mesh);
 
@@ -1104,7 +1116,7 @@
         const crystal = this.crystals[row]?.[col];
         if (!crystal) return;
 
-        const connected = this.findConnectedCrystals(row, col, crystal.color);
+        const connected = this.findConnectedCrystals(row, col, crystal.shapeType);
         if (connected.length < this.minGroupSize) return;
 
         this.isAnimating = true;
@@ -1215,7 +1227,7 @@
         });
       }
 
-      findConnectedCrystals(row, col, targetColor) {
+      findConnectedCrystals(row, col, targetType) {
         const visited = new Set();
         const connected = [];
         const stack = [{ row, col }];
@@ -1225,7 +1237,7 @@
           const { row: r, col: c } = stack.pop();
           const crystal = this.crystals[r]?.[c];
 
-          if (!crystal || crystal.color !== targetColor) continue;
+          if (!crystal || crystal.shapeType !== targetType) continue;
 
           connected.push({ row: r, col: c });
 
@@ -1251,7 +1263,7 @@
 
         const onGravityComplete = () => {
           if (--animationsPending === 0) {
-            this.checkGameState();
+            this.removeEmptyColumns();
           }
         };
 
@@ -1291,8 +1303,101 @@
         }
 
         if (animationsPending === 0) {
+          this.removeEmptyColumns();
+        }
+      }
+
+      removeEmptyColumns() {
+        const emptyCols = [];
+        for (let j = 0; j < this.gridSize; j++) {
+          let hasAnyCrystal = false;
+          for (let i = 0; i < this.gridSize; i++) {
+            if (this.crystals[i][j]) {
+              hasAnyCrystal = true;
+              break;
+            }
+          }
+          if (!hasAnyCrystal) {
+            emptyCols.push(j);
+          }
+        }
+
+        if (emptyCols.length > 0) {
+          this.score += emptyCols.length * 100;
+          this.updateScore();
+
+          let animationsPending = 0;
+          const newGridSize = this.gridSize - emptyCols.length;
+          const offsetX = -((newGridSize - 1) * this.spacing) / 2;
+
+          const onShiftComplete = () => {
+            if (--animationsPending === 0) {
+              this.finalizeColumnRemoval(emptyCols);
+            }
+          };
+
+          for (let j = 0; j < this.gridSize; j++) {
+            const shift = emptyCols.filter(c => c < j).length;
+            if (shift > 0) {
+              const newCol = j - shift;
+              const newX = offsetX + newCol * this.spacing;
+
+              for (let i = 0; i < this.gridSize; i++) {
+                const crystal = this.crystals[i][j];
+                if (crystal) {
+                  animationsPending++;
+                  new TWEEN.Tween(crystal.mesh.position)
+                    .to({ x: newX }, 500)
+                    .easing(TWEEN.Easing.Quadratic.Out)
+                    .onComplete(onShiftComplete)
+                    .start();
+
+                  const megaCrystal = this.megaCrystals.find(mc => mc.row === i && mc.col === j && mc.megaCrystalObj);
+                  if (megaCrystal) {
+                    new TWEEN.Tween(megaCrystal.megaCrystalObj.mesh.position)
+                      .to({ x: newX }, 500)
+                      .easing(TWEEN.Easing.Quadratic.Out)
+                      .start();
+                  }
+                }
+              }
+            }
+          }
+
+          if (animationsPending === 0) {
+            this.finalizeColumnRemoval(emptyCols);
+          }
+        } else {
           this.checkGameState();
         }
+      }
+
+      finalizeColumnRemoval(emptyCols) {
+        // Remove empty columns from data structure
+        emptyCols.sort((a, b) => b - a).forEach(col => {
+          for (let i = 0; i < this.gridSize; i++) {
+            this.crystals[i].splice(col, 1);
+          }
+        });
+        this.gridSize -= emptyCols.length;
+
+        // Update internal col property for all crystals and mega-crystals
+        for (let i = 0; i < this.gridSize; i++) {
+          for (let j = 0; j < this.gridSize; j++) {
+            if (this.crystals[i]?.[j]) {
+              this.crystals[i][j].col = j;
+            }
+          }
+        }
+
+        this.megaCrystals.forEach(mc => {
+          const shift = emptyCols.filter(c => c < mc.col).length;
+          if (shift > 0) mc.col -= shift;
+        });
+
+        // Recenter camera based on new board size
+        this.positionBoardElements();
+        this.checkGameState();
       }
 
       checkGameState() {
@@ -1314,7 +1419,7 @@
         for (let i = 0; i < this.gridSize; i++) {
           for (let j = 0; j < this.gridSize; j++) {
             const crystal = this.crystals[i]?.[j];
-            if (crystal && this.findConnectedCrystals(i, j, crystal.color).length >= this.minGroupSize) {
+            if (crystal && this.findConnectedCrystals(i, j, crystal.shapeType).length >= this.minGroupSize) {
               return true;
             }
           }
@@ -1366,7 +1471,7 @@
       }
 
       highlightConnectedGroup(crystal) {
-        const connected = this.findConnectedCrystals(crystal.row, crystal.col, crystal.color);
+        const connected = this.findConnectedCrystals(crystal.row, crystal.col, crystal.shapeType);
         if (connected.length < this.minGroupSize) return;
 
         connected.forEach(({ row, col }) => {
