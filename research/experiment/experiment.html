@@ -1005,8 +1005,12 @@
 
         this.megaCrystals.forEach(mc => {
           if (mc.megaCrystalObj) {
-            mc.megaCrystalObj.mesh.position.x = offset + mc.col * this.spacing;
-            mc.megaCrystalObj.mesh.position.y = offset + (this.gridSize - 1 - mc.row) * this.spacing;
+            const crystal = this.crystals[mc.row]?.[mc.col];
+            if (crystal) {
+              mc.megaCrystalObj.mesh.position.x = crystal.mesh.position.x;
+              mc.megaCrystalObj.mesh.position.y = crystal.mesh.position.y;
+              mc.megaCrystalObj.mesh.position.z = crystal.mesh.position.z + 0.1;
+            }
           }
         });
       }
@@ -1088,9 +1092,10 @@
 
             const megaCrystalData = this.megaCrystals.find(mc => mc.row === i && mc.col === j);
             if (megaCrystalData) {
-              const megaCrystal = new MegaCrystal(x, y, 0.2, 0.4);
+              const megaCrystal = new MegaCrystal(x, y, 0.1, 0.4);
               this.scene.add(megaCrystal.mesh);
               megaCrystalData.megaCrystalObj = megaCrystal;
+              megaCrystalData.attachedCrystal = crystal; // Keep reference for positioning
             }
           }
         }
@@ -1169,7 +1174,7 @@
       }
 
       sendEnergyPulses(explodedPositions) {
-        // Send energy to adjacent crystals and mega-crystals
+        // Send energy primarily to mega-crystals, then to adjacent crystals
         explodedPositions.forEach(({ row, col }) => {
           const sourcePos = new THREE.Vector3(
             -((this.gridSize - 1) * this.spacing) / 2 + col * this.spacing,
@@ -1177,30 +1182,7 @@
             0
           );
 
-          // Send to adjacent crystals
-          for (let dr = -1; dr <= 1; dr++) {
-            for (let dc = -1; dc <= 1; dc++) {
-              if (dr === 0 && dc === 0) continue;
-              const nr = row + dr;
-              const nc = col + dc;
-              if (nr >= 0 && nr < this.gridSize && nc >= 0 && nc < this.gridSize) {
-                const adjCrystal = this.crystals[nr]?.[nc];
-                if (adjCrystal) {
-                  setTimeout(() => {
-                    new EnergyPulse(
-                      sourcePos.clone(),
-                      adjCrystal.mesh.position.clone(),
-                      adjCrystal.color,
-                      this.scene,
-                      () => adjCrystal.addEnergy(10)
-                    );
-                  }, Math.random() * 100);
-                }
-              }
-            }
-          }
-
-          // Charge nearby mega-crystals
+          // Prioritize mega-crystals - send energy to nearby mega-crystals first
           this.megaCrystals.forEach(mc => {
             if (!mc.charged && mc.megaCrystalObj) {
               const dist = Math.abs(mc.row - row) + Math.abs(mc.col - col);
@@ -1220,10 +1202,33 @@
                       }
                     }
                   );
-                }, Math.random() * 150);
+                }, Math.random() * 100);
               }
             }
           });
+
+          // Then send to adjacent crystals
+          for (let dr = -1; dr <= 1; dr++) {
+            for (let dc = -1; dc <= 1; dc++) {
+              if (dr === 0 && dc === 0) continue;
+              const nr = row + dr;
+              const nc = col + dc;
+              if (nr >= 0 && nr < this.gridSize && nc >= 0 && nc < this.gridSize) {
+                const adjCrystal = this.crystals[nr]?.[nc];
+                if (adjCrystal) {
+                  setTimeout(() => {
+                    new EnergyPulse(
+                      sourcePos.clone(),
+                      adjCrystal.mesh.position.clone(),
+                      adjCrystal.color,
+                      this.scene,
+                      () => adjCrystal.addEnergy(10)
+                    );
+                  }, Math.random() * 150);
+                }
+              }
+            }
+          }
         });
       }
 
@@ -1288,15 +1293,9 @@
                 .onComplete(onGravityComplete)
                 .start();
 
-              // Move mega-crystals with their crystals
+              // Update mega-crystal row tracking (position updates in animate loop)
               this.megaCrystals.filter(mc => mc.row === i && mc.col === j && !mc.charged).forEach(mc => {
                 mc.row = targetRow;
-                if (mc.megaCrystalObj) {
-                  new TWEEN.Tween(mc.megaCrystalObj.mesh.position)
-                    .to({ y: newY }, 400)
-                    .easing(TWEEN.Easing.Bounce.Out)
-                    .start();
-                }
               });
             }
           }
@@ -1323,6 +1322,18 @@
         }
 
         if (emptyCols.length > 0) {
+          // Auto-charge any mega-crystals in cleared columns
+          emptyCols.forEach(col => {
+            const megaCrystalInCol = this.megaCrystals.find(mc => mc.col === col && !mc.charged);
+            if (megaCrystalInCol && megaCrystalInCol.megaCrystalObj) {
+              // Fully charge it
+              const remainingCharge = megaCrystalInCol.megaCrystalObj.maxCharge - megaCrystalInCol.megaCrystalObj.chargeLevel;
+              megaCrystalInCol.megaCrystalObj.charge(remainingCharge);
+              megaCrystalInCol.charged = true;
+              this.score += 100;
+            }
+          });
+
           this.score += emptyCols.length * 100;
           this.updateScore();
 
@@ -1352,13 +1363,7 @@
                     .onComplete(onShiftComplete)
                     .start();
 
-                  const megaCrystal = this.megaCrystals.find(mc => mc.row === i && mc.col === j && mc.megaCrystalObj);
-                  if (megaCrystal) {
-                    new TWEEN.Tween(megaCrystal.megaCrystalObj.mesh.position)
-                      .to({ x: newX }, 500)
-                      .easing(TWEEN.Easing.Quadratic.Out)
-                      .start();
-                  }
+                  // Mega-crystals will follow via animate loop
                 }
               }
             }
@@ -1488,8 +1493,17 @@
 
         if (!this.gamePaused) {
           this.crystals.flat().filter(c => c).forEach(c => c.rotate());
+
+          // Keep mega-crystals positioned above their crystals and rotate them
           this.megaCrystals.forEach(mc => {
             if (!mc.charged && mc.megaCrystalObj) {
+              // Ensure mega-crystal stays positioned above its crystal
+              const crystal = this.crystals[mc.row]?.[mc.col];
+              if (crystal) {
+                mc.megaCrystalObj.mesh.position.x = crystal.mesh.position.x;
+                mc.megaCrystalObj.mesh.position.y = crystal.mesh.position.y;
+                mc.megaCrystalObj.mesh.position.z = crystal.mesh.position.z + 0.1;
+              }
               mc.megaCrystalObj.rotate();
             }
           });
