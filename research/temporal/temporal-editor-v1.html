@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Temporal Text Editor - When Time Becomes Editable</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background: #000;
+            color: #0f0;
+            padding: 20px;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin-bottom: 10px;
+            text-align: center;
+            color: #0f0;
+            text-shadow: 0 0 10px #0f0;
+        }
+
+        .subtitle {
+            text-align: center;
+            font-size: 14px;
+            margin-bottom: 20px;
+            color: #0a0;
+        }
+
+        .instructions {
+            background: #001100;
+            border: 1px solid #0f0;
+            padding: 15px;
+            margin-bottom: 20px;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .instructions h3 {
+            margin-bottom: 10px;
+            color: #0f0;
+        }
+
+        .instructions ul {
+            margin-left: 20px;
+        }
+
+        .editor-container {
+            background: #000;
+            border: 2px solid #0f0;
+            padding: 10px;
+            position: relative;
+        }
+
+        canvas {
+            display: block;
+            background: #000;
+            border: none;
+            cursor: crosshair;
+        }
+
+        .timeline-container {
+            margin-top: 20px;
+            background: #001100;
+            border: 1px solid #0f0;
+            padding: 15px;
+        }
+
+        .timeline-label {
+            font-size: 12px;
+            margin-bottom: 10px;
+            color: #0a0;
+        }
+
+        .timeline {
+            position: relative;
+            height: 40px;
+            background: #000;
+            border: 1px solid #0f0;
+            cursor: grab;
+            user-select: none;
+        }
+
+        .timeline:active {
+            cursor: grabbing;
+        }
+
+        .timeline-playhead {
+            position: absolute;
+            top: 0;
+            width: 2px;
+            height: 100%;
+            background: #f00;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .timeline-marker {
+            position: absolute;
+            bottom: 0;
+            width: 2px;
+            height: 20px;
+            background: #0f0;
+            pointer-events: none;
+        }
+
+        .timeline-marker.concurrent {
+            background: #ff0;
+            height: 30px;
+        }
+
+        .status-bar {
+            margin-top: 10px;
+            padding: 10px;
+            background: #001100;
+            border: 1px solid #0f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .mode-indicator {
+            padding: 5px 10px;
+            border: 1px solid;
+            font-weight: bold;
+        }
+
+        .mode-live {
+            color: #0f0;
+            border-color: #0f0;
+            background: #001100;
+        }
+
+        .mode-scrubbed {
+            color: #f00;
+            border-color: #f00;
+            background: #110000;
+        }
+
+        .insert-mode {
+            padding: 5px 10px;
+            border: 1px solid #0a0;
+            color: #0a0;
+        }
+
+        .time-display {
+            font-family: 'Courier New', monospace;
+            color: #0a0;
+        }
+
+        .controls {
+            margin-top: 10px;
+            padding: 10px;
+            background: #001100;
+            border: 1px solid #0f0;
+            font-size: 12px;
+        }
+
+        .controls button {
+            background: #000;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 8px 15px;
+            margin-right: 10px;
+            cursor: pointer;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .controls button:hover {
+            background: #001100;
+        }
+
+        .controls button:active {
+            background: #002200;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⏱ THE TEMPORAL TEXT EDITOR ⏱</h1>
+        <div class="subtitle">When Time Becomes Editable</div>
+
+        <div class="instructions">
+            <h3>Quick Start Guide:</h3>
+            <ul>
+                <li><strong>Type normally</strong> - Each keystroke is recorded with a timestamp</li>
+                <li><strong>Drag timeline</strong> - Scrub backwards through time</li>
+                <li><strong>Click grid</strong> - Teleport cursor (no event recorded)</li>
+                <li><strong>Type while scrubbed</strong> - Creates concurrent edits that interleave with history</li>
+                <li><strong>Arrow keys</strong> - Move cursor (recorded in timeline)</li>
+                <li><strong>Insert key</strong> - Toggle between INSERT (|) and OVERWRITE (█) modes</li>
+                <li><strong>Backspace/Delete</strong> - Remove characters (behavior depends on mode)</li>
+            </ul>
+            <div style="margin-top: 10px; color: #ff0;">
+                <strong>Try this:</strong> Type "HELLO", drag timeline to start, click row 5, type "WORLD" - watch them alternate!
+            </div>
+        </div>
+
+        <div class="editor-container">
+            <canvas id="editor-canvas"></canvas>
+        </div>
+
+        <div class="timeline-container">
+            <div class="timeline-label">Timeline (drag to scrub through time)</div>
+            <div class="timeline" id="timeline">
+                <div class="timeline-playhead" id="playhead"></div>
+            </div>
+        </div>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <span>Mode:</span>
+                <span class="mode-indicator mode-live" id="mode-indicator">LIVE</span>
+            </div>
+            <div class="status-item">
+                <span>Insert Mode:</span>
+                <span class="insert-mode" id="insert-mode-indicator">INSERT (|)</span>
+            </div>
+            <div class="status-item">
+                <span>Time:</span>
+                <span class="time-display" id="time-display">0ms / 0ms</span>
+            </div>
+            <div class="status-item">
+                <span>Cursor:</span>
+                <span class="time-display" id="cursor-display">(0, 0)</span>
+            </div>
+            <div class="status-item">
+                <span>Events:</span>
+                <span class="time-display" id="event-count">0</span>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button id="clear-btn">Clear All</button>
+            <button id="export-btn">Export Timeline (JSON)</button>
+            <button id="help-btn">Toggle Instructions</button>
+        </div>
+    </div>
+
+    <script>
+        // ==================== CONFIGURATION ====================
+        const GRID_COLS = 80;
+        const GRID_ROWS = 20;
+        const FONT_SIZE = 16;
+        const FONT_FAMILY = 'Courier New';
+        const LINE_HEIGHT = 20;
+        const CHAR_WIDTH = 9.6; // Measured for Courier New 16px
+        const PADDING = 10;
+        const CURSOR_BLINK_RATE = 530; // ms
+        const TIME_INCREMENT = 50; // ms between keystrokes in LIVE mode
+
+        // Colors
+        const BG_COLOR = '#000';
+        const TEXT_COLOR = '#0f0';
+        const CURSOR_COLOR = '#0f0';
+        const CURSOR_ALPHA = 0.7;
+
+        // ==================== STATE ====================
+        let timeline = []; // Array of events
+        let currentTime = 0; // Current playhead position
+        let maxTime = 0; // Maximum time in timeline
+        let insertMode = true; // INSERT vs OVERWRITE
+        let isScrubbed = false; // Are we in SCRUBBED mode?
+        let grid = createEmptyGrid();
+        let cursor = { x: 0, y: 0 };
+        let cursorVisible = true;
+        let isDraggingTimeline = false;
+
+        // Canvas setup
+        const canvas = document.getElementById('editor-canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = GRID_COLS * CHAR_WIDTH + PADDING * 2;
+        canvas.height = GRID_ROWS * LINE_HEIGHT + PADDING * 2;
+
+        // ==================== GRID MANAGEMENT ====================
+        function createEmptyGrid() {
+            const grid = [];
+            for (let y = 0; y < GRID_ROWS; y++) {
+                grid[y] = [];
+                for (let x = 0; x < GRID_COLS; x++) {
+                    grid[y][x] = ' ';
+                }
+            }
+            return grid;
+        }
+
+        function cloneGrid(grid) {
+            return grid.map(row => [...row]);
+        }
+
+        // ==================== EVENT SYSTEM ====================
+        function createEvent(timestamp, action, cursorBefore) {
+            return {
+                timestamp,
+                action,
+                cursorBefore: { ...cursorBefore }
+            };
+        }
+
+        function addEvent(action) {
+            const timestamp = isScrubbed ? currentTime : maxTime + TIME_INCREMENT;
+            const event = createEvent(timestamp, action, cursor);
+
+            timeline.push(event);
+            timeline.sort((a, b) => a.timestamp - b.timestamp);
+
+            if (!isScrubbed) {
+                maxTime = timestamp;
+                currentTime = maxTime;
+            }
+
+            console.log(`Event added at ${timestamp}ms:`, action.type, action);
+
+            // In concurrent mode, advance to next event
+            if (isScrubbed && currentTime < maxTime) {
+                advanceToNextEvent();
+            }
+
+            rebuildState();
+            render();
+            updateUI();
+        }
+
+        function advanceToNextEvent() {
+            // Find the next event after current time
+            const nextEvent = timeline.find(e => e.timestamp > currentTime);
+            if (nextEvent) {
+                currentTime = nextEvent.timestamp;
+                console.log(`Advanced to next event at ${currentTime}ms`);
+            } else {
+                // No more future events, exit scrubbed mode
+                currentTime = maxTime;
+                isScrubbed = false;
+                console.log('Exited concurrent mode - no more future events');
+            }
+        }
+
+        // ==================== STATE DERIVATION ====================
+        function rebuildState() {
+            grid = createEmptyGrid();
+            cursor = { x: 0, y: 0 };
+
+            // Replay all events up to current time
+            for (const event of timeline) {
+                if (event.timestamp <= currentTime) {
+                    applyEvent(event);
+                }
+            }
+        }
+
+        function applyEvent(event) {
+            const { action, cursorBefore } = event;
+
+            // Set cursor to where it was before the action
+            cursor = { ...cursorBefore };
+
+            switch (action.type) {
+                case 'insert_char':
+                    applyInsertChar(action);
+                    break;
+                case 'delete_char':
+                    applyDeleteChar(action);
+                    break;
+                case 'delete_and_shift':
+                    applyDeleteAndShift(action);
+                    break;
+                case 'cursor_move':
+                    applyCursorMove(action);
+                    break;
+            }
+        }
+
+        function applyInsertChar(action) {
+            const { char, x, y, insertMode } = action;
+
+            if (insertMode) {
+                // Shift everything right from position x
+                for (let i = GRID_COLS - 1; i > x; i--) {
+                    grid[y][i] = grid[y][i - 1];
+                }
+            }
+
+            grid[y][x] = char;
+
+            // Move cursor right
+            cursor.x++;
+            if (cursor.x >= GRID_COLS) {
+                cursor.x = 0;
+                cursor.y = Math.min(cursor.y + 1, GRID_ROWS - 1);
+            }
+        }
+
+        function applyDeleteChar(action) {
+            const { x, y, moveCursor } = action;
+
+            grid[y][x] = ' ';
+
+            if (moveCursor) {
+                cursor.x = Math.max(0, cursor.x - 1);
+            }
+        }
+
+        function applyDeleteAndShift(action) {
+            const { x, y, moveCursor } = action;
+
+            // Shift everything left from position x
+            for (let i = x; i < GRID_COLS - 1; i++) {
+                grid[y][i] = grid[y][i + 1];
+            }
+            grid[y][GRID_COLS - 1] = ' ';
+
+            if (moveCursor) {
+                cursor.x = Math.max(0, cursor.x - 1);
+            }
+        }
+
+        function applyCursorMove(action) {
+            const { dx, dy } = action;
+            cursor.x = Math.max(0, Math.min(GRID_COLS - 1, cursor.x + dx));
+            cursor.y = Math.max(0, Math.min(GRID_ROWS - 1, cursor.y + dy));
+        }
+
+        // ==================== RENDERING ====================
+        function render() {
+            // Clear canvas
+            ctx.fillStyle = BG_COLOR;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw grid text
+            ctx.font = `${FONT_SIZE}px ${FONT_FAMILY}`;
+            ctx.fillStyle = TEXT_COLOR;
+
+            for (let y = 0; y < GRID_ROWS; y++) {
+                for (let x = 0; x < GRID_COLS; x++) {
+                    const char = grid[y][x];
+                    if (char !== ' ') {
+                        const px = PADDING + x * CHAR_WIDTH;
+                        const py = PADDING + (y + 1) * LINE_HEIGHT - 4;
+                        ctx.fillText(char, px, py);
+                    }
+                }
+            }
+
+            // Draw cursor
+            if (cursorVisible) {
+                drawCursor();
+            }
+        }
+
+        function drawCursor() {
+            const px = PADDING + cursor.x * CHAR_WIDTH;
+            const py = PADDING + cursor.y * LINE_HEIGHT + 2;
+
+            ctx.globalAlpha = CURSOR_ALPHA;
+            ctx.fillStyle = CURSOR_COLOR;
+
+            if (insertMode) {
+                // Thin line cursor for INSERT mode
+                ctx.fillRect(px, py, 2, LINE_HEIGHT - 4);
+            } else {
+                // Block cursor for OVERWRITE mode
+                ctx.fillRect(px, py, CHAR_WIDTH, LINE_HEIGHT - 4);
+            }
+
+            ctx.globalAlpha = 1.0;
+        }
+
+        // ==================== INPUT HANDLING ====================
+        document.addEventListener('keydown', (e) => {
+            // Prevent default for most keys
+            if (!e.ctrlKey && !e.metaKey) {
+                if (e.key.length === 1 || ['Backspace', 'Delete', 'Insert', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+                    e.preventDefault();
+                }
+            }
+
+            // Handle special keys
+            if (e.key === 'Insert') {
+                insertMode = !insertMode;
+                updateUI();
+                render();
+                return;
+            }
+
+            if (e.key === 'ArrowLeft') {
+                addEvent({ type: 'cursor_move', dx: -1, dy: 0 });
+                return;
+            }
+
+            if (e.key === 'ArrowRight') {
+                addEvent({ type: 'cursor_move', dx: 1, dy: 0 });
+                return;
+            }
+
+            if (e.key === 'ArrowUp') {
+                addEvent({ type: 'cursor_move', dx: 0, dy: -1 });
+                return;
+            }
+
+            if (e.key === 'ArrowDown') {
+                addEvent({ type: 'cursor_move', dx: 0, dy: 1 });
+                return;
+            }
+
+            if (e.key === 'Backspace') {
+                if (insertMode) {
+                    addEvent({
+                        type: 'delete_and_shift',
+                        x: cursor.x - 1,
+                        y: cursor.y,
+                        moveCursor: true
+                    });
+                } else {
+                    addEvent({
+                        type: 'delete_char',
+                        x: cursor.x - 1,
+                        y: cursor.y,
+                        moveCursor: true
+                    });
+                }
+                return;
+            }
+
+            if (e.key === 'Delete') {
+                if (insertMode) {
+                    addEvent({
+                        type: 'delete_and_shift',
+                        x: cursor.x,
+                        y: cursor.y,
+                        moveCursor: false
+                    });
+                } else {
+                    addEvent({
+                        type: 'delete_char',
+                        x: cursor.x,
+                        y: cursor.y,
+                        moveCursor: false
+                    });
+                }
+                return;
+            }
+
+            // Handle printable characters
+            if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+                addEvent({
+                    type: 'insert_char',
+                    char: e.key,
+                    x: cursor.x,
+                    y: cursor.y,
+                    insertMode: insertMode
+                });
+            }
+        });
+
+        // ==================== CANVAS INTERACTION ====================
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left - PADDING;
+            const y = e.clientY - rect.top - PADDING;
+
+            const gridX = Math.floor(x / CHAR_WIDTH);
+            const gridY = Math.floor(y / LINE_HEIGHT);
+
+            // Teleport cursor without recording event
+            cursor.x = Math.max(0, Math.min(GRID_COLS - 1, gridX));
+            cursor.y = Math.max(0, Math.min(GRID_ROWS - 1, gridY));
+
+            console.log(`Cursor teleported to (${cursor.x}, ${cursor.y})`);
+
+            render();
+            updateUI();
+        });
+
+        // ==================== TIMELINE INTERACTION ====================
+        const timelineEl = document.getElementById('timeline');
+        const playheadEl = document.getElementById('playhead');
+
+        function updateTimelineMarkers() {
+            // Remove old markers
+            const oldMarkers = timelineEl.querySelectorAll('.timeline-marker');
+            oldMarkers.forEach(m => m.remove());
+
+            if (maxTime === 0) return;
+
+            // Count events at each timestamp
+            const timestampCounts = {};
+            timeline.forEach(event => {
+                timestampCounts[event.timestamp] = (timestampCounts[event.timestamp] || 0) + 1;
+            });
+
+            // Create markers
+            Object.entries(timestampCounts).forEach(([timestamp, count]) => {
+                const marker = document.createElement('div');
+                marker.className = 'timeline-marker';
+                if (count > 1) {
+                    marker.classList.add('concurrent');
+                }
+                const percent = (parseInt(timestamp) / maxTime) * 100;
+                marker.style.left = `${percent}%`;
+                timelineEl.appendChild(marker);
+            });
+        }
+
+        function updatePlayhead() {
+            if (maxTime === 0) {
+                playheadEl.style.left = '0%';
+            } else {
+                const percent = (currentTime / maxTime) * 100;
+                playheadEl.style.left = `${percent}%`;
+            }
+        }
+
+        function scrubToPosition(clientX) {
+            const rect = timelineEl.getBoundingClientRect();
+            const x = clientX - rect.left;
+            const percent = Math.max(0, Math.min(1, x / rect.width));
+
+            currentTime = Math.floor(percent * maxTime);
+            isScrubbed = currentTime < maxTime;
+
+            rebuildState();
+            render();
+            updateUI();
+        }
+
+        timelineEl.addEventListener('mousedown', (e) => {
+            isDraggingTimeline = true;
+            scrubToPosition(e.clientX);
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (isDraggingTimeline) {
+                scrubToPosition(e.clientX);
+            }
+        });
+
+        document.addEventListener('mouseup', () => {
+            isDraggingTimeline = false;
+        });
+
+        // ==================== UI UPDATES ====================
+        function updateUI() {
+            // Update mode indicator
+            const modeIndicator = document.getElementById('mode-indicator');
+            if (isScrubbed) {
+                modeIndicator.textContent = 'SCRUBBED';
+                modeIndicator.className = 'mode-indicator mode-scrubbed';
+            } else {
+                modeIndicator.textContent = 'LIVE';
+                modeIndicator.className = 'mode-indicator mode-live';
+            }
+
+            // Update insert mode indicator
+            const insertModeIndicator = document.getElementById('insert-mode-indicator');
+            if (insertMode) {
+                insertModeIndicator.textContent = 'INSERT (|)';
+            } else {
+                insertModeIndicator.textContent = 'OVERWRITE (█)';
+            }
+
+            // Update time display
+            document.getElementById('time-display').textContent = `${currentTime}ms / ${maxTime}ms`;
+
+            // Update cursor display
+            document.getElementById('cursor-display').textContent = `(${cursor.x}, ${cursor.y})`;
+
+            // Update event count
+            document.getElementById('event-count').textContent = timeline.length;
+
+            // Update timeline
+            updateTimelineMarkers();
+            updatePlayhead();
+        }
+
+        // ==================== CONTROLS ====================
+        document.getElementById('clear-btn').addEventListener('click', () => {
+            if (confirm('Clear all events and reset editor?')) {
+                timeline = [];
+                currentTime = 0;
+                maxTime = 0;
+                isScrubbed = false;
+                rebuildState();
+                render();
+                updateUI();
+                console.log('Editor cleared');
+            }
+        });
+
+        document.getElementById('export-btn').addEventListener('click', () => {
+            const data = {
+                timeline,
+                metadata: {
+                    totalEvents: timeline.length,
+                    maxTime,
+                    gridSize: { cols: GRID_COLS, rows: GRID_ROWS },
+                    exportedAt: new Date().toISOString()
+                }
+            };
+
+            const json = JSON.stringify(data, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `temporal-timeline-${Date.now()}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            console.log('Timeline exported:', data);
+        });
+
+        document.getElementById('help-btn').addEventListener('click', () => {
+            const instructions = document.querySelector('.instructions');
+            instructions.style.display = instructions.style.display === 'none' ? 'block' : 'none';
+        });
+
+        // ==================== CURSOR BLINK ====================
+        setInterval(() => {
+            cursorVisible = !cursorVisible;
+            render();
+        }, CURSOR_BLINK_RATE);
+
+        // ==================== INITIALIZATION ====================
+        function init() {
+            rebuildState();
+            render();
+            updateUI();
+            console.log('Temporal Text Editor initialized');
+            console.log('Grid size:', GRID_COLS, 'x', GRID_ROWS);
+            console.log('Try typing, then drag the timeline back and type more!');
+        }
+
+        init();
+    </script>
+</body>
+</html>
