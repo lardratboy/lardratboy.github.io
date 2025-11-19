@@ -68,10 +68,12 @@ This is **event sourcing for text editing** - the document is derived from repla
 - Activated when you type while scrubbed back
 - Each new keystroke you make:
   1. Records action at current timeline position
-  2. Jumps to NEXT existing event
-  3. Rebuilds document (shows old AND new edits)
-  4. Returns your cursor to where you're typing
+  2. Calculates where your cursor should be after this action
+  3. Jumps to NEXT existing event
+  4. Rebuilds document (shows old AND new edits)
+  5. Restores your cursor to where you're typing (not where historical events left it)
 - Creates illusion of multiple people typing together
+- Your cursor stays where you're actively editing
 - Exits when timeline runs out of future events
 
 ### The Timeline Scrubber
