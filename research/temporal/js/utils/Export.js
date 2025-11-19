@@ -98,7 +98,7 @@ export class Export {
     lines.push(JSON.stringify(header));
 
     // Build a representation of the grid at each timestamp
-    let previousGrid = Array(header.height).fill('').map(() => ' '.repeat(header.width));
+    let previousGrid = Array(header.height).fill('').map(() => Array(header.width).fill(' '));
     let previousTime = 0;
 
     // Get all unique timestamps
