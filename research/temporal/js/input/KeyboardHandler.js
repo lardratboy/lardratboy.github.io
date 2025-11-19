@@ -1,6 +1,6 @@
 /**
  * KeyboardHandler - Handles keyboard input
- * Emits events: 'char-typed', 'delete', 'cursor-move', 'toggle-insert-mode'
+ * Emits events: 'char-typed', 'delete', 'cursor-move', 'toggle-insert-mode', 'newline'
  */
 
 import { EventEmitter } from '../utils/EventEmitter.js';
@@ -43,7 +43,7 @@ export class KeyboardHandler extends EventEmitter {
   _shouldPreventDefault(key) {
     const preventKeys = [
       'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
-      'Backspace', 'Delete', 'Insert'
+      'Backspace', 'Delete', 'Insert', 'Enter'
     ];
     return key.length === 1 || preventKeys.includes(key);
   }
@@ -72,6 +72,12 @@ export class KeyboardHandler extends EventEmitter {
     }
     if (key === 'ArrowDown') {
       this.emit('cursor-move', { dx: 0, dy: 1 });
+      return;
+    }
+
+    // Enter/Return - newline
+    if (key === 'Enter') {
+      this.emit('newline');
       return;
     }
 

@@ -52,6 +52,15 @@ export class EventSystem {
   }
 
   /**
+   * Create a newline event (move cursor to start of next row)
+   */
+  static createNewline() {
+    return {
+      type: 'newline'
+    };
+  }
+
+  /**
    * Apply an event to grid and cursor
    * @param {Object} event - The full event with timestamp and cursorBefore
    * @param {Grid} grid - The grid to modify
@@ -75,6 +84,9 @@ export class EventSystem {
         break;
       case 'cursor_move':
         this._applyCursorMove(action, cursor, grid);
+        break;
+      case 'newline':
+        this._applyNewline(cursor, grid);
         break;
     }
   }
@@ -117,5 +129,11 @@ export class EventSystem {
   static _applyCursorMove(action, cursor, grid) {
     const { dx, dy } = action;
     cursor.move(dx, dy, { cols: grid.cols, rows: grid.rows });
+  }
+
+  static _applyNewline(cursor, grid) {
+    // Move cursor to start of next row
+    cursor.x = 0;
+    cursor.y = Math.min(cursor.y + 1, grid.rows - 1);
   }
 }
