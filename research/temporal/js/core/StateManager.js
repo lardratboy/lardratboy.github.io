@@ -77,8 +77,16 @@ export class StateManager extends EventEmitter {
 
     Logger.debug(`Event added at ${timestamp}ms:`, action.type, action);
 
-    // In concurrent mode (scrubbed), advance to next event
+    // In concurrent mode (scrubbed), we need to preserve where the cursor should be
+    // after applying this new event, even though we're advancing to the next timestamp
+    let userCursorPosition = null;
     if (isScrubbed && this.currentTime < this.getMaxTime()) {
+      // Calculate where cursor will be after applying this event
+      const tempCursor = this.cursor.clone();
+      const tempGrid = this.grid.clone();
+      EventSystem.applyEvent(event, tempGrid, tempCursor);
+      userCursorPosition = tempCursor.clone();
+
       this.advanceToNextEvent();
     } else if (!isScrubbed) {
       // In live mode, advance current time
@@ -86,6 +94,14 @@ export class StateManager extends EventEmitter {
     }
 
     this.rebuildState();
+
+    // In concurrent mode, restore the user's cursor position
+    // This keeps the cursor where the user is typing, not where historical events left it
+    if (userCursorPosition) {
+      this.cursor.set(userCursorPosition);
+      Logger.debug(`Restored user cursor to (${userCursorPosition.x}, ${userCursorPosition.y})`);
+    }
+
     this.emit('event-added', event);
     this.emit('time-changed', this.currentTime);
 
