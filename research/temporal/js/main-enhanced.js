@@ -326,7 +326,7 @@ export class TemporalEditorEnhanced {
 
   // Export operations
   exportJSON() {
-    const data = Export.toJSON(this.state.getState());
+    const data = Export.toJSON(this.state.getState(), this.state.getTimeline());
     const filename = `temporal-timeline-${Date.now()}.json`;
     Export.downloadJSON(data, filename);
     Logger.info('Timeline exported:', filename);
@@ -337,6 +337,13 @@ export class TemporalEditorEnhanced {
     const filename = `temporal-timeline-${Date.now()}.csv`;
     Export.downloadCSV(data, filename);
     Logger.info('Timeline exported:', filename);
+  }
+
+  exportAsciinema() {
+    const data = Export.toAsciinema(this.state.getTimeline(), this.config);
+    const filename = `temporal-recording-${Date.now()}.cast`;
+    Export.downloadAsciinema(data, filename);
+    Logger.info('Asciinema recording exported:', filename);
   }
 
   // Persistence operations
@@ -497,6 +504,10 @@ document.addEventListener('DOMContentLoaded', () => {
     window.editor.exportCSV();
   });
 
+  document.getElementById('export-asciinema-btn').addEventListener('click', () => {
+    window.editor.exportAsciinema();
+  });
+
   // Playback controls
   document.getElementById('playback-play').addEventListener('click', () => {
     window.editor.play();
@@ -556,6 +567,7 @@ document.addEventListener('DOMContentLoaded', () => {
   console.log('\nPlayback:', 'editor.play(), editor.pause(), editor.stop()');
   console.log('Speed:', 'editor.setSpeed(0.5|1|2|4)');
   console.log('Step:', 'editor.stepForward(), editor.stepBackward()');
+  console.log('\nExport:', 'editor.exportJSON(), editor.exportCSV(), editor.exportAsciinema()');
   console.log('\nPersistence:', 'editor.save(), editor.load()');
   console.log('Drafts:', 'editor.saveDraft("name"), editor.loadDraft("name")');
   console.log('\nAnalysis:', 'editor.analyze()');
