@@ -315,6 +315,13 @@ export class TemporalEditorEnhanced {
     return this.state.getTimeline().serialize();
   }
 
+  toggleInsertMode() {
+    this.state.toggleInsertMode();
+    this._render();
+    this._updateUI();
+    Logger.info('Insert mode toggled:', this.state.getInsertMode() ? 'INSERT' : 'OVERWRITE');
+  }
+
   clear() {
     if (confirm('Clear all events and reset editor?')) {
       this.state.clear();
@@ -528,6 +535,10 @@ document.addEventListener('DOMContentLoaded', () => {
   window.editor = new TemporalEditorEnhanced('editor-canvas', 'timeline', 'status-bar');
 
   // Wire up basic controls
+  document.getElementById('toggle-insert-mode-btn').addEventListener('click', () => {
+    window.editor.toggleInsertMode();
+  });
+
   document.getElementById('clear-btn').addEventListener('click', () => {
     window.editor.clear();
   });
@@ -604,6 +615,7 @@ document.addEventListener('DOMContentLoaded', () => {
   Logger.info('Temporal Editor V3 ready!');
   console.log('=== Temporal Editor V3 - Enhanced ===');
   console.log('Access via: window.editor');
+  console.log('\nBasic:', 'editor.toggleInsertMode() - Switch between INSERT and OVERWRITE modes');
   console.log('\nPlayback:', 'editor.play(), editor.pause(), editor.stop()');
   console.log('Speed:', 'editor.setSpeed(0.5|1|2|4)');
   console.log('Step:', 'editor.stepForward(), editor.stepBackward()');
