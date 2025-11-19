@@ -233,4 +233,62 @@ export class Export {
     a.click();
     URL.revokeObjectURL(url);
   }
+
+  /**
+   * Import timeline from JSON file
+   * Returns a promise that resolves with the parsed data
+   */
+  static importJSON() {
+    return new Promise((resolve, reject) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json,application/json';
+
+      input.onchange = (e) => {
+        const file = e.target.files[0];
+        if (!file) {
+          reject(new Error('No file selected'));
+          return;
+        }
+
+        const reader = new FileReader();
+
+        reader.onload = (event) => {
+          try {
+            const data = JSON.parse(event.target.result);
+            resolve(data);
+          } catch (error) {
+            reject(new Error('Failed to parse JSON: ' + error.message));
+          }
+        };
+
+        reader.onerror = () => {
+          reject(new Error('Failed to read file'));
+        };
+
+        reader.readAsText(file);
+      };
+
+      input.click();
+    });
+  }
+
+  /**
+   * Validate imported JSON data
+   */
+  static validateImportedData(data) {
+    if (!data || typeof data !== 'object') {
+      throw new Error('Invalid data format');
+    }
+
+    if (!data.timeline || !data.timeline.events) {
+      throw new Error('Missing timeline data');
+    }
+
+    if (!data.metadata) {
+      throw new Error('Missing metadata');
+    }
+
+    return true;
+  }
 }

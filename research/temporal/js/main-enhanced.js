@@ -347,6 +347,41 @@ export class TemporalEditorEnhanced {
     Logger.info('Asciinema recording exported:', filename);
   }
 
+  async importJSON() {
+    try {
+      const data = await Export.importJSON();
+      Export.validateImportedData(data);
+
+      // Clear current state
+      this.state.clear();
+
+      // Load the timeline from imported data
+      this.state.timeline = this.state.timeline.constructor.deserialize(data.timeline);
+
+      // Restore current state if available
+      if (data.currentState) {
+        this.state.currentTime = data.currentState.currentTime || data.timeline.maxTime || 0;
+        this.state.insertMode = data.currentState.insertMode !== undefined ? data.currentState.insertMode : true;
+      } else {
+        // Default to end of timeline
+        this.state.currentTime = this.state.getMaxTime();
+      }
+
+      // Rebuild the state
+      this.state.rebuildState();
+
+      // Update UI
+      this._render();
+      this._updateUI();
+
+      Logger.info('Timeline imported successfully');
+      alert('Timeline imported successfully!');
+    } catch (error) {
+      Logger.error('Failed to import timeline:', error);
+      alert('Failed to import timeline: ' + error.message);
+    }
+  }
+
   // Persistence operations
   save(name = 'default') {
     Persistence.save(this.state.getState(), name);
@@ -497,6 +532,10 @@ document.addEventListener('DOMContentLoaded', () => {
     window.editor.clear();
   });
 
+  document.getElementById('import-json-btn').addEventListener('click', () => {
+    window.editor.importJSON();
+  });
+
   document.getElementById('export-json-btn').addEventListener('click', () => {
     window.editor.exportJSON();
   });
@@ -568,7 +607,7 @@ document.addEventListener('DOMContentLoaded', () => {
   console.log('\nPlayback:', 'editor.play(), editor.pause(), editor.stop()');
   console.log('Speed:', 'editor.setSpeed(0.5|1|2|4)');
   console.log('Step:', 'editor.stepForward(), editor.stepBackward()');
-  console.log('\nExport:', 'editor.exportJSON(), editor.exportCSV(), editor.exportAsciinema()');
+  console.log('\nImport/Export:', 'editor.importJSON(), editor.exportJSON(), editor.exportCSV(), editor.exportAsciinema()');
   console.log('\nPersistence:', 'editor.save(), editor.load()');
   console.log('Drafts:', 'editor.saveDraft("name"), editor.loadDraft("name")');
   console.log('\nAnalysis:', 'editor.analyze()');
