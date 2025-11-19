@@ -326,7 +326,8 @@ export class TemporalEditorEnhanced {
 
   // Export operations
   exportJSON() {
-    const data = Export.toJSON(this.state.getState(), this.state.getTimeline());
+    const state = this.state.getState();
+    const data = Export.toJSON(state, state.timeline);
     const filename = `temporal-timeline-${Date.now()}.json`;
     Export.downloadJSON(data, filename);
     Logger.info('Timeline exported:', filename);
