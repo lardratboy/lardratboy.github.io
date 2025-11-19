@@ -62,6 +62,7 @@ export class TemporalEditor {
     this.keyboard.on('delete', ({ isBackspace }) => this._onDelete(isBackspace));
     this.keyboard.on('cursor-move', ({ dx, dy }) => this._onCursorMove(dx, dy));
     this.keyboard.on('toggle-insert-mode', () => this._onToggleInsertMode());
+    this.keyboard.on('newline', () => this._onNewline());
 
     // Mouse events
     this.mouse.on('cursor-teleport', ({ x, y }) => this._onCursorTeleport(x, y));
@@ -113,6 +114,11 @@ export class TemporalEditor {
 
   _onCursorMove(dx, dy) {
     const action = EventSystem.createCursorMove(dx, dy);
+    this.state.addEvent(action);
+  }
+
+  _onNewline() {
+    const action = EventSystem.createNewline();
     this.state.addEvent(action);
   }
 

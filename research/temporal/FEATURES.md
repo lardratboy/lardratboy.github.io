@@ -467,6 +467,7 @@ editor.loadDraft('before-experiments')
 
 | Key | Action |
 |-----|--------|
+| Enter/Return | Move to start of next line (recorded) |
 | Insert | Toggle INSERT/OVERWRITE mode |
 | Arrow Keys | Move cursor (recorded) |
 | Backspace | Delete backward |
