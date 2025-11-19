@@ -191,6 +191,7 @@ export class StateManager extends EventEmitter {
     return {
       grid: this.grid,
       cursor: this.cursor,
+      timeline: this.timeline,
       currentTime: this.currentTime,
       maxTime: this.getMaxTime(),
       isLive: this.isLive(),

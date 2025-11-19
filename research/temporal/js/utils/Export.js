@@ -98,7 +98,9 @@ export class Export {
     lines.push(JSON.stringify(header));
 
     // Build a representation of the grid at each timestamp
-    let previousGrid = Array(header.height).fill('').map(() => Array(header.width).fill(' '));
+    let previousGrid = Array.from({ length: header.height }, () =>
+      Array.from({ length: header.width }, () => ' ')
+    );
     let previousTime = 0;
 
     // Get all unique timestamps
@@ -131,7 +133,9 @@ export class Export {
    * Rebuild grid from events (helper for asciinema export)
    */
   static _rebuildGridFromEvents(events, cols, rows) {
-    const grid = Array(rows).fill('').map(() => Array(cols).fill(' '));
+    const grid = Array.from({ length: rows }, () =>
+      Array.from({ length: cols }, () => ' ')
+    );
     const cursor = { x: 0, y: 0 };
 
     events.forEach(event => {
@@ -207,8 +211,11 @@ export class Export {
    * Compare two grids for equality
    */
   static _gridsEqual(grid1, grid2) {
+    if (!grid1 || !grid2) return false;
     if (grid1.length !== grid2.length) return false;
     for (let i = 0; i < grid1.length; i++) {
+      // Defensive check: ensure both are arrays
+      if (!Array.isArray(grid1[i]) || !Array.isArray(grid2[i])) return false;
       if (grid1[i].join('') !== grid2[i].join('')) return false;
     }
     return true;
