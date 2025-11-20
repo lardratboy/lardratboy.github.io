@@ -21,10 +21,30 @@ export class Renderer {
    */
   render(grid, cursor, insertMode, cursorVisible) {
     this.clear();
+    this.renderRightEdgeBoundary();
     this.renderGrid(grid);
     if (cursorVisible) {
       this.renderCursor(cursor, insertMode);
     }
+  }
+
+  /**
+   * Render the right edge boundary indicator
+   */
+  renderRightEdgeBoundary() {
+    const x = this.config.LAYOUT.PADDING + (this.config.GRID.COLS * this.config.FONT.CHAR_WIDTH);
+
+    this.ctx.strokeStyle = 'rgba(0, 255, 0, 0.3)';
+    this.ctx.lineWidth = 2;
+    this.ctx.setLineDash([5, 5]);
+
+    this.ctx.beginPath();
+    this.ctx.moveTo(x, this.config.LAYOUT.PADDING);
+    this.ctx.lineTo(x, this.canvas.height - this.config.LAYOUT.PADDING);
+    this.ctx.stroke();
+
+    // Reset line dash
+    this.ctx.setLineDash([]);
   }
 
   /**

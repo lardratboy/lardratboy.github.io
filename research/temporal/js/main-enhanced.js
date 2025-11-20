@@ -11,6 +11,7 @@ import { TimelineUI } from './ui/TimelineUI.js';
 import { StatusBar } from './ui/StatusBar.js';
 import { EventInspector } from './ui/EventInspector.js';
 import { MultiCursorRenderer } from './ui/MultiCursorRenderer.js';
+import { BranchUI } from './ui/BranchUI.js';
 import { KeyboardHandler } from './input/KeyboardHandler.js';
 import { MouseHandler } from './input/MouseHandler.js';
 import { PlaybackController } from './modes/PlaybackController.js';
@@ -52,6 +53,7 @@ export class TemporalEditorEnhanced {
     this.macros = new MacroRecorder();
     this.inspector = new EventInspector();
     this.multiCursor = new MultiCursorRenderer(this.config);
+    this.branchUI = new BranchUI('branch-ui-container-wrapper', this.branches);
 
     // Initialize UI
     this.inspector.createUI();
@@ -119,6 +121,42 @@ export class TemporalEditorEnhanced {
       this.state.rebuildState();
       this._render();
       this._updateUI();
+    });
+
+    // BranchUI events
+    this.branchUI.on('create-branch', ({ name, description }) => {
+      const success = this.createBranch(name, description);
+      if (success) {
+        this.branchUI.showNotification(`Branch "${name}" created!`, 'success');
+      } else {
+        this.branchUI.showNotification(`Failed to create branch "${name}"`, 'error');
+      }
+    });
+
+    this.branchUI.on('switch-branch', (name) => {
+      this.switchBranch(name);
+      this.branchUI.showNotification(`Switched to branch "${name}"`, 'success');
+    });
+
+    this.branchUI.on('delete-branch', (name) => {
+      const success = this.branches.deleteBranch(name);
+      if (success) {
+        this.branchUI.showNotification(`Branch "${name}" deleted!`, 'success');
+      } else {
+        this.branchUI.showNotification(`Failed to delete branch "${name}"`, 'error');
+      }
+    });
+
+    this.branchUI.on('merge-branch', (name) => {
+      const success = this.branches.mergeBranch(name);
+      if (success) {
+        this.state.rebuildState();
+        this._render();
+        this._updateUI();
+        this.branchUI.showNotification(`Merged branch "${name}"!`, 'success');
+      } else {
+        this.branchUI.showNotification(`Failed to merge branch "${name}"`, 'error');
+      }
     });
   }
 
@@ -523,6 +561,7 @@ export class TemporalEditorEnhanced {
     this.timelineUI.destroy();
     this.inspector.destroy();
     this.playback.destroy();
+    this.branchUI.destroy();
     this.state.removeAllListeners();
     Logger.info('Editor destroyed');
   }
