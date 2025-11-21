@@ -109,7 +109,7 @@ export class Grid {
     for (let x = fromX; x < this.cols - 1; x++) {
       this.cells[y][x] = this.cells[y][x + 1];
     }
-    this.cells[y][this.cols - 1] = ' ';
+    this.cells[y][this.cols - 1] = { char: ' ', color: '#0f0' };
   }
 
   /**
