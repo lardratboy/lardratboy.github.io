@@ -12,6 +12,7 @@ import { StatusBar } from './ui/StatusBar.js';
 import { EventInspector } from './ui/EventInspector.js';
 import { MultiCursorRenderer } from './ui/MultiCursorRenderer.js';
 import { BranchUI } from './ui/BranchUI.js';
+import { ColorPicker } from './ui/ColorPicker.js';
 import { KeyboardHandler } from './input/KeyboardHandler.js';
 import { MouseHandler } from './input/MouseHandler.js';
 import { PlaybackController } from './modes/PlaybackController.js';
@@ -54,6 +55,7 @@ export class TemporalEditorEnhanced {
     this.inspector = new EventInspector();
     this.multiCursor = new MultiCursorRenderer(this.config);
     this.branchUI = new BranchUI('branch-ui-container-wrapper', this.branches);
+    this.colorPicker = new ColorPicker('color-picker-container-wrapper');
 
     // Initialize UI
     this.inspector.createUI();
@@ -158,6 +160,11 @@ export class TemporalEditorEnhanced {
         this.branchUI.showNotification(`Failed to merge branch "${name}"`, 'error');
       }
     });
+
+    // ColorPicker events
+    this.colorPicker.on('color-changed', (color) => {
+      this.state.setCurrentColor(color);
+    });
   }
 
   // ==================== Input Handlers ====================
@@ -169,7 +176,8 @@ export class TemporalEditorEnhanced {
       cursor.x,
       cursor.y,
       this.state.getInsertMode(),
-      cursor
+      cursor,
+      this.state.getCurrentColor()
     );
     this.state.addEvent(action);
   }
@@ -562,6 +570,7 @@ export class TemporalEditorEnhanced {
     this.inspector.destroy();
     this.playback.destroy();
     this.branchUI.destroy();
+    this.colorPicker.destroy();
     this.state.removeAllListeners();
     Logger.info('Editor destroyed');
   }

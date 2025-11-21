@@ -19,6 +19,7 @@ export class StateManager extends EventEmitter {
     this.timeline = new Timeline();
     this.currentTime = 0;
     this.insertMode = true;
+    this.currentColor = '#0f0'; // Default green color
 
     // Derived state (rebuilt from timeline)
     this.grid = Grid.createEmpty(config.GRID.COLS, config.GRID.ROWS);
@@ -179,6 +180,10 @@ export class StateManager extends EventEmitter {
     return this.insertMode;
   }
 
+  getCurrentColor() {
+    return this.currentColor;
+  }
+
   getTimeline() {
     return this.timeline;
   }
@@ -215,6 +220,14 @@ export class StateManager extends EventEmitter {
     this.setInsertMode(!this.insertMode);
   }
 
+  setCurrentColor(color) {
+    if (this.currentColor !== color) {
+      this.currentColor = color;
+      this.emit('color-changed', { color });
+      Logger.debug(`Current color set to: ${color}`);
+    }
+  }
+
   // ==================== Actions ====================
 
   clear() {
@@ -233,6 +246,7 @@ export class StateManager extends EventEmitter {
       timeline: this.timeline.serialize(),
       currentTime: this.currentTime,
       insertMode: this.insertMode,
+      currentColor: this.currentColor,
       config: {
         cols: this.config.GRID.COLS,
         rows: this.config.GRID.ROWS
@@ -245,6 +259,7 @@ export class StateManager extends EventEmitter {
     state.timeline = Timeline.deserialize(data.timeline);
     state.currentTime = data.currentTime;
     state.insertMode = data.insertMode;
+    state.currentColor = data.currentColor || '#0f0';
     state.rebuildState();
     return state;
   }

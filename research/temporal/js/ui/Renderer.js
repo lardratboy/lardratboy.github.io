@@ -56,18 +56,18 @@ export class Renderer {
   }
 
   /**
-   * Render the text grid
+   * Render the text grid with colors
    */
   renderGrid(grid) {
     this.ctx.font = `${this.config.FONT.SIZE}px ${this.config.FONT.FAMILY}`;
-    this.ctx.fillStyle = this.config.COLORS.TEXT;
 
     for (let y = 0; y < grid.rows; y++) {
       for (let x = 0; x < grid.cols; x++) {
-        const char = grid.getChar(x, y);
-        if (char !== ' ') {
+        const cell = grid.getCell(x, y);
+        if (cell.char !== ' ') {
           const pos = this.gridToPixel(x, y);
-          this.ctx.fillText(char, pos.x, pos.y);
+          this.ctx.fillStyle = cell.color || this.config.COLORS.TEXT;
+          this.ctx.fillText(cell.char, pos.x, pos.y);
         }
       }
     }
