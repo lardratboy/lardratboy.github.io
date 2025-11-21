@@ -11,18 +11,32 @@ import { EventSystem } from './EventSystem.js';
 import { Logger } from '../utils/Logger.js';
 
 export class StateManager extends EventEmitter {
-  constructor(config) {
+  constructor(gridOrConfig, timelineOrUndefined) {
     super();
-    this.config = config;
+
+    // Support two modes:
+    // 1. New mode: StateManager(grid, timeline) - for infinite grid with VirtualGrid
+    // 2. Legacy mode: StateManager(config) - for fixed grid with config object
+    if (timelineOrUndefined) {
+      // New mode: accepting grid and timeline directly
+      this.grid = gridOrConfig;
+      this.timeline = timelineOrUndefined;
+      this.config = null;
+      this.isVirtualGrid = true;
+    } else {
+      // Legacy mode: accepting config object
+      this.config = gridOrConfig;
+      this.timeline = new Timeline();
+      this.grid = Grid.createEmpty(gridOrConfig.GRID.COLS, gridOrConfig.GRID.ROWS);
+      this.isVirtualGrid = false;
+    }
 
     // Core state
-    this.timeline = new Timeline();
     this.currentTime = 0;
     this.insertMode = true;
     this.currentColor = '#0f0'; // Default green color
 
-    // Derived state (rebuilt from timeline)
-    this.grid = Grid.createEmpty(config.GRID.COLS, config.GRID.ROWS);
+    // Cursor
     this.cursor = new Cursor(0, 0);
   }
 
@@ -32,7 +46,14 @@ export class StateManager extends EventEmitter {
   rebuildState() {
     Logger.debug('Rebuilding state at time:', this.currentTime);
 
-    this.grid = Grid.createEmpty(this.config.GRID.COLS, this.config.GRID.ROWS);
+    if (!this.isVirtualGrid) {
+      // Fixed grid mode - recreate grid
+      this.grid = Grid.createEmpty(this.config.GRID.COLS, this.config.GRID.ROWS);
+    } else {
+      // Virtual grid mode - clear existing grid
+      this.grid.clear();
+    }
+
     this.cursor = new Cursor(0, 0);
 
     const events = this.timeline.getEventsUpTo(this.currentTime);
@@ -45,10 +66,53 @@ export class StateManager extends EventEmitter {
   }
 
   /**
+   * Rebuild state from all events in timeline (not just up to current time)
+   */
+  rebuildFromEvents() {
+    Logger.debug('Rebuilding from all events');
+
+    if (!this.isVirtualGrid) {
+      // Fixed grid mode - recreate grid
+      this.grid = Grid.createEmpty(this.config.GRID.COLS, this.config.GRID.ROWS);
+    } else {
+      // Virtual grid mode - clear existing grid
+      this.grid.clear();
+    }
+
+    this.cursor = new Cursor(0, 0);
+
+    // Apply all events
+    this.timeline.events.forEach(event => {
+      EventSystem.applyEvent(event, this.grid, this.cursor);
+    });
+
+    // Set current time to max time
+    this.currentTime = this.getMaxTime();
+
+    this.emit('state-changed', this.getState());
+  }
+
+  /**
+   * Apply a single event to the current state
+   */
+  applyEvent(event) {
+    EventSystem.applyEvent(event, this.grid, this.cursor);
+    this.emit('state-changed', this.getState());
+  }
+
+  /**
    * Derive state at a specific time (without changing current time)
    */
   deriveStateAt(time) {
-    const grid = Grid.createEmpty(this.config.GRID.COLS, this.config.GRID.ROWS);
+    let grid;
+    if (!this.isVirtualGrid) {
+      grid = Grid.createEmpty(this.config.GRID.COLS, this.config.GRID.ROWS);
+    } else {
+      // For virtual grid, create a new instance and clear it
+      grid = this.grid.constructor ? new this.grid.constructor() : this.grid.clone();
+      if (grid.clear) grid.clear();
+    }
+
     const cursor = new Cursor(0, 0);
 
     const events = this.timeline.getEventsUpTo(time);
@@ -64,9 +128,10 @@ export class StateManager extends EventEmitter {
    */
   addEvent(action) {
     const isScrubbed = this.isScrubbed();
+    const timeIncrement = this.config ? this.config.TIMING.TIME_INCREMENT : 16;
     const timestamp = isScrubbed
       ? this.currentTime
-      : this.getMaxTime() + this.config.TIMING.TIME_INCREMENT;
+      : this.getMaxTime() + timeIncrement;
 
     const event = {
       timestamp,
@@ -142,10 +207,17 @@ export class StateManager extends EventEmitter {
    * Teleport cursor without recording event
    */
   teleportCursor(x, y) {
-    this.cursor.teleport(x, y, {
-      cols: this.config.GRID.COLS,
-      rows: this.config.GRID.ROWS
-    });
+    if (this.config) {
+      // Fixed grid mode - respect boundaries
+      this.cursor.teleport(x, y, {
+        cols: this.config.GRID.COLS,
+        rows: this.config.GRID.ROWS
+      });
+    } else {
+      // Virtual grid mode - no boundaries
+      this.cursor.x = x;
+      this.cursor.y = y;
+    }
     this.emit('state-changed', this.getState());
     Logger.debug(`Cursor teleported to (${x}, ${y})`);
   }
@@ -239,19 +311,29 @@ export class StateManager extends EventEmitter {
     Logger.info('State cleared');
   }
 
+  reset() {
+    // Alias for clear()
+    this.clear();
+  }
+
   // ==================== Serialization ====================
 
   serialize() {
-    return {
+    const result = {
       timeline: this.timeline.serialize(),
       currentTime: this.currentTime,
       insertMode: this.insertMode,
-      currentColor: this.currentColor,
-      config: {
+      currentColor: this.currentColor
+    };
+
+    if (this.config) {
+      result.config = {
         cols: this.config.GRID.COLS,
         rows: this.config.GRID.ROWS
-      }
-    };
+      };
+    }
+
+    return result;
   }
 
   static deserialize(data, config) {
