@@ -1,5 +1,5 @@
 /**
- * Grid - Manages the character grid state
+ * Grid - Manages the character grid state with color support
  */
 
 export class Grid {
@@ -14,7 +14,7 @@ export class Grid {
     for (let y = 0; y < this.rows; y++) {
       cells[y] = [];
       for (let x = 0; x < this.cols; x++) {
-        cells[y][x] = ' ';
+        cells[y][x] = { char: ' ', color: '#0f0' };
       }
     }
     return cells;
@@ -32,7 +32,7 @@ export class Grid {
    */
   clone() {
     const newGrid = new Grid(this.cols, this.rows);
-    newGrid.cells = this.cells.map(row => [...row]);
+    newGrid.cells = this.cells.map(row => row.map(cell => ({ ...cell })));
     return newGrid;
   }
 
@@ -43,17 +43,50 @@ export class Grid {
     if (x < 0 || x >= this.cols || y < 0 || y >= this.rows) {
       return ' ';
     }
+    return this.cells[y][x].char;
+  }
+
+  /**
+   * Get cell at position (returns {char, color})
+   */
+  getCell(x, y) {
+    if (x < 0 || x >= this.cols || y < 0 || y >= this.rows) {
+      return { char: ' ', color: '#0f0' };
+    }
     return this.cells[y][x];
+  }
+
+  /**
+   * Get color at position
+   */
+  getColor(x, y) {
+    if (x < 0 || x >= this.cols || y < 0 || y >= this.rows) {
+      return '#0f0';
+    }
+    return this.cells[y][x].color;
   }
 
   /**
    * Set character at position
    */
-  setChar(x, y, char) {
+  setChar(x, y, char, color = null) {
     if (x < 0 || x >= this.cols || y < 0 || y >= this.rows) {
       return;
     }
-    this.cells[y][x] = char;
+    this.cells[y][x].char = char;
+    if (color !== null) {
+      this.cells[y][x].color = color;
+    }
+  }
+
+  /**
+   * Set cell at position
+   */
+  setCell(x, y, char, color) {
+    if (x < 0 || x >= this.cols || y < 0 || y >= this.rows) {
+      return;
+    }
+    this.cells[y][x] = { char, color };
   }
 
   /**
@@ -93,7 +126,10 @@ export class Grid {
     return {
       cols: this.cols,
       rows: this.rows,
-      cells: this.cells.map(row => row.join(''))
+      cells: this.cells.map(row => row.map(cell => ({
+        char: cell.char,
+        color: cell.color
+      })))
     };
   }
 
@@ -102,7 +138,21 @@ export class Grid {
    */
   static deserialize(data) {
     const grid = new Grid(data.cols, data.rows);
-    grid.cells = data.cells.map(row => row.split(''));
+
+    // Handle old format (strings) and new format (objects with color)
+    grid.cells = data.cells.map(row => {
+      if (typeof row === 'string') {
+        // Old format - convert to new format
+        return row.split('').map(char => ({ char, color: '#0f0' }));
+      } else {
+        // New format
+        return row.map(cell => ({
+          char: cell.char || ' ',
+          color: cell.color || '#0f0'
+        }));
+      }
+    });
+
     return grid;
   }
 }

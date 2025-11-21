@@ -1,18 +1,19 @@
 /**
- * EventSystem - Creates and applies events
+ * EventSystem - Creates and applies events with color support
  */
 
 export class EventSystem {
   /**
    * Create an insert character event
    */
-  static createInsertChar(char, x, y, insertMode, cursor) {
+  static createInsertChar(char, x, y, insertMode, cursor, color = '#0f0') {
     return {
       type: 'insert_char',
       char,
       x,
       y,
-      insertMode
+      insertMode,
+      color
     };
   }
 
@@ -92,14 +93,14 @@ export class EventSystem {
   }
 
   static _applyInsertChar(action, grid, cursor) {
-    const { char, x, y, insertMode } = action;
+    const { char, x, y, insertMode, color } = action;
 
     if (insertMode) {
       // Shift everything right from position x
       grid.shiftRowRight(y, x);
     }
 
-    grid.setChar(x, y, char);
+    grid.setCell(x, y, char, color || '#0f0');
 
     // Move cursor right
     cursor.moveRight({ cols: grid.cols, rows: grid.rows });
@@ -108,7 +109,7 @@ export class EventSystem {
   static _applyDeleteChar(action, grid, cursor) {
     const { x, y, moveCursor } = action;
 
-    grid.setChar(x, y, ' ');
+    grid.setCell(x, y, ' ', '#0f0');
 
     if (moveCursor) {
       cursor.moveLeft();
