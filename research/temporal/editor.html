@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Temporal Text Editor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #1a1a1a;
+            color: #00ff00;
+            font-family: 'Courier New', monospace;
+            padding: 20px;
+            overflow: hidden;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #00ff00;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+
+        .instructions {
+            font-size: 12px;
+            color: #00aa00;
+            line-height: 1.4;
+        }
+
+        .editor-container {
+            background: #000;
+            border: 2px solid #00ff00;
+            padding: 10px;
+            position: relative;
+            margin-bottom: 20px;
+            cursor: crosshair;
+        }
+
+        .editor-grid {
+            font-family: 'Courier New', monospace;
+            font-size: 16px;
+            line-height: 20px;
+            white-space: pre;
+            position: relative;
+        }
+
+        .cursor {
+            position: absolute;
+            width: 10px;
+            height: 16px;
+            background: #00ff00;
+            animation: blink 1s step-end infinite;
+            pointer-events: none;
+            mix-blend-mode: difference;
+        }
+
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+
+        .timeline-container {
+            background: #0a0a0a;
+            border: 2px solid #00ff00;
+            padding: 15px;
+        }
+
+        .timeline-info {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+
+        .timeline-scrubber {
+            width: 100%;
+            height: 40px;
+            background: #1a1a1a;
+            border: 1px solid #00ff00;
+            position: relative;
+            cursor: grab;
+            margin-bottom: 10px;
+            user-select: none;
+        }
+
+        .timeline-scrubber:active {
+            background: #252525;
+            cursor: grabbing;
+        }
+
+        .timeline-track {
+            position: absolute;
+            top: 50%;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: #003300;
+            transform: translateY(-50%);
+        }
+
+        .timeline-marker {
+            position: absolute;
+            top: 0;
+            width: 2px;
+            height: 100%;
+            background: #00ff00;
+            opacity: 0.5;
+        }
+
+        .timeline-marker.concurrent {
+            background: #ffff00;
+            width: 4px;
+            opacity: 0.8;
+        }
+
+        .timeline-playhead {
+            position: absolute;
+            top: 0;
+            width: 3px;
+            height: 100%;
+            background: #ff0000;
+            transform: translateX(-50%);
+            z-index: 10;
+        }
+
+        .timeline-controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            background: #003300;
+            border: 1px solid #00ff00;
+            color: #00ff00;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .btn:hover {
+            background: #004400;
+        }
+
+        .btn:active {
+            background: #00ff00;
+            color: #000;
+        }
+
+        .status-bar {
+            background: #0a0a0a;
+            border: 2px solid #00ff00;
+            padding: 10px;
+            margin-top: 20px;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .mode-indicator {
+            display: inline-block;
+            padding: 2px 8px;
+            background: #003300;
+            margin-right: 10px;
+        }
+
+        .mode-indicator.recording {
+            background: #330000;
+            color: #ff0000;
+        }
+
+        .action-list {
+            max-height: 150px;
+            overflow-y: auto;
+            background: #000;
+            border: 1px solid #003300;
+            padding: 5px;
+            margin-top: 10px;
+            font-size: 11px;
+            line-height: 1.3;
+        }
+
+        .action-item {
+            padding: 2px;
+            border-left: 2px solid transparent;
+        }
+
+        .action-item.current {
+            background: #002200;
+            border-left-color: #00ff00;
+        }
+
+        .action-item.concurrent {
+            background: #222200;
+            border-left-color: #ffff00;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⏱️ TEMPORAL TEXT EDITOR</h1>
+            <div class="instructions">
+                <strong>Click editor to teleport cursor</strong> (no event) • <strong>INSERT/OVERWRITE button</strong> to toggle mode • Arrow keys to move<br>
+                <strong>INSERT mode:</strong> Typing shifts text right • Backspace/Delete shifts text left<br>
+                <strong>OVERWRITE mode:</strong> Typing replaces chars • Backspace/Delete just clears • <strong>Drag timeline</strong> to scrub ⚡
+            </div>
+        </div>
+
+        <div class="editor-container">
+            <div class="editor-grid" id="editor"></div>
+            <div class="cursor" id="cursor"></div>
+        </div>
+
+        <div class="timeline-container">
+            <div class="timeline-info">
+                <span>Timeline: <span id="current-time">0</span>ms / <span id="total-time">0</span>ms</span>
+                <span>Actions: <span id="action-count">0</span></span>
+            </div>
+            
+            <div class="timeline-scrubber" id="scrubber">
+                <div class="timeline-track"></div>
+                <div class="timeline-playhead" id="playhead"></div>
+            </div>
+
+            <div class="timeline-controls">
+                <button class="btn" id="play-pause">▶ Play</button>
+                <button class="btn" id="rewind">⏮ Start</button>
+                <button class="btn" id="step-back">◀ Step Back</button>
+                <button class="btn" id="step-forward">▶ Step Forward</button>
+                <button class="btn" id="toggle-insert" style="min-width: 100px;">INSERT</button>
+                <button class="btn" id="clear">🗑 Clear All</button>
+                <label style="color: #00aa00; display: flex; align-items: center; gap: 5px;">
+                    <input type="checkbox" id="auto-play" checked>
+                    Auto-play new actions
+                </label>
+            </div>
+
+            <div class="action-list" id="action-list"></div>
+        </div>
+
+        <div class="status-bar">
+            <span class="mode-indicator" id="mode">LIVE</span>
+            <span id="status">Ready to edit • Cursor: (0, 0)</span>
+        </div>
+    </div>
+
+    <script>
+        class TemporalTextEditor {
+            constructor(cols, rows) {
+                this.cols = cols;
+                this.rows = rows;
+                this.grid = Array(rows).fill(null).map(() => Array(cols).fill(' '));
+                this.cursorX = 0;
+                this.cursorY = 0;
+                
+                // Timeline system
+                this.timeline = [];
+                this.currentTime = 0;
+                this.startTime = Date.now();
+                this.isPlaying = false;
+                this.isConcurrentRecording = false;
+                this.playbackSpeed = 1;
+                this.autoPlay = true;
+                
+                // State tracking
+                this.isScrubbedBack = false;
+                
+                // Scrubbing state
+                this.isScrubbing = false;
+                this.scrubStartX = 0;
+                
+                // Edit mode
+                this.insertMode = true; // true = insert, false = overwrite
+                
+                // Character dimensions (measured after render)
+                this.charWidth = 9.6015625;
+                this.lineHeight = 20;
+                this.verticalOffset = 2;
+                
+                this.setupDOM();
+                this.setupEventListeners();
+                this.render();
+                this.measureCharDimensions();
+                this.updateCursorStyle();
+                this.updateInsertButton();
+                this.updateTimeline();
+            }
+
+            measureCharDimensions() {
+                // Create a temporary span with a single character to measure exact dimensions
+                const span = document.createElement('span');
+                span.style.fontFamily = 'Courier New, monospace';
+                span.style.fontSize = '16px';
+                span.style.lineHeight = '20px';
+                span.style.visibility = 'hidden';
+                span.style.position = 'absolute';
+                span.textContent = 'M'; // Use 'M' as it's typically the widest character
+                
+                document.body.appendChild(span);
+                const rect = span.getBoundingClientRect();
+                this.charWidth = rect.width;
+                this.lineHeight = 20; // Fixed from CSS
+                
+                // Calculate vertical offset to align with text
+                // For 16px font in 20px line-height, text typically starts ~2-3px from top
+                this.verticalOffset = 2;
+                
+                document.body.removeChild(span);
+                
+                console.log(`Measured character dimensions: ${this.charWidth}px x ${this.lineHeight}px, offset: ${this.verticalOffset}px`);
+            }
+
+            setupDOM() {
+                this.editorEl = document.getElementById('editor');
+                this.cursorEl = document.getElementById('cursor');
+                this.scrubberEl = document.getElementById('scrubber');
+                this.playheadEl = document.getElementById('playhead');
+                this.actionListEl = document.getElementById('action-list');
+                this.statusEl = document.getElementById('status');
+                this.modeEl = document.getElementById('mode');
+            }
+
+            setupEventListeners() {
+                // Keyboard events
+                document.addEventListener('keydown', (e) => this.handleKeyDown(e));
+                
+                // Click to teleport cursor (doesn't record event)
+                this.editorEl.addEventListener('click', (e) => this.handleEditorClick(e));
+                
+                // Timeline scrubber - click and drag to scrub
+                this.scrubberEl.addEventListener('mousedown', (e) => this.handleScrubberMouseDown(e));
+                document.addEventListener('mousemove', (e) => this.handleScrubberMouseMove(e));
+                document.addEventListener('mouseup', (e) => this.handleScrubberMouseUp(e));
+                
+                // Controls
+                document.getElementById('play-pause').addEventListener('click', () => this.togglePlayback());
+                document.getElementById('rewind').addEventListener('click', () => this.rewindToStart());
+                document.getElementById('step-back').addEventListener('click', () => this.stepBackward());
+                document.getElementById('step-forward').addEventListener('click', () => this.stepForward());
+                document.getElementById('toggle-insert').addEventListener('click', () => this.toggleInsertMode());
+                document.getElementById('clear').addEventListener('click', () => this.clearAll());
+                document.getElementById('auto-play').addEventListener('change', (e) => {
+                    this.autoPlay = e.target.checked;
+                });
+            }
+
+            handleEditorClick(e) {
+                // Ignore clicks during playback
+                if (this.isPlaying && !this.isConcurrentRecording) {
+                    return;
+                }
+
+                const rect = this.editorEl.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                // Calculate grid position using measured dimensions
+                // The editor-grid itself doesn't have padding, so we don't need to adjust here
+                const col = Math.floor(x / this.charWidth);
+                const row = Math.floor(y / this.lineHeight);
+
+                // Clamp to grid bounds
+                const newX = Math.max(0, Math.min(this.cols - 1, col));
+                const newY = Math.max(0, Math.min(this.rows - 1, row));
+
+                // Teleport cursor without recording event
+                this.cursorX = newX;
+                this.cursorY = newY;
+
+                this.render();
+                this.updateStatus();
+
+                console.log(`Cursor teleported to (${newX}, ${newY}) - no event recorded`);
+            }
+
+            handleKeyDown(e) {
+                const key = e.key;
+                
+                // Ignore if in pure playback mode (not concurrent recording)
+                if (this.isPlaying && !this.isConcurrentRecording) {
+                    e.preventDefault();
+                    return;
+                }
+
+                let action = null;
+
+                // Insert key toggles mode (for keyboards that have it)
+                if (key === 'Insert') {
+                    e.preventDefault();
+                    this.toggleInsertMode();
+                    return;
+                }
+
+                // Arrow keys - cursor movement
+                if (key === 'ArrowLeft') {
+                    e.preventDefault();
+                    if (this.cursorX > 0) {
+                        action = { type: 'cursor_move', dx: -1, dy: 0 };
+                    }
+                } else if (key === 'ArrowRight') {
+                    e.preventDefault();
+                    if (this.cursorX < this.cols - 1) {
+                        action = { type: 'cursor_move', dx: 1, dy: 0 };
+                    }
+                } else if (key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (this.cursorY > 0) {
+                        action = { type: 'cursor_move', dx: 0, dy: -1 };
+                    }
+                } else if (key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (this.cursorY < this.rows - 1) {
+                        action = { type: 'cursor_move', dx: 0, dy: 1 };
+                    }
+                }
+                // Backspace
+                else if (key === 'Backspace') {
+                    e.preventDefault();
+                    if (this.cursorX > 0) {
+                        if (this.insertMode) {
+                            // INSERT mode: delete and shift text left
+                            action = { 
+                                type: 'delete_and_shift', 
+                                x: this.cursorX - 1, 
+                                y: this.cursorY 
+                            };
+                        } else {
+                            // OVERWRITE mode: just clear the character
+                            action = { 
+                                type: 'delete_char', 
+                                x: this.cursorX - 1, 
+                                y: this.cursorY 
+                            };
+                        }
+                    }
+                }
+                // Delete
+                else if (key === 'Delete') {
+                    e.preventDefault();
+                    if (this.insertMode) {
+                        // INSERT mode: delete and shift text left
+                        action = { 
+                            type: 'delete_and_shift', 
+                            x: this.cursorX, 
+                            y: this.cursorY,
+                            moveCursor: false // Don't move cursor for Delete key
+                        };
+                    } else {
+                        // OVERWRITE mode: just clear the character
+                        action = { 
+                            type: 'delete_char', 
+                            x: this.cursorX, 
+                            y: this.cursorY,
+                            moveCursor: false
+                        };
+                    }
+                }
+                // Enter
+                else if (key === 'Enter') {
+                    e.preventDefault();
+                    if (this.cursorY < this.rows - 1) {
+                        action = { type: 'cursor_move', dx: -this.cursorX, dy: 1 };
+                    }
+                }
+                // Regular characters
+                else if (key.length === 1 && !e.ctrlKey && !e.metaKey) {
+                    e.preventDefault();
+                    if (this.cursorX < this.cols) {
+                        action = { 
+                            type: 'insert_char', 
+                            char: key, 
+                            x: this.cursorX, 
+                            y: this.cursorY,
+                            insertMode: this.insertMode // Store mode with action
+                        };
+                    }
+                }
+
+                if (action) {
+                    this.recordAction(action);
+                }
+            }
+
+            recordAction(action) {
+                const timestamp = this.currentTime;
+                
+                // If we're scrubbed back and starting to type, enter concurrent recording mode
+                if (this.isScrubbedBack && !this.isConcurrentRecording) {
+                    this.isConcurrentRecording = true;
+                    console.log('Entering concurrent recording mode at time:', this.currentTime);
+                }
+                
+                // Save user cursor before any state changes
+                const userCursorX = this.cursorX;
+                const userCursorY = this.cursorY;
+                
+                // Add to timeline
+                this.timeline.push({
+                    timestamp,
+                    action,
+                    cursorBefore: { x: this.cursorX, y: this.cursorY }
+                });
+
+                // Sort timeline by timestamp (stable sort)
+                this.timeline.sort((a, b) => a.timestamp - b.timestamp);
+
+                // Execute the action (this may change cursor position)
+                this.executeAction(action);
+                
+                // In concurrent mode, save the new cursor position after this action
+                const newUserCursorX = this.cursorX;
+                const newUserCursorY = this.cursorY;
+
+                // Update UI
+                this.render();
+                this.updateTimeline();
+                this.updateActionList();
+
+                // Handle time advancement based on mode
+                if (this.isConcurrentRecording) {
+                    // In concurrent mode, advance to next existing event
+                    // This will rebuild state and restore cursor
+                    this.advanceToNextEvent();
+                    
+                    // After advancing, restore the cursor to where the user just moved it
+                    this.cursorX = newUserCursorX;
+                    this.cursorY = newUserCursorY;
+                    this.render();
+                } else if (this.autoPlay && !this.isScrubbedBack) {
+                    // Normal live mode - advance time slightly
+                    this.currentTime = timestamp + 50;
+                    this.updatePlayheadPosition();
+                }
+
+                this.updateStatus();
+            }
+
+            executeAction(action) {
+                switch (action.type) {
+                    case 'cursor_move':
+                        this.cursorX += action.dx;
+                        this.cursorY += action.dy;
+                        this.cursorX = Math.max(0, Math.min(this.cols - 1, this.cursorX));
+                        this.cursorY = Math.max(0, Math.min(this.rows - 1, this.cursorY));
+                        break;
+                    
+                    case 'insert_char':
+                        // Default to overwrite if insertMode not specified (backward compatibility)
+                        const insertMode = action.insertMode !== undefined ? action.insertMode : false;
+                        
+                        if (insertMode) {
+                            // INSERT MODE: Shift characters to the right
+                            // Move all characters from cursor position to one position right
+                            for (let i = this.cols - 1; i > action.x; i--) {
+                                this.grid[action.y][i] = this.grid[action.y][i - 1];
+                            }
+                            this.grid[action.y][action.x] = action.char;
+                        } else {
+                            // OVERWRITE MODE: Just replace character at position
+                            this.grid[action.y][action.x] = action.char;
+                        }
+                        this.cursorX = action.x + 1;
+                        this.cursorY = action.y;
+                        break;
+                    
+                    case 'delete_and_shift':
+                        // DELETE with shift: Remove character and shift everything left
+                        for (let i = action.x; i < this.cols - 1; i++) {
+                            this.grid[action.y][i] = this.grid[action.y][i + 1];
+                        }
+                        // Fill the last position with space
+                        this.grid[action.y][this.cols - 1] = ' ';
+                        
+                        // Move cursor to deleted position (unless it's Delete key)
+                        if (action.moveCursor !== false) {
+                            this.cursorX = action.x;
+                        }
+                        this.cursorY = action.y;
+                        break;
+                    
+                    case 'delete_char':
+                        // DELETE without shift: Just clear the character
+                        this.grid[action.y][action.x] = ' ';
+                        
+                        // Move cursor to deleted position (unless it's Delete key)
+                        if (action.moveCursor !== false) {
+                            this.cursorX = action.x;
+                        }
+                        this.cursorY = action.y;
+                        break;
+                }
+            }
+
+            rebuildStateAtTime(time) {
+                // Reset grid and cursor
+                this.grid = Array(this.rows).fill(null).map(() => Array(this.cols).fill(' '));
+                this.cursorX = 0;
+                this.cursorY = 0;
+
+                // Replay all actions up to and including the current time
+                for (const entry of this.timeline) {
+                    if (entry.timestamp <= time) {
+                        this.executeAction(entry.action);
+                    } else {
+                        break;
+                    }
+                }
+
+                this.render();
+            }
+
+            handleScrubberMouseDown(e) {
+                // Stop concurrent recording if active
+                if (this.isConcurrentRecording) {
+                    this.isConcurrentRecording = false;
+                    this.isPlaying = false;
+                    document.getElementById('play-pause').textContent = '▶ Play';
+                }
+
+                const rect = this.scrubberEl.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const percentage = x / rect.width;
+                
+                const maxTime = this.getMaxTime();
+                this.currentTime = Math.floor(percentage * maxTime);
+                
+                this.isScrubbedBack = this.currentTime < maxTime;
+                this.isScrubbing = true;
+                
+                this.rebuildStateAtTime(this.currentTime);
+                this.updatePlayheadPosition();
+                this.updateActionList();
+                this.updateStatus();
+                
+                // Prevent text selection while dragging
+                e.preventDefault();
+            }
+
+            handleScrubberMouseMove(e) {
+                if (!this.isScrubbing) return;
+                
+                const rect = this.scrubberEl.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const percentage = Math.max(0, Math.min(1, x / rect.width));
+                
+                const maxTime = this.getMaxTime();
+                this.currentTime = Math.floor(percentage * maxTime);
+                
+                this.isScrubbedBack = this.currentTime < maxTime;
+                
+                this.rebuildStateAtTime(this.currentTime);
+                this.updatePlayheadPosition();
+                this.updateActionList();
+                this.updateStatus();
+            }
+
+            handleScrubberMouseUp(e) {
+                if (this.isScrubbing) {
+                    this.isScrubbing = false;
+                }
+            }
+
+            toggleInsertMode() {
+                this.insertMode = !this.insertMode;
+                this.updateInsertButton();
+                this.updateStatus();
+                this.updateCursorStyle();
+                console.log(`Mode: ${this.insertMode ? 'INSERT' : 'OVERWRITE'}`);
+            }
+
+            updateInsertButton() {
+                const btn = document.getElementById('toggle-insert');
+                if (this.insertMode) {
+                    btn.textContent = '📝 INSERT';
+                    btn.style.background = '#003300';
+                    btn.style.borderColor = '#00ff00';
+                } else {
+                    btn.textContent = '⬜ OVERWRITE';
+                    btn.style.background = '#332200';
+                    btn.style.borderColor = '#ffaa00';
+                }
+            }
+
+            togglePlayback() {
+                this.isPlaying = !this.isPlaying;
+                const btn = document.getElementById('play-pause');
+                btn.textContent = this.isPlaying ? '⏸ Pause' : '▶ Play';
+                
+                if (this.isPlaying) {
+                    // Exit concurrent recording mode when entering manual playback
+                    if (this.isConcurrentRecording) {
+                        this.isConcurrentRecording = false;
+                        this.isScrubbedBack = false;
+                    }
+                    this.playbackLoop();
+                }
+            }
+
+            playbackLoop() {
+                if (!this.isPlaying) return;
+
+                const maxTime = this.getMaxTime();
+                
+                if (this.currentTime >= maxTime) {
+                    this.isPlaying = false;
+                    document.getElementById('play-pause').textContent = '▶ Play';
+                    this.isScrubbedBack = false;
+                    return;
+                }
+
+                this.currentTime += 16 * this.playbackSpeed; // ~60fps
+                this.rebuildStateAtTime(this.currentTime);
+                this.updatePlayheadPosition();
+                this.updateActionList();
+                this.updateStatus();
+
+                requestAnimationFrame(() => this.playbackLoop());
+            }
+
+            advanceToNextEvent() {
+                // Save the user's current cursor position before rebuilding
+                const userCursorX = this.cursorX;
+                const userCursorY = this.cursorY;
+
+                // Find the next event timestamp after current time
+                const futureEvents = this.timeline.filter(e => e.timestamp > this.currentTime);
+                
+                if (futureEvents.length === 0) {
+                    // No more events, exit concurrent recording
+                    this.isConcurrentRecording = false;
+                    this.isPlaying = false;
+                    this.isScrubbedBack = false;
+                    document.getElementById('play-pause').textContent = '▶ Play';
+                    console.log('Exiting concurrent recording mode - no more events');
+                    this.updateStatus();
+                    return;
+                }
+
+                // Jump to the next event's timestamp
+                this.currentTime = futureEvents[0].timestamp;
+                
+                // Rebuild state to execute all actions up to this point
+                this.rebuildStateAtTime(this.currentTime);
+                
+                // Restore the user's cursor position (not the historical cursor)
+                this.cursorX = userCursorX;
+                this.cursorY = userCursorY;
+                
+                this.render();
+                this.updatePlayheadPosition();
+                this.updateActionList();
+                this.updateStatus();
+            }
+
+            rewindToStart() {
+                if (this.isConcurrentRecording) {
+                    this.isConcurrentRecording = false;
+                    this.isPlaying = false;
+                    document.getElementById('play-pause').textContent = '▶ Play';
+                }
+
+                this.currentTime = 0;
+                this.isScrubbedBack = true;
+                this.rebuildStateAtTime(this.currentTime);
+                this.updatePlayheadPosition();
+                this.updateActionList();
+                this.updateStatus();
+            }
+
+            stepBackward() {
+                if (this.isConcurrentRecording) {
+                    this.isConcurrentRecording = false;
+                    this.isPlaying = false;
+                    document.getElementById('play-pause').textContent = '▶ Play';
+                }
+
+                const prevActions = this.timeline.filter(e => e.timestamp < this.currentTime);
+                if (prevActions.length > 0) {
+                    this.currentTime = prevActions[prevActions.length - 1].timestamp;
+                } else {
+                    this.currentTime = 0;
+                }
+                this.isScrubbedBack = true;
+                this.rebuildStateAtTime(this.currentTime);
+                this.updatePlayheadPosition();
+                this.updateActionList();
+                this.updateStatus();
+            }
+
+            stepForward() {
+                if (this.isConcurrentRecording) {
+                    this.isConcurrentRecording = false;
+                    this.isPlaying = false;
+                    document.getElementById('play-pause').textContent = '▶ Play';
+                }
+
+                const nextActions = this.timeline.filter(e => e.timestamp > this.currentTime);
+                if (nextActions.length > 0) {
+                    this.currentTime = nextActions[0].timestamp;
+                    this.rebuildStateAtTime(this.currentTime);
+                    this.updatePlayheadPosition();
+                    this.updateActionList();
+                    this.updateStatus();
+                }
+            }
+
+            clearAll() {
+                this.isConcurrentRecording = false;
+                this.isPlaying = false;
+                this.timeline = [];
+                this.currentTime = 0;
+                this.grid = Array(this.rows).fill(null).map(() => Array(this.cols).fill(' '));
+                this.cursorX = 0;
+                this.cursorY = 0;
+                this.isScrubbedBack = false;
+                document.getElementById('play-pause').textContent = '▶ Play';
+                this.render();
+                this.updateTimeline();
+                this.updateActionList();
+                this.updateStatus();
+            }
+
+            getMaxTime() {
+                if (this.timeline.length === 0) return 0;
+                return Math.max(...this.timeline.map(e => e.timestamp));
+            }
+
+            updatePlayheadPosition() {
+                const maxTime = this.getMaxTime();
+                if (maxTime === 0) {
+                    this.playheadEl.style.left = '0%';
+                } else {
+                    const percentage = (this.currentTime / maxTime) * 100;
+                    this.playheadEl.style.left = percentage + '%';
+                }
+                document.getElementById('current-time').textContent = this.currentTime;
+            }
+
+            updateTimeline() {
+                const maxTime = this.getMaxTime();
+                document.getElementById('total-time').textContent = maxTime;
+                document.getElementById('action-count').textContent = this.timeline.length;
+                
+                // Clear existing markers
+                const existingMarkers = this.scrubberEl.querySelectorAll('.timeline-marker');
+                existingMarkers.forEach(m => m.remove());
+                
+                // Group actions by timestamp to find concurrent actions
+                const timeGroups = {};
+                this.timeline.forEach(entry => {
+                    if (!timeGroups[entry.timestamp]) {
+                        timeGroups[entry.timestamp] = [];
+                    }
+                    timeGroups[entry.timestamp].push(entry);
+                });
+                
+                // Add markers
+                Object.entries(timeGroups).forEach(([timestamp, entries]) => {
+                    const marker = document.createElement('div');
+                    marker.className = 'timeline-marker';
+                    if (entries.length > 1) {
+                        marker.classList.add('concurrent');
+                    }
+                    if (maxTime > 0) {
+                        marker.style.left = ((timestamp / maxTime) * 100) + '%';
+                    }
+                    this.scrubberEl.appendChild(marker);
+                });
+
+                this.updatePlayheadPosition();
+            }
+
+            updateActionList() {
+                this.actionListEl.innerHTML = '';
+                
+                // Group by timestamp
+                const timeGroups = {};
+                this.timeline.forEach((entry, idx) => {
+                    if (!timeGroups[entry.timestamp]) {
+                        timeGroups[entry.timestamp] = [];
+                    }
+                    timeGroups[entry.timestamp].push({ entry, idx });
+                });
+
+                Object.entries(timeGroups).sort((a, b) => a[0] - b[0]).forEach(([timestamp, items]) => {
+                    items.forEach(({ entry, idx }) => {
+                        const div = document.createElement('div');
+                        div.className = 'action-item';
+                        
+                        if (entry.timestamp === this.currentTime) {
+                            div.classList.add('current');
+                        }
+                        if (items.length > 1) {
+                            div.classList.add('concurrent');
+                        }
+
+                        let desc = '';
+                        switch (entry.action.type) {
+                            case 'cursor_move':
+                                desc = `Move (${entry.action.dx > 0 ? '+' : ''}${entry.action.dx}, ${entry.action.dy > 0 ? '+' : ''}${entry.action.dy})`;
+                                break;
+                            case 'insert_char':
+                                const mode = entry.action.insertMode ? 'INS' : 'OVR';
+                                desc = `${mode} '${entry.action.char}' at (${entry.action.x}, ${entry.action.y})`;
+                                break;
+                            case 'delete_and_shift':
+                                desc = `Delete+Shift at (${entry.action.x}, ${entry.action.y})`;
+                                break;
+                            case 'delete_char':
+                                desc = `Delete at (${entry.action.x}, ${entry.action.y})`;
+                                break;
+                        }
+
+                        div.textContent = `[${timestamp}ms] ${desc}${items.length > 1 ? ' ⚡' : ''}`;
+                        this.actionListEl.appendChild(div);
+                    });
+                });
+
+                // Scroll to current action
+                const currentAction = this.actionListEl.querySelector('.current');
+                if (currentAction) {
+                    currentAction.scrollIntoView({ block: 'nearest' });
+                }
+            }
+
+            updateCursorStyle() {
+                if (this.insertMode) {
+                    // INSERT mode: thin line cursor
+                    this.cursorEl.style.width = '2px';
+                    this.cursorEl.style.background = '#00ff00';
+                } else {
+                    // OVERWRITE mode: block cursor
+                    this.cursorEl.style.width = this.charWidth + 'px';
+                    this.cursorEl.style.background = '#00ff0080'; // Semi-transparent
+                }
+            }
+
+            updateStatus() {
+                let mode = 'LIVE';
+                if (this.isConcurrentRecording) {
+                    mode = 'CONCURRENT';
+                } else if (this.isScrubbedBack) {
+                    mode = 'SCRUBBED';
+                }
+
+                this.modeEl.textContent = mode;
+                this.modeEl.className = 'mode-indicator';
+                if (this.isScrubbedBack || this.isConcurrentRecording) {
+                    this.modeEl.classList.add('recording');
+                }
+
+                const actionsAtCurrentTime = this.timeline.filter(e => e.timestamp === this.currentTime).length;
+                const concurrentMsg = actionsAtCurrentTime > 1 ? ` • ${actionsAtCurrentTime} concurrent actions!` : '';
+                
+                const editMode = this.insertMode ? 'INSERT' : 'OVERWRITE';
+                let statusMsg = `${mode} mode • ${editMode} • Cursor: (${this.cursorX}, ${this.cursorY}) • Time: ${this.currentTime}ms${concurrentMsg}`;
+                
+                if (this.isConcurrentRecording) {
+                    statusMsg += ' • Type to advance to next event...';
+                }
+                
+                this.statusEl.textContent = statusMsg;
+            }
+
+            render() {
+                // Render grid
+                const lines = this.grid.map(row => row.join('')).join('\n');
+                this.editorEl.textContent = lines;
+
+                // Position cursor using measured dimensions with vertical offset
+                // Add 10px to account for container padding
+                const containerPadding = 10;
+                this.cursorEl.style.left = (this.cursorX * this.charWidth + containerPadding) + 'px';
+                this.cursorEl.style.top = (this.cursorY * this.lineHeight + this.verticalOffset + containerPadding) + 'px';
+            }
+        }
+
+        // Initialize
+        const editor = new TemporalTextEditor(80, 20);
+        console.log('Temporal Text Editor initialized!');
+        console.log('Click INSERT/OVERWRITE button to toggle modes (or use Insert key if you have one)');
+        console.log('INSERT mode: text shifts right when typing, left when deleting');
+        console.log('OVERWRITE mode: text replaces, deletes just clear');
+        console.log('CLICK the editor grid to teleport cursor (no event recorded)');
+        console.log('DRAG the timeline to scrub through time smoothly!');
+        console.log('Scrub back + type = concurrent editing with multiple cursors!');
+    </script>
+</body>
+</html>
