@@ -34,7 +34,7 @@ export class StateManager extends EventEmitter {
     // Core state
     this.currentTime = 0;
     this.insertMode = true;
-    this.currentColor = '#0f0'; // Default green color
+    this.currentColor = '#00ff00'; // Default green color
 
     // Cursor
     this.cursor = new Cursor(0, 0);
@@ -341,7 +341,7 @@ export class StateManager extends EventEmitter {
     state.timeline = Timeline.deserialize(data.timeline);
     state.currentTime = data.currentTime;
     state.insertMode = data.insertMode;
-    state.currentColor = data.currentColor || '#0f0';
+    state.currentColor = data.currentColor || '#00ff00';
     state.rebuildState();
     return state;
   }

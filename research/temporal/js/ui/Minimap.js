@@ -1,12 +1,12 @@
 /**
  * Minimap - Shows overview of entire grid with viewport indicator
- * Emits events: 'minimap-click'
+ * Emits events: 'navigate'
  */
 
 import { EventEmitter } from '../utils/EventEmitter.js';
 
 export class Minimap extends EventEmitter {
-  constructor(canvasId, config) {
+  constructor(canvasId, grid, viewport) {
     super();
     this.canvas = document.getElementById(canvasId);
     if (!this.canvas) {
@@ -15,7 +15,8 @@ export class Minimap extends EventEmitter {
       this.canvas.id = canvasId;
     }
     this.ctx = this.canvas.getContext('2d');
-    this.config = config;
+    this.grid = grid;
+    this.viewport = viewport;
 
     // Minimap dimensions
     this.width = 200;
@@ -31,10 +32,10 @@ export class Minimap extends EventEmitter {
   /**
    * Render minimap
    */
-  render(grid, viewport) {
+  render() {
     this.clear();
 
-    const bounds = grid.getBounds();
+    const bounds = this.grid.getBounds();
     const gridWidth = bounds.maxX - bounds.minX + 1;
     const gridHeight = bounds.maxY - bounds.minY + 1;
 
@@ -60,7 +61,7 @@ export class Minimap extends EventEmitter {
     this.gridBounds = bounds;
 
     // Render grid cells
-    grid.cells.forEach((cell, key) => {
+    this.grid.cells.forEach((cell, key) => {
       const [x, y] = key.split(',').map(Number);
 
       if (cell.char !== ' ') {
@@ -74,7 +75,7 @@ export class Minimap extends EventEmitter {
     });
 
     // Render viewport rectangle
-    const vpBounds = viewport.getBounds();
+    const vpBounds = this.viewport.getBounds();
     const vpX = offsetX + (vpBounds.minX - bounds.minX) * scale;
     const vpY = offsetY + (vpBounds.minY - bounds.minY) * scale;
     const vpW = (vpBounds.maxX - vpBounds.minX + 1) * scale;
@@ -138,7 +139,7 @@ export class Minimap extends EventEmitter {
     const gridX = Math.floor((px - this.offsetX) / this.scale + this.gridBounds.minX);
     const gridY = Math.floor((py - this.offsetY) / this.scale + this.gridBounds.minY);
 
-    this.emit('minimap-click', { x: gridX, y: gridY });
+    this.emit('navigate', { x: gridX, y: gridY });
   }
 
   /**
