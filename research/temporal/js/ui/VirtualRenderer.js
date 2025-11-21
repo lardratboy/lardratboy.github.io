@@ -3,17 +3,42 @@
  */
 
 export class VirtualRenderer {
-  constructor(canvas, config) {
-    this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
-    this.config = config;
+  constructor(canvasId, grid, viewport) {
+    // Get canvas element
+    this.canvas = typeof canvasId === 'string'
+      ? document.getElementById(canvasId)
+      : canvasId;
 
-    // Setup canvas size
-    this.canvas.width = config.GRID.COLS * config.FONT.CHAR_WIDTH + config.LAYOUT.PADDING * 2;
-    this.canvas.height = config.GRID.ROWS * config.FONT.LINE_HEIGHT + config.LAYOUT.PADDING * 2;
+    if (!this.canvas) {
+      throw new Error(`Canvas element not found: ${canvasId}`);
+    }
 
-    // Viewport (optional - for infinite grid mode)
-    this.viewport = null;
+    this.ctx = this.canvas.getContext('2d');
+    this.grid = grid;
+    this.viewport = viewport;
+
+    // Default font and layout settings
+    this.cellWidth = 12;
+    this.cellHeight = 20;
+    this.padding = 10;
+    this.fontSize = 16;
+    this.fontFamily = 'Courier New, monospace';
+
+    // Default colors
+    this.bgColor = '#000';
+    this.textColor = '#0f0';
+    this.cursorColor = '#0f0';
+    this.cursorAlpha = 0.7;
+
+    // Setup canvas size based on viewport
+    if (this.viewport) {
+      this.canvas.width = this.viewport.cols * this.cellWidth + this.padding * 2;
+      this.canvas.height = this.viewport.rows * this.cellHeight + this.padding * 2;
+    } else {
+      // Default size
+      this.canvas.width = 80 * this.cellWidth + this.padding * 2;
+      this.canvas.height = 24 * this.cellHeight + this.padding * 2;
+    }
   }
 
   /**
@@ -26,15 +51,12 @@ export class VirtualRenderer {
   /**
    * Render the complete editor state
    */
-  render(grid, cursor, insertMode, cursorVisible, selection = null) {
+  render(cursor, insertMode, selection = null, cursorVisible = true) {
     this.clear();
-    if (!this.viewport) {
-      this.renderRightEdgeBoundary();
-    }
     if (selection) {
       this.renderSelection(selection);
     }
-    this.renderGrid(grid);
+    this.renderGrid();
     if (cursorVisible) {
       this.renderCursor(cursor, insertMode);
     }
@@ -44,37 +66,18 @@ export class VirtualRenderer {
   }
 
   /**
-   * Render the right edge boundary indicator (fixed grid only)
-   */
-  renderRightEdgeBoundary() {
-    const x = this.config.LAYOUT.PADDING + (this.config.GRID.COLS * this.config.FONT.CHAR_WIDTH);
-
-    this.ctx.strokeStyle = 'rgba(0, 255, 0, 0.3)';
-    this.ctx.lineWidth = 2;
-    this.ctx.setLineDash([5, 5]);
-
-    this.ctx.beginPath();
-    this.ctx.moveTo(x, this.config.LAYOUT.PADDING);
-    this.ctx.lineTo(x, this.canvas.height - this.config.LAYOUT.PADDING);
-    this.ctx.stroke();
-
-    // Reset line dash
-    this.ctx.setLineDash([]);
-  }
-
-  /**
    * Clear the canvas
    */
   clear() {
-    this.ctx.fillStyle = this.config.COLORS.BACKGROUND;
+    this.ctx.fillStyle = this.bgColor;
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
   /**
    * Render the text grid with colors
    */
-  renderGrid(grid) {
-    this.ctx.font = `${this.config.FONT.SIZE}px ${this.config.FONT.FAMILY}`;
+  renderGrid() {
+    this.ctx.font = `${this.fontSize}px ${this.fontFamily}`;
 
     if (this.viewport) {
       // Virtual grid mode - only render visible cells
@@ -82,25 +85,10 @@ export class VirtualRenderer {
 
       for (let y = bounds.minY; y <= bounds.maxY; y++) {
         for (let x = bounds.minX; x <= bounds.maxX; x++) {
-          const cell = grid.getCell(x, y);
+          const cell = this.grid.getCell(x, y);
           if (cell.char !== ' ') {
             const pos = this.gridToPixel(x, y);
-            this.ctx.fillStyle = cell.color || this.config.COLORS.TEXT;
-            this.ctx.fillText(cell.char, pos.x, pos.y);
-          }
-        }
-      }
-    } else {
-      // Fixed grid mode - render all cells
-      const rows = grid.rows || this.config.GRID.ROWS;
-      const cols = grid.cols || this.config.GRID.COLS;
-
-      for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) {
-          const cell = grid.getCell(x, y);
-          if (cell.char !== ' ') {
-            const pos = this.gridToPixel(x, y);
-            this.ctx.fillStyle = cell.color || this.config.COLORS.TEXT;
+            this.ctx.fillStyle = cell.color || this.textColor;
             this.ctx.fillText(cell.char, pos.x, pos.y);
           }
         }
@@ -138,16 +126,16 @@ export class VirtualRenderer {
     if (start.y === end.y) {
       // Single row selection
       const pos = this.gridToPixel(start.x, start.y);
-      const width = (end.x - start.x) * this.config.FONT.CHAR_WIDTH;
+      const width = (end.x - start.x) * this.cellWidth;
       this.ctx.fillRect(
         pos.x,
-        pos.y - this.config.FONT.LINE_HEIGHT + 4,
+        pos.y - this.cellHeight + 4,
         width,
-        this.config.FONT.LINE_HEIGHT - 4
+        this.cellHeight - 4
       );
     } else {
       // Multi-row selection
-      const maxCols = this.viewport ? this.viewport.cols : this.config.GRID.COLS;
+      const maxCols = this.viewport ? this.viewport.cols : 80;
 
       for (let y = start.y; y <= end.y; y++) {
         // Skip if row not visible in viewport
@@ -169,12 +157,12 @@ export class VirtualRenderer {
         }
 
         const pos = this.gridToPixel(startX, y);
-        const width = (endX - startX) * this.config.FONT.CHAR_WIDTH;
+        const width = (endX - startX) * this.cellWidth;
         this.ctx.fillRect(
           pos.x,
-          pos.y - this.config.FONT.LINE_HEIGHT + 4,
+          pos.y - this.cellHeight + 4,
           width,
-          this.config.FONT.LINE_HEIGHT - 4
+          this.cellHeight - 4
         );
       }
     }
@@ -191,24 +179,24 @@ export class VirtualRenderer {
 
     const pos = this.gridToPixel(cursor.x, cursor.y);
 
-    this.ctx.globalAlpha = this.config.COLORS.CURSOR_ALPHA;
-    this.ctx.fillStyle = this.config.COLORS.CURSOR;
+    this.ctx.globalAlpha = this.cursorAlpha;
+    this.ctx.fillStyle = this.cursorColor;
 
     if (insertMode) {
       // Thin line cursor for INSERT mode
       this.ctx.fillRect(
         pos.x,
-        pos.y - this.config.FONT.LINE_HEIGHT + 4,
+        pos.y - this.cellHeight + 4,
         2,
-        this.config.FONT.LINE_HEIGHT - 4
+        this.cellHeight - 4
       );
     } else {
       // Block cursor for OVERWRITE mode
       this.ctx.fillRect(
         pos.x,
-        pos.y - this.config.FONT.LINE_HEIGHT + 4,
-        this.config.FONT.CHAR_WIDTH,
-        this.config.FONT.LINE_HEIGHT - 4
+        pos.y - this.cellHeight + 4,
+        this.cellWidth,
+        this.cellHeight - 4
       );
     }
 
@@ -230,8 +218,8 @@ export class VirtualRenderer {
     }
 
     return {
-      x: this.config.LAYOUT.PADDING + displayX * this.config.FONT.CHAR_WIDTH,
-      y: this.config.LAYOUT.PADDING + (displayY + 1) * this.config.FONT.LINE_HEIGHT - 4
+      x: this.padding + displayX * this.cellWidth,
+      y: this.padding + (displayY + 1) * this.cellHeight - 4
     };
   }
 
@@ -239,8 +227,8 @@ export class VirtualRenderer {
    * Convert pixel coordinates to grid coordinates
    */
   pixelToGrid(px, py) {
-    let x = Math.floor((px - this.config.LAYOUT.PADDING) / this.config.FONT.CHAR_WIDTH);
-    let y = Math.floor((py - this.config.LAYOUT.PADDING) / this.config.FONT.LINE_HEIGHT);
+    let x = Math.floor((px - this.padding) / this.cellWidth);
+    let y = Math.floor((py - this.padding) / this.cellHeight);
 
     // If viewport is active, convert from viewport-relative to grid coordinates
     if (this.viewport) {
@@ -248,9 +236,6 @@ export class VirtualRenderer {
       return gridCoords;
     }
 
-    return {
-      x: Math.max(0, Math.min(this.config.GRID.COLS - 1, x)),
-      y: Math.max(0, Math.min(this.config.GRID.ROWS - 1, y))
-    };
+    return { x, y };
   }
 }
