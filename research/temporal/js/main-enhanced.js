@@ -170,6 +170,12 @@ export class TemporalEditorEnhanced {
   // ==================== Input Handlers ====================
 
   _onCharTyped(char) {
+    // Pause playback if it's running to prevent corruption
+    if (this.playback.isPlaying) {
+      this.playback.pause();
+      Logger.info('Playback paused due to user input');
+    }
+
     const cursor = this.state.getCurrentCursor();
     const action = EventSystem.createInsertChar(
       char,
@@ -183,6 +189,12 @@ export class TemporalEditorEnhanced {
   }
 
   _onDelete(isBackspace) {
+    // Pause playback if it's running to prevent corruption
+    if (this.playback.isPlaying) {
+      this.playback.pause();
+      Logger.info('Playback paused due to user input');
+    }
+
     const cursor = this.state.getCurrentCursor();
     const insertMode = this.state.getInsertMode();
 
@@ -205,11 +217,23 @@ export class TemporalEditorEnhanced {
   }
 
   _onCursorMove(dx, dy) {
+    // Pause playback if it's running to prevent corruption
+    if (this.playback.isPlaying) {
+      this.playback.pause();
+      Logger.info('Playback paused due to user input');
+    }
+
     const action = EventSystem.createCursorMove(dx, dy);
     this.state.addEvent(action);
   }
 
   _onNewline() {
+    // Pause playback if it's running to prevent corruption
+    if (this.playback.isPlaying) {
+      this.playback.pause();
+      Logger.info('Playback paused due to user input');
+    }
+
     const action = EventSystem.createNewline();
     this.state.addEvent(action);
   }
@@ -221,12 +245,24 @@ export class TemporalEditorEnhanced {
   }
 
   _onCursorTeleport(x, y) {
+    // Pause playback if it's running for better user experience
+    if (this.playback.isPlaying) {
+      this.playback.pause();
+      Logger.info('Playback paused due to cursor teleport');
+    }
+
     this.state.teleportCursor(x, y);
     this._render();
     this._updateUI();
   }
 
   _onTimelineScrub(percent) {
+    // Pause playback if it's running when user manually scrubs
+    if (this.playback.isPlaying) {
+      this.playback.pause();
+      Logger.info('Playback paused due to manual timeline scrub');
+    }
+
     const maxTime = this.state.getMaxTime();
     const time = Math.floor(percent * maxTime);
     this.state.scrubTo(time);
