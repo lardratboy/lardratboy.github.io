@@ -19,9 +19,12 @@ export class Renderer {
   /**
    * Render the complete editor state
    */
-  render(grid, cursor, insertMode, cursorVisible) {
+  render(grid, cursor, insertMode, cursorVisible, selection = null) {
     this.clear();
     this.renderRightEdgeBoundary();
+    if (selection) {
+      this.renderSelection(selection);
+    }
     this.renderGrid(grid);
     if (cursorVisible) {
       this.renderCursor(cursor, insertMode);
@@ -69,6 +72,57 @@ export class Renderer {
           this.ctx.fillStyle = cell.color || this.config.COLORS.TEXT;
           this.ctx.fillText(cell.char, pos.x, pos.y);
         }
+      }
+    }
+  }
+
+  /**
+   * Render selection highlight
+   */
+  renderSelection(selection) {
+    if (!selection || !selection.isSelected) return;
+
+    const sel = selection.getSelection();
+    if (!sel) return;
+
+    this.ctx.fillStyle = 'rgba(100, 150, 255, 0.3)';
+
+    const { start, end } = sel;
+
+    if (start.y === end.y) {
+      // Single row selection
+      const pos = this.gridToPixel(start.x, start.y);
+      const width = (end.x - start.x) * this.config.FONT.CHAR_WIDTH;
+      this.ctx.fillRect(
+        pos.x,
+        pos.y - this.config.FONT.LINE_HEIGHT + 4,
+        width,
+        this.config.FONT.LINE_HEIGHT - 4
+      );
+    } else {
+      // Multi-row selection
+      for (let y = start.y; y <= end.y; y++) {
+        let startX, endX;
+
+        if (y === start.y) {
+          startX = start.x;
+          endX = this.config.GRID.COLS;
+        } else if (y === end.y) {
+          startX = 0;
+          endX = end.x;
+        } else {
+          startX = 0;
+          endX = this.config.GRID.COLS;
+        }
+
+        const pos = this.gridToPixel(startX, y);
+        const width = (endX - startX) * this.config.FONT.CHAR_WIDTH;
+        this.ctx.fillRect(
+          pos.x,
+          pos.y - this.config.FONT.LINE_HEIGHT + 4,
+          width,
+          this.config.FONT.LINE_HEIGHT - 4
+        );
       }
     }
   }

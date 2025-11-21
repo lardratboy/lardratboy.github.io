@@ -49,7 +49,38 @@ export class KeyboardHandler extends EventEmitter {
   }
 
   _handleKey(e) {
-    const { key } = e;
+    const { key, shiftKey, ctrlKey, metaKey } = e;
+    const modKey = ctrlKey || metaKey; // Ctrl on Windows/Linux, Cmd on Mac
+
+    // Keyboard shortcuts with Ctrl/Cmd
+    if (modKey) {
+      if (key === 'z' || key === 'Z') {
+        this.emit('undo');
+        return;
+      }
+      if (key === 'y' || key === 'Y') {
+        this.emit('redo');
+        return;
+      }
+      if (key === 'c' || key === 'C') {
+        this.emit('copy');
+        return;
+      }
+      if (key === 'x' || key === 'X') {
+        this.emit('cut');
+        return;
+      }
+      if (key === 'v' || key === 'V') {
+        this.emit('paste');
+        return;
+      }
+      if (key === 'b' || key === 'B') {
+        this.emit('add-annotation');
+        return;
+      }
+      // Let other Ctrl+key combinations pass through
+      return;
+    }
 
     // Insert mode toggle
     if (key === 'Insert') {
@@ -57,21 +88,43 @@ export class KeyboardHandler extends EventEmitter {
       return;
     }
 
-    // Arrow keys - cursor movement
+    // Arrow keys - cursor movement or selection
     if (key === 'ArrowLeft') {
-      this.emit('cursor-move', { dx: -1, dy: 0 });
+      if (shiftKey) {
+        this.emit('selection-move', { dx: -1, dy: 0 });
+      } else {
+        this.emit('cursor-move', { dx: -1, dy: 0 });
+      }
       return;
     }
     if (key === 'ArrowRight') {
-      this.emit('cursor-move', { dx: 1, dy: 0 });
+      if (shiftKey) {
+        this.emit('selection-move', { dx: 1, dy: 0 });
+      } else {
+        this.emit('cursor-move', { dx: 1, dy: 0 });
+      }
       return;
     }
     if (key === 'ArrowUp') {
-      this.emit('cursor-move', { dx: 0, dy: -1 });
+      if (shiftKey) {
+        this.emit('selection-move', { dx: 0, dy: -1 });
+      } else {
+        this.emit('cursor-move', { dx: 0, dy: -1 });
+      }
       return;
     }
     if (key === 'ArrowDown') {
-      this.emit('cursor-move', { dx: 0, dy: 1 });
+      if (shiftKey) {
+        this.emit('selection-move', { dx: 0, dy: 1 });
+      } else {
+        this.emit('cursor-move', { dx: 0, dy: 1 });
+      }
+      return;
+    }
+
+    // Escape - clear selection
+    if (key === 'Escape') {
+      this.emit('escape');
       return;
     }
 
@@ -92,7 +145,7 @@ export class KeyboardHandler extends EventEmitter {
     }
 
     // Printable characters
-    if (key.length === 1 && !e.ctrlKey && !e.metaKey) {
+    if (key.length === 1) {
       this.emit('char-typed', { char: key });
     }
   }

@@ -13,11 +13,15 @@ import { EventInspector } from './ui/EventInspector.js';
 import { MultiCursorRenderer } from './ui/MultiCursorRenderer.js';
 import { BranchUI } from './ui/BranchUI.js';
 import { ColorPicker } from './ui/ColorPicker.js';
+import { AnnotationUI } from './ui/AnnotationUI.js';
 import { KeyboardHandler } from './input/KeyboardHandler.js';
 import { MouseHandler } from './input/MouseHandler.js';
 import { PlaybackController } from './modes/PlaybackController.js';
 import { BranchManager } from './modes/BranchManager.js';
 import { MacroRecorder } from './modes/MacroRecorder.js';
+import { AnnotationManager } from './core/Annotation.js';
+import { UndoStack } from './core/UndoStack.js';
+import { Selection } from './core/Selection.js';
 import { Export } from './utils/Export.js';
 import { Persistence } from './utils/Persistence.js';
 import { PatternAnalysis } from './utils/PatternAnalysis.js';
@@ -57,6 +61,13 @@ export class TemporalEditorEnhanced {
     this.branchUI = new BranchUI('branch-ui-container-wrapper', this.branches);
     this.colorPicker = new ColorPicker('color-picker-container-wrapper');
 
+    // Create new high-priority features
+    this.annotations = new AnnotationManager();
+    this.undoStack = new UndoStack(this.state);
+    this.selection = new Selection();
+    this.annotationUI = new AnnotationUI('annotation-ui-container', this.annotations, this.state);
+    this.loopMode = false;
+
     // Initialize UI
     this.inspector.createUI();
 
@@ -92,6 +103,14 @@ export class TemporalEditorEnhanced {
     this.keyboard.on('cursor-move', ({ dx, dy }) => this._onCursorMove(dx, dy));
     this.keyboard.on('toggle-insert-mode', () => this._onToggleInsertMode());
     this.keyboard.on('newline', () => this._onNewline());
+    this.keyboard.on('selection-move', ({ dx, dy }) => this._onSelectionMove(dx, dy));
+    this.keyboard.on('escape', () => this._onEscape());
+    this.keyboard.on('undo', () => this._onUndo());
+    this.keyboard.on('redo', () => this._onRedo());
+    this.keyboard.on('copy', () => this._onCopy());
+    this.keyboard.on('cut', () => this._onCut());
+    this.keyboard.on('paste', () => this._onPaste());
+    this.keyboard.on('add-annotation', () => this._onAddAnnotation());
 
     // Mouse events
     this.mouse.on('cursor-teleport', ({ x, y }) => this._onCursorTeleport(x, y));
@@ -164,6 +183,27 @@ export class TemporalEditorEnhanced {
     // ColorPicker events
     this.colorPicker.on('color-changed', (color) => {
       this.state.setCurrentColor(color);
+    });
+
+    // AnnotationUI events
+    this.annotationUI.on('goto-time', (timestamp) => {
+      this.state.scrubTo(timestamp);
+    });
+
+    // Selection events
+    this.selection.on('selection-changed', () => {
+      this._render();
+    });
+    this.selection.on('selection-cleared', () => {
+      this._render();
+    });
+
+    // UndoStack events
+    this.undoStack.on('can-undo-changed', (canUndo) => {
+      this._updateUndoRedoUI();
+    });
+    this.undoStack.on('can-redo-changed', (canRedo) => {
+      this._updateUndoRedoUI();
     });
   }
 
@@ -273,10 +313,104 @@ export class TemporalEditorEnhanced {
     if (this.macros.isRecording) {
       this.macros.recordEvent(event);
     }
+
+    // Record in undo stack
+    this.undoStack.recordEvent(event);
   }
 
   _onPlaybackStateChange() {
     this._updatePlaybackUI();
+  }
+
+  _onSelectionMove(dx, dy) {
+    const cursor = this.state.getCurrentCursor();
+
+    // Start selection if not active
+    if (!this.selection.hasSelection()) {
+      this.selection.startSelection(cursor.x, cursor.y);
+    }
+
+    // Move cursor
+    const action = EventSystem.createCursorMove(dx, dy);
+    this.state.addEvent(action);
+
+    // Update selection end
+    const newCursor = this.state.getCurrentCursor();
+    this.selection.updateSelection(newCursor.x, newCursor.y);
+  }
+
+  _onEscape() {
+    this.selection.clearSelection();
+  }
+
+  _onUndo() {
+    if (this.undoStack.undo()) {
+      this._render();
+      this._updateUI();
+      Logger.info('Undo performed');
+    }
+  }
+
+  _onRedo() {
+    if (this.undoStack.redo()) {
+      this._render();
+      this._updateUI();
+      Logger.info('Redo performed');
+    }
+  }
+
+  async _onCopy() {
+    if (this.selection.hasSelection()) {
+      const success = await this.selection.copy(this.state.getCurrentGrid());
+      if (success) {
+        Logger.info('Text copied');
+      }
+    } else {
+      Logger.warn('No selection to copy');
+    }
+  }
+
+  async _onCut() {
+    if (this.selection.hasSelection()) {
+      // Copy first
+      const success = await this.selection.copy(this.state.getCurrentGrid());
+      if (success) {
+        // Delete selected text (simplified - just clear selection for now)
+        this.selection.clearSelection();
+        Logger.info('Text cut');
+      }
+    } else {
+      Logger.warn('No selection to cut');
+    }
+  }
+
+  async _onPaste() {
+    const text = await this.selection.paste();
+    if (text) {
+      // Paste each character as events
+      for (const char of text) {
+        if (char === '\n') {
+          const action = EventSystem.createNewline();
+          this.state.addEvent(action);
+        } else {
+          const cursor = this.state.getCurrentCursor();
+          const action = EventSystem.createInsertChar(
+            char,
+            cursor.x,
+            cursor.y,
+            this.state.getInsertMode(),
+            cursor,
+            this.state.getCurrentColor()
+          );
+          this.state.addEvent(action);
+        }
+      }
+      Logger.info('Text pasted:', text.length, 'chars');
+    }
+  }
+
+  _onAddAnnotation() {
+    this.annotationUI.promptAdd();
   }
 
   // ==================== State Event Handlers ====================
@@ -301,7 +435,8 @@ export class TemporalEditorEnhanced {
       this.state.getCurrentGrid(),
       this.state.getCurrentCursor(),
       this.state.getInsertMode(),
-      this.cursorVisible
+      this.cursorVisible,
+      this.selection
     );
 
     // Render multi-cursors if enabled
@@ -337,6 +472,24 @@ export class TemporalEditorEnhanced {
         playBtn.style.display = 'inline-block';
         pauseBtn.style.display = 'none';
       }
+    }
+
+    // Update loop button state
+    const loopBtn = document.getElementById('playback-loop');
+    if (loopBtn) {
+      loopBtn.classList.toggle('active', this.loopMode);
+    }
+  }
+
+  _updateUndoRedoUI() {
+    const undoBtn = document.getElementById('undo-btn');
+    const redoBtn = document.getElementById('redo-btn');
+
+    if (undoBtn) {
+      undoBtn.disabled = !this.undoStack.canUndo();
+    }
+    if (redoBtn) {
+      redoBtn.disabled = !this.undoStack.canRedo();
     }
   }
 
@@ -536,6 +689,64 @@ export class TemporalEditorEnhanced {
     this.playback.stepBackward();
   }
 
+  toggleLoop() {
+    const enabled = this.playback.toggleLoop();
+    this.loopMode = enabled;
+    this._updatePlaybackUI();
+    Logger.info('Loop mode:', enabled);
+    return enabled;
+  }
+
+  // Undo/Redo operations
+  undo() {
+    return this.undoStack.undo();
+  }
+
+  redo() {
+    return this.undoStack.redo();
+  }
+
+  // Annotation operations
+  addAnnotation(text, type = 'note') {
+    const currentTime = this.state.getCurrentTime();
+    return this.annotations.addAnnotation(currentTime, text, type);
+  }
+
+  addBookmark(text) {
+    return this.addAnnotation(text, 'bookmark');
+  }
+
+  getAnnotations() {
+    return this.annotations.getAllAnnotations();
+  }
+
+  getBookmarks() {
+    return this.annotations.getBookmarks();
+  }
+
+  // Selection operations
+  selectAll() {
+    const grid = this.state.getCurrentGrid();
+    this.selection.startSelection(0, 0);
+    this.selection.updateSelection(grid.cols - 1, grid.rows - 1);
+    this._render();
+  }
+
+  clearSelection() {
+    this.selection.clearSelection();
+  }
+
+  async copySelection() {
+    if (this.selection.hasSelection()) {
+      return await this.selection.copy(this.state.getCurrentGrid());
+    }
+    return false;
+  }
+
+  async pasteText() {
+    return await this._onPaste();
+  }
+
   // Analysis operations
   analyze() {
     const analysis = PatternAnalysis.analyze(this.state.getTimeline());
@@ -668,6 +879,19 @@ document.addEventListener('DOMContentLoaded', () => {
     window.editor.setSpeed(parseFloat(e.target.value));
   });
 
+  document.getElementById('playback-loop').addEventListener('click', () => {
+    window.editor.toggleLoop();
+  });
+
+  // Undo/Redo controls
+  document.getElementById('undo-btn').addEventListener('click', () => {
+    window.editor.undo();
+  });
+
+  document.getElementById('redo-btn').addEventListener('click', () => {
+    window.editor.redo();
+  });
+
   // Persistence controls
   document.getElementById('save-btn').addEventListener('click', () => {
     window.editor.save('user-save');
@@ -697,12 +921,15 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   Logger.info('Temporal Editor V3 ready!');
-  console.log('=== Temporal Editor V3 - Enhanced ===');
+  console.log('=== Temporal Editor V3 - Enhanced + High Priority Features ===');
   console.log('Access via: window.editor');
   console.log('\nBasic:', 'editor.toggleInsertMode() - Switch between INSERT and OVERWRITE modes');
-  console.log('\nPlayback:', 'editor.play(), editor.pause(), editor.stop()');
+  console.log('\nPlayback:', 'editor.play(), editor.pause(), editor.stop(), editor.toggleLoop()');
   console.log('Speed:', 'editor.setSpeed(0.5|1|2|4)');
   console.log('Step:', 'editor.stepForward(), editor.stepBackward()');
+  console.log('\nUndo/Redo:', 'editor.undo(), editor.redo()');
+  console.log('\nSelection:', 'editor.selectAll(), editor.clearSelection(), editor.copySelection(), editor.pasteText()');
+  console.log('\nAnnotations:', 'editor.addAnnotation("text"), editor.addBookmark("text"), editor.getAnnotations()');
   console.log('\nImport/Export:', 'editor.importJSON(), editor.exportJSON(), editor.exportCSV(), editor.exportAsciinema()');
   console.log('\nPersistence:', 'editor.save(), editor.load()');
   console.log('Drafts:', 'editor.saveDraft("name"), editor.loadDraft("name")');
@@ -710,4 +937,5 @@ document.addEventListener('DOMContentLoaded', () => {
   console.log('\nBranches:', 'editor.createBranch("name"), editor.switchBranch("name")');
   console.log('Macros:', 'editor.startRecording("name"), editor.saveMacro(), editor.replayMacro("name")');
   console.log('\nMulti-cursor:', 'editor.toggleMultiCursor()');
+  console.log('\n💡 NEW FEATURES: Undo/Redo (Ctrl+Z/Y), Selection (Shift+Arrows), Copy/Paste (Ctrl+C/V), Bookmarks (Ctrl+B), Loop Mode');
 });

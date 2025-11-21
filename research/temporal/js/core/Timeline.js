@@ -79,6 +79,18 @@ export class Timeline {
   }
 
   /**
+   * Remove event by timestamp
+   */
+  removeEvent(timestamp) {
+    const index = this.events.findIndex(e => e.timestamp === timestamp);
+    if (index !== -1) {
+      this.events.splice(index, 1);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Clear all events
    */
   clear() {

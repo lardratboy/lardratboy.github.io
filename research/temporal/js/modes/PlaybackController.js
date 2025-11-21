@@ -16,6 +16,7 @@ export class PlaybackController extends EventEmitter {
     this.playbackSpeed = 1.0; // 1x speed
     this.playbackInterval = null;
     this.lastPlaybackTime = 0;
+    this.loopMode = false;
   }
 
   /**
@@ -146,9 +147,14 @@ export class PlaybackController extends EventEmitter {
       const maxTime = this.stateManager.getMaxTime();
 
       if (newTime >= maxTime) {
-        // Reached end
-        this.stateManager.scrubTo(maxTime);
-        this.pause();
+        // Reached end - check for loop mode
+        if (this.loopMode) {
+          this.stateManager.scrubTo(0);
+          this.lastPlaybackTime = Date.now();
+        } else {
+          this.stateManager.scrubTo(maxTime);
+          this.pause();
+        }
       } else {
         this.stateManager.scrubTo(newTime);
       }
@@ -163,12 +169,32 @@ export class PlaybackController extends EventEmitter {
   }
 
   /**
+   * Toggle loop mode
+   */
+  toggleLoop() {
+    this.loopMode = !this.loopMode;
+    this.emit('loop-changed', this.loopMode);
+    Logger.debug('Loop mode:', this.loopMode);
+    return this.loopMode;
+  }
+
+  /**
+   * Set loop mode
+   */
+  setLoopMode(enabled) {
+    this.loopMode = enabled;
+    this.emit('loop-changed', this.loopMode);
+    Logger.debug('Loop mode set to:', this.loopMode);
+  }
+
+  /**
    * Get current playback state
    */
   getState() {
     return {
       isPlaying: this.isPlaying,
-      speed: this.playbackSpeed
+      speed: this.playbackSpeed,
+      loopMode: this.loopMode
     };
   }
 
