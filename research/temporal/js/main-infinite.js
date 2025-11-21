@@ -16,7 +16,6 @@ import { AnnotationManager } from './core/Annotation.js';
 import { UndoStack } from './core/UndoStack.js';
 import { Logger } from './utils/Logger.js';
 import { ColorPicker } from './ui/ColorPicker.js';
-import { BranchManager } from './ui/BranchManager.js';
 
 class TemporalEditorInfinite {
   constructor() {
@@ -35,7 +34,6 @@ class TemporalEditorInfinite {
     this.annotations = new AnnotationManager();
     this.undoStack = new UndoStack(this.timeline);
     this.colorPicker = new ColorPicker();
-    this.branchManager = new BranchManager(this.stateManager);
 
     // Cursor state
     this.cursor = { x: 0, y: 0 };
