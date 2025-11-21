@@ -25,9 +25,9 @@ export class VirtualRenderer {
     this.fontFamily = 'Courier New, monospace';
 
     // Default colors
-    this.bgColor = '#000';
-    this.textColor = '#0f0';
-    this.cursorColor = '#0f0';
+    this.bgColor = '#000000';
+    this.textColor = '#00ff00';
+    this.cursorColor = '#00ff00';
     this.cursorAlpha = 0.7;
 
     // Setup canvas size based on viewport

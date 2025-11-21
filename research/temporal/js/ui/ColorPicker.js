@@ -10,22 +10,22 @@ export class ColorPicker extends EventEmitter {
   constructor(containerId) {
     super();
     this.containerId = containerId;
-    this.currentColor = '#0f0';
+    this.currentColor = '#00ff00';
 
-    // Preset colors (retro terminal palette)
+    // Preset colors (retro terminal palette) - using full 6-digit hex format
     this.presetColors = [
-      { name: 'Green', value: '#0f0', desc: 'Classic Terminal' },
-      { name: 'Cyan', value: '#0ff', desc: 'Aqua' },
-      { name: 'Yellow', value: '#ff0', desc: 'Warning' },
-      { name: 'Red', value: '#f00', desc: 'Error' },
-      { name: 'Magenta', value: '#f0f', desc: 'Purple' },
-      { name: 'Blue', value: '#00f', desc: 'Info' },
-      { name: 'White', value: '#fff', desc: 'Bright' },
-      { name: 'Orange', value: '#fa0', desc: 'Warm' },
-      { name: 'Pink', value: '#f8f', desc: 'Soft' },
-      { name: 'Lime', value: '#8f0', desc: 'Bright Green' },
-      { name: 'Teal', value: '#0aa', desc: 'Ocean' },
-      { name: 'Purple', value: '#a0f', desc: 'Violet' }
+      { name: 'Green', value: '#00ff00', desc: 'Classic Terminal' },
+      { name: 'Cyan', value: '#00ffff', desc: 'Aqua' },
+      { name: 'Yellow', value: '#ffff00', desc: 'Warning' },
+      { name: 'Red', value: '#ff0000', desc: 'Error' },
+      { name: 'Magenta', value: '#ff00ff', desc: 'Purple' },
+      { name: 'Blue', value: '#0000ff', desc: 'Info' },
+      { name: 'White', value: '#ffffff', desc: 'Bright' },
+      { name: 'Orange', value: '#ffaa00', desc: 'Warm' },
+      { name: 'Pink', value: '#ff88ff', desc: 'Soft' },
+      { name: 'Lime', value: '#88ff00', desc: 'Bright Green' },
+      { name: 'Teal', value: '#00aaaa', desc: 'Ocean' },
+      { name: 'Purple', value: '#aa00ff', desc: 'Violet' }
     ];
 
     this.createUI();
