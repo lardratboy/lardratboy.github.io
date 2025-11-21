@@ -7,22 +7,29 @@ import { EventEmitter } from '../utils/EventEmitter.js';
 import { Logger } from '../utils/Logger.js';
 
 export class Viewport extends EventEmitter {
-  constructor(config) {
+  constructor(x, y, cols, rows) {
     super();
-    this.config = config;
 
     // Viewport position (top-left corner in grid coordinates)
-    this.x = 0;
-    this.y = 0;
+    this.x = x || 0;
+    this.y = y || 0;
 
-    // Viewport size in grid cells
-    this.cols = config.GRID.COLS;
-    this.rows = config.GRID.ROWS;
+    // Base viewport size in grid cells (at 100% zoom)
+    this.baseCols = cols || 80;
+    this.baseRows = rows || 24;
+
+    // Current viewport size (affected by zoom)
+    this.cols = this.baseCols;
+    this.rows = this.baseRows;
+
+    // Viewport offset for panning
+    this.offsetX = 0;
+    this.offsetY = 0;
 
     // Zoom level (1.0 = 100%)
     this.zoom = 1.0;
     this.minZoom = 0.5;
-    this.maxZoom = 3.0;
+    this.maxZoom = 2.0;
   }
 
   /**
@@ -112,8 +119,8 @@ export class Viewport extends EventEmitter {
 
     // Adjust viewport size based on zoom
     // More zoom = fewer cells visible
-    this.cols = Math.floor(this.config.GRID.COLS / this.zoom);
-    this.rows = Math.floor(this.config.GRID.ROWS / this.zoom);
+    this.cols = Math.floor(this.baseCols / this.zoom);
+    this.rows = Math.floor(this.baseRows / this.zoom);
 
     this.emit('zoom-changed', this.zoom);
     this.emit('viewport-changed', this.getInfo());
@@ -196,8 +203,8 @@ export class Viewport extends EventEmitter {
   /**
    * Deserialize viewport state
    */
-  static deserialize(data, config) {
-    const viewport = new Viewport(config);
+  static deserialize(data, cols = 80, rows = 24) {
+    const viewport = new Viewport(0, 0, cols, rows);
     if (data) {
       viewport.x = data.x || 0;
       viewport.y = data.y || 0;
