@@ -217,7 +217,8 @@
             <div class="instructions">
                 <strong>Click editor to teleport cursor</strong> (no event) • <strong>INSERT/OVERWRITE button</strong> to toggle mode • Arrow keys to move<br>
                 <strong>INSERT mode:</strong> Typing shifts text right • Backspace/Delete shifts text left<br>
-                <strong>OVERWRITE mode:</strong> Typing replaces chars • Backspace/Delete just clears • <strong>Drag timeline</strong> to scrub ⚡
+                <strong>OVERWRITE mode:</strong> Typing replaces chars • Backspace/Delete just clears • <strong>Drag timeline</strong> to scrub ⚡<br>
+                <strong>💾 Export JSON:</strong> Save your timeline for later • <strong>📂 Import JSON:</strong> Restore a saved session
             </div>
         </div>
 
@@ -244,6 +245,9 @@
                 <button class="btn" id="step-forward">▶ Step Forward</button>
                 <button class="btn" id="toggle-insert" style="min-width: 100px;">INSERT</button>
                 <button class="btn" id="clear">🗑 Clear All</button>
+                <button class="btn" id="export">💾 Export JSON</button>
+                <button class="btn" id="import">📂 Import JSON</button>
+                <input type="file" id="import-file" accept=".json" style="display: none;">
                 <label style="color: #00aa00; display: flex; align-items: center; gap: 5px;">
                     <input type="checkbox" id="auto-play" checked>
                     Auto-play new actions
@@ -354,6 +358,11 @@
                 document.getElementById('step-forward').addEventListener('click', () => this.stepForward());
                 document.getElementById('toggle-insert').addEventListener('click', () => this.toggleInsertMode());
                 document.getElementById('clear').addEventListener('click', () => this.clearAll());
+                document.getElementById('export').addEventListener('click', () => this.exportJSON());
+                document.getElementById('import').addEventListener('click', () => {
+                    document.getElementById('import-file').click();
+                });
+                document.getElementById('import-file').addEventListener('change', (e) => this.importJSON(e));
                 document.getElementById('auto-play').addEventListener('change', (e) => {
                     this.autoPlay = e.target.checked;
                 });
@@ -833,6 +842,113 @@
                 this.updateTimeline();
                 this.updateActionList();
                 this.updateStatus();
+            }
+
+            exportJSON() {
+                // Create export data with all necessary state
+                const exportData = {
+                    version: '1.0',
+                    exportDate: new Date().toISOString(),
+                    editorConfig: {
+                        cols: this.cols,
+                        rows: this.rows
+                    },
+                    timeline: this.timeline,
+                    currentTime: this.currentTime,
+                    insertMode: this.insertMode,
+                    autoPlay: this.autoPlay
+                };
+
+                // Convert to JSON string with pretty printing
+                const jsonString = JSON.stringify(exportData, null, 2);
+
+                // Create blob and download
+                const blob = new Blob([jsonString], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `temporal-editor-${Date.now()}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                console.log('Exported timeline with', this.timeline.length, 'actions');
+                this.statusEl.textContent = `Exported ${this.timeline.length} actions to JSON`;
+                setTimeout(() => this.updateStatus(), 2000);
+            }
+
+            importJSON(event) {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const importData = JSON.parse(e.target.result);
+
+                        // Validate import data
+                        if (!importData.timeline || !Array.isArray(importData.timeline)) {
+                            throw new Error('Invalid JSON format: missing or invalid timeline');
+                        }
+
+                        // Stop any ongoing playback
+                        this.isPlaying = false;
+                        this.isConcurrentRecording = false;
+                        document.getElementById('play-pause').textContent = '▶ Play';
+
+                        // Restore timeline
+                        this.timeline = importData.timeline;
+
+                        // Restore settings
+                        if (importData.currentTime !== undefined) {
+                            this.currentTime = importData.currentTime;
+                        } else {
+                            this.currentTime = 0;
+                        }
+
+                        if (importData.insertMode !== undefined) {
+                            this.insertMode = importData.insertMode;
+                        }
+
+                        if (importData.autoPlay !== undefined) {
+                            this.autoPlay = importData.autoPlay;
+                            document.getElementById('auto-play').checked = this.autoPlay;
+                        }
+
+                        // Check if editor dimensions match
+                        if (importData.editorConfig) {
+                            if (importData.editorConfig.cols !== this.cols ||
+                                importData.editorConfig.rows !== this.rows) {
+                                console.warn(`Warning: Imported data has different dimensions (${importData.editorConfig.cols}x${importData.editorConfig.rows}) vs current (${this.cols}x${this.rows})`);
+                            }
+                        }
+
+                        // Rebuild state from imported timeline
+                        this.isScrubbedBack = false;
+                        this.rebuildStateAtTime(this.currentTime);
+
+                        // Update UI
+                        this.updateInsertButton();
+                        this.updateCursorStyle();
+                        this.updateTimeline();
+                        this.updateActionList();
+                        this.updateStatus();
+
+                        console.log('Imported timeline with', this.timeline.length, 'actions');
+                        this.statusEl.textContent = `Imported ${this.timeline.length} actions from JSON (exported ${importData.exportDate || 'unknown'})`;
+                        setTimeout(() => this.updateStatus(), 3000);
+
+                    } catch (error) {
+                        console.error('Import failed:', error);
+                        alert('Failed to import JSON: ' + error.message);
+                    }
+
+                    // Reset file input so the same file can be imported again
+                    event.target.value = '';
+                };
+
+                reader.readAsText(file);
             }
 
             getMaxTime() {
