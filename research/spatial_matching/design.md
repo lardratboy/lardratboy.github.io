@@ -9,25 +9,26 @@
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
-2. [Game Concept](#game-concept)
-3. [Core Gameplay Loop](#core-gameplay-loop)
-4. [Unique Mechanics](#unique-mechanics)
-5. [Game Modes](#game-modes)
-6. [Progression Systems](#progression-systems)
-7. [Scoring & Rewards](#scoring--rewards)
-8. [Visual Design](#visual-design)
-9. [Audio Design](#audio-design)
-10. [User Interface](#user-interface)
-11. [Controls & Interaction](#controls--interaction)
-12. [Difficulty Progression](#difficulty-progression)
-13. [Power-Ups & Special Pieces](#power-ups--special-pieces)
-14. [Tutorial & Onboarding](#tutorial--onboarding)
-15. [Accessibility](#accessibility)
-16. [Target Audience](#target-audience)
-17. [Competitive Analysis](#competitive-analysis)
-18. [Technical Requirements](#technical-requirements)
-19. [Monetization Strategy](#monetization-strategy)
-20. [Future Features](#future-features)
+2. [Current Implementation Status](#current-implementation-status)
+3. [Game Concept](#game-concept)
+4. [Core Gameplay Loop](#core-gameplay-loop)
+5. [Unique Mechanics](#unique-mechanics)
+6. [Game Modes](#game-modes)
+7. [Progression Systems](#progression-systems)
+8. [Scoring & Rewards](#scoring--rewards)
+9. [Visual Design](#visual-design)
+10. [Audio Design](#audio-design)
+11. [User Interface](#user-interface)
+12. [Controls & Interaction](#controls--interaction)
+13. [Difficulty Progression](#difficulty-progression)
+14. [Power-Ups & Special Pieces](#power-ups--special-pieces)
+15. [Tutorial & Onboarding](#tutorial--onboarding)
+16. [Accessibility](#accessibility)
+17. [Target Audience](#target-audience)
+18. [Competitive Analysis](#competitive-analysis)
+19. [Technical Requirements](#technical-requirements)
+20. [Monetization Strategy](#monetization-strategy)
+21. [Future Features](#future-features)
 
 ---
 
@@ -61,7 +62,108 @@ Cube Corner is an innovative match-3 puzzle game that reimagines the genre throu
 
 ---
 
-## 2. Game Concept
+## 2. Current Implementation Status
+
+**Last Updated:** November 2024
+**Prototype Version:** 0.2 (Swap Mechanics)
+
+### What's Currently Implemented ✅
+
+**Core Gameplay:**
+- ✅ 10×10 board with three sections (Red wall, Green wall, Blue floor)
+- ✅ 5×5 unused gray section (bottom-right corner)
+- ✅ **Swap-based mechanics** (click to select, click another to swap)
+- ✅ Match-3 detection (horizontal and vertical)
+- ✅ Optional diagonal matching (toggle in UI)
+- ✅ Gravity system with multi-directional flow
+- ✅ Cascade detection and chain reactions
+- ✅ Basic scoring system
+- ✅ 5 colors (red, green, blue, yellow, magenta)
+
+**Visual & UI:**
+- ✅ 3D rendering with Three.js
+- ✅ Camera positioning for corner view
+- ✅ Minimap showing grid layout
+- ✅ Score display
+- ✅ Move feedback (selection highlight)
+- ✅ Responsive design (portrait/landscape support)
+
+**Technical:**
+- ✅ HTML5/WebGL implementation
+- ✅ Mouse interaction (click-based)
+- ✅ Animation system (swap, fall, clear)
+- ✅ Window resize handling
+
+### What's NOT Yet Implemented ⬜
+
+**Gameplay Features:**
+- ⬜ Piece spawning/dropping mechanic (original design concept)
+- ⬜ Move limits
+- ⬜ Level objectives
+- ⬜ Special pieces (Bomb, Lightning, Rainbow, Cascade Star)
+- ⬜ Power-ups
+- ⬜ Tutorial system
+- ⬜ Multiple game modes
+
+**Content:**
+- ⬜ Story mode (100 levels)
+- ⬜ Endless mode
+- ⬜ Puzzle mode
+- ⬜ Daily challenges
+- ⬜ Boss levels
+
+**Systems:**
+- ⬜ Progression system
+- ⬜ Achievement system
+- ⬜ Collection/unlocks
+- ⬜ Monetization
+- ⬜ Leaderboards
+- ⬜ Save/load system
+
+**Polish:**
+- ⬜ Audio (music & SFX)
+- ⬜ Particle effects
+- ⬜ Advanced animations
+- ⬜ Themes/skins
+- ⬜ Accessibility features
+
+### Design Evolution Notes
+
+**Important: Core Mechanic Change**
+
+The current prototype implements a **swap-based match-3** mechanic (similar to Bejeweled):
+- Players click a cube to select it
+- Click another cube to swap positions
+- Swaps trigger gravity and match detection
+- All three boards can be manipulated
+
+The original design document (sections below) describes a **drop-based spawning** mechanic (similar to Dr. Mario):
+- Players choose which wall to spawn pieces on
+- Pieces drop down columns
+- Gravity transfers pieces between boards
+
+**Both mechanics work with the 3D corner topology.** The current implementation chose swapping for:
+1. Easier prototyping and iteration
+2. More strategic control for players
+3. Familiar mechanic for testing the unique 3D space
+
+Future development may:
+- Keep swap mechanics and refine them further
+- Implement drop mechanics as originally designed
+- Offer both as different game modes
+
+### How to Use This Document
+
+The sections below describe the **complete vision** for the game, not just what's currently built. Consider:
+- **Sections 3-20**: Full design vision (aspirational)
+- **Section 2**: Current reality (what's playable now)
+- Implementation should reference both for context
+
+---
+
+## 3. Game Concept (Full Vision)
+
+**Note:** This section and those following describe the complete design vision. See Section 2 for current implementation status.
 
 ### Vision Statement
 Create a puzzle game that challenges players to think in three dimensions while maintaining the accessible satisfaction of match-3 gameplay. Every move should feel strategic, every cascade should feel earned, and the spatial relationship between boards should create emergent complexity.
@@ -1897,6 +1999,7 @@ The market lacks a match-3 game with genuine spatial innovation. Most "3D match-
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | Nov 2024 | Design Team | Initial comprehensive design document |
+| 1.1 | Nov 2024 | Claude Code | Added Section 2: Current Implementation Status to reconcile design vision with working prototype. Clarified swap-based mechanic vs. drop-based design. |
 
 ---
 

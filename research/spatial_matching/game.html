@@ -1,5 +1,101 @@
 <!DOCTYPE html>
 <html lang="en">
+<!--
+═══════════════════════════════════════════════════════════════════════════
+  3D CORNER MATCH-3 GAME
+═══════════════════════════════════════════════════════════════════════════
+
+  Version: 0.2 (Swap Mechanics Prototype)
+  Last Updated: November 2024
+
+  DESCRIPTION:
+  A spatial match-3 puzzle game where three boards (Red wall, Green wall,
+  Blue floor) meet at a 3D corner. Players swap cubes to create matches of
+  3+ same-colored pieces. Gravity flows between boards creating cascading
+  chain reactions.
+
+  CURRENT IMPLEMENTATION:
+  ✅ 10×10 board grid (three 5×5 sections + one 5×5 unused)
+  ✅ Swap-based mechanics (click to select, click another to swap)
+  ✅ Match-3 detection (horizontal, vertical, optional diagonal)
+  ✅ Multi-directional gravity system
+  ✅ Cascade chain reactions
+  ✅ Basic scoring with combo multipliers
+  ✅ 3D visualization with Three.js
+  ✅ Minimap showing grid state
+  ✅ Responsive camera positioning
+
+  BOARD LAYOUT (10×10 Grid):
+  ┌─────────────────────────────────┐
+  │  Red Wall   │   Green Wall      │
+  │  (5×5)      │   (5×5)           │
+  │  Back       │   Right           │
+  │  Vertical   │   Vertical        │
+  ├─────────────┼───────────────────┤
+  │  Blue Floor │   Unused          │
+  │  (5×5)      │   (5×5)           │
+  │  Horizontal │   Gray            │
+  │  Bottom     │   Disabled        │
+  └─────────────┴───────────────────┘
+
+  COORDINATE MAPPING:
+  - Red Wall:   rows 0-4, cols 0-4   (back wall at z=0, vertical)
+  - Green Wall: rows 0-4, cols 5-9   (right wall at x=5, vertical)
+  - Blue Floor: rows 5-9, cols 0-4   (floor at y=0, horizontal)
+  - Gray Area:  rows 5-9, cols 5-9   (unused, value = -1)
+
+  3D POSITIONS:
+  Red Wall (back):  x=[0-4], y=[5-1], z=0
+  Green Wall (right): x=5, y=[5-1], z=[1-5]
+  Blue Floor (bottom): x=[0-4], y=0, z=[1-5]
+
+  GRAVITY FLOW:
+  1. Red/Green walls: Pieces fall down within wall (row increases)
+  2. Red wall bottom (row 4) → Blue floor top (row 5, same col)
+  3. Green wall bottom (row 4) → Blue floor right (col 4, row=green col-5)
+  4. Blue floor: Pieces fall down (row increases)
+
+  GAME MECHANICS:
+  - Click a cube to select (highlights with emissive glow)
+  - Click another cube to swap positions
+  - After swap, gravity resolves and matches are detected
+  - Matches of 3+ are cleared and score increases
+  - Cascading matches award bonus multipliers (2× chain = 20 pts bonus)
+  - Optional diagonal matching (toggle with checkbox)
+
+  COLORS:
+  0 = Red    (#FF0000)
+  1 = Green  (#00FF00)
+  2 = Blue   (#0000FF)
+  3 = Yellow (#FFFF00)
+  4 = Magenta(#FF00FF)
+  -1 = Empty/Unused
+
+  SCORING:
+  Base: 10 points per cleared piece
+  Cascade bonus: +20 points per chain level (2-chain = +20, 3-chain = +40)
+
+  DESIGN NOTES:
+  See design.md for full vision and future features. Current implementation
+  uses swap mechanics for easier prototyping. Original design envisioned
+  drop/spawn mechanics (like Dr. Mario). Both approaches work with the
+  unique 3D corner topology.
+
+  DEPENDENCIES:
+  - Three.js r128 (3D rendering engine)
+
+  FUTURE FEATURES (Not Yet Implemented):
+  ⬜ Special pieces (Bomb, Lightning, Rainbow)
+  ⬜ Power-ups
+  ⬜ Level objectives and move limits
+  ⬜ Story mode with 100 levels
+  ⬜ Audio (music and SFX)
+  ⬜ Particle effects
+  ⬜ Tutorial system
+  ⬜ Save/load and progression
+
+═══════════════════════════════════════════════════════════════════════════
+-->
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -147,7 +243,25 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
-        // Game Constants
+        /*
+         * ═══════════════════════════════════════════════════════════════
+         * GAME LOGIC - 3D CORNER MATCH-3
+         * ═══════════════════════════════════════════════════════════════
+         *
+         * This script implements a swap-based match-3 game with unique
+         * 3D corner topology. Key systems:
+         *
+         * 1. Board Management: 10×10 grid with three active sections
+         * 2. Swap Mechanics: Click-to-select, click-to-swap interaction
+         * 3. Gravity System: Multi-directional piece falling
+         * 4. Match Detection: Horizontal, vertical, optional diagonal
+         * 5. Cascade System: Chain reactions with multipliers
+         * 6. 3D Rendering: Three.js visualization of corner space
+         */
+
+        // ═══════════════════════════════════════════════════════════════
+        // GAME CONSTANTS
+        // ═══════════════════════════════════════════════════════════════
         const COLORS = [
             0xff0000, // red
             0x00ff00, // green
@@ -156,12 +270,14 @@
             0xff00ff  // magenta
         ];
         
-        const BOARD_SIZE = 10;
-        const SECTION_SIZE = 5;
-        const CUBE_SIZE = 0.85;
-        const SPACING = 1.0;
-        
-        // Game State
+        const BOARD_SIZE = 10;        // 10×10 grid total
+        const SECTION_SIZE = 5;       // Each section is 5×5
+        const CUBE_SIZE = 0.85;       // Cube dimensions in 3D space
+        const SPACING = 1.0;          // Space between cube centers
+
+        // ═══════════════════════════════════════════════════════════════
+        // GAME STATE
+        // ═══════════════════════════════════════════════════════════════
         let board = [];
         let cubes = [];
         let scene, camera, renderer, raycaster, mouse;
@@ -301,6 +417,20 @@
             }
         }
         
+        /**
+         * Calculate 3D position for a cube based on its grid coordinates.
+         * Maps the 10×10 2D grid to 3D corner space with three sections.
+         *
+         * @param {number} row - Grid row (0-9)
+         * @param {number} col - Grid column (0-9)
+         * @returns {{x: number, y: number, z: number}} 3D position
+         *
+         * Mapping:
+         * - Red Wall (rows 0-4, cols 0-4): Back wall at z=0, vertical layout
+         * - Green Wall (rows 0-4, cols 5-9): Right wall at x=5, vertical layout
+         * - Blue Floor (rows 5-9, cols 0-4): Floor at y=0, horizontal layout
+         * - Gray Area (rows 5-9, cols 5-9): Unused (should never be called)
+         */
         function getCubePosition(row, col) {
             // Red section: rows 0-4, cols 0-4 (back wall - vertical)
             if (row < 5 && col < 5) {
@@ -446,9 +576,22 @@
             }
         }
         
+        /**
+         * Find and clear all matches of 3+ consecutive same-colored pieces.
+         * Searches in horizontal, vertical, and optionally diagonal directions.
+         *
+         * @returns {boolean} True if any matches were found and cleared
+         *
+         * Process:
+         * 1. Scan all valid board positions
+         * 2. For each color, check in all directions for consecutive matches
+         * 3. Mark matches of length >= 3
+         * 4. Clear matched pieces (remove from board and scene)
+         * 5. Return true if anything was cleared
+         */
         function findAndClearMatches() {
             const matches = new Set();
-            
+
             // Check directions - conditionally include diagonals
             const directions = [
                 [0, 1],   // horizontal
@@ -518,6 +661,22 @@
             return true;
         }
         
+        /**
+         * Apply gravity system to make pieces fall and fill empty spaces.
+         * This is a complex multi-step process that handles:
+         * 1. Pieces falling within each section
+         * 2. Pieces transferring between sections at boundaries
+         * 3. Spawning new pieces at the top of walls
+         * 4. Detecting cascade matches
+         *
+         * Gravity rules:
+         * - Red/Green walls: Fall down (row increases)
+         * - Red wall row 4 → Blue floor row 5 (same column)
+         * - Green wall row 4 → Blue floor column 4 (row = green col - 5)
+         * - Blue floor: Fall down (row increases)
+         *
+         * Runs iteratively until board is stable (no movement or spawning).
+         */
         function applyGravity() {
             isAnimating = true;
 
