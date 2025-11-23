@@ -520,39 +520,27 @@
         
         function applyGravity() {
             isAnimating = true;
-            
+
             // Apply gravity iteratively until stable
-            for (let iteration = 0; iteration < 30; iteration++) {
+            for (let iteration = 0; iteration < 50; iteration++) {
                 let anyMoved = false;
-                
-                // 1. Pack within Red wall (downward)
-                anyMoved = packWallDown(0, 4, 0, 4) || anyMoved;
-                
-                // 2. Pack within Green wall (downward)
-                anyMoved = packWallDown(0, 4, 5, 9) || anyMoved;
-                
-                // 3. Transfer Red wall bottom to Blue floor
-                anyMoved = transferRedToBlue() || anyMoved;
-                
-                // 4. Transfer Green wall bottom to Blue floor
-                anyMoved = transferGreenToBlue() || anyMoved;
-                
-                // 5. Pack Blue floor
-                anyMoved = packFloorCompletely() || anyMoved;
-                
+
+                // Step 1: Within each section, move pieces down one step
+                anyMoved = applyGravityStep() || anyMoved;
+
                 // If nothing moved this iteration, we're done
                 if (!anyMoved) break;
             }
-            
-            // 6. Spawn new pieces at top of walls
+
+            // Spawn new pieces at top of walls
             spawnNewPieces();
-            
-            // 7. Update cube positions
+
+            // Update cube positions
             setTimeout(() => {
                 updateAllCubePositions();
                 updateMinimap();
                 isAnimating = false;
-                
+
                 // Check for cascade matches
                 if (findAndClearMatches()) {
                     score += 20; // Bonus for cascade
@@ -563,129 +551,68 @@
                 }
             }, 500);
         }
-        
-        function packWallDown(startRow, endRow, startCol, endCol) {
+
+        function applyGravityStep() {
             let moved = false;
-            
-            // Process each column independently
-            for (let col = startCol; col <= endCol; col++) {
-                // Collect all non-empty pieces in this column from top to bottom
-                const pieces = [];
-                for (let row = startRow; row <= endRow; row++) {
-                    if (board[row] && board[row][col] !== -1 && board[row][col] !== undefined) {
-                        pieces.push(board[row][col]);
-                    }
-                }
-                
-                // Now rebuild column with pieces at bottom
-                for (let row = startRow; row <= endRow; row++) {
-                    if (!board[row]) board[row] = [];
-                    
-                    const pieceIndex = pieces.length - 1 - (endRow - row);
-                    
-                    if (pieceIndex >= 0) {
-                        // Should have a piece here
-                        if (board[row][col] !== pieces[pieceIndex]) {
-                            moved = true;
+
+            // Process from bottom to top to avoid moving pieces multiple times
+            for (let row = BOARD_SIZE - 1; row >= 0; row--) {
+                for (let col = 0; col < BOARD_SIZE; col++) {
+                    // Skip empty cells and invalid cells
+                    if (!board[row] || board[row][col] === -1 || board[row][col] === undefined) continue;
+                    if (row >= 5 && col >= 5) continue; // Gray section
+
+                    const piece = board[row][col];
+                    let targetRow = -1;
+                    let targetCol = -1;
+
+                    // Determine where this piece wants to move
+                    if (row < 5 && col < 5) {
+                        // Red wall (back wall) - pieces fall down within the wall
+                        if (row < 4) {
+                            targetRow = row + 1;
+                            targetCol = col;
+                        } else if (row === 4) {
+                            // Bottom of red wall - transfer to blue floor
+                            targetRow = 5;
+                            targetCol = col;
                         }
-                        board[row][col] = pieces[pieceIndex];
-                    } else {
-                        // Should be empty
-                        if (board[row][col] !== -1) {
-                            moved = true;
+                    } else if (row < 5 && col >= 5) {
+                        // Green wall (right wall) - pieces fall down within the wall
+                        if (row < 4) {
+                            targetRow = row + 1;
+                            targetCol = col;
+                        } else if (row === 4) {
+                            // Bottom of green wall - transfer to blue floor
+                            // Map green column to blue floor position
+                            targetRow = col; // Green col 5->row 5, col 6->row 6, etc.
+                            targetCol = 4;   // Right edge of floor
                         }
-                        board[row][col] = -1;
-                    }
-                }
-            }
-            
-            return moved;
-        }
-        
-        function packFloorCompletely() {
-            let moved = false;
-            
-            // Pack each column of the floor (rows 5-9, cols 0-4)
-            for (let col = 0; col < 5; col++) {
-                // Collect all non-empty pieces in this column from top to bottom
-                const pieces = [];
-                for (let row = 5; row < 10; row++) {
-                    if (board[row] && board[row][col] !== -1 && board[row][col] !== undefined) {
-                        pieces.push(board[row][col]);
-                    }
-                }
-                
-                // Now rebuild column with pieces at bottom
-                for (let row = 5; row < 10; row++) {
-                    if (!board[row]) board[row] = [];
-                    
-                    const pieceIndex = pieces.length - 1 - (9 - row);
-                    
-                    if (pieceIndex >= 0) {
-                        // Should have a piece here
-                        if (board[row][col] !== pieces[pieceIndex]) {
-                            moved = true;
+                    } else if (row >= 5 && col < 5) {
+                        // Blue floor - pieces fall down within the floor
+                        if (row < 9) {
+                            targetRow = row + 1;
+                            targetCol = col;
                         }
-                        board[row][col] = pieces[pieceIndex];
-                    } else {
-                        // Should be empty
-                        if (board[row][col] !== -1) {
-                            moved = true;
-                        }
-                        board[row][col] = -1;
                     }
-                }
-            }
-            
-            return moved;
-        }
-        
-        function transferRedToBlue() {
-            let moved = false;
-            // Red wall bottom (row 4, cols 0-4) → Blue floor (rows 5-9, same columns)
-            for (let col = 0; col < 5; col++) {
-                if (!board[4]) continue;
-                
-                // If Red has a piece at bottom, move it to Blue floor
-                if (board[4][col] !== -1 && board[4][col] !== undefined) {
-                    // Find first empty spot in this column of Blue floor (top to bottom)
-                    for (let row = 5; row < 10; row++) {
-                        if (!board[row]) board[row] = [];
-                        if (board[row][col] === -1 || board[row][col] === undefined) {
-                            board[row][col] = board[4][col];
-                            board[4][col] = -1;
+
+                    // Try to move piece to target position if it's empty
+                    if (targetRow >= 0 && targetCol >= 0) {
+                        if (!board[targetRow]) board[targetRow] = [];
+
+                        if (board[targetRow][targetCol] === -1 || board[targetRow][targetCol] === undefined) {
+                            // Move the piece
+                            board[targetRow][targetCol] = piece;
+                            board[row][col] = -1;
                             moved = true;
-                            break;
                         }
                     }
                 }
             }
+
             return moved;
         }
-        
-        function transferGreenToBlue() {
-            let moved = false;
-            // Green wall bottom (row 4, cols 5-9) → Blue floor right edge (rows 5-9, col 4)
-            for (let greenCol = 5; greenCol < 10; greenCol++) {
-                if (!board[4]) continue;
-                
-                const blueRow = greenCol; // Green col 5→blue row 5, col 6→row 6, etc.
-                
-                // If Green has a piece at bottom, move it to Blue floor
-                if (board[4][greenCol] !== -1 && board[4][greenCol] !== undefined) {
-                    if (!board[blueRow]) board[blueRow] = [];
-                    
-                    // Place in column 4 (rightmost column of floor) if empty
-                    if (board[blueRow][4] === -1 || board[blueRow][4] === undefined) {
-                        board[blueRow][4] = board[4][greenCol];
-                        board[4][greenCol] = -1;
-                        moved = true;
-                    }
-                }
-            }
-            return moved;
-        }
-        
+
         function spawnNewPieces() {
             // Spawn at top of Red wall (row 0, cols 0-4)
             if (!board[0]) board[0] = [];
