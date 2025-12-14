@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>B2Ply v3 - Bytes To Points (with Hilbert & Morton)</title>
+    <title>B2Ply v4 - Bytes To Points (with PCA)</title>
     <style>
         body {
             margin: 0;
@@ -314,6 +314,7 @@
                 <option value="stereoA">Stereographic A</option>
                 <option value="stereoB">Stereographic B</option>
                 <option value="fibonacci">Fibonacci Sphere</option>
+                <option value="pca">PCA (Data-Driven)</option>
             </select>
         </div>
         <div class="control-group" id="quantizationGroup">
@@ -452,6 +453,9 @@
                         quantizationGroup.style.display = 'none';
                     } else if (currentProjection === 'fibonacci') {
                         projectionLabel.textContent = 'Fibonacci';
+                        quantizationGroup.style.display = 'none';
+                    } else if (currentProjection === 'pca') {
+                        projectionLabel.textContent = 'PCA';
                         quantizationGroup.style.display = 'none';
                     }
                     
@@ -712,6 +716,171 @@
             return projectedPoints;
         }
 
+        function calculatePCAProjection(points) {
+            const numPoints = points.length / 3;
+            const projectedPoints = new Float32Array(points.length);
+            
+            if (numPoints < 2) {
+                return projectedPoints;
+            }
+            
+            // Step 1: Calculate mean (centroid)
+            let meanX = 0, meanY = 0, meanZ = 0;
+            for (let i = 0; i < points.length; i += 3) {
+                meanX += points[i];
+                meanY += points[i + 1];
+                meanZ += points[i + 2];
+            }
+            meanX /= numPoints;
+            meanY /= numPoints;
+            meanZ /= numPoints;
+            
+            // Step 2: Calculate covariance matrix (3x3 symmetric)
+            // Cov = [xx, xy, xz]
+            //       [xy, yy, yz]
+            //       [xz, yz, zz]
+            let cxx = 0, cxy = 0, cxz = 0;
+            let cyy = 0, cyz = 0, czz = 0;
+            
+            for (let i = 0; i < points.length; i += 3) {
+                const dx = points[i] - meanX;
+                const dy = points[i + 1] - meanY;
+                const dz = points[i + 2] - meanZ;
+                
+                cxx += dx * dx;
+                cxy += dx * dy;
+                cxz += dx * dz;
+                cyy += dy * dy;
+                cyz += dy * dz;
+                czz += dz * dz;
+            }
+            
+            // Normalize by n-1 for sample covariance
+            const n = numPoints - 1;
+            cxx /= n; cxy /= n; cxz /= n;
+            cyy /= n; cyz /= n; czz /= n;
+            
+            // Step 3: Find eigenvectors using power iteration
+            // We need the two largest eigenvectors for 2D projection
+            const eigenvectors = computeTopTwoEigenvectors(cxx, cxy, cxz, cyy, cyz, czz);
+            
+            // Step 4: Project points onto the two principal components
+            let minU = Infinity, maxU = -Infinity;
+            let minV = Infinity, maxV = -Infinity;
+            
+            const projected2D = new Float32Array(numPoints * 2);
+            
+            for (let i = 0; i < numPoints; i++) {
+                const idx = i * 3;
+                const dx = points[idx] - meanX;
+                const dy = points[idx + 1] - meanY;
+                const dz = points[idx + 2] - meanZ;
+                
+                // Project onto first eigenvector (PC1)
+                const u = dx * eigenvectors.pc1[0] + dy * eigenvectors.pc1[1] + dz * eigenvectors.pc1[2];
+                // Project onto second eigenvector (PC2)
+                const v = dx * eigenvectors.pc2[0] + dy * eigenvectors.pc2[1] + dz * eigenvectors.pc2[2];
+                
+                projected2D[i * 2] = u;
+                projected2D[i * 2 + 1] = v;
+                
+                minU = Math.min(minU, u);
+                maxU = Math.max(maxU, u);
+                minV = Math.min(minV, v);
+                maxV = Math.max(maxV, v);
+            }
+            
+            // Step 5: Normalize to [-1, 1] range
+            const rangeU = maxU - minU || 1;
+            const rangeV = maxV - minV || 1;
+            const scale = Math.max(rangeU, rangeV) / 2;
+            
+            for (let i = 0; i < numPoints; i++) {
+                const idx = i * 3;
+                const u = projected2D[i * 2];
+                const v = projected2D[i * 2 + 1];
+                
+                projectedPoints[idx] = u / scale;
+                projectedPoints[idx + 1] = v / scale;
+                projectedPoints[idx + 2] = 0; // Flatten to z=0 plane
+            }
+            
+            return projectedPoints;
+        }
+
+        function computeTopTwoEigenvectors(cxx, cxy, cxz, cyy, cyz, czz) {
+            // Power iteration to find dominant eigenvector
+            // Then deflation to find second eigenvector
+            
+            const maxIterations = 100;
+            const tolerance = 1e-10;
+            
+            // Helper: multiply covariance matrix by vector
+            function matVecMul(vx, vy, vz) {
+                return [
+                    cxx * vx + cxy * vy + cxz * vz,
+                    cxy * vx + cyy * vy + cyz * vz,
+                    cxz * vx + cyz * vy + czz * vz
+                ];
+            }
+            
+            // Helper: normalize vector
+            function normalize(v) {
+                const len = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                if (len < 1e-10) return [1, 0, 0];
+                return [v[0] / len, v[1] / len, v[2] / len];
+            }
+            
+            // Find first eigenvector (largest eigenvalue)
+            let pc1 = [1, 0, 0]; // Initial guess
+            let eigenvalue1 = 0;
+            
+            for (let iter = 0; iter < maxIterations; iter++) {
+                const newVec = matVecMul(pc1[0], pc1[1], pc1[2]);
+                const newLen = Math.sqrt(newVec[0] * newVec[0] + newVec[1] * newVec[1] + newVec[2] * newVec[2]);
+                
+                if (Math.abs(newLen - eigenvalue1) < tolerance) break;
+                
+                eigenvalue1 = newLen;
+                pc1 = normalize(newVec);
+            }
+            
+            // Deflate the matrix: C' = C - λ1 * v1 * v1^T
+            const deflatedCxx = cxx - eigenvalue1 * pc1[0] * pc1[0];
+            const deflatedCxy = cxy - eigenvalue1 * pc1[0] * pc1[1];
+            const deflatedCxz = cxz - eigenvalue1 * pc1[0] * pc1[2];
+            const deflatedCyy = cyy - eigenvalue1 * pc1[1] * pc1[1];
+            const deflatedCyz = cyz - eigenvalue1 * pc1[1] * pc1[2];
+            const deflatedCzz = czz - eigenvalue1 * pc1[2] * pc1[2];
+            
+            // Helper for deflated matrix
+            function deflatedMatVecMul(vx, vy, vz) {
+                return [
+                    deflatedCxx * vx + deflatedCxy * vy + deflatedCxz * vz,
+                    deflatedCxy * vx + deflatedCyy * vy + deflatedCyz * vz,
+                    deflatedCxz * vx + deflatedCyz * vy + deflatedCzz * vz
+                ];
+            }
+            
+            // Find second eigenvector
+            // Start with vector orthogonal to pc1
+            let pc2 = Math.abs(pc1[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+            // Gram-Schmidt orthogonalization
+            const dot = pc2[0] * pc1[0] + pc2[1] * pc1[1] + pc2[2] * pc1[2];
+            pc2 = normalize([pc2[0] - dot * pc1[0], pc2[1] - dot * pc1[1], pc2[2] - dot * pc1[2]]);
+            
+            for (let iter = 0; iter < maxIterations; iter++) {
+                const newVec = deflatedMatVecMul(pc2[0], pc2[1], pc2[2]);
+                const newNorm = normalize(newVec);
+                
+                // Ensure orthogonality to pc1
+                const d = newNorm[0] * pc1[0] + newNorm[1] * pc1[1] + newNorm[2] * pc1[2];
+                pc2 = normalize([newNorm[0] - d * pc1[0], newNorm[1] - d * pc1[1], newNorm[2] - d * pc1[2]]);
+            }
+            
+            return { pc1, pc2 };
+        }
+
         function updateProjectedPositions(cloud) {
             const originalPositions = cloud.originalPositions;
             let projectedPositions;
@@ -728,6 +897,8 @@
                 projectedPositions = calculateStereographicProjection(originalPositions, 'B');
             } else if (currentProjection === 'fibonacci') {
                 projectedPositions = calculateFibonacciSphere(originalPositions);
+            } else if (currentProjection === 'pca') {
+                projectedPositions = calculatePCAProjection(originalPositions);
             }
             
             cloud.object.geometry.setAttribute('projectedPosition', new THREE.Float32BufferAttribute(projectedPositions, 3));
@@ -963,8 +1134,14 @@
         }
 
         function createPointCloud(buffer, fileName) {
+            const inputByteCount = buffer.length;
+            const inputTupleCount = Math.floor(inputByteCount / 3);
+            
             const rgbData = new Uint8Array(getUniqueTuples(buffer));
             const pointCount = Math.floor(rgbData.length / 3);
+            
+            console.log(`Importing "${fileName}": ${inputByteCount} bytes (${inputTupleCount} tuples) → ${pointCount} unique points`);
+            
             const vertices = new Float32Array(pointCount * 3);
 
             for (let i = 0; i < pointCount; i++) {
@@ -995,6 +1172,8 @@
                 projectedPositions = calculateStereographicProjection(vertices, 'B');
             } else if (currentProjection === 'fibonacci') {
                 projectedPositions = calculateFibonacciSphere(vertices);
+            } else if (currentProjection === 'pca') {
+                projectedPositions = calculatePCAProjection(vertices);
             }
 
             // Create the 2D thumbnail image
@@ -1227,16 +1406,20 @@
         }
 
         function generateBIN(pointCloud) {
-            const positions = pointCloud.geometry.getAttribute('position');
-            const pointCount = positions.count;
+            const originalPositions = pointCloud.geometry.getAttribute('originalPosition');
+            const projectedPositions = pointCloud.geometry.getAttribute('projectedPosition');
+            const pointCount = originalPositions.count;
+            
+            console.log(`Exporting BIN: ${pointCount} points, blendFactor: ${blendFactor}`);
             
             // Create binary data array: 3 bytes per point (x, y, z as signed 8-bit)
             const binaryData = new Int8Array(pointCount * 3);
             
             for (let i = 0; i < pointCount; i++) {
-                const x = positions.getX(i);
-                const y = positions.getY(i);
-                const z = positions.getZ(i);
+                // Interpolate between original and projected based on blendFactor
+                const x = originalPositions.getX(i) * (1 - blendFactor) + projectedPositions.getX(i) * blendFactor;
+                const y = originalPositions.getY(i) * (1 - blendFactor) + projectedPositions.getY(i) * blendFactor;
+                const z = originalPositions.getZ(i) * (1 - blendFactor) + projectedPositions.getZ(i) * blendFactor;
                 
                 const baseIndex = i * 3;
                 binaryData[baseIndex] = convertFloatToInt8(x);
@@ -1244,22 +1427,29 @@
                 binaryData[baseIndex + 2] = convertFloatToInt8(z);
             }
             
+            console.log(`BIN export complete: ${binaryData.byteLength} bytes`);
             return binaryData.buffer;
         }
 
         function generateCombinedBIN(clouds, totalPoints) {
+            console.log(`Exporting Combined BIN: ${totalPoints} points, blendFactor: ${blendFactor}`);
+            
             // Create binary data array for all visible clouds
             const binaryData = new Int8Array(totalPoints * 3);
             let currentIndex = 0;
             
             for (const cloud of clouds) {
                 if (cloud.object.visible) {
-                    const positions = cloud.object.geometry.getAttribute('position');
+                    const originalPositions = cloud.object.geometry.getAttribute('originalPosition');
+                    const projectedPositions = cloud.object.geometry.getAttribute('projectedPosition');
                     
-                    for (let i = 0; i < positions.count; i++) {
-                        const x = positions.getX(i);
-                        const y = positions.getY(i);
-                        const z = positions.getZ(i);
+                    console.log(`  - ${cloud.name}: ${originalPositions.count} points`);
+                    
+                    for (let i = 0; i < originalPositions.count; i++) {
+                        // Interpolate between original and projected based on blendFactor
+                        const x = originalPositions.getX(i) * (1 - blendFactor) + projectedPositions.getX(i) * blendFactor;
+                        const y = originalPositions.getY(i) * (1 - blendFactor) + projectedPositions.getY(i) * blendFactor;
+                        const z = originalPositions.getZ(i) * (1 - blendFactor) + projectedPositions.getZ(i) * blendFactor;
                         
                         const baseIndex = currentIndex * 3;
                         binaryData[baseIndex] = convertFloatToInt8(x);
@@ -1271,18 +1461,20 @@
                 }
             }
             
+            console.log(`Combined BIN export complete: ${binaryData.byteLength} bytes (${currentIndex} points written)`);
             return binaryData.buffer;
         }
 
         function generatePLY(pointCloud) {
-            const positions = pointCloud.geometry.getAttribute('position');
+            const originalPositions = pointCloud.geometry.getAttribute('originalPosition');
+            const projectedPositions = pointCloud.geometry.getAttribute('projectedPosition');
             const colors = pointCloud.geometry.getAttribute('color');
             const vertices = [];
 
             // Header
             let ply = 'ply\n';
             ply += 'format ascii 1.0\n';
-            ply += `element vertex ${positions.count}\n`;
+            ply += `element vertex ${originalPositions.count}\n`;
             ply += 'property float x\n';
             ply += 'property float y\n';
             ply += 'property float z\n';
@@ -1292,10 +1484,11 @@
             ply += 'end_header\n';
 
             // Vertex data
-            for (let i = 0; i < positions.count; i++) {
-                const x = positions.getX(i);
-                const y = positions.getY(i);
-                const z = positions.getZ(i);
+            for (let i = 0; i < originalPositions.count; i++) {
+                // Interpolate between original and projected based on blendFactor
+                const x = originalPositions.getX(i) * (1 - blendFactor) + projectedPositions.getX(i) * blendFactor;
+                const y = originalPositions.getY(i) * (1 - blendFactor) + projectedPositions.getY(i) * blendFactor;
+                const z = originalPositions.getZ(i) * (1 - blendFactor) + projectedPositions.getZ(i) * blendFactor;
                 const r = colors.getX(i);
                 const g = colors.getY(i);
                 const b = colors.getZ(i);
@@ -1322,13 +1515,15 @@
             // Add vertex data from all clouds
             for (const cloud of clouds) {
                 if (cloud.object.visible) {
-                    const positions = cloud.object.geometry.getAttribute('position');
+                    const originalPositions = cloud.object.geometry.getAttribute('originalPosition');
+                    const projectedPositions = cloud.object.geometry.getAttribute('projectedPosition');
                     const colors = cloud.object.geometry.getAttribute('color');
 
-                    for (let i = 0; i < positions.count; i++) {
-                        const x = positions.getX(i);
-                        const y = positions.getY(i);
-                        const z = positions.getZ(i);
+                    for (let i = 0; i < originalPositions.count; i++) {
+                        // Interpolate between original and projected based on blendFactor
+                        const x = originalPositions.getX(i) * (1 - blendFactor) + projectedPositions.getX(i) * blendFactor;
+                        const y = originalPositions.getY(i) * (1 - blendFactor) + projectedPositions.getY(i) * blendFactor;
+                        const z = originalPositions.getZ(i) * (1 - blendFactor) + projectedPositions.getZ(i) * blendFactor;
                         const r = colors.getX(i);
                         const g = colors.getY(i);
                         const b = colors.getZ(i);
