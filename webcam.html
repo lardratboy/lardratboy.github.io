@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Webcam Texture</title>
+    <style>
+        body { margin: 0; }
+        canvas { display: block; }
+        #error { 
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: red;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="error">Failed to access webcam</div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128/examples/js/controls/OrbitControls.js"></script>
+    <script>
+        const vertexShader = `
+            varying vec3 vColor;
+            uniform sampler2D tDiffuse;
+            uniform float displacementScale;
+            uniform float pointSize;
+
+            void main() {
+                vec4 t = texture2D(tDiffuse, uv);
+                vec3 displaced = position + normal * t.rgb * displacementScale;
+                vColor = t.rgb;
+                vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
+                gl_PointSize = 4.5;//pointSize;
+                gl_Position = projectionMatrix * mvPosition;
+            }
+        `;
+
+        const fragmentShader = `
+            varying vec3 vColor;
+
+            void main() {
+                gl_FragColor = vec4(vColor,1.0);
+            }
+        `;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const scene = new THREE.Scene();
+            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            const renderer = new THREE.WebGLRenderer();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+
+            const aspectRatio = 16.0/9.0;
+            const geometry = new THREE.PlaneGeometry(aspectRatio * 20, 20, 1000, 1000);
+            const video = document.createElement('video');
+            video.playsInline = true;
+
+            const texture = new THREE.VideoTexture(video);
+            const material = new THREE.ShaderMaterial({
+                                size: 0.02,
+                                uniforms: {
+                                    tDiffuse: { value: texture },
+                                    displacementScale: { value: 4.0 }
+                                },
+                                vertexShader,
+                                fragmentShader,
+                                side: THREE.DoubleSide
+                            });
+            points = new THREE.Points(geometry, material);
+            scene.add(points);
+          
+            camera.position.z = 10;
+
+            let angle = 0;
+            const radius = 10;
+            const speed = 0.01;
+
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(stream => {
+                    video.srcObject = stream;
+                    video.play();
+                })
+                .catch(err => {
+                    console.error('Webcam error:', err);
+                    document.getElementById('error').style.display = 'block';
+                });
+
+            function animate() {
+                requestAnimationFrame(animate);
+                controls.update();
+                renderer.render(scene, camera);
+            }
+            animate();
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        });
+    </script>
+</body>
+</html>
