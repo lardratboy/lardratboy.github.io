@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Orthonormal Basis Histogram — Hierarchical Color Projection</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; }
+        canvas { width: 100%; height: 100%; }
+
+        #dropZone {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 1000; display: none; background: rgba(0,0,0,0.7);
+            color: white; justify-content: center; align-items: center;
+            font-family: Arial, sans-serif; font-size: 24px;
+        }
+
+        #instructions {
+            position: fixed; bottom: 80px; left: 20px; color: #ccc;
+            font-family: Arial, sans-serif; background: rgba(0,0,0,0.6);
+            padding: 10px 14px; border-radius: 5px; font-size: 13px;
+            line-height: 1.6; max-width: 380px;
+        }
+        #instructions b { color: #7af; }
+
+        #objectList {
+            position: fixed; top: 20px; right: 20px; color: white;
+            font-family: Arial, sans-serif; background: rgba(0,0,0,0.6);
+            padding: 15px; border-radius: 5px; max-height: 80vh; overflow-y: auto;
+            min-width: 200px;
+        }
+        .object-item {
+            margin: 5px 0; padding: 5px; background: rgba(255,255,255,0.08);
+            border-radius: 3px; display: flex; justify-content: space-between;
+            align-items: center; gap: 10px;
+        }
+        .object-info { flex-grow: 1; font-size: 13px; }
+        .delete-btn {
+            background: #ff4444; border: none; color: white;
+            padding: 2px 6px; border-radius: 3px; cursor: pointer;
+        }
+        .delete-btn:hover { background: #ff6666; }
+        .visibility-btn {
+            background: none; border: none; color: white;
+            cursor: pointer; padding: 2px 6px;
+        }
+        .thumbnail {
+            width: 44px; height: 44px; background-color: #222;
+            border: 1px solid #555; cursor: pointer; object-fit: contain;
+        }
+
+        #gridControls {
+            position: fixed; top: 20px; left: 20px; color: white;
+            font-family: Arial, sans-serif; background: rgba(0,0,0,0.6);
+            padding: 15px; border-radius: 5px; font-size: 13px;
+        }
+        #gridControls label { display: block; margin: 4px 0; cursor: pointer; }
+
+        #controlPanel {
+            position: fixed; bottom: 0; left: 0; right: 0;
+            background: rgba(0,0,0,0.85); color: white;
+            font-family: Arial, sans-serif; padding: 12px 20px;
+            display: flex; align-items: center; gap: 22px;
+            justify-content: center; flex-wrap: wrap;
+        }
+        .control-group {
+            display: flex; align-items: center; gap: 8px;
+        }
+        .control-label { font-size: 13px; min-width: 60px; }
+        select, input[type=range] {
+            background: #333; color: white; border: 1px solid #555;
+            padding: 3px 6px; border-radius: 3px;
+        }
+        .range-val { font-size: 12px; color: #aaa; min-width: 35px; text-align: center; }
+
+        #progressContainer {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            background: rgba(0,0,0,0.92); padding: 24px; border-radius: 10px;
+            display: none; z-index: 1500; color: white; font-family: Arial, sans-serif;
+        }
+        #progressBar {
+            width: 300px; height: 18px; background: #333;
+            border: 1px solid #555; border-radius: 10px; overflow: hidden; margin: 10px 0;
+        }
+        #progressFill {
+            height: 100%; background: linear-gradient(90deg, #4CAF50, #45a049);
+            width: 0%; transition: width 0.3s ease;
+        }
+        #progressText { text-align: center; font-size: 14px; }
+        #progressDetails { text-align: center; font-size: 12px; color: #aaa; }
+
+        #imagePopup {
+            display: none; position: fixed; left: 0; top: 0; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.85); z-index: 2000;
+            align-items: center; justify-content: center; flex-direction: column;
+        }
+        #popupImage { max-width: 90%; max-height: 80%; border: 2px solid white; background: #222; }
+        #popupCaption { color: white; margin-top: 10px; font-family: Arial, sans-serif; }
+        #closePopup { position: absolute; top: 20px; right: 30px; font-size: 30px; color: white; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div id="dropZone">Drop images here</div>
+
+    <div id="instructions">
+        <b>Orthonormal Basis Histogram</b><br>
+        Drop / paste images to analyze.<br>
+        Layer 1 (coarse bits) → tiled 2D + histogram lines<br>
+        Layer 2 (fine bits) → sub-histograms at each tip,<br>
+        &nbsp;&nbsp;oriented by the coarse line's orthonormal basis.<br><br>
+        Left-drag to rotate · Scroll to zoom
+    </div>
+
+    <input type="file" id="fileInput" multiple accept="image/*"
+           style="position:absolute;top:10px;left:10px;z-index:100;" />
+
+    <div id="gridControls">
+        <label><input type="checkbox" checked onchange="toggleGrid()"> Base Grid</label>
+        <label><input type="checkbox" checked onchange="toggleLayer(1)"> Layer 1 (Coarse)</label>
+        <label><input type="checkbox" checked onchange="toggleLayer(2)"> Layer 2 (Fine)</label>
+        <label><input type="checkbox" checked onchange="toggleValueColors()"> Value Colors</label>
+        <label><input type="checkbox" checked onchange="toggleAutoLOD()"> Auto LOD</label>
+    </div>
+
+    <div id="objectList">
+        <h3 style="margin-top:0">Loaded Images</h3>
+        <div id="objectItems"></div>
+    </div>
+
+    <div id="controlPanel">
+        <div class="control-group">
+            <span class="control-label">Coarse:</span>
+            <select id="coarseBitsSelect">
+                <option value="2">2-bit (4³)</option>
+                <option value="3">3-bit (8³)</option>
+                <option value="4" selected>4-bit (16³)</option>
+                <option value="5">5-bit (32³)</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <span class="control-label">Fine:</span>
+            <select id="fineBitsSelect">
+                <option value="2">2-bit (4³)</option>
+                <option value="3">3-bit (8³)</option>
+                <option value="4" selected>4-bit (16³)</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <span class="control-label">Sub-scale:</span>
+            <input type="range" id="subScaleSlider" min="5" max="200" value="80" />
+            <span class="range-val" id="subScaleVal">0.80</span>
+        </div>
+        <div class="control-group">
+            <span class="control-label">Max pts:</span>
+            <select id="maxPointsSelect">
+                <option value="50000">50k</option>
+                <option value="200000" selected>200k</option>
+                <option value="500000">500k</option>
+                <option value="-1">Unlimited</option>
+            </select>
+        </div>
+    </div>
+
+    <div id="progressContainer">
+        <div id="progressText">Processing...</div>
+        <div id="progressBar"><div id="progressFill"></div></div>
+        <div id="progressDetails"></div>
+    </div>
+
+    <div id="imagePopup">
+        <span id="closePopup">&times;</span>
+        <img id="popupImage">
+        <div id="popupCaption"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128/examples/js/controls/OrbitControls.js"></script>
+    <script>
+    /* ── Global state ──────────────────────────────────────── */
+    let scene, camera, renderer, controls;
+    let pointClouds = new Map();
+    let objectCounter = 0;
+    let baseGrid;
+
+    let coarseBits = 4;
+    let fineBits   = 4;
+    let subScale   = 0.80;
+    let maxPoints  = 200000;
+    let showLayer1 = true;
+    let showLayer2 = true;
+    let useValueColors = true;
+    let autoLOD = true;
+
+    /* ── Hierarchical Color Counter ────────────────────────── */
+    class HierarchicalColorCounter {
+        constructor(cBits, fBits) {
+            this.cBits = cBits;
+            this.fBits = fBits;
+            this.cRange = 1 << cBits;
+            this.fRange = 1 << fBits;
+            this.cMask  = this.cRange - 1;
+            this.fMask  = this.fRange - 1;
+
+            this.coarseCounts = new Map();   // coarseKey → count
+            this.fineCounts   = new Map();   // coarseKey → Map(fineKey → count)
+            this.maxCoarse    = 0;
+            this.maxFine      = new Map();   // coarseKey → maxFineCount
+        }
+
+        increment(r, g, b) {
+            const cr = (r >> (8 - this.cBits)) & this.cMask;
+            const cg = (g >> (8 - this.cBits)) & this.cMask;
+            const cb = (b >> (8 - this.cBits)) & this.cMask;
+
+            const fr = (r >> (8 - this.cBits - this.fBits)) & this.fMask;
+            const fg = (g >> (8 - this.cBits - this.fBits)) & this.fMask;
+            const fb = (b >> (8 - this.cBits - this.fBits)) & this.fMask;
+
+            const cKey = (cb << (this.cBits * 2)) | (cg << this.cBits) | cr;
+            const fKey = (fb << (this.fBits * 2)) | (fg << this.fBits) | fr;
+
+            const cc = (this.coarseCounts.get(cKey) || 0) + 1;
+            this.coarseCounts.set(cKey, cc);
+            if (cc > this.maxCoarse) this.maxCoarse = cc;
+
+            if (!this.fineCounts.has(cKey)) {
+                this.fineCounts.set(cKey, new Map());
+                this.maxFine.set(cKey, 0);
+            }
+            const fm = this.fineCounts.get(cKey);
+            const fc = (fm.get(fKey) || 0) + 1;
+            fm.set(fKey, fc);
+            if (fc > this.maxFine.get(cKey)) this.maxFine.set(cKey, fc);
+
+            return cc === 1;
+        }
+
+        coarseSize() { return this.coarseCounts.size; }
+
+        *coarseEntries() {
+            for (const [key, count] of this.coarseCounts) {
+                const cr = key & this.cMask;
+                const cg = (key >> this.cBits) & this.cMask;
+                const cb = key >> (this.cBits * 2);
+                yield { cr, cg, cb, count, key };
+            }
+        }
+
+        *fineEntries(coarseKey) {
+            const fm = this.fineCounts.get(coarseKey);
+            if (!fm) return;
+            for (const [key, count] of fm) {
+                const fr = key & this.fMask;
+                const fg = (key >> this.fBits) & this.fMask;
+                const fb = key >> (this.fBits * 2);
+                yield { fr, fg, fb, count, key };
+            }
+        }
+
+        fineSize(coarseKey) {
+            const fm = this.fineCounts.get(coarseKey);
+            return fm ? fm.size : 0;
+        }
+    }
+
+    /* ── Progress UI ───────────────────────────────────────── */
+    function updateProgress(pct, text = 'Processing...', details = '') {
+        const c = document.getElementById('progressContainer');
+        const f = document.getElementById('progressFill');
+        const t = document.getElementById('progressText');
+        const d = document.getElementById('progressDetails');
+        if (pct >= 0) {
+            c.style.display = 'block';
+            f.style.width = pct + '%';
+            t.textContent = text;
+            d.textContent = details;
+        } else {
+            c.style.display = 'none';
+        }
+    }
+
+    /* ── Scene init ────────────────────────────────────────── */
+    function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x111111);
+
+        camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.01, 500);
+        camera.position.set(1.8, 1.8, 1.8);
+        camera.lookAt(0, 0, 0);
+
+        renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setSize(innerWidth, innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        controls = new THREE.OrbitControls(camera, renderer.domElement);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+        setupGrid();
+        setupDropZone();
+        setupImagePopup();
+        setupControls();
+        animate();
+    }
+
+    function setupGrid() {
+        baseGrid = new THREE.GridHelper(2, 4, 0x0044aa, 0x003366);
+        baseGrid.rotation.x = Math.PI / 2;
+        scene.add(baseGrid);
+    }
+
+    /* ── Orthonormal basis from a direction vector ─────────── */
+    function buildBasis(dir) {
+        const up = dir.clone().normalize();
+        let arb = new THREE.Vector3(1, 0, 0);
+        if (Math.abs(up.dot(arb)) > 0.9) arb.set(0, 1, 0);
+        const right   = new THREE.Vector3().crossVectors(up, arb).normalize();
+        const forward = new THREE.Vector3().crossVectors(right, up).normalize();
+        return { right, forward, up };
+    }
+
+    /* ── Tiled projection helpers ──────────────────────────── */
+    function tiledCoords(qr, qg, qb, qRange) {
+        const sqrtQ = Math.floor(Math.sqrt(qRange));
+        const maxTC = Math.max(sqrtQ * qRange + qRange - 1, 1);
+        const col = qb % sqrtQ;
+        const row = Math.floor(qb / sqrtQ);
+        const tx = col * qRange + qr;
+        const ty = row * qRange + qg;
+        return {
+            x: (tx / maxTC) * 2 - 1,
+            y: (ty / maxTC) * 2 - 1
+        };
+    }
+
+    /* ── Main processing pipeline ──────────────────────────── */
+    async function processImageData(buffer, fileName) {
+        const view = new DataView(buffer instanceof ArrayBuffer ? buffer : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
+        const maxTuples = Math.floor(view.byteLength / 3);
+
+        const counter = new HierarchicalColorCounter(coarseBits, fineBits);
+        updateProgress(0, 'Counting colors...', '');
+
+        const CHUNK = 200000;
+        let uniqueCoarse = 0;
+        for (let s = 0; s < maxTuples; s += CHUNK) {
+            const end = Math.min(s + CHUNK, maxTuples);
+            for (let i = s; i < end; i++) {
+                const off = i * 3;
+                if (counter.increment(view.getUint8(off), view.getUint8(off+1), view.getUint8(off+2)))
+                    uniqueCoarse++;
+            }
+            if (s % (CHUNK * 5) === 0) {
+                updateProgress(Math.round(s / maxTuples * 40), 'Counting colors...',
+                    `${uniqueCoarse.toLocaleString()} coarse cells`);
+                await new Promise(r => setTimeout(r, 1));
+            }
+        }
+        console.log(`${fileName}: ${uniqueCoarse} coarse cells, maxCoarse=${counter.maxCoarse}`);
+
+        /* ── Build Layer 1: coarse lines ──────────────────── */
+        updateProgress(40, 'Building Layer 1...', '');
+        const coarseEntries = Array.from(counter.coarseEntries());
+        const cRange = counter.cRange;
+        const maxLogC = Math.log(counter.maxCoarse) || 1;
+        const lineCount1 = coarseEntries.length;
+
+        const pos1 = new Float32Array(lineCount1 * 6);
+        const col1 = new Float32Array(lineCount1 * 6);
+        const coarseHeights = new Map(); // coarseKey → height
+        const coarseBases   = new Map(); // coarseKey → {x,y}
+
+        for (let i = 0; i < lineCount1; i++) {
+            const { cr, cg, cb, count, key } = coarseEntries[i];
+            const tc = tiledCoords(cr, cg, cb, cRange);
+            const h  = (Math.log(count) / maxLogC) * 0.5;
+
+            coarseHeights.set(key, h);
+            coarseBases.set(key, tc);
+
+            const idx = i * 6;
+            pos1[idx]   = tc.x; pos1[idx+1] = tc.y; pos1[idx+2] = 0;
+            pos1[idx+3] = tc.x; pos1[idx+4] = tc.y; pos1[idx+5] = h;
+
+            let r, g, b;
+            if (useValueColors) {
+                r = cr / (cRange - 1);
+                g = cg / (cRange - 1);
+                b = cb / (cRange - 1);
+            } else {
+                const t = h / 0.5;
+                r = t; g = 0.2; b = 1 - t;
+            }
+            col1[idx] = r; col1[idx+1] = g; col1[idx+2] = b;
+            col1[idx+3] = r; col1[idx+4] = g; col1[idx+5] = b;
+        }
+
+        /* ── Build Layer 2: fine sub-histograms ───────────── */
+        updateProgress(60, 'Building Layer 2...', '');
+
+        // Determine how many fine lines we can afford
+        let totalFineLines = 0;
+        for (const { key } of coarseEntries) totalFineLines += counter.fineSize(key);
+
+        const maxFineLines = autoLOD ? Math.min(totalFineLines, Math.max(maxPoints, 100000)) : totalFineLines;
+
+        // Sort coarse cells by count (highest first) for LOD priority
+        const sortedCoarse = [...coarseEntries].sort((a, b) => b.count - a.count);
+
+        // Compute sub-cell spacing: distance between adjacent coarse cells in tiled space
+        const sqrtCRange = Math.floor(Math.sqrt(cRange));
+        const maxTiledC  = Math.max(sqrtCRange * cRange + cRange - 1, 1);
+        const cellSpacing = 2 / maxTiledC; // normalized spacing of one coarse cell
+        const baseSubSize = cellSpacing * subScale; // scale of each sub-histogram tile
+
+        const fRange = counter.fRange;
+        const sqrtFRange = Math.floor(Math.sqrt(fRange));
+        const maxTiledF  = Math.max(sqrtFRange * fRange + fRange - 1, 1);
+
+        let fineLinesBudget = maxFineLines;
+        const pos2Chunks = [];
+        const col2Chunks = [];
+        let builtFineLines = 0;
+
+        for (let ci = 0; ci < sortedCoarse.length && fineLinesBudget > 0; ci++) {
+            const { cr: ccr, cg: ccg, cb: ccb, count: ccount, key: cKey } = sortedCoarse[ci];
+            const fSize = counter.fineSize(cKey);
+            if (fSize === 0) continue;
+
+            const base = coarseBases.get(cKey);
+            const height = coarseHeights.get(cKey);
+            if (!base || height === undefined) continue;
+
+            const maxFineC = counter.maxFine.get(cKey) || 1;
+            const maxLogF  = Math.log(maxFineC) || 1;
+
+            // Tip of coarse histogram line
+            const tipX = base.x;
+            const tipY = base.y;
+            const tipZ = height;
+
+            // Build orthonormal basis from the coarse line direction
+            // The coarse line goes from (base.x, base.y, 0) to (base.x, base.y, height)
+            // Direction is (0, 0, height) → normalized to (0, 0, 1) always for vertical lines
+            // But we scale the sub-projection by height, giving size-proportional sub-histograms
+            const lineDir = new THREE.Vector3(0, 0, Math.max(height, 0.001));
+            const basis = buildBasis(lineDir);
+
+            // Scale: sub-histogram fits within baseSubSize, proportional to coarse height
+            const scale = baseSubSize * (0.3 + 0.7 * (height / 0.5));
+
+            const linesToDraw = Math.min(fSize, fineLinesBudget);
+            const fEntries = Array.from(counter.fineEntries(cKey));
+            // Sort fine by count for LOD
+            if (linesToDraw < fSize) fEntries.sort((a, b) => b.count - a.count);
+
+            const fp = new Float32Array(linesToDraw * 6);
+            const fc = new Float32Array(linesToDraw * 6);
+
+            for (let fi = 0; fi < linesToDraw; fi++) {
+                const { fr, fg, fb, count: fcount } = fEntries[fi];
+
+                // Fine tiled coordinates (local, in [-1, 1])
+                const fCol = fb % sqrtFRange;
+                const fRow = Math.floor(fb / sqrtFRange);
+                const ftx = fCol * fRange + fr;
+                const fty = fRow * fRange + fg;
+                const localX = (ftx / maxTiledF) * 2 - 1;
+                const localY = (fty / maxTiledF) * 2 - 1;
+
+                // Fine histogram height (along basis.up)
+                const fh = (Math.log(fcount) / maxLogF) * scale * 0.5;
+
+                // Transform local coords into world via orthonormal basis
+                // Base of fine line: tip + scale*(localX*right + localY*forward)
+                const bx = tipX + scale * (localX * basis.right.x + localY * basis.forward.x);
+                const by = tipY + scale * (localX * basis.right.y + localY * basis.forward.y);
+                const bz = tipZ + scale * (localX * basis.right.z + localY * basis.forward.z);
+
+                // Tip of fine line: base + fh * basis.up
+                const ex = bx + fh * basis.up.x;
+                const ey = by + fh * basis.up.y;
+                const ez = bz + fh * basis.up.z;
+
+                const idx = fi * 6;
+                fp[idx]   = bx; fp[idx+1] = by; fp[idx+2] = bz;
+                fp[idx+3] = ex; fp[idx+4] = ey; fp[idx+5] = ez;
+
+                let r, g, b;
+                if (useValueColors) {
+                    // Blend coarse + fine color
+                    const cNorm = v => v / (cRange - 1);
+                    const fNorm = v => v / (fRange - 1);
+                    r = cNorm(ccr) * 0.5 + fNorm(fr) * 0.5;
+                    g = cNorm(ccg) * 0.5 + fNorm(fg) * 0.5;
+                    b = cNorm(ccb) * 0.5 + fNorm(fb) * 0.5;
+                } else {
+                    const t = fh / (scale * 0.5);
+                    r = t; g = 0.4; b = 1 - t;
+                }
+                fc[idx] = r; fc[idx+1] = g; fc[idx+2] = b;
+                fc[idx+3] = r; fc[idx+4] = g; fc[idx+5] = b;
+            }
+
+            pos2Chunks.push(fp);
+            col2Chunks.push(fc);
+            fineLinesBudget -= linesToDraw;
+            builtFineLines  += linesToDraw;
+
+            if (ci % 200 === 0) {
+                const pct = 60 + Math.round((ci / sortedCoarse.length) * 35);
+                updateProgress(pct, 'Building Layer 2...',
+                    `${builtFineLines.toLocaleString()} fine lines`);
+                await new Promise(r => setTimeout(r, 1));
+            }
+        }
+
+        // Merge fine chunks
+        const totalF = builtFineLines * 6;
+        const pos2 = new Float32Array(totalF);
+        const col2 = new Float32Array(totalF);
+        let offset = 0;
+        for (let i = 0; i < pos2Chunks.length; i++) {
+            pos2.set(pos2Chunks[i], offset);
+            col2.set(col2Chunks[i], offset);
+            offset += pos2Chunks[i].length;
+        }
+
+        updateProgress(98, 'Creating meshes...', '');
+
+        /* ── Create THREE objects ─────────────────────────── */
+        const lineMat = t => new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 1, transparent: t, opacity: t ? 0.7 : 1 });
+
+        // Layer 1
+        const geom1 = new THREE.BufferGeometry();
+        geom1.setAttribute('position', new THREE.Float32BufferAttribute(pos1, 3));
+        geom1.setAttribute('color',    new THREE.Float32BufferAttribute(col1, 3));
+        const layer1 = new THREE.LineSegments(geom1, lineMat(false));
+        layer1.visible = showLayer1;
+
+        // Layer 2
+        const geom2 = new THREE.BufferGeometry();
+        geom2.setAttribute('position', new THREE.Float32BufferAttribute(pos2, 3));
+        geom2.setAttribute('color',    new THREE.Float32BufferAttribute(col2, 3));
+        const layer2 = new THREE.LineSegments(geom2, lineMat(false));
+        layer2.visible = showLayer2;
+
+        scene.add(layer1);
+        scene.add(layer2);
+
+        // Thumbnail
+        const thumbnail = createThumbnail(buffer);
+
+        const id = `cloud_${objectCounter++}`;
+        pointClouds.set(id, {
+            layer1, layer2,
+            name: fileName || 'unknown',
+            coarseCount: lineCount1,
+            fineCount: builtFineLines,
+            thumbnail,
+            originalData: buffer,
+            counter
+        });
+
+        updateObjectList();
+        updateProgress(100, 'Complete!',
+            `${lineCount1.toLocaleString()} coarse · ${builtFineLines.toLocaleString()} fine lines`);
+        setTimeout(() => updateProgress(-1), 1200);
+
+        console.log(`${fileName}: ${lineCount1} coarse, ${builtFineLines} fine lines`);
+    }
+
+    /* ── Thumbnail helper ──────────────────────────────────── */
+    function createThumbnail(buffer) {
+        const bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+        const pc = Math.floor(bytes.length / 3);
+        const side = Math.ceil(Math.sqrt(pc));
+        const c = document.createElement('canvas');
+        c.width = side; c.height = side;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = 'black'; ctx.fillRect(0, 0, side, side);
+        const id = ctx.createImageData(side, side);
+        const d = id.data; d.fill(0);
+        for (let i = 0; i < pc && i < side * side; i++) {
+            const px = (Math.floor(i / side) * side + (i % side)) * 4;
+            const ri = i * 3;
+            d[px] = bytes[ri]; d[px+1] = bytes[ri+1]; d[px+2] = bytes[ri+2]; d[px+3] = 255;
+        }
+        ctx.putImageData(id, 0, 0);
+        return { dataUrl: c.toDataURL('image/png'), width: side, height: side };
+    }
+
+    /* ── Regenerate everything ─────────────────────────────── */
+    function regenerateAll() {
+        const saved = [];
+        pointClouds.forEach((cloud, id) => {
+            saved.push({ data: cloud.originalData, name: cloud.name });
+            scene.remove(cloud.layer1);
+            scene.remove(cloud.layer2);
+        });
+        pointClouds.clear();
+        objectCounter = 0;
+        saved.forEach(s => processImageData(s.data, s.name));
+    }
+
+    /* ── Controls setup ────────────────────────────────────── */
+    function setupControls() {
+        document.getElementById('coarseBitsSelect').addEventListener('change', e => {
+            coarseBits = parseInt(e.target.value);
+            clampFineBits();
+            regenerateAll();
+        });
+        document.getElementById('fineBitsSelect').addEventListener('change', e => {
+            fineBits = parseInt(e.target.value);
+            clampFineBits();
+            regenerateAll();
+        });
+        document.getElementById('subScaleSlider').addEventListener('input', e => {
+            subScale = parseInt(e.target.value) / 100;
+            document.getElementById('subScaleVal').textContent = subScale.toFixed(2);
+            regenerateAll();
+        });
+        document.getElementById('maxPointsSelect').addEventListener('change', e => {
+            maxPoints = parseInt(e.target.value);
+            regenerateAll();
+        });
+    }
+
+    function clampFineBits() {
+        const max = 8 - coarseBits;
+        if (fineBits > max) {
+            fineBits = Math.max(1, max);
+            document.getElementById('fineBitsSelect').value = fineBits;
+        }
+    }
+
+    /* ── Toggles ───────────────────────────────────────────── */
+    function toggleGrid() { baseGrid.visible = !baseGrid.visible; }
+
+    function toggleLayer(n) {
+        if (n === 1) { showLayer1 = !showLayer1; pointClouds.forEach(c => c.layer1.visible = showLayer1); }
+        if (n === 2) { showLayer2 = !showLayer2; pointClouds.forEach(c => c.layer2.visible = showLayer2); }
+    }
+
+    function toggleValueColors() { useValueColors = !useValueColors; regenerateAll(); }
+    function toggleAutoLOD() { autoLOD = !autoLOD; }
+
+    /* ── Object list UI ────────────────────────────────────── */
+    function updateObjectList() {
+        const container = document.getElementById('objectItems');
+        container.innerHTML = '';
+        pointClouds.forEach((cloud, id) => {
+            const item = document.createElement('div');
+            item.className = 'object-item';
+
+            if (cloud.thumbnail) {
+                const thumb = document.createElement('img');
+                thumb.className = 'thumbnail';
+                thumb.src = cloud.thumbnail.dataUrl;
+                thumb.title = 'Click to view';
+                thumb.onclick = () => showImagePopup(id);
+                item.appendChild(thumb);
+            }
+
+            const info = document.createElement('div');
+            info.className = 'object-info';
+            info.innerHTML = `${cloud.name}<br><small>${cloud.coarseCount.toLocaleString()} coarse · ${cloud.fineCount.toLocaleString()} fine</small>`;
+            item.appendChild(info);
+
+            const vis = document.createElement('button');
+            vis.className = 'visibility-btn';
+            vis.innerHTML = cloud.layer1.visible ? '👁️' : '👁️‍🗨️';
+            vis.onclick = () => {
+                const v = !cloud.layer1.visible;
+                cloud.layer1.visible = v && showLayer1;
+                cloud.layer2.visible = v && showLayer2;
+                updateObjectList();
+            };
+            item.appendChild(vis);
+
+            const del = document.createElement('button');
+            del.className = 'delete-btn';
+            del.textContent = '×';
+            del.onclick = () => {
+                scene.remove(cloud.layer1);
+                scene.remove(cloud.layer2);
+                pointClouds.delete(id);
+                updateObjectList();
+            };
+            item.appendChild(del);
+
+            container.appendChild(item);
+        });
+    }
+
+    /* ── Image popup ───────────────────────────────────────── */
+    function setupImagePopup() {
+        const popup = document.getElementById('imagePopup');
+        document.getElementById('closePopup').onclick = () => popup.style.display = 'none';
+        popup.onclick = e => { if (e.target === popup) popup.style.display = 'none'; };
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') popup.style.display = 'none'; });
+    }
+
+    function showImagePopup(id) {
+        const cloud = pointClouds.get(id);
+        if (!cloud || !cloud.thumbnail) return;
+        document.getElementById('popupImage').src = cloud.thumbnail.dataUrl;
+        document.getElementById('popupCaption').textContent =
+            `${cloud.name}: ${cloud.coarseCount.toLocaleString()} coarse · ${cloud.fineCount.toLocaleString()} fine (${cloud.thumbnail.width}×${cloud.thumbnail.height})`;
+        document.getElementById('imagePopup').style.display = 'flex';
+    }
+
+    /* ── File handling (drag, drop, paste, input) ──────────── */
+    function removeAlpha(canvas, data) {
+        const n = canvas.width * canvas.height;
+        const rgb = new Uint8ClampedArray(n * 3);
+        for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
+            rgb[j] = data[i]; rgb[j+1] = data[i+1]; rgb[j+2] = data[i+2];
+        }
+        return rgb;
+    }
+
+    function handleFiles(files) {
+        for (const file of files) {
+            if (!file.type.startsWith('image/')) continue;
+            const reader = new FileReader();
+            reader.onload = e => {
+                const img = new Image();
+                img.onload = () => {
+                    const c = document.createElement('canvas');
+                    const ctx = c.getContext('2d');
+                    c.width = img.width; c.height = img.height;
+                    ctx.drawImage(img, 0, 0);
+                    const id = ctx.getImageData(0, 0, c.width, c.height);
+                    processImageData(removeAlpha(c, id.data), file.name);
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+    }
+
+    function setupDropZone() {
+        const dz = document.getElementById('dropZone');
+        document.addEventListener('dragenter', e => { e.preventDefault(); dz.style.display = 'flex'; });
+        dz.addEventListener('dragleave', e => { e.preventDefault(); dz.style.display = 'none'; });
+        dz.addEventListener('dragover', e => e.preventDefault());
+        dz.addEventListener('drop', e => {
+            e.preventDefault(); dz.style.display = 'none';
+            if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+            else {
+                for (let i = 0; i < e.dataTransfer.items.length; i++) {
+                    const item = e.dataTransfer.items[i];
+                    if (item.kind === 'string') item.getAsString(s => tryFetch(s));
+                }
+            }
+        });
+    }
+
+    document.addEventListener('paste', e => {
+        e.preventDefault();
+        for (let item of (e.clipboardData || window.clipboardData).items) {
+            if (item.kind === 'file') handleFiles([item.getAsFile()]);
+            else item.getAsString(s => tryFetch(s));
+        }
+    });
+
+    async function tryFetch(src) {
+        // Try extracting img src from HTML fragment
+        if (src.startsWith('<')) {
+            try {
+                const doc = new DOMParser().parseFromString(src, 'text/html');
+                const imgEl = doc.querySelector('img');
+                if (imgEl) src = imgEl.getAttribute('src');
+            } catch (_) { return; }
+        }
+        try {
+            const r = await fetch(src);
+            if (r.ok) handleFiles([await r.blob()]);
+        } catch (_) {}
+    }
+
+    /* ── Animate ───────────────────────────────────────────── */
+    function animate() {
+        requestAnimationFrame(animate);
+        if (controls) controls.update();
+        renderer.render(scene, camera);
+    }
+
+    /* ── Boot ──────────────────────────────────────────────── */
+    init();
+
+    window.addEventListener('resize', () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+    });
+
+    document.getElementById('fileInput').addEventListener('change', e => handleFiles(e.target.files));
+    </script>
+</body>
+</html>
