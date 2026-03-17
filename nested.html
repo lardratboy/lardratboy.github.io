@@ -287,6 +287,7 @@
 
   <div class="section">
     <button class="process-btn" id="btn-process" disabled>Reprocess (data change)</button>
+    <button class="process-btn" id="btn-export" disabled style="margin-top:6px">Export PLY</button>
   </div>
 </div>
 
@@ -1149,6 +1150,128 @@ function updateStats() {
 }
 
 // ═══════════════════════════════════════════════════════════
+// PLY EXPORT
+//
+// Reconstructs world-space positions + colors from packed
+// indices on the CPU, mirroring the vertex shader logic.
+// Exports as ASCII PLY with current mode/gap/layout settings.
+// ═══════════════════════════════════════════════════════════
+function exportPLY() {
+  if (!cachedResult) return;
+
+  const config = getConfig();
+  const { packed, numPoints, divisions, levelBits } = cachedResult;
+  const numLevels = divisions.length;
+  const layout = computeLayoutUniforms(
+    divisions, config.levels, config.gapScale, projectionMode
+  );
+  const isTiled = projectionMode === 'tiled';
+
+  const t0 = performance.now();
+
+  // Use the active buffer (insertion or morton-sorted)
+  const order = document.getElementById('sel-order').value;
+  const buf = (order === 'morton' && cachedMortonPacked) ? cachedMortonPacked : packed;
+
+  // Pre-build header
+  const lines = [
+    'ply',
+    'format ascii 1.0',
+    `comment Nested Mosaic export — ${isTiled ? 'tiled 2D' : '3D spatial'} mode`,
+    `comment ${numLevels} levels: ${divisions.join('x')} divisions`,
+    `comment buffer order: ${order}`,
+    `comment source: ${fileName || 'unknown'}`,
+    `element vertex ${numPoints}`,
+    'property float x',
+    'property float y',
+    'property float z',
+    'property uchar red',
+    'property uchar green',
+    'property uchar blue',
+    'end_header'
+  ];
+
+  // Tiled layout helpers
+  const zCols = divisions.map(d => Math.max(1, Math.floor(Math.sqrt(d))));
+
+  for (let pt = 0; pt < numPoints; pt++) {
+    const base = pt * 4;
+
+    // Unpack indices for all levels
+    let wx = 0, wy = 0, wz = 0;
+    let ncX = 0, ncY = 0, ncZ = 0;
+
+    for (let lv = numLevels - 1; lv >= 0; lv--) {
+      const p = buf[base + lv];
+      const ix = (p >> 16) & 0xFF;
+      const iy = (p >> 8) & 0xFF;
+      const iz = p & 0xFF;
+
+      // Color: inner→outer accumulation (matches shader)
+      ncX = (ncX + ix) / divisions[lv];
+      ncY = (ncY + iy) / divisions[lv];
+      ncZ = (ncZ + iz) / divisions[lv];
+    }
+
+    // Position: outer→inner accumulation (matches shader)
+    for (let lv = 0; lv < numLevels; lv++) {
+      const p = buf[base + lv];
+      const ix = (p >> 16) & 0xFF;
+      const iy = (p >> 8) & 0xFF;
+      const iz = p & 0xFF;
+
+      if (!isTiled) {
+        // 3D spatial
+        const step = layout.step3D[lv];
+        wx += ix * step;
+        wy += iy * step;
+        wz += iz * step;
+      } else {
+        // Tiled 2D
+        const d = divisions[lv];
+        const zc = zCols[lv];
+        const col = iz % zc;
+        const row = Math.floor(iz / zc);
+        wx += (col * d + ix) * layout.stepTX[lv];
+        wz += (row * d + iy) * layout.stepTY[lv];
+        // wy stays 0
+      }
+    }
+
+    // Apply centering + scale (matches shader)
+    const x = (wx - layout.center[0]) * layout.scale;
+    const y = (wy - layout.center[1]) * layout.scale;
+    const z = (wz - layout.center[2]) * layout.scale;
+
+    // Color: [0,1] → [0,255]
+    const r = Math.round(Math.max(0, Math.min(1, ncX)) * 255);
+    const g = Math.round(Math.max(0, Math.min(1, ncY)) * 255);
+    const b = Math.round(Math.max(0, Math.min(1, ncZ)) * 255);
+
+    lines.push(`${x.toFixed(6)} ${y.toFixed(6)} ${z.toFixed(6)} ${r} ${g} ${b}`);
+  }
+
+  const plyText = lines.join('\n') + '\n';
+  const elapsed = Math.round(performance.now() - t0);
+  console.log(`PLY export: ${numPoints} vertices, ${(plyText.length / 1024 / 1024).toFixed(1)}MB, ${elapsed}ms`);
+
+  // Download
+  const baseName = fileName ? fileName.replace(/\.[^.]+$/, '') : 'mosaic';
+  const modeSuffix = isTiled ? 'tiled' : '3d';
+  const dlName = `${baseName}_${modeSuffix}_${order}_${numPoints}pts.ply`;
+
+  const blob = new Blob([plyText], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = dlName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ═══════════════════════════════════════════════════════════
 // FILE HANDLING
 // ═══════════════════════════════════════════════════════════
 function loadFile(file) {
@@ -1161,6 +1284,7 @@ function loadFile(file) {
     document.getElementById('file-info').innerHTML =
       `<span class="fname">${fileName}</span><br>${fileBuffer.byteLength.toLocaleString()} bytes — ~${tuples.toLocaleString()} tuples`;
     document.getElementById('btn-process').disabled = false;
+    document.getElementById('btn-export').disabled = false;
     runHeavyProcess();
   };
   reader.readAsArrayBuffer(file);
@@ -1215,6 +1339,9 @@ function init() {
 
   // Manual reprocess button
   document.getElementById('btn-process').addEventListener('click', runHeavyProcess);
+
+  // PLY export
+  document.getElementById('btn-export').addEventListener('click', exportPLY);
 
   // ── Debounced change handlers ──
   let heavyTimer = null, lightTimer = null;
