@@ -185,6 +185,8 @@
   .badge-3d { background:rgba(68,170,255,0.15); color:var(--accent); }
   .badge-tiled { background:rgba(255,68,170,0.15); color:var(--tiled); }
   .badge-gpu { background:rgba(80,255,130,0.15); color:#4f8; margin-left:4px; }
+  .badge-morton { background:rgba(255,200,40,0.15); color:#fc4; margin-left:4px; }
+  .badge-insert { background:rgba(150,150,180,0.1); color:var(--text-dim); margin-left:4px; }
 </style>
 </head>
 <body>
@@ -265,6 +267,13 @@
         <input type="range" id="sl-gapscale" min="0" max="3" value="1" step="0.05">
         <span class="val" id="val-gapscale">1.00</span>
       </div>
+    </div>
+    <div class="row">
+      <label>Buffer Order</label>
+      <select id="sel-order">
+        <option value="insertion" selected>Insertion (file order)</option>
+        <option value="morton">Morton Z-curve</option>
+      </select>
     </div>
     <div class="row toggle-row" id="row-autorotate">
       <label>Auto-Rotate</label>
@@ -445,6 +454,8 @@ let shaderMaterial = null;
 
 // Cached from last processData() — survives uniform-only updates
 let cachedResult = null;
+let cachedMortonPacked = null;  // sorted copy, lazily computed
+let mortonSortTime = 0;
 
 const ORTHO_BASE = 4;
 const FIT_SIZE = 3;  // normalize cloud to ~3 units across
@@ -601,6 +612,121 @@ function processData(buffer, dataType, isLittleEndian, levelBits) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// MORTON Z-CURVE ENCODING + SORT
+//
+// The hierarchical index chain (ix0,iy0,iz0, ix1,iy1,iz1,...)
+// is a natural multi-resolution address. To produce a Morton
+// key we concatenate each axis's bits outer→inner to form
+// full X, Y, Z coordinates, then interleave Z-Y-X bits MSB
+// first. Sorting the packed buffer by Morton key gives
+// spatial coherence: consecutive points in buffer are
+// spatially adjacent in the nesting hierarchy.
+//
+// For ≤ 16 bits/axis (48-bit Morton) we use Number (exact
+// up to 2^53). For > 16 bits/axis we use BigInt.
+// ═══════════════════════════════════════════════════════════
+
+function mortonSortPacked(result) {
+  const { packed, numPoints, levelBits, divisions } = result;
+  const numLevels = levelBits.length;
+  const totalBitsPerAxis = levelBits.reduce((s, b) => s + b, 0);
+  const useBigInt = totalBitsPerAxis > 16;
+
+  const t0 = performance.now();
+
+  // ── Build sort keys ──
+  const indices = new Uint32Array(numPoints);
+  let keys;
+
+  if (useBigInt) {
+    keys = new Array(numPoints);
+    for (let i = 0; i < numPoints; i++) {
+      indices[i] = i;
+      const base = i * 4;
+
+      // Reconstruct full X, Y, Z by concatenating bits outer→inner
+      let fullX = 0n, fullY = 0n, fullZ = 0n;
+      for (let lv = 0; lv < numLevels; lv++) {
+        const bits = levelBits[lv];
+        const p = packed[base + lv];
+        const ix = BigInt((p >> 16) & 0xFF);
+        const iy = BigInt((p >> 8) & 0xFF);
+        const iz = BigInt(p & 0xFF);
+        const b = BigInt(bits);
+        fullX = (fullX << b) | ix;
+        fullY = (fullY << b) | iy;
+        fullZ = (fullZ << b) | iz;
+      }
+
+      // Interleave Z-Y-X, MSB first → single Morton key
+      let key = 0n;
+      const tb = BigInt(totalBitsPerAxis);
+      for (let b = tb - 1n; b >= 0n; b--) {
+        key = (key << 1n) | ((fullZ >> b) & 1n);
+        key = (key << 1n) | ((fullY >> b) & 1n);
+        key = (key << 1n) | ((fullX >> b) & 1n);
+      }
+      keys[i] = key;
+    }
+
+    // Sort indices by BigInt key
+    indices.sort((a, b) => {
+      const ka = keys[a], kb = keys[b];
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
+
+  } else {
+    // Fast path: Number-safe (totalBitsPerAxis ≤ 16 → Morton ≤ 48 bits)
+    keys = new Float64Array(numPoints);
+    for (let i = 0; i < numPoints; i++) {
+      indices[i] = i;
+      const base = i * 4;
+
+      let fullX = 0, fullY = 0, fullZ = 0;
+      for (let lv = 0; lv < numLevels; lv++) {
+        const bits = levelBits[lv];
+        const p = packed[base + lv];
+        const ix = (p >> 16) & 0xFF;
+        const iy = (p >> 8) & 0xFF;
+        const iz = p & 0xFF;
+        fullX = (fullX << bits) | ix;
+        fullY = (fullY << bits) | iy;
+        fullZ = (fullZ << bits) | iz;
+      }
+
+      // Interleave Z-Y-X using bit manipulation
+      // For ≤ 16 bits per axis, Morton ≤ 48 bits, safe in float64
+      let key = 0;
+      for (let b = totalBitsPerAxis - 1; b >= 0; b--) {
+        key = key * 8 + (((fullZ >> b) & 1) << 2)
+                      + (((fullY >> b) & 1) << 1)
+                      +  ((fullX >> b) & 1);
+      }
+      keys[i] = key;
+    }
+
+    // Sort by Number key
+    indices.sort((a, b) => keys[a] - keys[b]);
+  }
+
+  // ── Reorder packed buffer by sorted indices ──
+  const sorted = new Float32Array(numPoints * 4);
+  for (let i = 0; i < numPoints; i++) {
+    const src = indices[i] * 4;
+    const dst = i * 4;
+    sorted[dst]     = packed[src];
+    sorted[dst + 1] = packed[src + 1];
+    sorted[dst + 2] = packed[src + 2];
+    sorted[dst + 3] = packed[src + 3];
+  }
+
+  const elapsed = Math.round(performance.now() - t0);
+  console.log(`Morton sort: ${numPoints} points, ${totalBitsPerAxis} bits/axis, ${useBigInt ? 'BigInt' : 'Number'} path — ${elapsed}ms`);
+
+  return { sorted, elapsed };
+}
+
+// ═══════════════════════════════════════════════════════════
 // LAYOUT UNIFORMS — computed from level config + mode
 //
 // This is the heart of the "UV trick": all coordinate math
@@ -700,6 +826,22 @@ function buildPointCloud(result) {
   }
   if (result.numPoints === 0) return;
 
+  // Select buffer based on current sort order
+  const order = document.getElementById('sel-order').value;
+  let bufferData;
+
+  if (order === 'morton') {
+    // Lazily compute or use cached Morton sort
+    if (!cachedMortonPacked) {
+      const m = mortonSortPacked(result);
+      cachedMortonPacked = m.sorted;
+      mortonSortTime = m.elapsed;
+    }
+    bufferData = cachedMortonPacked;
+  } else {
+    bufferData = result.packed;
+  }
+
   const geo = new THREE.BufferGeometry();
 
   // Dummy position attribute (vec3) — THREE.js needs this for draw count
@@ -709,7 +851,7 @@ function buildPointCloud(result) {
 
   // Real data: packed hierarchical indices (vec4)
   geo.setAttribute('a_packed',
-    new THREE.Float32BufferAttribute(result.packed, 4)
+    new THREE.Float32BufferAttribute(bufferData, 4)
   );
 
   // Set bounding sphere to prevent THREE.js from computing it from dummy positions
@@ -908,6 +1050,8 @@ function runHeavyProcess() {
       const levelBits = config.levels.map(l => l.bits);
 
       const t0 = performance.now();
+      cachedMortonPacked = null;  // invalidate sort cache
+      mortonSortTime = 0;
       cachedResult = processData(
         fileBuffer, config.dataType, config.isLittleEndian, levelBits
       );
@@ -934,6 +1078,26 @@ function runLightUpdate() {
   updateStats();
 }
 
+// MEDIUM: sort order changed — rebuild geometry with (possibly cached) sorted data
+function runSortUpdate() {
+  if (!cachedResult) return;
+
+  const loading = document.getElementById('loading');
+  loading.classList.add('active');
+
+  requestAnimationFrame(() => setTimeout(() => {
+    try {
+      buildPointCloud(cachedResult);
+      updateStats();
+      const order = document.getElementById('sel-order').value;
+      console.log(`[sort] Rebuilt with ${order} order${order === 'morton' ? ` (${mortonSortTime}ms sort)` : ''}`);
+    } catch (err) {
+      console.error('Sort error:', err);
+    }
+    loading.classList.remove('active');
+  }, 20));
+}
+
 function updateStats() {
   const el = document.getElementById('stats');
   const r = cachedResult;
@@ -955,11 +1119,17 @@ function updateStats() {
   }).join('<br>&nbsp;&nbsp;');
 
   const totalRes = r.divisions.reduce((s, d) => s * d, 1);
-  const gpuBytes = r.numPoints * 16; // 4 floats × 4 bytes packed attribute
-  const oldBytes = r.numPoints * 24; // would have been 3+3 Float32
+  const gpuBytes = r.numPoints * 16;
+  const oldBytes = r.numPoints * 24;
+  const order = document.getElementById('sel-order').value;
+  const totalBPA = r.levelBits.reduce((s, b) => s + b, 0);
+
+  const orderBadge = order === 'morton'
+    ? `<span class="badge badge-morton">MORTON Z</span>`
+    : `<span class="badge badge-insert">FILE ORDER</span>`;
 
   el.innerHTML = `
-    ${badge}<span class="badge badge-gpu">GPU SHADER</span><br>
+    ${badge}${orderBadge}<span class="badge badge-gpu">GPU SHADER</span><br>
     <span class="sl">Points:</span> <span class="sv">${r.numPoints.toLocaleString()}</span>
     <span class="sl"> / ${r.totalTuples.toLocaleString()} tuples</span><br>
     <span class="sl">Deduped:</span> <span class="sv">${r.duplicates.toLocaleString()}</span><br>
@@ -969,7 +1139,12 @@ function updateStats() {
       `L${i}:<span class="sv">${c}</span>`).join(' ')}<br>
     <span class="sl">GPU buf:</span> <span class="sv">${(gpuBytes/1024).toFixed(1)}KB</span>
     <span class="sl">(was ${(oldBytes/1024).toFixed(1)}KB)</span><br>
-    <span class="sl">Pack time:</span> <span class="sv">${r._elapsed || 0}ms</span>
+    <span class="sl">Pack:</span> <span class="sv">${r._elapsed || 0}ms</span>${
+      order === 'morton'
+        ? ` <span class="sl">Sort:</span> <span class="sv">${mortonSortTime}ms</span>
+           <span class="sl">(${totalBPA}b/axis, ${totalBPA > 16 ? 'BigInt' : 'Number'})</span>`
+        : ''
+    }
   `;
 }
 
@@ -1074,6 +1249,9 @@ function init() {
 
   // Gap scale → light
   document.getElementById('sl-gapscale').addEventListener('input', triggerLight);
+
+  // Sort order → medium (re-sort + rebuild geometry, no file re-read)
+  document.getElementById('sel-order').addEventListener('change', runSortUpdate);
 }
 
 init();
