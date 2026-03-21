@@ -251,48 +251,80 @@ fn tanhMap(fv: f32) -> u32 {
 
 const S: f32 = 4294967295.0;
 
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx=gid.x;
-    if(idx>=P.tupleCount){return;}
-    let off=idx*P.byteStep;
-    var vals: array<u32,3>;
+// Workgroup-local accumulation: reduces global atomic contention ~256×
+var<workgroup> wg_count: atomic<u32>;
+var<workgroup> wg_base: u32;
 
-    switch(P.format){
-        case 0u{for(var j=0u;j<3u;j++){vals[j]=rU32a(off+j*4u);}}
-        case 1u{for(var j=0u;j<3u;j++){vals[j]=rU32a(off+j*4u)^0x80000000u;}}
-        case 2u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU16a(off+j*2u))/65535.0*S);}}
-        case 3u{for(var j=0u;j<3u;j++){let v=rU16a(off+j*2u);let sv=select(i32(v),i32(v)-65536,v>32767u);vals[j]=u32(f32(sv+32768)/65535.0*S);}}
-        case 4u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU8(off+j))/255.0*S);}}
-        case 5u{for(var j=0u;j<3u;j++){let b=rU8(off+j);let sv=select(i32(b),i32(b)-256,b>127u);vals[j]=u32(f32(sv+128)/255.0*S);}}
-        case 6u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=u32(f32((b0>>4u)&0xFu)/15.0*S);vals[1]=u32(f32(b0&0xFu)/15.0*S);vals[2]=u32(f32((b1>>4u)&0xFu)/15.0*S);}
-        case 7u{let b0=rU8(off);let b1=rU8(off+1u);var nibs:array<u32,3>;nibs[0]=(b0>>4u)&0xFu;nibs[1]=b0&0xFu;nibs[2]=(b1>>4u)&0xFu;for(var j=0u;j<3u;j++){let n=nibs[j];let sv=select(i32(n),i32(n)-16,n>7u);vals[j]=u32(f32(sv+8)/15.0*S);}}
-        case 8u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(bitcast<f32>(rU32a(off+j*4u)));}}
-        case 9u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dF64(off+j*8u));}}
-        case 10u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp16(rU16a(off+j*2u)));}}
-        case 11u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dBf16(rU16a(off+j*2u)));}}
-        case 12u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E4M3(rU8(off+j)));}}
-        case 13u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E5M2(rU8(off+j)));}}
-        case 14u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=tanhMap(dFp4(b0>>4u));vals[1]=tanhMap(dFp4(b0&0xFu));vals[2]=tanhMap(dFp4(b1>>4u));}
-        default{}
+@compute @workgroup_size(256)
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_index) lid: u32
+) {
+    // Phase 0: Reset workgroup counter
+    if (lid == 0u) { atomicStore(&wg_count, 0u); }
+    workgroupBarrier();
+
+    // Phase 1: Decode, dedup, pack — each thread works independently
+    let idx = gid.x;
+    var isUnique = false;
+    var localSlot = 0u;
+    var packed: array<f32, 4>;
+
+    if (idx < P.tupleCount) {
+        let off = idx * P.byteStep;
+        var vals: array<u32, 3>;
+
+        switch(P.format){
+            case 0u{for(var j=0u;j<3u;j++){vals[j]=rU32a(off+j*4u);}}
+            case 1u{for(var j=0u;j<3u;j++){vals[j]=rU32a(off+j*4u)^0x80000000u;}}
+            case 2u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU16a(off+j*2u))/65535.0*S);}}
+            case 3u{for(var j=0u;j<3u;j++){let v=rU16a(off+j*2u);let sv=select(i32(v),i32(v)-65536,v>32767u);vals[j]=u32(f32(sv+32768)/65535.0*S);}}
+            case 4u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU8(off+j))/255.0*S);}}
+            case 5u{for(var j=0u;j<3u;j++){let b=rU8(off+j);let sv=select(i32(b),i32(b)-256,b>127u);vals[j]=u32(f32(sv+128)/255.0*S);}}
+            case 6u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=u32(f32((b0>>4u)&0xFu)/15.0*S);vals[1]=u32(f32(b0&0xFu)/15.0*S);vals[2]=u32(f32((b1>>4u)&0xFu)/15.0*S);}
+            case 7u{let b0=rU8(off);let b1=rU8(off+1u);var nibs:array<u32,3>;nibs[0]=(b0>>4u)&0xFu;nibs[1]=b0&0xFu;nibs[2]=(b1>>4u)&0xFu;for(var j=0u;j<3u;j++){let n=nibs[j];let sv=select(i32(n),i32(n)-16,n>7u);vals[j]=u32(f32(sv+8)/15.0*S);}}
+            case 8u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(bitcast<f32>(rU32a(off+j*4u)));}}
+            case 9u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dF64(off+j*8u));}}
+            case 10u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp16(rU16a(off+j*2u)));}}
+            case 11u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dBf16(rU16a(off+j*2u)));}}
+            case 12u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E4M3(rU8(off+j)));}}
+            case 13u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E5M2(rU8(off+j)));}}
+            case 14u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=tanhMap(dFp4(b0>>4u));vals[1]=tanhMap(dFp4(b0&0xFu));vals[2]=tanhMap(dFp4(b1>>4u));}
+            default{}
+        }
+
+        let vx=vals[0]; let vy=vals[1]; let vz=vals[2];
+        let dx=(vx>>P.shift)&0x3FFu; let dy=(vy>>P.shift)&0x3FFu; let dz=(vz>>P.shift)&0x3FFu;
+        let key=(dz<<20u)|(dy<<10u)|dx;
+
+        let old = atomicOr(&bitTable[key>>5u], 1u<<(key&31u));
+        if ((old & (1u<<(key&31u))) == 0u) {
+            isUnique = true;
+            // Get local slot within this workgroup (workgroup-local atomic — fast)
+            localSlot = atomicAdd(&wg_count, 1u);
+            // Pack output into registers
+            packed[0] = f32((((vx>>28u)&0xFu)<<16u) | (((vy>>28u)&0xFu)<<8u) | ((vz>>28u)&0xFu));
+            packed[1] = f32((((vx>>24u)&0xFu)<<16u) | (((vy>>24u)&0xFu)<<8u) | ((vz>>24u)&0xFu));
+            packed[2] = f32((((vx>>20u)&0xFu)<<16u) | (((vy>>20u)&0xFu)<<8u) | ((vz>>20u)&0xFu));
+            let cr=(dx*255u)/1023u; let cg=(dy*255u)/1023u; let cb=(dz*255u)/1023u;
+            packed[3] = f32((cr<<16u) | (cg<<8u) | cb);
+        }
     }
 
-    let vx=vals[0];let vy=vals[1];let vz=vals[2];
-    let dx=(vx>>P.shift)&0x3FFu;let dy=(vy>>P.shift)&0x3FFu;let dz=(vz>>P.shift)&0x3FFu;
-    let key=(dz<<20u)|(dy<<10u)|dx;
-    let old=atomicOr(&bitTable[key>>5u],1u<<(key&31u));
-    if((old&(1u<<(key&31u)))==0u){
-        let oi=atomicAdd(&indirect[1],1u);
-        let b=oi*4u;
-        // Pack per §4.7: (ix << 16) | (iy << 8) | iz per tier
-        output[b+0u]=f32((((vx>>28u)&0xFu)<<16u) | (((vy>>28u)&0xFu)<<8u) | ((vz>>28u)&0xFu));
-        output[b+1u]=f32((((vx>>24u)&0xFu)<<16u) | (((vy>>24u)&0xFu)<<8u) | ((vz>>24u)&0xFu));
-        output[b+2u]=f32((((vx>>20u)&0xFu)<<16u) | (((vy>>20u)&0xFu)<<8u) | ((vz>>20u)&0xFu));
-        // Color: quantize 10-bit to 8-bit, pack same way
-        let cr = (dx * 255u) / 1023u;
-        let cg = (dy * 255u) / 1023u;
-        let cb = (dz * 255u) / 1023u;
-        output[b+3u]=f32((cr<<16u) | (cg<<8u) | cb);
+    // Phase 2: Thread 0 reserves a global block for the entire workgroup
+    workgroupBarrier();
+    if (lid == 0u) {
+        wg_base = atomicAdd(&indirect[1], atomicLoad(&wg_count));
+    }
+    workgroupBarrier();
+
+    // Phase 3: Each unique thread writes at globalBase + localSlot
+    if (isUnique) {
+        let b = (wg_base + localSlot) * 4u;
+        output[b]     = packed[0];
+        output[b+1u]  = packed[1];
+        output[b+2u]  = packed[2];
+        output[b+3u]  = packed[3];
     }
 }
 `;
