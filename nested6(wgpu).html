@@ -478,68 +478,104 @@ function mkStaticBufs() {
 }
 
 // =============================================================================
-//  COMPUTE DISPATCH
+//  COMPUTE DISPATCH (chunked — streams data in 128MB pages)
 // =============================================================================
+
+const CHUNK_BYTES = 128 * 1024 * 1024; // 128MB raw data per chunk
+const MAX_OUTPUT_POINTS = 16 * 1024 * 1024; // 16M unique points cap
 
 async function runCompute() {
     if (!state.buffer || !device) return;
     const byteLen = state.buffer.byteLength;
     const byteStep = getByteStep(state.format);
-    const tupleCount = Math.floor(byteLen / byteStep);
-    if (tupleCount === 0) return;
+    const totalTuples = Math.floor(byteLen / byteStep);
+    if (totalTuples === 0) return;
 
-    // Raw data buffer (padded to 4-byte alignment)
-    const rawAligned = Math.ceil(byteLen/4)*4;
-    if (rawDataBuf) rawDataBuf.destroy();
-    rawDataBuf = device.createBuffer({size:rawAligned, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-    const padded = new Uint8Array(rawAligned);
-    padded.set(new Uint8Array(state.buffer));
-    device.queue.writeBuffer(rawDataBuf, 0, padded);
+    const statsEl = document.getElementById('stats');
 
-    // Output buffer (12 f32s per potential point)
-    const outBytes = tupleCount * 12 * 4;
+    // Output buffer — capped, also respect device limits
+    const maxOutBytes = Math.min(
+        MAX_OUTPUT_POINTS * 48,
+        device.limits.maxStorageBufferBindingSize
+    );
+    const maxPoints = Math.floor(maxOutBytes / 48);
     if (outputBuf) outputBuf.destroy();
-    outputBuf = device.createBuffer({size:outBytes, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+    outputBuf = device.createBuffer({
+        size: maxPoints * 48,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
 
-    // Uniforms
-    device.queue.writeBuffer(computeUniformBuf, 0, new Uint32Array([
-        FORMAT_ID[state.format], state.isLE?1:0, state.shift, tupleCount,
-        byteStep, getWordSize(state.format), 0, 0
-    ]));
-
-    // Clear bitTable + init indirect
-    const enc = device.createCommandEncoder();
-    enc.clearBuffer(bitTableBuf);
-    device.queue.submit([enc.finish()]);
+    // Clear bitTable + init indirect [6, 0, 0, 0, 0]
+    const initEnc = device.createCommandEncoder();
+    initEnc.clearBuffer(bitTableBuf);
+    device.queue.submit([initEnc.finish()]);
     device.queue.writeBuffer(indirectBuf, 0, new Uint32Array([6, 0, 0, 0, 0]));
 
-    // Bind group + dispatch
-    const bg = device.createBindGroup({ layout:computeBGL, entries:[
-        {binding:0,resource:{buffer:rawDataBuf}},
-        {binding:1,resource:{buffer:bitTableBuf}},
-        {binding:2,resource:{buffer:outputBuf}},
-        {binding:3,resource:{buffer:indirectBuf}},
-        {binding:4,resource:{buffer:computeUniformBuf}},
-    ]});
-    const enc2 = device.createCommandEncoder();
-    const pass = enc2.beginComputePass();
-    pass.setPipeline(computePipeline);
-    pass.setBindGroup(0, bg);
-    pass.dispatchWorkgroups(Math.ceil(tupleCount/256));
-    pass.end();
-    device.queue.submit([enc2.finish()]);
+    // Chunk the input
+    const chunkTuples = Math.floor(CHUNK_BYTES / byteStep);
+    const totalChunks = Math.ceil(totalTuples / chunkTuples);
+    const srcBytes = new Uint8Array(state.buffer);
 
-    // Readback count
-    const rb = device.createBuffer({size:20,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-    const enc3 = device.createCommandEncoder();
-    enc3.copyBufferToBuffer(indirectBuf, 0, rb, 0, 20);
-    device.queue.submit([enc3.finish()]);
+    for (let chunk = 0; chunk < totalChunks; chunk++) {
+        const startTuple = chunk * chunkTuples;
+        const count = Math.min(chunkTuples, totalTuples - startTuple);
+        const chunkByteOff = startTuple * byteStep;
+        const chunkByteLen = count * byteStep;
+        const rawAligned = Math.ceil(chunkByteLen / 4) * 4;
+
+        // Upload this chunk's raw data
+        if (rawDataBuf) rawDataBuf.destroy();
+        rawDataBuf = device.createBuffer({
+            size: rawAligned,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        const padded = new Uint8Array(rawAligned);
+        padded.set(srcBytes.subarray(chunkByteOff, chunkByteOff + chunkByteLen));
+        device.queue.writeBuffer(rawDataBuf, 0, padded);
+
+        // Uniforms for this chunk
+        device.queue.writeBuffer(computeUniformBuf, 0, new Uint32Array([
+            FORMAT_ID[state.format], state.isLE ? 1 : 0, state.shift, count,
+            byteStep, getWordSize(state.format), 0, 0
+        ]));
+
+        // Bind group + dispatch
+        const bg = device.createBindGroup({ layout: computeBGL, entries: [
+            { binding: 0, resource: { buffer: rawDataBuf } },
+            { binding: 1, resource: { buffer: bitTableBuf } },
+            { binding: 2, resource: { buffer: outputBuf } },
+            { binding: 3, resource: { buffer: indirectBuf } },
+            { binding: 4, resource: { buffer: computeUniformBuf } },
+        ]});
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(computePipeline);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(Math.ceil(count / 256));
+        pass.end();
+        device.queue.submit([enc.finish()]);
+
+        // Yield between chunks to keep page responsive + show progress
+        if (totalChunks > 1) {
+            await device.queue.onSubmittedWorkDone();
+            statsEl.innerHTML = `Processing: <b>chunk ${chunk + 1}/${totalChunks}</b> · ${((chunk + 1) / totalChunks * 100).toFixed(0)}%`;
+        }
+    }
+
+    // Readback final point count
+    const rb = device.createBuffer({ size: 20, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(indirectBuf, 0, rb, 0, 20);
+    device.queue.submit([enc.finish()]);
     await rb.mapAsync(GPUMapMode.READ);
     pointCount = new Uint32Array(rb.getMappedRange())[1];
     rb.unmap(); rb.destroy();
 
-    document.getElementById('stats').innerHTML =
-        `Source: <b>${state.fileName}</b><br>Nodes: <b>${pointCount.toLocaleString()}</b> · Tuples: <b>${tupleCount.toLocaleString()}</b><br>Pipeline: <b>WebGPU Compute</b>`;
+    const mbIn = (byteLen / (1024 * 1024)).toFixed(1);
+    statsEl.innerHTML =
+        `Source: <b>${state.fileName}</b> (${mbIn} MB)<br>` +
+        `Nodes: <b>${pointCount.toLocaleString()}</b> · Tuples: <b>${totalTuples.toLocaleString()}</b><br>` +
+        `Chunks: <b>${totalChunks}</b> · Pipeline: <b>WebGPU Compute</b>`;
 }
 
 // =============================================================================
