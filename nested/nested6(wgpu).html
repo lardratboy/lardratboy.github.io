@@ -187,6 +187,21 @@ fn rU32(off: u32) -> u32 {
     return select(b0|(b1<<8u)|(b2<<16u)|(b3<<24u), (b0<<24u)|(b1<<16u)|(b2<<8u)|b3, P.isLE==0u);
 }
 
+// Fast-path: 4-byte aligned LE read (1 load vs 4 loads + shifts)
+fn rU32a(off: u32) -> u32 {
+    if (P.isLE != 0u) { return raw[off >> 2u]; }
+    return rU32(off);
+}
+
+// Fast-path: 2-byte aligned LE read (1 load + select vs 2 loads + shifts)
+fn rU16a(off: u32) -> u32 {
+    if (P.isLE != 0u) {
+        let w = raw[off >> 2u];
+        return select(w & 0xFFFFu, w >> 16u, (off & 2u) != 0u);
+    }
+    return rU16(off);
+}
+
 fn dFp16(bits: u32) -> f32 {
     let s=f32((bits>>15u)&1u); let e=(bits>>10u)&0x1Fu; let m=bits&0x3FFu;
     let sign=1.0-2.0*s;
@@ -220,7 +235,7 @@ fn dFp4(bits: u32) -> f32 {
     return sign*exp2(f32(e)-1.0)*(1.0+f32(m)/2.0);
 }
 fn dF64(off: u32) -> f32 {
-    let lo=rU32(off); let hi=rU32(off+4u);
+    let lo=rU32a(off); let hi=rU32a(off+4u);
     let s=f32((hi>>31u)&1u); let sign=1.0-2.0*s;
     let e=i32((hi>>20u)&0x7FFu)-1023;
     let mHi=hi&0xFFFFFu;
@@ -244,18 +259,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var vals: array<u32,3>;
 
     switch(P.format){
-        case 0u{for(var j=0u;j<3u;j++){vals[j]=rU32(off+j*4u);}}
-        case 1u{for(var j=0u;j<3u;j++){vals[j]=rU32(off+j*4u)^0x80000000u;}}
-        case 2u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU16(off+j*2u))/65535.0*S);}}
-        case 3u{for(var j=0u;j<3u;j++){let v=rU16(off+j*2u);let sv=select(i32(v),i32(v)-65536,v>32767u);vals[j]=u32(f32(sv+32768)/65535.0*S);}}
+        case 0u{for(var j=0u;j<3u;j++){vals[j]=rU32a(off+j*4u);}}
+        case 1u{for(var j=0u;j<3u;j++){vals[j]=rU32a(off+j*4u)^0x80000000u;}}
+        case 2u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU16a(off+j*2u))/65535.0*S);}}
+        case 3u{for(var j=0u;j<3u;j++){let v=rU16a(off+j*2u);let sv=select(i32(v),i32(v)-65536,v>32767u);vals[j]=u32(f32(sv+32768)/65535.0*S);}}
         case 4u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU8(off+j))/255.0*S);}}
         case 5u{for(var j=0u;j<3u;j++){let b=rU8(off+j);let sv=select(i32(b),i32(b)-256,b>127u);vals[j]=u32(f32(sv+128)/255.0*S);}}
         case 6u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=u32(f32((b0>>4u)&0xFu)/15.0*S);vals[1]=u32(f32(b0&0xFu)/15.0*S);vals[2]=u32(f32((b1>>4u)&0xFu)/15.0*S);}
         case 7u{let b0=rU8(off);let b1=rU8(off+1u);var nibs:array<u32,3>;nibs[0]=(b0>>4u)&0xFu;nibs[1]=b0&0xFu;nibs[2]=(b1>>4u)&0xFu;for(var j=0u;j<3u;j++){let n=nibs[j];let sv=select(i32(n),i32(n)-16,n>7u);vals[j]=u32(f32(sv+8)/15.0*S);}}
-        case 8u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(bitcast<f32>(rU32(off+j*4u)));}}
+        case 8u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(bitcast<f32>(rU32a(off+j*4u)));}}
         case 9u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dF64(off+j*8u));}}
-        case 10u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp16(rU16(off+j*2u)));}}
-        case 11u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dBf16(rU16(off+j*2u)));}}
+        case 10u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp16(rU16a(off+j*2u)));}}
+        case 11u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dBf16(rU16a(off+j*2u)));}}
         case 12u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E4M3(rU8(off+j)));}}
         case 13u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E5M2(rU8(off+j)));}}
         case 14u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=tanhMap(dFp4(b0>>4u));vals[1]=tanhMap(dFp4(b0&0xFu));vals[2]=tanhMap(dFp4(b1>>4u));}
@@ -645,9 +660,14 @@ async function runCompute() {
 
     const statsEl = document.getElementById('stats');
 
-    // Clear bitTable + reset indirect (buffers already allocated at init)
+    // Fix #8: Only clear the region of bitTable that this shift level can touch
+    // At shift=22 (10 bits/axis): full 128MB. At shift=28 (4 bits/axis): ~2MB.
+    const bitsPerAxis = Math.min(10, 32 - state.shift);
+    const maxPerAxis = (1 << bitsPerAxis) - 1;
+    const maxKey = (maxPerAxis << 20) | (maxPerAxis << 10) | maxPerAxis;
+    const clearBytes = Math.min(Math.ceil((maxKey + 1) / 32) * 4, BIT_TABLE_SIZE);
     const initEnc = device.createCommandEncoder();
-    initEnc.clearBuffer(bitTableBuf);
+    initEnc.clearBuffer(bitTableBuf, 0, clearBytes);
     device.queue.submit([initEnc.finish()]);
     device.queue.writeBuffer(indirectBuf, 0, indirectResetData);
 
