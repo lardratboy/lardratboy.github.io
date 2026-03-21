@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Unified Strata — WebGPU</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #050508; color: #ccc; font-family: 'Consolas', 'SF Mono', monospace; overflow: hidden; }
+    canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+
+    #panel {
+        position: fixed; top: 16px; left: 16px; z-index: 10;
+        background: rgba(8, 8, 12, 0.96); border: 1px solid rgba(0, 255, 255, 0.2);
+        border-radius: 12px; padding: 18px; width: 360px;
+        backdrop-filter: blur(20px); box-shadow: 0 0 50px rgba(0,0,0,0.9);
+        max-height: calc(100vh - 32px); overflow-y: auto;
+    }
+    #panel::-webkit-scrollbar { width: 4px; }
+    #panel::-webkit-scrollbar-thumb { background: #222; }
+
+    h1 { font-size: 14px; font-weight: 700; color: #0ff; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 5px; }
+    .sub-h1 { font-size: 9px; color: #446; margin-bottom: 15px; }
+    .group-label { font-size: 9px; color: #558; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 1px; margin-top: 10px; }
+    .ctrl { margin-bottom: 12px; }
+    .ctrl label { display: flex; justify-content: space-between; font-size: 10px; color: #888; margin-bottom: 4px; }
+    .ctrl label span.val { color: #0ff; font-weight: bold; }
+    input[type=range] { width: 100%; height: 4px; cursor: pointer; accent-color: #0ff; -webkit-appearance: none; appearance: none; background: #112; }
+    input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 12px; width: 12px; border-radius: 50%; background: #0ff; }
+    .btn-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 10px; }
+    button { padding: 6px 2px; font-size: 9px; background: #0a0a1a; border: 1px solid #114; color: #558; cursor: pointer; border-radius: 4px; font-family: inherit; transition: 0.2s; }
+    button:hover { border-color: #0ff; color: #0ff; }
+    button.active { background: #035; color: #0ff; border-color: #0ff; }
+    .file-btn { width: 100%; background: #0ff; color: #000; font-weight: bold; border: none; padding: 10px; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; border-radius: 6px; margin-bottom: 10px; }
+    .export-btn { width: 100%; background: rgba(0, 255, 100, 0.15); color: #0f6; border: 1px solid #0f6; padding: 10px; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; border-radius: 6px; margin-top: 10px; font-weight: bold; }
+    .export-btn:hover { background: #0f6; color: #000; }
+    .stats { font-size: 10px; color: #446; border-top: 1px solid #113; padding-top: 10px; line-height: 1.5; margin-top: 10px; }
+    b { color: #7af; }
+    #dropZone {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 100;
+        display: none; background: rgba(0,0,0,0.8); justify-content: center; align-items: center;
+        border: 4px dashed #0ff; pointer-events: none;
+    }
+    #gpuError {
+        display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        z-index: 200; background: #1a0008; border: 1px solid #f00; border-radius: 12px;
+        padding: 30px; max-width: 500px; text-align: center; color: #f66;
+    }
+</style>
+</head>
+<body>
+
+<div id="gpuError">
+    <h1 style="color:#f00; margin-bottom:15px;">WebGPU Not Available</h1>
+    <p style="font-size:12px; line-height:1.6;">This tool requires WebGPU. Use Chrome 113+, Edge 113+, or Safari 18+.</p>
+</div>
+
+<div id="dropZone"><h1 style="color:#0ff">INJECT BYTESTREAM</h1></div>
+
+<div id="panel">
+    <h1>Unified Strata</h1>
+    <div class="sub-h1">WebGPU Compute · Multi-Scale Forensic Geometry</div>
+
+    <button class="file-btn" onclick="document.getElementById('fIn').click()">Open Binary File</button>
+    <input type="file" id="fIn" style="display:none" onchange="handleFile(this.files)">
+
+    <div class="group-label">Integer Types</div>
+    <div class="btn-grid">
+        <button id="t-uint4" onclick="setFormat('uint4')">uint4</button>
+        <button id="t-uint8" onclick="setFormat('uint8')">uint8</button>
+        <button id="t-uint16" onclick="setFormat('uint16')">uint16</button>
+        <button id="t-uint32" class="active" onclick="setFormat('uint32')">uint32</button>
+        <button id="t-int4" onclick="setFormat('int4')">int4</button>
+        <button id="t-int8" onclick="setFormat('int8')">int8</button>
+        <button id="t-int16" onclick="setFormat('int16')">int16</button>
+        <button id="t-int32" onclick="setFormat('int32')">int32</button>
+    </div>
+
+    <div class="group-label">Floating Point Types</div>
+    <div class="btn-grid">
+        <button id="t-fp4" onclick="setFormat('fp4')">fp4</button>
+        <button id="t-fp8_e4m3" onclick="setFormat('fp8_e4m3')">fp8_m3</button>
+        <button id="t-fp8_e5m2" onclick="setFormat('fp8_e5m2')">fp8_m2</button>
+        <button id="t-fp16" onclick="setFormat('fp16')">fp16</button>
+        <button id="t-bf16" onclick="setFormat('bf16')">bf16</button>
+        <button id="t-fp32" onclick="setFormat('fp32')">fp32</button>
+        <button id="t-fp64" onclick="setFormat('fp64')">fp64</button>
+    </div>
+
+    <div class="group-label">Logic Controls</div>
+    <div class="btn-grid" style="grid-template-columns: 1fr 1fr;">
+        <button id="leBtn" class="active" onclick="setEndian(true)">Little Endian</button>
+        <button id="beBtn" onclick="setEndian(false)">Big Endian</button>
+    </div>
+
+    <div class="ctrl">
+        <label>Macro Gap <span class="val" id="vG0">0.25</span></label>
+        <input type="range" id="sG0" min="0" max="2" step="0.01" value="0.25">
+    </div>
+    <div class="ctrl">
+        <label>Meso Gap <span class="val" id="vG1">0.10</span></label>
+        <input type="range" id="sG1" min="0" max="2" step="0.01" value="0.10">
+    </div>
+    <div class="ctrl">
+        <label>Micro Gap <span class="val" id="vG2">0.05</span></label>
+        <input type="range" id="sG2" min="0" max="1" step="0.01" value="0.05">
+    </div>
+    <div class="ctrl">
+        <label>Dive (Bit Shift) <span class="val" id="vShift">22</span></label>
+        <input type="range" id="sShift" min="0" max="22" step="1" value="22">
+    </div>
+
+    <button class="export-btn" onclick="exportPLY()">Export .PLY Cloud</button>
+
+    <div class="btn-grid" style="grid-template-columns: 1fr 1fr 1fr; margin-top:10px;">
+        <button onclick="generateDemo('lorenz')">Lorenz</button>
+        <button onclick="generateDemo('thomas')">Thomas</button>
+        <button onclick="generateDemo('noise')">Random</button>
+    </div>
+
+    <div id="stats" class="stats">Initializing WebGPU…</div>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+
+// =============================================================================
+//  WGSL — COMPUTE SHADER
+// =============================================================================
+
+const COMPUTE_WGSL = `
+struct Params {
+    format: u32, isLE: u32, shift: u32, tupleCount: u32,
+    byteStep: u32, wSize: u32, _p0: u32, _p1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> raw: array<u32>;
+@group(0) @binding(1) var<storage, read_write> bitTable: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<storage, read_write> indirect: array<atomic<u32>>;
+@group(0) @binding(4) var<uniform> P: Params;
+
+fn rU8(off: u32) -> u32 { return (raw[off >> 2u] >> ((off & 3u) * 8u)) & 0xFFu; }
+
+fn rU16(off: u32) -> u32 {
+    let lo = rU8(off); let hi = rU8(off + 1u);
+    return select(lo | (hi << 8u), (lo << 8u) | hi, P.isLE == 0u);
+}
+
+fn rU32(off: u32) -> u32 {
+    let b0 = rU8(off); let b1 = rU8(off+1u); let b2 = rU8(off+2u); let b3 = rU8(off+3u);
+    return select(b0|(b1<<8u)|(b2<<16u)|(b3<<24u), (b0<<24u)|(b1<<16u)|(b2<<8u)|b3, P.isLE==0u);
+}
+
+fn dFp16(bits: u32) -> f32 {
+    let s=f32((bits>>15u)&1u); let e=(bits>>10u)&0x1Fu; let m=bits&0x3FFu;
+    let sign=1.0-2.0*s;
+    if(e==0u){return sign*exp2(-14.0)*(f32(m)/1024.0);}
+    if(e==31u){return select(sign*65504.0,0.0,m!=0u);}
+    return sign*exp2(f32(e)-15.0)*(1.0+f32(m)/1024.0);
+}
+fn dBf16(bits: u32) -> f32 {
+    let s=f32((bits>>15u)&1u); let e=(bits>>7u)&0xFFu; let m=bits&0x7Fu;
+    let sign=1.0-2.0*s;
+    if(e==0u){return sign*exp2(-126.0)*(f32(m)/128.0);}
+    if(e==255u){return select(sign*3.4e38,0.0,m!=0u);}
+    return sign*exp2(f32(e)-127.0)*(1.0+f32(m)/128.0);
+}
+fn dFp8E4M3(bits: u32) -> f32 {
+    let s=f32((bits>>7u)&1u); let e=(bits>>3u)&0xFu; let m=bits&0x7u;
+    let sign=1.0-2.0*s;
+    if(e==0u){return sign*exp2(-6.0)*(f32(m)/8.0);}
+    return sign*exp2(f32(e)-7.0)*(1.0+f32(m)/8.0);
+}
+fn dFp8E5M2(bits: u32) -> f32 {
+    let s=f32((bits>>7u)&1u); let e=(bits>>2u)&0x1Fu; let m=bits&0x3u;
+    let sign=1.0-2.0*s;
+    if(e==0u){return sign*exp2(-14.0)*(f32(m)/4.0);}
+    return sign*exp2(f32(e)-15.0)*(1.0+f32(m)/4.0);
+}
+fn dFp4(bits: u32) -> f32 {
+    let s=f32((bits>>3u)&1u); let e=(bits>>1u)&0x3u; let m=bits&1u;
+    let sign=1.0-2.0*s;
+    if(e==0u){return sign*0.5*(f32(m)/2.0);}
+    return sign*exp2(f32(e)-1.0)*(1.0+f32(m)/2.0);
+}
+fn dF64(off: u32) -> f32 {
+    let lo=rU32(off); let hi=rU32(off+4u);
+    let s=f32((hi>>31u)&1u); let sign=1.0-2.0*s;
+    let e=i32((hi>>20u)&0x7FFu)-1023;
+    let mHi=hi&0xFFFFFu;
+    if(e==1024){return select(sign*3.4e38,0.0,(mHi|lo)!=0u);}
+    if(e==-1023){return sign*exp2(-1022.0)*(f32(mHi)/f32(0x100000u));}
+    return sign*exp2(f32(e))*(1.0+f32(mHi)/f32(0x100000u));
+}
+
+fn tanhMap(fv: f32) -> u32 {
+    let t=tanh(clamp(fv,-20.0,20.0));
+    return u32(clamp(t*0.5+0.5,0.0,1.0)*4294967295.0);
+}
+
+const S: f32 = 4294967295.0;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx=gid.x;
+    if(idx>=P.tupleCount){return;}
+    let off=idx*P.byteStep;
+    var vals: array<u32,3>;
+
+    switch(P.format){
+        case 0u{for(var j=0u;j<3u;j++){vals[j]=rU32(off+j*4u);}}
+        case 1u{for(var j=0u;j<3u;j++){vals[j]=rU32(off+j*4u)^0x80000000u;}}
+        case 2u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU16(off+j*2u))/65535.0*S);}}
+        case 3u{for(var j=0u;j<3u;j++){let v=rU16(off+j*2u);let sv=select(i32(v),i32(v)-65536,v>32767u);vals[j]=u32(f32(sv+32768)/65535.0*S);}}
+        case 4u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU8(off+j))/255.0*S);}}
+        case 5u{for(var j=0u;j<3u;j++){let b=rU8(off+j);let sv=select(i32(b),i32(b)-256,b>127u);vals[j]=u32(f32(sv+128)/255.0*S);}}
+        case 6u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=u32(f32((b0>>4u)&0xFu)/15.0*S);vals[1]=u32(f32(b0&0xFu)/15.0*S);vals[2]=u32(f32((b1>>4u)&0xFu)/15.0*S);}
+        case 7u{let b0=rU8(off);let b1=rU8(off+1u);var nibs:array<u32,3>;nibs[0]=(b0>>4u)&0xFu;nibs[1]=b0&0xFu;nibs[2]=(b1>>4u)&0xFu;for(var j=0u;j<3u;j++){let n=nibs[j];let sv=select(i32(n),i32(n)-16,n>7u);vals[j]=u32(f32(sv+8)/15.0*S);}}
+        case 8u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(bitcast<f32>(rU32(off+j*4u)));}}
+        case 9u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dF64(off+j*8u));}}
+        case 10u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp16(rU16(off+j*2u)));}}
+        case 11u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dBf16(rU16(off+j*2u)));}}
+        case 12u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E4M3(rU8(off+j)));}}
+        case 13u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E5M2(rU8(off+j)));}}
+        case 14u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=tanhMap(dFp4(b0>>4u));vals[1]=tanhMap(dFp4(b0&0xFu));vals[2]=tanhMap(dFp4(b1>>4u));}
+        default{}
+    }
+
+    let vx=vals[0];let vy=vals[1];let vz=vals[2];
+    let dx=(vx>>P.shift)&0x3FFu;let dy=(vy>>P.shift)&0x3FFu;let dz=(vz>>P.shift)&0x3FFu;
+    let key=(dz<<20u)|(dy<<10u)|dx;
+    let old=atomicOr(&bitTable[key>>5u],1u<<(key&31u));
+    if((old&(1u<<(key&31u)))==0u){
+        let oi=atomicAdd(&indirect[1],1u);
+        let b=oi*12u;
+        output[b+0u]=f32((vx>>28u)&0xFu);output[b+1u]=f32((vy>>28u)&0xFu);output[b+2u]=f32((vz>>28u)&0xFu);
+        output[b+3u]=f32((vx>>24u)&0xFu);output[b+4u]=f32((vy>>24u)&0xFu);output[b+5u]=f32((vz>>24u)&0xFu);
+        output[b+6u]=f32((vx>>20u)&0xFu);output[b+7u]=f32((vy>>20u)&0xFu);output[b+8u]=f32((vz>>20u)&0xFu);
+        output[b+9u]=f32(dx)/1023.0;output[b+10u]=f32(dy)/1023.0;output[b+11u]=f32(dz)/1023.0;
+    }
+}
+`;
+
+// =============================================================================
+//  WGSL — RENDER SHADERS
+// =============================================================================
+
+const RENDER_WGSL = `
+struct RParams {
+    mvp: mat4x4<f32>,
+    s0: f32, s1: f32, s2: f32, center: f32,
+    scale: f32, pointSize: f32, vpW: f32, vpH: f32,
+};
+
+@group(0) @binding(0) var<storage, read> pts: array<f32>;
+@group(0) @binding(1) var<uniform> R: RParams;
+
+struct VSOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+@vertex
+fn vs(@location(0) qOff: vec2<f32>, @builtin(instance_index) ii: u32) -> VSOut {
+    let b=ii*12u;
+    let p0=vec3(pts[b],pts[b+1u],pts[b+2u]);
+    let p1=vec3(pts[b+3u],pts[b+4u],pts[b+5u]);
+    let p2=vec3(pts[b+6u],pts[b+7u],pts[b+8u]);
+    let col=vec3(pts[b+9u],pts[b+10u],pts[b+11u]);
+    let world=(p0*R.s0+p1*R.s1+p2*R.s2-vec3(R.center))*R.scale;
+    var clip=R.mvp*vec4(world,1.0);
+    clip=vec4(clip.xy+qOff*R.pointSize*clip.w/vec2(R.vpW,R.vpH),clip.zw);
+    var o:VSOut;
+    o.pos=clip; o.color=col+0.1; o.uv=qOff;
+    return o;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4<f32> {
+    if(dot(in.uv,in.uv)>1.0){discard;}
+    return vec4(in.color,1.0);
+}
+`;
+
+// =============================================================================
+//  STATE + HELPERS
+// =============================================================================
+
+const FORMAT_ID = {
+    'uint32':0,'int32':1,'uint16':2,'int16':3,'uint8':4,'int8':5,'uint4':6,'int4':7,
+    'fp32':8,'fp64':9,'fp16':10,'bf16':11,'fp8_e4m3':12,'fp8_e5m2':13,'fp4':14
+};
+
+let state = {
+    format: 'uint32', isLE: true, shift: 22,
+    gaps: [0.25, 0.1, 0.05], buffer: null, fileName: "Internal"
+};
+
+function getWordSize(f) {
+    if (['uint16','int16','fp16','bf16'].includes(f)) return 2;
+    if (['uint8','int8','fp8_e4m3','fp8_e5m2','fp4','uint4','int4'].includes(f)) return 1;
+    if (f === 'fp64') return 8;
+    return 4;
+}
+function getByteStep(f) { return f.endsWith('4') ? 2 : getWordSize(f) * 3; }
+
+function computeStrides() {
+    const g = state.gaps;
+    const s2 = 1.0 + g[2], s1 = 15.0 * s2 * (1.0 + g[1]), s0 = 15.0 * s1 * (1.0 + g[0]);
+    const max = 15.0 * s0 + 15.0 * s1 + 15.0 * s2;
+    return { s0, s1, s2, max, ctr: max / 2, scl: 5.0 / max };
+}
+
+// =============================================================================
+//  MATRIX MATH + ORBIT CAMERA
+// =============================================================================
+
+function mat4Persp(fov, asp, n, f) {
+    const t = 1/Math.tan(fov/2), nf = 1/(n-f);
+    return new Float32Array([t/asp,0,0,0, 0,t,0,0, 0,0,(f+n)*nf,-1, 0,0,2*f*n*nf,0]);
+}
+
+function mat4LookAt(eye, tgt, up) {
+    let zx=eye[0]-tgt[0],zy=eye[1]-tgt[1],zz=eye[2]-tgt[2];
+    let l=1/Math.hypot(zx,zy,zz); zx*=l;zy*=l;zz*=l;
+    let xx=up[1]*zz-up[2]*zy, xy=up[2]*zx-up[0]*zz, xz=up[0]*zy-up[1]*zx;
+    l=1/Math.hypot(xx,xy,xz); xx*=l;xy*=l;xz*=l;
+    let yx=zy*xz-zz*xy, yy=zz*xx-zx*xz, yz=zx*xy-zy*xx;
+    return new Float32Array([
+        xx,yx,zx,0, xy,yy,zy,0, xz,yz,zz,0,
+        -(xx*eye[0]+xy*eye[1]+xz*eye[2]),
+        -(yx*eye[0]+yy*eye[1]+yz*eye[2]),
+        -(zx*eye[0]+zy*eye[1]+zz*eye[2]), 1
+    ]);
+}
+
+function mat4Mul(a, b) {
+    const o = new Float32Array(16);
+    for (let i=0;i<4;i++) for (let j=0;j<4;j++)
+        o[j*4+i] = a[i]*b[j*4]+a[4+i]*b[j*4+1]+a[8+i]*b[j*4+2]+a[12+i]*b[j*4+3];
+    return o;
+}
+
+let camTheta=Math.PI*0.25, camPhi=Math.PI*0.35, camRadius=8;
+let camTarget=[0,0,0];
+let isDrag=false, isPan=false, isDolly=false, lastMX=0, lastMY=0;
+
+function getMVP(asp) {
+    const sp=Math.sin(camPhi),cp=Math.cos(camPhi),st=Math.sin(camTheta),ct=Math.cos(camTheta);
+    const eye=[camTarget[0]+camRadius*sp*ct, camTarget[1]+camRadius*cp, camTarget[2]+camRadius*sp*st];
+    return mat4Mul(mat4Persp(Math.PI/3, asp, 0.01, 1000), mat4LookAt(eye, camTarget, [0,1,0]));
+}
+
+// =============================================================================
+//  WEBGPU CORE
+// =============================================================================
+
+let device, context, canvasEl, canvasFmt;
+let computePipeline, renderPipeline;
+let rawDataBuf, bitTableBuf, outputBuf, indirectBuf, computeUniformBuf;
+let renderUniformBuf, quadVBuf, quadIBuf;
+let computeBGL, renderBGL;
+let depthTex, depthView;
+let pointCount = 0;
+
+const BIT_TABLE_SIZE = (1 << 25) * 4;
+
+async function initWebGPU() {
+    if (!navigator.gpu) { document.getElementById('gpuError').style.display='block'; return false; }
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference:'high-performance' });
+    if (!adapter) { document.getElementById('gpuError').style.display='block'; return false; }
+
+    const limits = {};
+    const want = { maxStorageBufferBindingSize: 512*1024*1024, maxBufferSize: 1024*1024*1024 };
+    for (const [k,v] of Object.entries(want)) limits[k] = Math.min(v, adapter.limits[k]);
+    device = await adapter.requestDevice({ requiredLimits: limits });
+
+    canvasEl = document.getElementById('canvas');
+    canvasEl.width = innerWidth; canvasEl.height = innerHeight;
+    context = canvasEl.getContext('webgpu');
+    canvasFmt = navigator.gpu.getPreferredCanvasFormat();
+    context.configure({ device, format: canvasFmt, alphaMode: 'premultiplied' });
+
+    mkDepth();
+    mkPipelines();
+    mkStaticBufs();
+
+    // Mouse
+    canvasEl.addEventListener('mousedown', e => {
+        if (e.button===0) isDrag=true; if (e.button===1) isDolly=true; if (e.button===2) isPan=true;
+        lastMX=e.clientX; lastMY=e.clientY;
+        if (e.button===1) e.preventDefault();
+    });
+    addEventListener('mousemove', e => {
+        const dx=e.clientX-lastMX, dy=e.clientY-lastMY;
+        lastMX=e.clientX; lastMY=e.clientY;
+        if (isDrag) { camTheta+=dx*0.005; camPhi=Math.max(0.05,Math.min(Math.PI-0.05,camPhi-dy*0.005)); }
+        if (isPan) {
+            const st=Math.sin(camTheta),ct=Math.cos(camTheta);
+            const sp=Math.sin(camPhi),cp=Math.cos(camPhi);
+            const r=[-st,0,ct], u=[-cp*ct,sp,-cp*st], ps=camRadius*0.002;
+            for(let i=0;i<3;i++) camTarget[i]+=(r[i]*dx+u[i]*dy)*ps;
+        }
+        if (isDolly) {
+            camRadius*=1-dy*0.005;
+            camRadius=Math.max(0.1,Math.min(500,camRadius));
+        }
+    });
+    addEventListener('mouseup', ()=>{ isDrag=false; isPan=false; isDolly=false; });
+    canvasEl.addEventListener('contextmenu', e=>e.preventDefault());
+    canvasEl.addEventListener('auxclick', e=>e.preventDefault());
+    canvasEl.addEventListener('mousedown', e=>{ if(e.button===1) e.preventDefault(); });
+    canvasEl.addEventListener('wheel', e=>{
+        camRadius*=1+e.deltaY*0.001; camRadius=Math.max(0.1,Math.min(500,camRadius));
+    }, {passive:true});
+    addEventListener('resize', ()=>{ canvasEl.width=innerWidth; canvasEl.height=innerHeight; mkDepth(); });
+
+    return true;
+}
+
+function mkDepth() {
+    if (depthTex) depthTex.destroy();
+    depthTex = device.createTexture({
+        size:[canvasEl.width,canvasEl.height], format:'depth24plus',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+    });
+    depthView = depthTex.createView();
+}
+
+function mkPipelines() {
+    const cs = device.createShaderModule({code: COMPUTE_WGSL});
+    computeBGL = device.createBindGroupLayout({ entries:[
+        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
+        {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
+    ]});
+    computePipeline = device.createComputePipeline({
+        layout: device.createPipelineLayout({bindGroupLayouts:[computeBGL]}),
+        compute:{module:cs,entryPoint:'main'}
+    });
+
+    const rs = device.createShaderModule({code: RENDER_WGSL});
+    renderBGL = device.createBindGroupLayout({ entries:[
+        {binding:0,visibility:GPUShaderStage.VERTEX,buffer:{type:'read-only-storage'}},
+        {binding:1,visibility:GPUShaderStage.VERTEX,buffer:{type:'uniform'}},
+    ]});
+    renderPipeline = device.createRenderPipeline({
+        layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
+        vertex:{ module:rs, entryPoint:'vs', buffers:[{
+            arrayStride:8, stepMode:'vertex',
+            attributes:[{shaderLocation:0,offset:0,format:'float32x2'}]
+        }]},
+        fragment:{ module:rs, entryPoint:'fs', targets:[{format:canvasFmt, blend:{
+            color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha'},
+            alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha'},
+        }}]},
+        primitive:{topology:'triangle-list'},
+        depthStencil:{format:'depth24plus',depthWriteEnabled:true,depthCompare:'less'},
+    });
+}
+
+function mkStaticBufs() {
+    quadVBuf = device.createBuffer({size:32,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(quadVBuf,0,new Float32Array([-1,-1, 1,-1, -1,1, 1,1]));
+    quadIBuf = device.createBuffer({size:12,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(quadIBuf,0,new Uint16Array([0,1,2, 2,1,3]));
+    computeUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    renderUniformBuf = device.createBuffer({size:96,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+    indirectBuf = device.createBuffer({
+        size:20,
+        usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC,
+    });
+}
+
+// =============================================================================
+//  COMPUTE DISPATCH
+// =============================================================================
+
+async function runCompute() {
+    if (!state.buffer || !device) return;
+    const byteLen = state.buffer.byteLength;
+    const byteStep = getByteStep(state.format);
+    const tupleCount = Math.floor(byteLen / byteStep);
+    if (tupleCount === 0) return;
+
+    // Raw data buffer (padded to 4-byte alignment)
+    const rawAligned = Math.ceil(byteLen/4)*4;
+    if (rawDataBuf) rawDataBuf.destroy();
+    rawDataBuf = device.createBuffer({size:rawAligned, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+    const padded = new Uint8Array(rawAligned);
+    padded.set(new Uint8Array(state.buffer));
+    device.queue.writeBuffer(rawDataBuf, 0, padded);
+
+    // Output buffer (12 f32s per potential point)
+    const outBytes = tupleCount * 12 * 4;
+    if (outputBuf) outputBuf.destroy();
+    outputBuf = device.createBuffer({size:outBytes, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+
+    // Uniforms
+    device.queue.writeBuffer(computeUniformBuf, 0, new Uint32Array([
+        FORMAT_ID[state.format], state.isLE?1:0, state.shift, tupleCount,
+        byteStep, getWordSize(state.format), 0, 0
+    ]));
+
+    // Clear bitTable + init indirect
+    const enc = device.createCommandEncoder();
+    enc.clearBuffer(bitTableBuf);
+    device.queue.submit([enc.finish()]);
+    device.queue.writeBuffer(indirectBuf, 0, new Uint32Array([6, 0, 0, 0, 0]));
+
+    // Bind group + dispatch
+    const bg = device.createBindGroup({ layout:computeBGL, entries:[
+        {binding:0,resource:{buffer:rawDataBuf}},
+        {binding:1,resource:{buffer:bitTableBuf}},
+        {binding:2,resource:{buffer:outputBuf}},
+        {binding:3,resource:{buffer:indirectBuf}},
+        {binding:4,resource:{buffer:computeUniformBuf}},
+    ]});
+    const enc2 = device.createCommandEncoder();
+    const pass = enc2.beginComputePass();
+    pass.setPipeline(computePipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(tupleCount/256));
+    pass.end();
+    device.queue.submit([enc2.finish()]);
+
+    // Readback count
+    const rb = device.createBuffer({size:20,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    const enc3 = device.createCommandEncoder();
+    enc3.copyBufferToBuffer(indirectBuf, 0, rb, 0, 20);
+    device.queue.submit([enc3.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    pointCount = new Uint32Array(rb.getMappedRange())[1];
+    rb.unmap(); rb.destroy();
+
+    document.getElementById('stats').innerHTML =
+        `Source: <b>${state.fileName}</b><br>Nodes: <b>${pointCount.toLocaleString()}</b> · Tuples: <b>${tupleCount.toLocaleString()}</b><br>Pipeline: <b>WebGPU Compute</b>`;
+}
+
+// =============================================================================
+//  RENDER LOOP
+// =============================================================================
+
+function render() {
+    requestAnimationFrame(render);
+    if (!device || !outputBuf || pointCount===0) return;
+    const w=canvasEl.width, h=canvasEl.height;
+    if (w===0||h===0) return;
+
+    const st = computeStrides();
+    const mvp = getMVP(w/h);
+    const ru = new Float32Array(24);
+    ru.set(mvp,0);
+    ru[16]=st.s0; ru[17]=st.s1; ru[18]=st.s2; ru[19]=st.ctr; ru[20]=st.scl;
+    ru[21]=4.0; ru[22]=w; ru[23]=h;
+    device.queue.writeBuffer(renderUniformBuf, 0, ru);
+
+    const bg = device.createBindGroup({ layout:renderBGL, entries:[
+        {binding:0,resource:{buffer:outputBuf}},
+        {binding:1,resource:{buffer:renderUniformBuf}},
+    ]});
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+        colorAttachments:[{
+            view: context.getCurrentTexture().createView(),
+            clearValue:{r:0.008,g:0.008,b:0.016,a:1}, loadOp:'clear', storeOp:'store',
+        }],
+        depthStencilAttachment:{
+            view:depthView, depthClearValue:1.0, depthLoadOp:'clear', depthStoreOp:'store',
+        }
+    });
+    pass.setPipeline(renderPipeline);
+    pass.setBindGroup(0, bg);
+    pass.setVertexBuffer(0, quadVBuf);
+    pass.setIndexBuffer(quadIBuf, 'uint16');
+    pass.drawIndexedIndirect(indirectBuf, 0);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+}
+
+// =============================================================================
+//  ENCODERS (CPU — for demo generation)
+// =============================================================================
+
+function fp16ToF32(u16){let s=(u16>>15)&1,e=(u16>>10)&0x1F,m=u16&0x3FF;if(e===0)return(s?-1:1)*Math.pow(2,-14)*(m/1024);if(e===31)return m?NaN:(s?-Infinity:Infinity);return(s?-1:1)*Math.pow(2,e-15)*(1+m/1024);}
+function bf16ToF32(u16){let s=(u16>>15)&1,e=(u16>>7)&0xFF,m=u16&0x7F;if(e===0)return(s?-1:1)*Math.pow(2,-126)*(m/128);if(e===255)return m?NaN:(s?-Infinity:Infinity);return(s?-1:1)*Math.pow(2,e-127)*(1+m/128);}
+function fp8E4M3ToF32(u8){let s=(u8>>7)&1,e=(u8>>3)&0xF,m=u8&0x7;if(e===0)return(s?-1:1)*Math.pow(2,-6)*(m/8);return(s?-1:1)*Math.pow(2,e-7)*(1+m/8);}
+function fp8E5M2ToF32(u8){let s=(u8>>7)&1,e=(u8>>2)&0x1F,m=u8&0x3;if(e===0)return(s?-1:1)*Math.pow(2,-14)*(m/4);return(s?-1:1)*Math.pow(2,e-15)*(1+m/4);}
+function fp4ToF32(u8){let s=(u8>>3)&1,e=(u8>>1)&0x3,m=u8&1;if(e===0)return(s?-1:1)*0.5*(m/2);return(s?-1:1)*Math.pow(2,e-1)*(1+m/2);}
+function f32ToFp16(v){const b=new ArrayBuffer(4),f=new Float32Array(b),u=new Uint32Array(b);f[0]=v;const bits=u[0],s=(bits>>>31)&1,e=(bits>>>23)&0xFF,m=bits&0x7FFFFF;if(e===0xFF)return(s<<15)|0x7C00|(m?0x200:0);const ue=e-127;if(ue>15)return(s<<15)|0x7C00;if(ue<-14){const sh=-14-ue;if(sh>24)return s<<15;return(s<<15)|(((0x800000|m)>>(sh+13))&0x3FF);}return(s<<15)|((ue+15)<<10)|(m>>13);}
+function f32ToBf16(v){const b=new ArrayBuffer(4),f=new Float32Array(b),u=new Uint32Array(b);f[0]=v;return u[0]>>>16;}
+function f32ToFp8E4M3(v){let best=0,bd=Infinity;for(let b=0;b<256;b++){const d=fp8E4M3ToF32(b);if(!isFinite(d))continue;if(Math.abs(d-v)<bd){bd=Math.abs(d-v);best=b;}}return best;}
+function f32ToFp8E5M2(v){let best=0,bd=Infinity;for(let b=0;b<256;b++){const d=fp8E5M2ToF32(b);if(!isFinite(d))continue;if(Math.abs(d-v)<bd){bd=Math.abs(d-v);best=b;}}return best;}
+function f32ToFp4(v){let best=0,bd=Infinity;for(let b=0;b<16;b++){if(Math.abs(fp4ToF32(b)-v)<bd){bd=Math.abs(fp4ToF32(b)-v);best=b;}}return best;}
+function normToFloat(n){return Math.atanh(2*Math.max(0.01,Math.min(0.99,n))-1);}
+
+// =============================================================================
+//  DEMO GENERATION (CPU)
+// =============================================================================
+
+function generateDemo(shape) {
+    const f=state.format, isLE=state.isLE, num=100000;
+    const is4Bit=f.endsWith('4'), isFloat=f.startsWith('fp')||f==='bf16';
+    const byteStep=getByteStep(f);
+    const buf=new ArrayBuffer(num*byteStep), v=new DataView(buf);
+    let x=0.1,y=0,z=0; state.fileName="DEMO: "+shape.toUpperCase();
+
+    for(let i=0;i<num;i++){
+        let nx,ny,nz;
+        if(shape==='lorenz'){let dx=10*(y-x),dy=x*(28-z)-y,dz=x*y-(8/3)*z;x+=dx*0.005;y+=dy*0.005;z+=dz*0.005;nx=(x+25)/50;ny=(y+30)/60;nz=z/50;}
+        else if(shape==='thomas'){const b=0.208186;let dx=Math.sin(y)-b*x,dy=Math.sin(z)-b*y,dz=Math.sin(x)-b*z;x+=dx*0.05;y+=dy*0.05;z+=dz*0.05;nx=(x+2.5)/5;ny=(y+2.5)/5;nz=(z+2.5)/5;}
+        else{nx=Math.random();ny=Math.random();nz=Math.random();}
+        nx=Math.max(0,Math.min(1,nx));ny=Math.max(0,Math.min(1,ny));nz=Math.max(0,Math.min(1,nz));
+        const norms=[nx,ny,nz],off=i*byteStep;
+
+        if(is4Bit){
+            if(f==='uint4'){const nibs=norms.map(n=>Math.round(n*15));v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
+            else if(f==='int4'){const nibs=norms.map(n=>{let s=Math.round(n*15)-8;return s<0?s+16:s;});v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
+            else if(f==='fp4'){const nibs=norms.map(n=>f32ToFp4(normToFloat(n)));v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
+        }else if(isFloat){
+            const fv=norms.map(n=>normToFloat(n));
+            if(f==='fp32'){for(let j=0;j<3;j++)v.setFloat32(off+j*4,fv[j],isLE);}
+            else if(f==='fp64'){for(let j=0;j<3;j++)v.setFloat64(off+j*8,fv[j],isLE);}
+            else if(f==='fp16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,f32ToFp16(fv[j]),isLE);}
+            else if(f==='bf16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,f32ToBf16(fv[j]),isLE);}
+            else if(f==='fp8_e4m3'){for(let j=0;j<3;j++)v.setUint8(off+j,f32ToFp8E4M3(fv[j]));}
+            else if(f==='fp8_e5m2'){for(let j=0;j<3;j++)v.setUint8(off+j,f32ToFp8E5M2(fv[j]));}
+        }else{
+            if(f==='uint32'){for(let j=0;j<3;j++)v.setUint32(off+j*4,norms[j]*4294967295,isLE);}
+            else if(f==='int32'){for(let j=0;j<3;j++)v.setInt32(off+j*4,norms[j]*4294967295-2147483648,isLE);}
+            else if(f==='uint16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,norms[j]*65535,isLE);}
+            else if(f==='int16'){for(let j=0;j<3;j++)v.setInt16(off+j*2,norms[j]*65535-32768,isLE);}
+            else if(f==='uint8'){for(let j=0;j<3;j++)v.setUint8(off+j,norms[j]*255);}
+            else if(f==='int8'){for(let j=0;j<3;j++)v.setInt8(off+j,norms[j]*255-128);}
+        }
+    }
+    state.buffer=buf; runCompute();
+}
+
+// =============================================================================
+//  PLY EXPORT (GPU readback)
+// =============================================================================
+
+async function exportPLY() {
+    if(!outputBuf||pointCount===0)return;
+    const st=computeStrides();
+    const readSize=pointCount*12*4;
+    const rb=device.createBuffer({size:readSize,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    const enc=device.createCommandEncoder();
+    enc.copyBufferToBuffer(outputBuf,0,rb,0,readSize);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const d=new Float32Array(rb.getMappedRange());
+
+    let lines=["ply","format ascii 1.0",
+        `comment Generated by Unified Strata WebGPU — ${state.fileName}`,
+        `comment Type: ${state.format} Endian: ${state.isLE?'LE':'BE'} Dive: ${state.shift}`,
+        `element vertex ${pointCount}`,
+        "property float x","property float y","property float z",
+        "property uchar red","property uchar green","property uchar blue","end_header"];
+    for(let i=0;i<pointCount;i++){
+        const b=i*12;
+        const wx=(d[b]*st.s0+d[b+3]*st.s1+d[b+6]*st.s2-st.ctr)*st.scl;
+        const wy=(d[b+1]*st.s0+d[b+4]*st.s1+d[b+7]*st.s2-st.ctr)*st.scl;
+        const wz=(d[b+2]*st.s0+d[b+5]*st.s1+d[b+8]*st.s2-st.ctr)*st.scl;
+        const r=Math.min(255,Math.floor((d[b+9]+0.1)*255));
+        const g=Math.min(255,Math.floor((d[b+10]+0.1)*255));
+        const bl=Math.min(255,Math.floor((d[b+11]+0.1)*255));
+        lines.push(`${wx.toFixed(6)} ${wy.toFixed(6)} ${wz.toFixed(6)} ${r} ${g} ${bl}`);
+    }
+    rb.unmap(); rb.destroy();
+    const blob=new Blob([lines.join("\n")],{type:"text/plain"});
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement("a");
+    link.href=url; link.download=`${state.fileName.replace(/[^a-z0-9]/gi,'_')}_strata.ply`;
+    link.click();
+}
+
+// =============================================================================
+//  UI HANDLERS
+// =============================================================================
+
+function setFormat(f){state.format=f;document.querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.id==='t-'+f));runCompute();}
+function setEndian(le){state.isLE=le;document.getElementById('leBtn').classList.toggle('active',le);document.getElementById('beBtn').classList.toggle('active',!le);runCompute();}
+function handleFile(files){if(!files[0])return;state.fileName=files[0].name;const r=new FileReader();r.onload=ev=>{state.buffer=ev.target.result;runCompute();};r.readAsArrayBuffer(files[0]);}
+document.getElementById('sG0').oninput=e=>{state.gaps[0]=parseFloat(e.target.value);document.getElementById('vG0').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sG1').oninput=e=>{state.gaps[1]=parseFloat(e.target.value);document.getElementById('vG1').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sG2').oninput=e=>{state.gaps[2]=parseFloat(e.target.value);document.getElementById('vG2').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;runCompute();};
+
+const dz=document.getElementById('dropZone');
+document.addEventListener('dragenter',e=>{e.preventDefault();dz.style.display='flex';});
+document.addEventListener('dragover',e=>e.preventDefault());
+dz.addEventListener('dragleave',e=>{e.preventDefault();dz.style.display='none';});
+document.addEventListener('drop',e=>{e.preventDefault();dz.style.display='none';handleFile(e.dataTransfer.files);});
+
+// =============================================================================
+//  BOOT
+// =============================================================================
+
+(async()=>{
+    const ok=await initWebGPU();
+    if(!ok)return;
+    render();
+    generateDemo('lorenz');
+})();
+
+</script>
+</body>
+</html>
