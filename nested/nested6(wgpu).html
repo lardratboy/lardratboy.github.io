@@ -111,6 +111,10 @@
         <input type="range" id="sG2" min="0" max="1" step="0.01" value="0.05">
     </div>
     <div class="ctrl">
+        <label>Gap Inflate <span class="val" id="vInf">0.50</span></label>
+        <input type="range" id="sInf" min="0" max="1" step="0.01" value="0.50">
+    </div>
+    <div class="ctrl">
         <label>Dive (Bit Shift) <span class="val" id="vShift">22</span></label>
         <input type="range" id="sShift" min="0" max="22" step="1" value="22">
     </div>
@@ -342,7 +346,7 @@ const FORMAT_ID = {
 
 let state = {
     format: 'uint32', isLE: true, shift: 22,
-    gaps: [0.25, 0.1, 0.05], buffer: null, fileName: "Internal",
+    gaps: [0.25, 0.1, 0.05], inflate: 0.5, buffer: null, fileName: "Internal",
     mode: 0, // 0 = 3D, 1 = Tiled 2D
 };
 
@@ -354,15 +358,29 @@ function getWordSize(f) {
 }
 function getByteStep(f) { return f.endsWith('4') ? 2 : getWordSize(f) * 3; }
 
+function computeInflation() {
+    const g = state.gaps, p = state.inflate;
+    // §7.2: inflate[i] = Π_{j=0}^{i-1} (1 + g_j × p)
+    const inf0 = 1;
+    const inf1 = 1 + g[0] * p;
+    const inf2 = inf1 * (1 + g[1] * p);
+    return [inf0, inf1, inf2];
+}
+
 function computeStrides() {
     const g = state.gaps;
+    const inf = computeInflation();
+    // Base strides (bottom-up, no inflation)
     const s2 = 1.0 + g[2], s1 = 15.0 * s2 * (1.0 + g[1]), s0 = 15.0 * s1 * (1.0 + g[0]);
-    const max = 15.0 * s0 + 15.0 * s1 + 15.0 * s2;
-    return { s0, s1, s2, max, ctr: max / 2, scl: 5.0 / max };
+    // Apply inflation: step_inflated[i] = step[i] × inflate[i]
+    const is0 = s0 * inf[0], is1 = s1 * inf[1], is2 = s2 * inf[2];
+    const max = 15.0 * is0 + 15.0 * is1 + 15.0 * is2;
+    return { s0: is0, s1: is1, s2: is2, max, ctr: max / 2, scl: 5.0 / max };
 }
 
 function computeTiledStrides() {
     const g = state.gaps;
+    const inf = computeInflation();
     const D = 16, ZCOLS = 4, TW = ZCOLS * D; // d=16, sqrt(16)=4, tiledW=64
 
     // Bottom-up stride computation (§6.2)
@@ -372,10 +390,10 @@ function computeTiledStrides() {
     const strX0 = TW * strX1 * (1 + g[1]);
     const strY0 = TW * strY1 * (1 + g[1]);
 
-    // Step = stride * (1 + own gap) — cell-to-cell spacing at each level
-    const stepX0 = strX0 * (1 + g[0]), stepY0 = strY0 * (1 + g[0]);
-    const stepX1 = strX1 * (1 + g[1]), stepY1 = strY1 * (1 + g[1]);
-    const stepX2 = strX2 * (1 + g[2]), stepY2 = strY2 * (1 + g[2]);
+    // Step = stride * (1 + own gap) × inflation (§7.5)
+    const stepX0 = strX0 * (1 + g[0]) * inf[0], stepY0 = strY0 * (1 + g[0]) * inf[0];
+    const stepX1 = strX1 * (1 + g[1]) * inf[1], stepY1 = strY1 * (1 + g[1]) * inf[1];
+    const stepX2 = strX2 * (1 + g[2]) * inf[2], stepY2 = strY2 * (1 + g[2]) * inf[2];
 
     // Max flat coord = (ZCOLS-1)*D + (D-1) = 63
     const maxX = 63 * stepX0 + 63 * stepX1 + 63 * stepX2;
@@ -824,6 +842,7 @@ function handleFile(files){if(!files[0])return;state.fileName=files[0].name;cons
 document.getElementById('sG0').oninput=e=>{state.gaps[0]=parseFloat(e.target.value);document.getElementById('vG0').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG1').oninput=e=>{state.gaps[1]=parseFloat(e.target.value);document.getElementById('vG1').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG2').oninput=e=>{state.gaps[2]=parseFloat(e.target.value);document.getElementById('vG2').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sInf').oninput=e=>{state.inflate=parseFloat(e.target.value);document.getElementById('vInf').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;runCompute();};
 
 const dz=document.getElementById('dropZone');
