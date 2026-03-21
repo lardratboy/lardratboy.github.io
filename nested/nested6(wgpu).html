@@ -717,33 +717,57 @@ async function runCompute() {
 //  RENDER LOOP
 // =============================================================================
 
+// Pre-allocated uniform staging buffer (avoids GC per frame)
+const ruData = new Float32Array(40);
+
+// Cached bind group — only recreated when outputBuf changes
+let renderBG = null;
+let renderBG_outputBuf = null;
+
+// Cached stride results — recomputed only when gaps/inflate change
+let cachedStrides = null;
+let cachedTiledStrides = null;
+let lastGapKey = '';
+
+function updateCachedStrides() {
+    const key = state.gaps.join(',') + ',' + state.inflate;
+    if (key !== lastGapKey) {
+        lastGapKey = key;
+        cachedStrides = computeStrides();
+        cachedTiledStrides = computeTiledStrides();
+    }
+}
+
+function ensureRenderBindGroup() {
+    if (renderBG && renderBG_outputBuf === outputBuf) return;
+    renderBG = device.createBindGroup({ layout:renderBGL, entries:[
+        {binding:0,resource:{buffer:outputBuf}},
+        {binding:1,resource:{buffer:renderUniformBuf}},
+    ]});
+    renderBG_outputBuf = outputBuf;
+}
+
 function render() {
     requestAnimationFrame(render);
     if (!device || !outputBuf || pointCount===0) return;
     const w=canvasEl.width, h=canvasEl.height;
     if (w===0||h===0) return;
 
-    const st = computeStrides();
-    const ti = computeTiledStrides();
+    updateCachedStrides();
+    ensureRenderBindGroup();
+
+    const st = cachedStrides;
+    const ti = cachedTiledStrides;
     const mvp = getMVP(w/h);
 
-    // Pack: mat4(16) + 3D(4) + render(4) + tiled(12) + pad(4) = 40 floats = 160 bytes
-    const ru = new Float32Array(40);
-    ru.set(mvp, 0);
-    // 3D params
-    ru[16]=st.s0; ru[17]=st.s1; ru[18]=st.s2; ru[19]=st.ctr; ru[20]=st.scl;
-    ru[21]=4.0; ru[22]=w; ru[23]=h;
-    // Tiled params
-    ru[24]=state.mode;
-    ru[25]=ti.stepX0; ru[26]=ti.stepX1; ru[27]=ti.stepX2;
-    ru[28]=ti.stepY0; ru[29]=ti.stepY1; ru[30]=ti.stepY2;
-    ru[31]=ti.centerX; ru[32]=ti.centerY; ru[33]=ti.scale;
-    device.queue.writeBuffer(renderUniformBuf, 0, ru);
-
-    const bg = device.createBindGroup({ layout:renderBGL, entries:[
-        {binding:0,resource:{buffer:outputBuf}},
-        {binding:1,resource:{buffer:renderUniformBuf}},
-    ]});
+    ruData.set(mvp, 0);
+    ruData[16]=st.s0; ruData[17]=st.s1; ruData[18]=st.s2; ruData[19]=st.ctr; ruData[20]=st.scl;
+    ruData[21]=4.0; ruData[22]=w; ruData[23]=h;
+    ruData[24]=state.mode;
+    ruData[25]=ti.stepX0; ruData[26]=ti.stepX1; ruData[27]=ti.stepX2;
+    ruData[28]=ti.stepY0; ruData[29]=ti.stepY1; ruData[30]=ti.stepY2;
+    ruData[31]=ti.centerX; ruData[32]=ti.centerY; ruData[33]=ti.scale;
+    device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
     const pass = enc.beginRenderPass({
@@ -756,7 +780,7 @@ function render() {
         }
     });
     pass.setPipeline(renderPipeline);
-    pass.setBindGroup(0, bg);
+    pass.setBindGroup(0, renderBG);
     pass.setVertexBuffer(0, quadVBuf);
     pass.setIndexBuffer(quadIBuf, 'uint16');
     pass.drawIndexedIndirect(indirectBuf, 0);
