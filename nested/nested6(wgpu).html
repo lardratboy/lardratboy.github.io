@@ -595,6 +595,23 @@ function mkStaticBufs() {
         size:20,
         usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC,
     });
+
+    // Fix #1: Output buffer — allocate once at max capacity
+    const maxOutBytes = Math.min(
+        MAX_OUTPUT_POINTS * BYTES_PER_POINT,
+        device.limits.maxStorageBufferBindingSize
+    );
+    outputBuf = device.createBuffer({
+        size: maxOutBytes,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+
+    // Fix #2: Raw staging buffer — allocate once at chunk size, reuse every dispatch
+    const rawBufSize = Math.ceil(CHUNK_BYTES / 4) * 4; // 128MB aligned
+    rawDataBuf = device.createBuffer({
+        size: rawBufSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
 }
 
 // =============================================================================
@@ -604,6 +621,10 @@ function mkStaticBufs() {
 const CHUNK_BYTES = 128 * 1024 * 1024; // 128MB raw data per chunk
 const BYTES_PER_POINT = 16; // 4 packed floats × 4 bytes
 const MAX_OUTPUT_POINTS = 48 * 1024 * 1024; // 48M unique points cap (was 16M at 48 bytes)
+
+// Pre-allocated staging arrays to avoid per-chunk GC
+const computeUniformData = new Uint32Array(8);
+const indirectResetData = new Uint32Array([6, 0, 0, 0, 0]);
 
 async function runCompute() {
     if (!state.buffer || !device) return;
@@ -624,65 +645,59 @@ async function runCompute() {
 
     const statsEl = document.getElementById('stats');
 
-    // Output buffer — capped, also respect device limits
-    const maxOutBytes = Math.min(
-        MAX_OUTPUT_POINTS * BYTES_PER_POINT,
-        device.limits.maxStorageBufferBindingSize
-    );
-    const maxPoints = Math.floor(maxOutBytes / BYTES_PER_POINT);
-    if (outputBuf) outputBuf.destroy();
-    outputBuf = device.createBuffer({
-        size: maxPoints * BYTES_PER_POINT,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    });
-
-    // Clear bitTable + init indirect [6, 0, 0, 0, 0]
+    // Clear bitTable + reset indirect (buffers already allocated at init)
     const initEnc = device.createCommandEncoder();
     initEnc.clearBuffer(bitTableBuf);
     device.queue.submit([initEnc.finish()]);
-    device.queue.writeBuffer(indirectBuf, 0, new Uint32Array([6, 0, 0, 0, 0]));
+    device.queue.writeBuffer(indirectBuf, 0, indirectResetData);
 
     // Chunk the input
-    const MAX_DISPATCH = 65535 * 256; // max workgroups per dim * workgroup size
+    const MAX_DISPATCH = 65535 * 256;
     const chunkTuples = Math.min(Math.floor(CHUNK_BYTES / byteStep), MAX_DISPATCH);
     const totalChunks = Math.ceil(totalTuples / chunkTuples);
     const srcBytes = new Uint8Array(state.buffer, startByte, windowBytes);
+
+    // Fix #4: Bind group is stable — rawDataBuf, outputBuf, etc. are all reused
+    const computeBG = device.createBindGroup({ layout: computeBGL, entries: [
+        { binding: 0, resource: { buffer: rawDataBuf } },
+        { binding: 1, resource: { buffer: bitTableBuf } },
+        { binding: 2, resource: { buffer: outputBuf } },
+        { binding: 3, resource: { buffer: indirectBuf } },
+        { binding: 4, resource: { buffer: computeUniformBuf } },
+    ]});
 
     for (let chunk = 0; chunk < totalChunks; chunk++) {
         const startTuple = chunk * chunkTuples;
         const count = Math.min(chunkTuples, totalTuples - startTuple);
         const chunkByteOff = startTuple * byteStep;
         const chunkByteLen = count * byteStep;
-        const rawAligned = Math.ceil(chunkByteLen / 4) * 4;
 
-        // Upload this chunk's raw data
-        if (rawDataBuf) rawDataBuf.destroy();
-        rawDataBuf = device.createBuffer({
-            size: rawAligned,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        });
-        const padded = new Uint8Array(rawAligned);
-        padded.set(srcBytes.subarray(chunkByteOff, chunkByteOff + chunkByteLen));
-        device.queue.writeBuffer(rawDataBuf, 0, padded);
+        // Fix #3: Direct upload, 4-byte aligned
+        const alignedLen = Math.ceil(chunkByteLen / 4) * 4;
+        if (chunkByteOff + alignedLen <= srcBytes.length) {
+            // Source has enough bytes — read the aligned amount directly (extra 1-3 bytes are harmless)
+            device.queue.writeBuffer(rawDataBuf, 0, srcBytes, chunkByteOff, alignedLen);
+        } else {
+            // Final chunk boundary — pad the tail
+            const tmp = new Uint8Array(alignedLen);
+            tmp.set(srcBytes.subarray(chunkByteOff, chunkByteOff + chunkByteLen));
+            device.queue.writeBuffer(rawDataBuf, 0, tmp);
+        }
 
-        // Uniforms for this chunk
-        device.queue.writeBuffer(computeUniformBuf, 0, new Uint32Array([
-            FORMAT_ID[state.format], state.isLE ? 1 : 0, state.shift, count,
-            byteStep, getWordSize(state.format), 0, 0
-        ]));
+        // Uniforms for this chunk (reuse pre-allocated array)
+        computeUniformData[0] = FORMAT_ID[state.format];
+        computeUniformData[1] = state.isLE ? 1 : 0;
+        computeUniformData[2] = state.shift;
+        computeUniformData[3] = count;
+        computeUniformData[4] = byteStep;
+        computeUniformData[5] = getWordSize(state.format);
+        device.queue.writeBuffer(computeUniformBuf, 0, computeUniformData);
 
-        // Bind group + dispatch
-        const bg = device.createBindGroup({ layout: computeBGL, entries: [
-            { binding: 0, resource: { buffer: rawDataBuf } },
-            { binding: 1, resource: { buffer: bitTableBuf } },
-            { binding: 2, resource: { buffer: outputBuf } },
-            { binding: 3, resource: { buffer: indirectBuf } },
-            { binding: 4, resource: { buffer: computeUniformBuf } },
-        ]});
+        // Dispatch
         const enc = device.createCommandEncoder();
         const pass = enc.beginComputePass();
         pass.setPipeline(computePipeline);
-        pass.setBindGroup(0, bg);
+        pass.setBindGroup(0, computeBG);
         pass.dispatchWorkgroups(Math.ceil(count / 256));
         pass.end();
         device.queue.submit([enc.finish()]);
@@ -921,13 +936,19 @@ function handleFile(files){
     };
     r.readAsArrayBuffer(files[0]);
 }
-document.getElementById('sOff').oninput=e=>{state.scrubOffset=parseFloat(e.target.value)/100;document.getElementById('vOff').innerText=parseFloat(e.target.value).toFixed(1)+'%';runCompute();};
-document.getElementById('sWin').oninput=e=>{state.scrubWindowMB=parseFloat(e.target.value);document.getElementById('vWin').innerText=parseFloat(e.target.value).toFixed(1);runCompute();};
+// Fix #9: Debounced compute — coalesce rapid slider changes
+let computeRAF = 0;
+function scheduleCompute() {
+    cancelAnimationFrame(computeRAF);
+    computeRAF = requestAnimationFrame(() => runCompute());
+}
+document.getElementById('sOff').oninput=e=>{state.scrubOffset=parseFloat(e.target.value)/100;document.getElementById('vOff').innerText=parseFloat(e.target.value).toFixed(1)+'%';scheduleCompute();};
+document.getElementById('sWin').oninput=e=>{state.scrubWindowMB=parseFloat(e.target.value);document.getElementById('vWin').innerText=parseFloat(e.target.value).toFixed(1);scheduleCompute();};
 document.getElementById('sG0').oninput=e=>{state.gaps[0]=parseFloat(e.target.value);document.getElementById('vG0').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG1').oninput=e=>{state.gaps[1]=parseFloat(e.target.value);document.getElementById('vG1').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG2').oninput=e=>{state.gaps[2]=parseFloat(e.target.value);document.getElementById('vG2').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sInf').oninput=e=>{state.inflate=parseFloat(e.target.value);document.getElementById('vInf').innerText=parseFloat(e.target.value).toFixed(2);};
-document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;runCompute();};
+document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;scheduleCompute();};
 
 const dz=document.getElementById('dropZone');
 document.addEventListener('dragenter',e=>{e.preventDefault();dz.style.display='flex';});
