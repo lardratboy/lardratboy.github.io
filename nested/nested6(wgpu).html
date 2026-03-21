@@ -239,11 +239,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let old=atomicOr(&bitTable[key>>5u],1u<<(key&31u));
     if((old&(1u<<(key&31u)))==0u){
         let oi=atomicAdd(&indirect[1],1u);
-        let b=oi*12u;
-        output[b+0u]=f32((vx>>28u)&0xFu);output[b+1u]=f32((vy>>28u)&0xFu);output[b+2u]=f32((vz>>28u)&0xFu);
-        output[b+3u]=f32((vx>>24u)&0xFu);output[b+4u]=f32((vy>>24u)&0xFu);output[b+5u]=f32((vz>>24u)&0xFu);
-        output[b+6u]=f32((vx>>20u)&0xFu);output[b+7u]=f32((vy>>20u)&0xFu);output[b+8u]=f32((vz>>20u)&0xFu);
-        output[b+9u]=f32(dx)/1023.0;output[b+10u]=f32(dy)/1023.0;output[b+11u]=f32(dz)/1023.0;
+        let b=oi*4u;
+        // Pack per §4.7: (ix << 16) | (iy << 8) | iz per tier
+        output[b+0u]=f32((((vx>>28u)&0xFu)<<16u) | (((vy>>28u)&0xFu)<<8u) | ((vz>>28u)&0xFu));
+        output[b+1u]=f32((((vx>>24u)&0xFu)<<16u) | (((vy>>24u)&0xFu)<<8u) | ((vz>>24u)&0xFu));
+        output[b+2u]=f32((((vx>>20u)&0xFu)<<16u) | (((vy>>20u)&0xFu)<<8u) | ((vz>>20u)&0xFu));
+        // Color: quantize 10-bit to 8-bit, pack same way
+        let cr = (dx * 255u) / 1023u;
+        let cg = (dy * 255u) / 1023u;
+        let cb = (dz * 255u) / 1023u;
+        output[b+3u]=f32((cr<<16u) | (cg<<8u) | cb);
     }
 }
 `;
@@ -274,11 +279,14 @@ struct VSOut {
 
 @vertex
 fn vs(@location(0) qOff: vec2<f32>, @builtin(instance_index) ii: u32) -> VSOut {
-    let b=ii*12u;
-    let p0=vec3(pts[b],pts[b+1u],pts[b+2u]);
-    let p1=vec3(pts[b+3u],pts[b+4u],pts[b+5u]);
-    let p2=vec3(pts[b+6u],pts[b+7u],pts[b+8u]);
-    let col=vec3(pts[b+9u],pts[b+10u],pts[b+11u]);
+    let b=ii*4u;
+    let raw0=u32(pts[b]); let raw1=u32(pts[b+1u]); let raw2=u32(pts[b+2u]); let raw3=u32(pts[b+3u]);
+
+    // Unpack tier indices: (ix << 16) | (iy << 8) | iz
+    let p0=vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
+    let p1=vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
+    let p2=vec3(f32((raw2>>16u)&0xFFu), f32((raw2>>8u)&0xFFu), f32(raw2&0xFFu));
+    let col=vec3(f32((raw3>>16u)&0xFFu)/255.0, f32((raw3>>8u)&0xFFu)/255.0, f32(raw3&0xFFu)/255.0);
 
     var world: vec3<f32>;
 
@@ -549,7 +557,8 @@ function mkStaticBufs() {
 // =============================================================================
 
 const CHUNK_BYTES = 128 * 1024 * 1024; // 128MB raw data per chunk
-const MAX_OUTPUT_POINTS = 16 * 1024 * 1024; // 16M unique points cap
+const BYTES_PER_POINT = 16; // 4 packed floats × 4 bytes
+const MAX_OUTPUT_POINTS = 48 * 1024 * 1024; // 48M unique points cap (was 16M at 48 bytes)
 
 async function runCompute() {
     if (!state.buffer || !device) return;
@@ -562,13 +571,13 @@ async function runCompute() {
 
     // Output buffer — capped, also respect device limits
     const maxOutBytes = Math.min(
-        MAX_OUTPUT_POINTS * 48,
+        MAX_OUTPUT_POINTS * BYTES_PER_POINT,
         device.limits.maxStorageBufferBindingSize
     );
-    const maxPoints = Math.floor(maxOutBytes / 48);
+    const maxPoints = Math.floor(maxOutBytes / BYTES_PER_POINT);
     if (outputBuf) outputBuf.destroy();
     outputBuf = device.createBuffer({
-        size: maxPoints * 48,
+        size: maxPoints * BYTES_PER_POINT,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
 
@@ -640,10 +649,11 @@ async function runCompute() {
     rb.unmap(); rb.destroy();
 
     const mbIn = (byteLen / (1024 * 1024)).toFixed(1);
+    const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
     statsEl.innerHTML =
         `Source: <b>${state.fileName}</b> (${mbIn} MB)<br>` +
-        `Nodes: <b>${pointCount.toLocaleString()}</b> · Tuples: <b>${totalTuples.toLocaleString()}</b><br>` +
-        `Chunks: <b>${totalChunks}</b> · Pipeline: <b>WebGPU Compute</b>`;
+        `Nodes: <b>${pointCount.toLocaleString()}</b> · GPU: <b>${mbOut} MB</b><br>` +
+        `Tuples: <b>${totalTuples.toLocaleString()}</b> · Chunks: <b>${totalChunks}</b> · <b>WebGPU</b>`;
 }
 
 // =============================================================================
@@ -763,7 +773,7 @@ function generateDemo(shape) {
 async function exportPLY() {
     if(!outputBuf||pointCount===0)return;
     const st=computeStrides();
-    const readSize=pointCount*12*4;
+    const readSize=pointCount*BYTES_PER_POINT;
     const rb=device.createBuffer({size:readSize,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
     const enc=device.createCommandEncoder();
     enc.copyBufferToBuffer(outputBuf,0,rb,0,readSize);
@@ -778,13 +788,21 @@ async function exportPLY() {
         "property float x","property float y","property float z",
         "property uchar red","property uchar green","property uchar blue","end_header"];
     for(let i=0;i<pointCount;i++){
-        const b=i*12;
-        const wx=(d[b]*st.s0+d[b+3]*st.s1+d[b+6]*st.s2-st.ctr)*st.scl;
-        const wy=(d[b+1]*st.s0+d[b+4]*st.s1+d[b+7]*st.s2-st.ctr)*st.scl;
-        const wz=(d[b+2]*st.s0+d[b+5]*st.s1+d[b+8]*st.s2-st.ctr)*st.scl;
-        const r=Math.min(255,Math.floor((d[b+9]+0.1)*255));
-        const g=Math.min(255,Math.floor((d[b+10]+0.1)*255));
-        const bl=Math.min(255,Math.floor((d[b+11]+0.1)*255));
+        const b=i*4;
+        // Unpack tiers
+        const raw0=d[b]|0, raw1=d[b+1]|0, raw2=d[b+2]|0, raw3=d[b+3]|0;
+        const p0x=(raw0>>16)&0xFF, p0y=(raw0>>8)&0xFF, p0z=raw0&0xFF;
+        const p1x=(raw1>>16)&0xFF, p1y=(raw1>>8)&0xFF, p1z=raw1&0xFF;
+        const p2x=(raw2>>16)&0xFF, p2y=(raw2>>8)&0xFF, p2z=raw2&0xFF;
+
+        const wx=(p0x*st.s0+p1x*st.s1+p2x*st.s2-st.ctr)*st.scl;
+        const wy=(p0y*st.s0+p1y*st.s1+p2y*st.s2-st.ctr)*st.scl;
+        const wz=(p0z*st.s0+p1z*st.s1+p2z*st.s2-st.ctr)*st.scl;
+
+        // Unpack color (already 0-255) + apply +0.1 brightness boost
+        const r=Math.min(255,((raw3>>16)&0xFF)+25);
+        const g=Math.min(255,((raw3>>8)&0xFF)+25);
+        const bl=Math.min(255,(raw3&0xFF)+25);
         lines.push(`${wx.toFixed(6)} ${wy.toFixed(6)} ${wz.toFixed(6)} ${r} ${g} ${bl}`);
     }
     rb.unmap(); rb.destroy();
