@@ -74,6 +74,15 @@
     <button class="file-btn" onclick="document.getElementById('fIn').click()">Open Binary File</button>
     <input type="file" id="fIn" style="display:none" onchange="handleFile(this.files)">
 
+    <div class="group-label">Scrub Timeline</div>
+    <div class="ctrl">
+        <label>File Offset <span class="val" id="vOff">0%</span></label>
+        <input type="range" id="sOff" min="0" max="100" step="0.1" value="0">
+    </div>
+    <div class="ctrl">
+        <label>Window Size (MB) <span class="val" id="vWin">32.0</span></label>
+        <input type="range" id="sWin" min="0.1" max="256" step="0.1" value="32">
+    </div>
     <div class="group-label">Data Type</div>
     <select id="selFormat" onchange="setFormat(this.value)">
         <optgroup label="Integer">
@@ -364,6 +373,8 @@ let state = {
     format: 'uint32', isLE: true, shift: 22,
     gaps: [0.25, 0.1, 0.05], inflate: 0.5, buffer: null, fileName: "Internal",
     mode: 0, // 0 = 3D, 1 = Tiled 2D
+    scrubOffset: 0, // 0–1 (percentage of file)
+    scrubWindowMB: 32,
 };
 
 function getWordSize(f) {
@@ -596,9 +607,19 @@ const MAX_OUTPUT_POINTS = 48 * 1024 * 1024; // 48M unique points cap (was 16M at
 
 async function runCompute() {
     if (!state.buffer || !device) return;
-    const byteLen = state.buffer.byteLength;
+    const fullByteLen = state.buffer.byteLength;
     const byteStep = getByteStep(state.format);
-    const totalTuples = Math.floor(byteLen / byteStep);
+
+    // Scrub window: compute byte offset (aligned to byteStep) and window length
+    const startByte = Math.min(
+        Math.floor((state.scrubOffset * fullByteLen) / byteStep) * byteStep,
+        Math.max(0, fullByteLen - byteStep)
+    );
+    const windowBytes = Math.min(
+        Math.round(state.scrubWindowMB * 1024 * 1024),
+        fullByteLen - startByte
+    );
+    const totalTuples = Math.floor(windowBytes / byteStep);
     if (totalTuples === 0) return;
 
     const statsEl = document.getElementById('stats');
@@ -625,7 +646,7 @@ async function runCompute() {
     const MAX_DISPATCH = 65535 * 256; // max workgroups per dim * workgroup size
     const chunkTuples = Math.min(Math.floor(CHUNK_BYTES / byteStep), MAX_DISPATCH);
     const totalChunks = Math.ceil(totalTuples / chunkTuples);
-    const srcBytes = new Uint8Array(state.buffer);
+    const srcBytes = new Uint8Array(state.buffer, startByte, windowBytes);
 
     for (let chunk = 0; chunk < totalChunks; chunk++) {
         const startTuple = chunk * chunkTuples;
@@ -682,12 +703,14 @@ async function runCompute() {
     pointCount = new Uint32Array(rb.getMappedRange())[1];
     rb.unmap(); rb.destroy();
 
-    const mbIn = (byteLen / (1024 * 1024)).toFixed(1);
+    const mbFull = (fullByteLen / (1024 * 1024)).toFixed(1);
+    const mbWin = (windowBytes / (1024 * 1024)).toFixed(1);
     const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
+    const offPct = (state.scrubOffset * 100).toFixed(1);
     statsEl.innerHTML =
-        `Source: <b>${state.fileName}</b> (${mbIn} MB)<br>` +
-        `Nodes: <b>${pointCount.toLocaleString()}</b> · GPU: <b>${mbOut} MB</b><br>` +
-        `Tuples: <b>${totalTuples.toLocaleString()}</b> · Chunks: <b>${totalChunks}</b> · <b>WebGPU</b>`;
+        `Source: <b>${state.fileName}</b> (${mbFull} MB)<br>` +
+        `Window: <b>${mbWin} MB</b> @ ${offPct}% · Nodes: <b>${pointCount.toLocaleString()}</b><br>` +
+        `GPU: <b>${mbOut} MB</b> · Chunks: <b>${totalChunks}</b> · <b>WebGPU</b>`;
 }
 
 // =============================================================================
@@ -854,7 +877,28 @@ async function exportPLY() {
 function setFormat(f){state.format=f;document.getElementById('selFormat').value=f;runCompute();}
 function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=le?'le':'be';runCompute();}
 function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);}
-function handleFile(files){if(!files[0])return;state.fileName=files[0].name;const r=new FileReader();r.onload=ev=>{state.buffer=ev.target.result;runCompute();};r.readAsArrayBuffer(files[0]);}
+function handleFile(files){
+    if(!files[0])return;
+    state.fileName=files[0].name;
+    const r=new FileReader();
+    r.onload=ev=>{
+        state.buffer=ev.target.result;
+        const mb=state.buffer.byteLength/(1024*1024);
+        const winSlider=document.getElementById('sWin');
+        winSlider.max=Math.max(1,Math.ceil(mb));
+        // Default window to full file if under 32MB, else 32MB
+        const defWin=Math.min(32,mb);
+        winSlider.value=defWin; state.scrubWindowMB=defWin;
+        document.getElementById('vWin').innerText=defWin.toFixed(1);
+        // Reset offset
+        document.getElementById('sOff').value=0; state.scrubOffset=0;
+        document.getElementById('vOff').innerText='0%';
+        runCompute();
+    };
+    r.readAsArrayBuffer(files[0]);
+}
+document.getElementById('sOff').oninput=e=>{state.scrubOffset=parseFloat(e.target.value)/100;document.getElementById('vOff').innerText=parseFloat(e.target.value).toFixed(1)+'%';runCompute();};
+document.getElementById('sWin').oninput=e=>{state.scrubWindowMB=parseFloat(e.target.value);document.getElementById('vWin').innerText=parseFloat(e.target.value).toFixed(1);runCompute();};
 document.getElementById('sG0').oninput=e=>{state.gaps[0]=parseFloat(e.target.value);document.getElementById('vG0').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG1').oninput=e=>{state.gaps[1]=parseFloat(e.target.value);document.getElementById('vG1').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG2').oninput=e=>{state.gaps[2]=parseFloat(e.target.value);document.getElementById('vG2').innerText=parseFloat(e.target.value).toFixed(2);};
