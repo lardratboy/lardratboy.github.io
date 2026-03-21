@@ -92,6 +92,12 @@
         <button id="beBtn" onclick="setEndian(false)">Big Endian</button>
     </div>
 
+    <div class="group-label">Projection</div>
+    <div class="btn-grid" style="grid-template-columns: 1fr 1fr;">
+        <button id="mode3d" class="active" onclick="setMode(0)">3D Spatial</button>
+        <button id="modeTiled" onclick="setMode(1)">Tiled 2D</button>
+    </div>
+
     <div class="ctrl">
         <label>Macro Gap <span class="val" id="vG0">0.25</span></label>
         <input type="range" id="sG0" min="0" max="2" step="0.01" value="0.25">
@@ -251,6 +257,10 @@ struct RParams {
     mvp: mat4x4<f32>,
     s0: f32, s1: f32, s2: f32, center: f32,
     scale: f32, pointSize: f32, vpW: f32, vpH: f32,
+    mode: f32, stepX0: f32, stepX1: f32, stepX2: f32,
+    stepY0: f32, stepY1: f32, stepY2: f32,
+    tiledCenterX: f32, tiledCenterY: f32, tiledScale: f32,
+    _p0: f32, _p1: f32,
 };
 
 @group(0) @binding(0) var<storage, read> pts: array<f32>;
@@ -269,9 +279,38 @@ fn vs(@location(0) qOff: vec2<f32>, @builtin(instance_index) ii: u32) -> VSOut {
     let p1=vec3(pts[b+3u],pts[b+4u],pts[b+5u]);
     let p2=vec3(pts[b+6u],pts[b+7u],pts[b+8u]);
     let col=vec3(pts[b+9u],pts[b+10u],pts[b+11u]);
-    let world=(p0*R.s0+p1*R.s1+p2*R.s2-vec3(R.center))*R.scale;
-    var clip=R.mvp*vec4(world,1.0);
-    clip=vec4(clip.xy+qOff*R.pointSize*clip.w/vec2(R.vpW,R.vpH),clip.zw);
+
+    var world: vec3<f32>;
+
+    if (R.mode < 0.5) {
+        // 3D isotropic
+        world = (p0*R.s0 + p1*R.s1 + p2*R.s2 - vec3(R.center)) * R.scale;
+    } else {
+        // Tiled 2D — fold Z into tile grid per tier
+        let ZCOLS = 4u;
+        let D = 16.0;
+
+        let iz0=u32(p0.z); let iz1=u32(p1.z); let iz2=u32(p2.z);
+
+        let fx0 = f32(iz0 % ZCOLS) * D + p0.x;
+        let fy0 = f32(iz0 / ZCOLS) * D + p0.y;
+        let fx1 = f32(iz1 % ZCOLS) * D + p1.x;
+        let fy1 = f32(iz1 / ZCOLS) * D + p1.y;
+        let fx2 = f32(iz2 % ZCOLS) * D + p2.x;
+        let fy2 = f32(iz2 / ZCOLS) * D + p2.y;
+
+        let px = fx0*R.stepX0 + fx1*R.stepX1 + fx2*R.stepX2;
+        let py = fy0*R.stepY0 + fy1*R.stepY1 + fy2*R.stepY2;
+
+        world = vec3(
+            (px - R.tiledCenterX) * R.tiledScale,
+            (py - R.tiledCenterY) * R.tiledScale,
+            0.0
+        );
+    }
+
+    var clip = R.mvp * vec4(world, 1.0);
+    clip = vec4(clip.xy + qOff*R.pointSize*clip.w/vec2(R.vpW, R.vpH), clip.zw);
     var o:VSOut;
     o.pos=clip; o.color=col+0.1; o.uv=qOff;
     return o;
@@ -295,7 +334,8 @@ const FORMAT_ID = {
 
 let state = {
     format: 'uint32', isLE: true, shift: 22,
-    gaps: [0.25, 0.1, 0.05], buffer: null, fileName: "Internal"
+    gaps: [0.25, 0.1, 0.05], buffer: null, fileName: "Internal",
+    mode: 0, // 0 = 3D, 1 = Tiled 2D
 };
 
 function getWordSize(f) {
@@ -311,6 +351,33 @@ function computeStrides() {
     const s2 = 1.0 + g[2], s1 = 15.0 * s2 * (1.0 + g[1]), s0 = 15.0 * s1 * (1.0 + g[0]);
     const max = 15.0 * s0 + 15.0 * s1 + 15.0 * s2;
     return { s0, s1, s2, max, ctr: max / 2, scl: 5.0 / max };
+}
+
+function computeTiledStrides() {
+    const g = state.gaps;
+    const D = 16, ZCOLS = 4, TW = ZCOLS * D; // d=16, sqrt(16)=4, tiledW=64
+
+    // Bottom-up stride computation (§6.2)
+    const strX2 = 1, strY2 = 1;
+    const strX1 = TW * strX2 * (1 + g[2]);
+    const strY1 = TW * strY2 * (1 + g[2]);
+    const strX0 = TW * strX1 * (1 + g[1]);
+    const strY0 = TW * strY1 * (1 + g[1]);
+
+    // Step = stride * (1 + own gap) — cell-to-cell spacing at each level
+    const stepX0 = strX0 * (1 + g[0]), stepY0 = strY0 * (1 + g[0]);
+    const stepX1 = strX1 * (1 + g[1]), stepY1 = strY1 * (1 + g[1]);
+    const stepX2 = strX2 * (1 + g[2]), stepY2 = strY2 * (1 + g[2]);
+
+    // Max flat coord = (ZCOLS-1)*D + (D-1) = 63
+    const maxX = 63 * stepX0 + 63 * stepX1 + 63 * stepX2;
+    const maxY = 63 * stepY0 + 63 * stepY1 + 63 * stepY2;
+    const maxE = Math.max(maxX, maxY);
+
+    return {
+        stepX0, stepY0, stepX1, stepY1, stepX2, stepY2,
+        centerX: maxX / 2, centerY: maxY / 2, scale: 5.0 / maxE
+    };
 }
 
 // =============================================================================
@@ -469,7 +536,7 @@ function mkStaticBufs() {
     quadIBuf = device.createBuffer({size:12,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
     device.queue.writeBuffer(quadIBuf,0,new Uint16Array([0,1,2, 2,1,3]));
     computeUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    renderUniformBuf = device.createBuffer({size:96,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    renderUniformBuf = device.createBuffer({size:160,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     indirectBuf = device.createBuffer({
         size:20,
@@ -590,11 +657,20 @@ function render() {
     if (w===0||h===0) return;
 
     const st = computeStrides();
+    const ti = computeTiledStrides();
     const mvp = getMVP(w/h);
-    const ru = new Float32Array(24);
-    ru.set(mvp,0);
+
+    // Pack: mat4(16) + 3D(4) + render(4) + tiled(12) + pad(4) = 40 floats = 160 bytes
+    const ru = new Float32Array(40);
+    ru.set(mvp, 0);
+    // 3D params
     ru[16]=st.s0; ru[17]=st.s1; ru[18]=st.s2; ru[19]=st.ctr; ru[20]=st.scl;
     ru[21]=4.0; ru[22]=w; ru[23]=h;
+    // Tiled params
+    ru[24]=state.mode;
+    ru[25]=ti.stepX0; ru[26]=ti.stepX1; ru[27]=ti.stepX2;
+    ru[28]=ti.stepY0; ru[29]=ti.stepY1; ru[30]=ti.stepY2;
+    ru[31]=ti.centerX; ru[32]=ti.centerY; ru[33]=ti.scale;
     device.queue.writeBuffer(renderUniformBuf, 0, ru);
 
     const bg = device.createBindGroup({ layout:renderBGL, entries:[
@@ -723,8 +799,9 @@ async function exportPLY() {
 //  UI HANDLERS
 // =============================================================================
 
-function setFormat(f){state.format=f;document.querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.id==='t-'+f));runCompute();}
+function setFormat(f){state.format=f;document.querySelectorAll('.btn-grid button[id^="t-"]').forEach(b=>b.classList.toggle('active',b.id==='t-'+f));runCompute();}
 function setEndian(le){state.isLE=le;document.getElementById('leBtn').classList.toggle('active',le);document.getElementById('beBtn').classList.toggle('active',!le);runCompute();}
+function setMode(m){state.mode=m;document.getElementById('mode3d').classList.toggle('active',m===0);document.getElementById('modeTiled').classList.toggle('active',m===1);}
 function handleFile(files){if(!files[0])return;state.fileName=files[0].name;const r=new FileReader();r.onload=ev=>{state.buffer=ev.target.result;runCompute();};r.readAsArrayBuffer(files[0]);}
 document.getElementById('sG0').oninput=e=>{state.gaps[0]=parseFloat(e.target.value);document.getElementById('vG0').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG1').oninput=e=>{state.gaps[1]=parseFloat(e.target.value);document.getElementById('vG1').innerText=parseFloat(e.target.value).toFixed(2);};
