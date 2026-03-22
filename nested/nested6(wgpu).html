@@ -139,6 +139,16 @@
         <label>Gap Inflate <span class="val" id="vInf">0.50</span></label>
         <input type="range" id="sInf" min="0" max="1" step="0.01" value="0.50">
     </div>
+
+    <div class="group-label">Rendering</div>
+    <div class="ctrl">
+        <label>Point Size <span class="val" id="vPts">1.00</span></label>
+        <input type="range" id="sPts" min="0.1" max="4" step="0.01" value="1">
+    </div>
+    <div class="ctrl">
+        <label>Center Gravity <span class="val" id="vProx">0.00</span></label>
+        <input type="range" id="sProx" min="0" max="1" step="0.01" value="0">
+    </div>
     <div class="ctrl">
         <label>Dive (Bit Shift) <span class="val" id="vShift">22</span></label>
         <input type="range" id="sShift" min="0" max="22" step="1" value="22">
@@ -341,7 +351,7 @@ struct RParams {
     mode: f32, stepX0: f32, stepX1: f32, stepX2: f32,
     stepY0: f32, stepY1: f32, stepY2: f32,
     tiledCenterX: f32, tiledCenterY: f32, tiledScale: f32,
-    _p0: f32, _p1: f32,
+    proximityStrength: f32, _p0: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
@@ -394,10 +404,20 @@ fn vs(
         );
     }
 
+    // Center-proximity sizing: particles near origin are larger and brighter
+    let dist = length(world);
+    let proximity = 1.0 - clamp(dist / 5.0, 0.0, 1.0);
+    let proxSq = proximity * proximity; // quadratic falloff — sharper center focus
+    let size = R.pointSize * mix(1.0, 0.5 + 1.5 * proxSq, R.proximityStrength);
+
     var clip = R.mvp * vec4(world, 1.0);
-    clip = vec4(clip.xy + qOff*R.pointSize*clip.w/vec2(R.vpW, R.vpH), clip.zw);
+    clip = vec4(clip.xy + qOff*size*clip.w/vec2(R.vpW, R.vpH), clip.zw);
+
+    // Brightness: dim periphery, bright center
+    let proxBright = mix(1.0, 0.4 + 1.2 * proxSq, R.proximityStrength);
+
     var o:VSOut;
-    o.pos=clip; o.color=col+0.1; o.uv=qOff;
+    o.pos=clip; o.color=(col+0.1) * proxBright; o.uv=qOff;
     return o;
 }
 
@@ -422,6 +442,8 @@ let state = {
     gaps: [0.25, 0.1, 0.05], inflate: 0.5,
     file: null, fileSize: 0, buffer: null, fileName: "Internal",
     mode: 0, // 0 = 3D, 1 = Tiled 2D
+    proximity: 0,
+    pointScale: 1.0,
     scrubOffset: 0, // 0–1 (percentage of file)
     scrubWindowMB: 32,
 };
@@ -857,11 +879,12 @@ function render() {
 
     ruData.set(mvp, 0);
     ruData[16]=st.s0; ruData[17]=st.s1; ruData[18]=st.s2; ruData[19]=st.ctr; ruData[20]=st.scl;
-    ruData[21]=4.0; ruData[22]=w; ruData[23]=h;
+    ruData[21]=Math.max(1.0, Math.min(16.0, 30.0 / camRadius)) * state.pointScale; ruData[22]=w; ruData[23]=h;
     ruData[24]=state.mode;
     ruData[25]=ti.stepX0; ruData[26]=ti.stepX1; ruData[27]=ti.stepX2;
     ruData[28]=ti.stepY0; ruData[29]=ti.stepY1; ruData[30]=ti.stepY2;
     ruData[31]=ti.centerX; ruData[32]=ti.centerY; ruData[33]=ti.scale;
+    ruData[34]=state.proximity;
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
@@ -1036,6 +1059,8 @@ document.getElementById('sG0').oninput=e=>{state.gaps[0]=parseFloat(e.target.val
 document.getElementById('sG1').oninput=e=>{state.gaps[1]=parseFloat(e.target.value);document.getElementById('vG1').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG2').oninput=e=>{state.gaps[2]=parseFloat(e.target.value);document.getElementById('vG2').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sInf').oninput=e=>{state.inflate=parseFloat(e.target.value);document.getElementById('vInf').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sPts').oninput=e=>{state.pointScale=parseFloat(e.target.value);document.getElementById('vPts').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sProx').oninput=e=>{state.proximity=parseFloat(e.target.value);document.getElementById('vProx').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;scheduleCompute();};
 
 const dz=document.getElementById('dropZone');
