@@ -419,7 +419,8 @@ const FORMAT_ID = {
 
 let state = {
     format: 'uint32', isLE: true, shift: 22,
-    gaps: [0.25, 0.1, 0.05], inflate: 0.5, buffer: null, fileName: "Internal",
+    gaps: [0.25, 0.1, 0.05], inflate: 0.5,
+    file: null, fileSize: 0, buffer: null, fileName: "Internal",
     mode: 0, // 0 = 3D, 1 = Tiled 2D
     scrubOffset: 0, // 0–1 (percentage of file)
     scrubWindowMB: 32,
@@ -679,21 +680,45 @@ const MAX_OUTPUT_POINTS = 48 * 1024 * 1024; // 48M unique points cap (was 16M at
 const computeUniformData = new Uint32Array(8);
 const indirectResetData = new Uint32Array([6, 0, 0, 0, 0]);
 
+let loadingWindow = false;
+let windowDirty = false;
+
+async function loadWindow() {
+    if (!state.file && !state.buffer) return;
+    if (!state.file) { runCompute(); return; }
+    if (loadingWindow) { windowDirty = true; return; }
+    loadingWindow = true;
+    windowDirty = false;
+
+    try {
+        const byteStep = getByteStep(state.format);
+        const fileSize = state.fileSize;
+
+        const startByte = Math.min(
+            Math.floor((state.scrubOffset * fileSize) / byteStep) * byteStep,
+            Math.max(0, fileSize - byteStep)
+        );
+        const windowBytes = Math.min(
+            Math.round(state.scrubWindowMB * 1024 * 1024),
+            fileSize - startByte
+        );
+        if (windowBytes < byteStep) { loadingWindow = false; return; }
+
+        const blob = state.file.slice(startByte, startByte + windowBytes);
+        state.buffer = await blob.arrayBuffer();
+        runCompute();
+    } catch(e) {
+        console.warn('loadWindow error:', e);
+    }
+    loadingWindow = false;
+    if (windowDirty) loadWindow();
+}
+
 async function runCompute() {
     if (!state.buffer || !device) return;
-    const fullByteLen = state.buffer.byteLength;
+    const byteLen = state.buffer.byteLength;
     const byteStep = getByteStep(state.format);
-
-    // Scrub window: compute byte offset (aligned to byteStep) and window length
-    const startByte = Math.min(
-        Math.floor((state.scrubOffset * fullByteLen) / byteStep) * byteStep,
-        Math.max(0, fullByteLen - byteStep)
-    );
-    const windowBytes = Math.min(
-        Math.round(state.scrubWindowMB * 1024 * 1024),
-        fullByteLen - startByte
-    );
-    const totalTuples = Math.floor(windowBytes / byteStep);
+    const totalTuples = Math.floor(byteLen / byteStep);
     if (totalTuples === 0) return;
 
     const statsEl = document.getElementById('stats');
@@ -713,7 +738,7 @@ async function runCompute() {
     const MAX_DISPATCH = 65535 * 256;
     const chunkTuples = Math.min(Math.floor(CHUNK_BYTES / byteStep), MAX_DISPATCH);
     const totalChunks = Math.ceil(totalTuples / chunkTuples);
-    const srcBytes = new Uint8Array(state.buffer, startByte, windowBytes);
+    const srcBytes = new Uint8Array(state.buffer);
 
     // Fix #4: Bind group is stable — rawDataBuf, outputBuf, etc. are all reused
     const computeBG = device.createBindGroup({ layout: computeBGL, entries: [
@@ -776,8 +801,8 @@ async function runCompute() {
     pointCount = new Uint32Array(rb.getMappedRange())[1];
     rb.unmap(); rb.destroy();
 
-    const mbFull = (fullByteLen / (1024 * 1024)).toFixed(1);
-    const mbWin = (windowBytes / (1024 * 1024)).toFixed(1);
+    const mbFull = (state.fileSize / (1024 * 1024)).toFixed(1);
+    const mbWin = (byteLen / (1024 * 1024)).toFixed(1);
     const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
     const offPct = (state.scrubOffset * 100).toFixed(1);
     statsEl.innerHTML =
@@ -915,7 +940,10 @@ function generateDemo(shape) {
             else if(f==='int8'){for(let j=0;j<3;j++)v.setInt8(off+j,norms[j]*255-128);}
         }
     }
-    state.buffer=buf; runCompute();
+    state.file = null;
+    state.fileSize = buf.byteLength;
+    state.buffer = buf;
+    runCompute();
 }
 
 // =============================================================================
@@ -974,32 +1002,36 @@ function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=
 function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);}
 function handleFile(files){
     if(!files[0])return;
-    state.fileName=files[0].name;
-    const r=new FileReader();
-    r.onload=ev=>{
-        state.buffer=ev.target.result;
-        const mb=state.buffer.byteLength/(1024*1024);
-        const winSlider=document.getElementById('sWin');
-        winSlider.max=Math.max(1,Math.ceil(mb));
-        // Default window to full file if under 32MB, else 32MB
-        const defWin=Math.min(32,mb);
-        winSlider.value=defWin; state.scrubWindowMB=defWin;
-        document.getElementById('vWin').innerText=defWin.toFixed(1);
-        // Reset offset
-        document.getElementById('sOff').value=0; state.scrubOffset=0;
-        document.getElementById('vOff').innerText='0%';
-        runCompute();
-    };
-    r.readAsArrayBuffer(files[0]);
+    const f = files[0];
+    state.file = f;
+    state.fileSize = f.size;
+    state.fileName = f.name;
+
+    const mb = f.size / (1024 * 1024);
+    const winSlider = document.getElementById('sWin');
+    winSlider.max = Math.max(1, Math.ceil(mb));
+    const defWin = Math.min(32, mb);
+    winSlider.value = defWin; state.scrubWindowMB = defWin;
+    document.getElementById('vWin').innerText = defWin.toFixed(1);
+
+    document.getElementById('sOff').value = 0; state.scrubOffset = 0;
+    document.getElementById('vOff').innerText = '0%';
+
+    loadWindow();
 }
-// Fix #9: Debounced compute — coalesce rapid slider changes
+// Fix #9: Debounced dispatchers — coalesce rapid slider changes
 let computeRAF = 0;
 function scheduleCompute() {
     cancelAnimationFrame(computeRAF);
     computeRAF = requestAnimationFrame(() => runCompute());
 }
-document.getElementById('sOff').oninput=e=>{state.scrubOffset=parseFloat(e.target.value)/100;document.getElementById('vOff').innerText=parseFloat(e.target.value).toFixed(1)+'%';scheduleCompute();};
-document.getElementById('sWin').oninput=e=>{state.scrubWindowMB=parseFloat(e.target.value);document.getElementById('vWin').innerText=parseFloat(e.target.value).toFixed(1);scheduleCompute();};
+let windowRAF = 0;
+function scheduleLoadWindow() {
+    cancelAnimationFrame(windowRAF);
+    windowRAF = requestAnimationFrame(() => loadWindow());
+}
+document.getElementById('sOff').oninput=e=>{state.scrubOffset=parseFloat(e.target.value)/100;document.getElementById('vOff').innerText=parseFloat(e.target.value).toFixed(1)+'%';scheduleLoadWindow();};
+document.getElementById('sWin').oninput=e=>{state.scrubWindowMB=parseFloat(e.target.value);document.getElementById('vWin').innerText=parseFloat(e.target.value).toFixed(1);scheduleLoadWindow();};
 document.getElementById('sG0').oninput=e=>{state.gaps[0]=parseFloat(e.target.value);document.getElementById('vG0').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG1').oninput=e=>{state.gaps[1]=parseFloat(e.target.value);document.getElementById('vG1').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG2').oninput=e=>{state.gaps[2]=parseFloat(e.target.value);document.getElementById('vG2').innerText=parseFloat(e.target.value).toFixed(2);};
