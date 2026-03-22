@@ -149,6 +149,24 @@
         <label>Center Gravity <span class="val" id="vProx">0.00</span></label>
         <input type="range" id="sProx" min="0" max="1" step="0.01" value="0">
     </div>
+    <div class="select-row">
+        <div>
+            <div class="group-label">Gravity Focus</div>
+            <select id="selGravTarget" onchange="state.gravityTarget=parseInt(this.value)">
+                <option value="0" selected>World Center</option>
+                <option value="1">Camera Target</option>
+            </select>
+        </div>
+        <div>
+            <div class="group-label">Falloff Curve</div>
+            <select id="selFalloff" onchange="state.falloffCurve=parseInt(this.value)">
+                <option value="0" selected>Quadratic</option>
+                <option value="1">Linear</option>
+                <option value="2">Inverse Square</option>
+                <option value="3">Logarithmic</option>
+            </select>
+        </div>
+    </div>
     <div class="ctrl">
         <label>Dive (Bit Shift) <span class="val" id="vShift">22</span></label>
         <input type="range" id="sShift" min="0" max="22" step="1" value="22">
@@ -351,7 +369,8 @@ struct RParams {
     mode: f32, stepX0: f32, stepX1: f32, stepX2: f32,
     stepY0: f32, stepY1: f32, stepY2: f32,
     tiledCenterX: f32, tiledCenterY: f32, tiledScale: f32,
-    proximityStrength: f32, _p0: f32,
+    proximityStrength: f32, falloffCurve: f32,
+    gravTargetX: f32, gravTargetY: f32, gravTargetZ: f32, _p0: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
@@ -404,17 +423,28 @@ fn vs(
         );
     }
 
-    // Center-proximity sizing: particles near origin are larger and brighter
-    let dist = length(world);
-    let proximity = 1.0 - clamp(dist / 5.0, 0.0, 1.0);
-    let proxSq = proximity * proximity; // quadratic falloff — sharper center focus
-    let size = R.pointSize * mix(1.0, 0.5 + 1.5 * proxSq, R.proximityStrength);
+    // Center-proximity sizing with selectable gravity target and falloff curve
+    let gravCenter = vec3(R.gravTargetX, R.gravTargetY, R.gravTargetZ);
+    let dist = length(world - gravCenter);
+    let normDist = clamp(dist / 5.0, 0.0, 1.0);
+
+    // Falloff curves: 0=quadratic, 1=linear, 2=inverse-square, 3=logarithmic
+    var prox = 0.0;
+    let curve = u32(R.falloffCurve + 0.5);
+    switch (curve) {
+        case 1u{ prox = 1.0 - normDist; }
+        case 2u{ prox = 1.0 / (1.0 + dist * dist * 0.16); }
+        case 3u{ prox = 1.0 - log(1.0 + dist) / log(6.0); }
+        default{ let p = 1.0 - normDist; prox = p * p; }
+    }
+    prox = clamp(prox, 0.0, 1.0);
+    let size = R.pointSize * mix(1.0, 0.5 + 1.5 * prox, R.proximityStrength);
 
     var clip = R.mvp * vec4(world, 1.0);
     clip = vec4(clip.xy + qOff*size*clip.w/vec2(R.vpW, R.vpH), clip.zw);
 
     // Brightness: dim periphery, bright center
-    let proxBright = mix(1.0, 0.4 + 1.2 * proxSq, R.proximityStrength);
+    let proxBright = mix(1.0, 0.4 + 1.2 * prox, R.proximityStrength);
 
     var o:VSOut;
     o.pos=clip; o.color=(col+0.1) * proxBright; o.uv=qOff;
@@ -444,6 +474,8 @@ let state = {
     mode: 0, // 0 = 3D, 1 = Tiled 2D
     proximity: 0,
     pointScale: 1.0,
+    gravityTarget: 0, // 0 = world center, 1 = camera target
+    falloffCurve: 0,  // 0 = quadratic, 1 = linear, 2 = inverse-square, 3 = logarithmic
     scrubOffset: 0, // 0–1 (percentage of file)
     scrubWindowMB: 32,
 };
@@ -885,6 +917,13 @@ function render() {
     ruData[28]=ti.stepY0; ruData[29]=ti.stepY1; ruData[30]=ti.stepY2;
     ruData[31]=ti.centerX; ruData[32]=ti.centerY; ruData[33]=ti.scale;
     ruData[34]=state.proximity;
+    ruData[35]=state.falloffCurve;
+    // Gravity focus: world center (0,0,0) or camera orbit target
+    if (state.gravityTarget === 1) {
+        ruData[36]=camTarget[0]; ruData[37]=camTarget[1]; ruData[38]=camTarget[2];
+    } else {
+        ruData[36]=0; ruData[37]=0; ruData[38]=0;
+    }
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
