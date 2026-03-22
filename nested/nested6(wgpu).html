@@ -344,8 +344,7 @@ struct RParams {
     _p0: f32, _p1: f32,
 };
 
-@group(0) @binding(0) var<storage, read> pts: array<f32>;
-@group(0) @binding(1) var<uniform> R: RParams;
+@group(0) @binding(0) var<uniform> R: RParams;
 
 struct VSOut {
     @builtin(position) pos: vec4<f32>,
@@ -354,9 +353,11 @@ struct VSOut {
 };
 
 @vertex
-fn vs(@location(0) qOff: vec2<f32>, @builtin(instance_index) ii: u32) -> VSOut {
-    let b=ii*4u;
-    let raw0=u32(pts[b]); let raw1=u32(pts[b+1u]); let raw2=u32(pts[b+2u]); let raw3=u32(pts[b+3u]);
+fn vs(
+    @location(0) qOff: vec2<f32>,
+    @location(1) pk: vec4<f32>,
+) -> VSOut {
+    let raw0=u32(pk.x); let raw1=u32(pk.y); let raw2=u32(pk.z); let raw3=u32(pk.w);
 
     // Unpack tier indices: (ix << 16) | (iy << 8) | iz
     let p0=vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
@@ -612,15 +613,20 @@ function mkPipelines() {
 
     const rs = device.createShaderModule({code: RENDER_WGSL});
     renderBGL = device.createBindGroupLayout({ entries:[
-        {binding:0,visibility:GPUShaderStage.VERTEX,buffer:{type:'read-only-storage'}},
-        {binding:1,visibility:GPUShaderStage.VERTEX,buffer:{type:'uniform'}},
+        {binding:0,visibility:GPUShaderStage.VERTEX,buffer:{type:'uniform'}},
     ]});
     renderPipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
-        vertex:{ module:rs, entryPoint:'vs', buffers:[{
-            arrayStride:8, stepMode:'vertex',
-            attributes:[{shaderLocation:0,offset:0,format:'float32x2'}]
-        }]},
+        vertex:{ module:rs, entryPoint:'vs', buffers:[
+            { // Slot 0: quad vertices (per-vertex)
+                arrayStride:8, stepMode:'vertex',
+                attributes:[{shaderLocation:0,offset:0,format:'float32x2'}]
+            },
+            { // Slot 1: packed point data (per-instance)
+                arrayStride:16, stepMode:'instance',
+                attributes:[{shaderLocation:1,offset:0,format:'float32x4'}]
+            },
+        ]},
         fragment:{ module:rs, entryPoint:'fs', targets:[{format:canvasFmt, blend:{
             color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha'},
             alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha'},
@@ -650,7 +656,7 @@ function mkStaticBufs() {
     );
     outputBuf = device.createBuffer({
         size: maxOutBytes,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_SRC,
     });
 
     // Fix #2: Raw staging buffer — allocate once at chunk size, reuse every dispatch
@@ -787,9 +793,15 @@ async function runCompute() {
 // Pre-allocated uniform staging buffer (avoids GC per frame)
 const ruData = new Float32Array(40);
 
-// Cached bind group — only recreated when outputBuf changes
+// Cached bind group — uniform-only, created once
 let renderBG = null;
-let renderBG_outputBuf = null;
+
+function ensureRenderBindGroup() {
+    if (renderBG) return;
+    renderBG = device.createBindGroup({ layout:renderBGL, entries:[
+        {binding:0,resource:{buffer:renderUniformBuf}},
+    ]});
+}
 
 // Cached stride results — recomputed only when gaps/inflate change
 let cachedStrides = null;
@@ -803,15 +815,6 @@ function updateCachedStrides() {
         cachedStrides = computeStrides();
         cachedTiledStrides = computeTiledStrides();
     }
-}
-
-function ensureRenderBindGroup() {
-    if (renderBG && renderBG_outputBuf === outputBuf) return;
-    renderBG = device.createBindGroup({ layout:renderBGL, entries:[
-        {binding:0,resource:{buffer:outputBuf}},
-        {binding:1,resource:{buffer:renderUniformBuf}},
-    ]});
-    renderBG_outputBuf = outputBuf;
 }
 
 function render() {
@@ -849,6 +852,7 @@ function render() {
     pass.setPipeline(renderPipeline);
     pass.setBindGroup(0, renderBG);
     pass.setVertexBuffer(0, quadVBuf);
+    pass.setVertexBuffer(1, outputBuf);
     pass.setIndexBuffer(quadIBuf, 'uint16');
     pass.drawIndexedIndirect(indirectBuf, 0);
     pass.end();
