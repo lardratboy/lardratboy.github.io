@@ -221,6 +221,23 @@
         <input type="range" id="sSlabSoft" min="0" max="1" step="0.01" value="0.2">
     </div>
 
+    <div class="select-row">
+        <div>
+            <div class="group-label">CSG Compose</div>
+            <select id="selCSG" onchange="state.csgMode=parseInt(this.value)">
+                <option value="0" selected>Intersect</option>
+                <option value="1">Union</option>
+                <option value="2">Subtract</option>
+            </select>
+        </div>
+        <div>
+            <div class="group-label">Gizmo Alpha</div>
+            <div class="ctrl" style="margin-top:6px;">
+                <input type="range" id="sGizmo" min="0" max="1" step="0.01" value="0.3" style="width:100%;">
+            </div>
+        </div>
+    </div>
+
     <div class="group-label" style="display:flex;justify-content:space-between;align-items:center;">
         Clip Volume (AABB)
         <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbAABB" onchange="state.aabbEnabled=this.checked?1:0" style="accent-color:#0ff;"> On</label>
@@ -458,7 +475,7 @@ struct RParams {
     slabOffset: f32, slabHalfT: f32, slabSoft: f32,
     aabbMinX: f32, aabbMinY: f32, aabbMinZ: f32,
     aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
-    aabbMode: f32, _p0: f32, _p1: f32, _p2: f32,
+    aabbMode: f32, csgMode: f32, gizmoAlpha: f32, _p0: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
@@ -580,24 +597,49 @@ fn vs(
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
-    var alpha = 1.0;
-
-    // Cross-section slab
-    if (R.slabHalfT > 0.0) {
+    // Compute signed distances (negative = inside)
+    var slabDist = -999.0;
+    let hasSlab = R.slabHalfT > 0.0;
+    if (hasSlab) {
         let slabN = vec3(R.slabNX, R.slabNY, R.slabNZ);
         let d = dot(in.worldPos, slabN) - R.slabOffset;
-        let ad = abs(d);
-        if (ad > R.slabHalfT) { discard; }
-        alpha *= 1.0 - smoothstep(R.slabHalfT - R.slabSoft, R.slabHalfT, ad);
+        slabDist = abs(d) - R.slabHalfT;
     }
 
-    // AABB clip volume
-    if (abs(R.aabbMode) > 0.5) {
+    var aabbDist = -999.0;
+    let hasAABB = abs(R.aabbMode) > 0.5;
+    if (hasAABB) {
         let aMin = vec3(R.aabbMinX, R.aabbMinY, R.aabbMinZ);
         let aMax = vec3(R.aabbMaxX, R.aabbMaxY, R.aabbMaxZ);
-        let inside = all(in.worldPos >= aMin) && all(in.worldPos <= aMax);
-        let keep = select(!inside, inside, R.aabbMode > 0.0);
-        if (!keep) { discard; }
+        let dMin = aMin - in.worldPos;
+        let dMax = in.worldPos - aMax;
+        aabbDist = max(max(max(dMin.x, dMax.x), max(dMin.y, dMax.y)), max(dMin.z, dMax.z));
+        if (R.aabbMode < 0.0) { aabbDist = -aabbDist; }
+    }
+
+    // CSG composition (only when both active)
+    var cd: f32;
+    if (hasSlab && hasAABB) {
+        let csg = u32(R.csgMode + 0.5);
+        switch (csg) {
+            case 1u { cd = min(slabDist, aabbDist); }
+            case 2u { cd = max(slabDist, -aabbDist); }
+            default { cd = max(slabDist, aabbDist); }
+        }
+    } else if (hasSlab) {
+        cd = slabDist;
+    } else if (hasAABB) {
+        cd = aabbDist;
+    } else {
+        cd = -999.0;
+    }
+
+    // Discard + soft edge
+    let soft = max(R.slabSoft, 0.001);
+    if (cd > soft) { discard; }
+    var alpha = 1.0;
+    if (cd > 0.0) {
+        alpha = 1.0 - smoothstep(0.0, soft, cd);
     }
 
     // Point sprite circle
@@ -607,7 +649,45 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 `;
 
 // =============================================================================
-//  STATE + HELPERS
+//  WGSL — WIREFRAME SHADER (reuses RParams uniform for MVP + gizmoAlpha)
+// =============================================================================
+
+const WIRE_WGSL = `
+struct RParams {
+    mvp: mat4x4<f32>,
+    s0: f32, s1: f32, s2: f32, center: f32,
+    scale: f32, pointSize: f32, vpW: f32, vpH: f32,
+    mode: f32, stepX0: f32, stepX1: f32, stepX2: f32,
+    stepY0: f32, stepY1: f32, stepY2: f32,
+    tiledCenterX: f32, tiledCenterY: f32, tiledScale: f32,
+    proximityStrength: f32, falloffCurve: f32,
+    gravTargetX: f32, gravTargetY: f32, gravTargetZ: f32,
+    depthScale: f32, subRotSinY: f32, subRotCosY: f32,
+    subRotSinX: f32, subRotCosX: f32,
+    slabNX: f32, slabNY: f32, slabNZ: f32,
+    slabOffset: f32, slabHalfT: f32, slabSoft: f32,
+    aabbMinX: f32, aabbMinY: f32, aabbMinZ: f32,
+    aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
+    aabbMode: f32, csgMode: f32, gizmoAlpha: f32, _p0: f32,
+};
+@group(0) @binding(0) var<uniform> R: RParams;
+
+struct WOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) col: vec4<f32>,
+};
+
+@vertex fn wvs(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>) -> WOut {
+    var o: WOut;
+    o.pos = R.mvp * vec4(p, 1.0);
+    o.col = vec4(c.rgb, c.a * R.gizmoAlpha);
+    return o;
+}
+
+@fragment fn wfs(in: WOut) -> @location(0) vec4<f32> {
+    return in.col;
+}
+`;
 // =============================================================================
 
 const FORMAT_ID = {
@@ -637,6 +717,8 @@ let state = {
     aabbEnabled: 0,
     aabbMin: [-5, -5, -5],
     aabbMax: [5, 5, 5],
+    csgMode: 0,       // 0=intersect, 1=union, 2=subtract
+    gizmoAlpha: 0.3,
 };
 
 function getWordSize(f) {
@@ -740,9 +822,9 @@ function getMVP(asp) {
 // =============================================================================
 
 let device, context, canvasEl, canvasFmt;
-let computePipeline, renderPipeline;
+let computePipeline, renderPipeline, wirePipeline;
 let rawDataBuf, bitTableBuf, outputBuf, indirectBuf, computeUniformBuf;
-let renderUniformBuf, quadVBuf, quadIBuf;
+let renderUniformBuf, quadVBuf, quadIBuf, wireVBuf;
 let computeBGL, renderBGL;
 let depthTex, depthView;
 let pointCount = 0;
@@ -853,6 +935,25 @@ function mkPipelines() {
         primitive:{topology:'triangle-list'},
         depthStencil:{format:'depth24plus',depthWriteEnabled:true,depthCompare:'less'},
     });
+
+    // Wireframe pipeline — line-list, no depth write, alpha blending
+    const ws = device.createShaderModule({code: WIRE_WGSL});
+    wirePipeline = device.createRenderPipeline({
+        layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
+        vertex:{ module:ws, entryPoint:'wvs', buffers:[{
+            arrayStride: 28, stepMode:'vertex',
+            attributes:[
+                {shaderLocation:0, offset:0, format:'float32x3'},
+                {shaderLocation:1, offset:12, format:'float32x4'},
+            ]
+        }]},
+        fragment:{ module:ws, entryPoint:'wfs', targets:[{format:canvasFmt, blend:{
+            color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha'},
+            alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha'},
+        }}]},
+        primitive:{topology:'line-list'},
+        depthStencil:{format:'depth24plus',depthWriteEnabled:false,depthCompare:'less'},
+    });
 }
 
 function mkStaticBufs() {
@@ -862,6 +963,7 @@ function mkStaticBufs() {
     device.queue.writeBuffer(quadIBuf,0,new Uint16Array([0,1,2, 2,1,3]));
     computeUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     renderUniformBuf = device.createBuffer({size:240,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    wireVBuf = device.createBuffer({size:4096,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
     bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     indirectBuf = device.createBuffer({
         size:20,
@@ -1060,6 +1162,69 @@ function updateCachedStrides() {
     }
 }
 
+function buildWireVerts(sn) {
+    const v = []; // [x,y,z, r,g,b,a, ...] per vertex, 7 floats each
+    const S = 6.0;
+
+    // Helper: push an edge (two vertices with same color)
+    function edge(a, b, r, g, bl, al) {
+        v.push(a[0],a[1],a[2], r,g,bl,al, b[0],b[1],b[2], r,g,bl,al);
+    }
+
+    // Slab wireframe
+    if (state.slabEnabled) {
+        // Tangent vectors perpendicular to slab normal
+        let t1, t2;
+        const ax=Math.abs(sn[0]),ay=Math.abs(sn[1]),az=Math.abs(sn[2]);
+        if (ay < 0.99) {
+            t1 = [sn[1]*0-0*sn[2], sn[2]*0-sn[0]*0, sn[0]*0-sn[1]*0]; // cross(sn,[0,0,1]) first
+            t1 = [-sn[2], 0, sn[0]]; // cross with (0,1,0) simplified
+            if (ay > ax && ay > az) t1 = [sn[2], 0, -sn[0]]; // if Y-dominant, cross with (0,0,1)
+            // Actually let's do it properly
+            t1 = [0-sn[2]*0, sn[2]*0-sn[0]*0, sn[0]*0-0]; // wrong approach, let me just do cross products
+        }
+        // Proper cross product with up or right
+        const up = (Math.abs(sn[1]) < 0.99) ? [0,1,0] : [1,0,0];
+        t1 = [
+            sn[1]*up[2]-sn[2]*up[1],
+            sn[2]*up[0]-sn[0]*up[2],
+            sn[0]*up[1]-sn[1]*up[0]
+        ];
+        const len1 = Math.sqrt(t1[0]*t1[0]+t1[1]*t1[1]+t1[2]*t1[2]);
+        if (len1 > 0) { t1[0]/=len1; t1[1]/=len1; t1[2]/=len1; }
+        t2 = [
+            sn[1]*t1[2]-sn[2]*t1[1],
+            sn[2]*t1[0]-sn[0]*t1[2],
+            sn[0]*t1[1]-sn[1]*t1[0]
+        ];
+
+        for (const sign of [-1, 1]) {
+            const d = state.slabPosition + sign * state.slabThickness * 0.5;
+            const cx=sn[0]*d, cy=sn[1]*d, cz=sn[2]*d;
+            const c = [];
+            for (const s1 of [-S, S]) for (const s2 of [-S, S]) {
+                c.push([cx+t1[0]*s1+t2[0]*s2, cy+t1[1]*s1+t2[1]*s2, cz+t1[2]*s1+t2[2]*s2]);
+            }
+            edge(c[0],c[1], 0,1,1,1); edge(c[1],c[3], 0,1,1,1);
+            edge(c[3],c[2], 0,1,1,1); edge(c[2],c[0], 0,1,1,1);
+        }
+    }
+
+    // AABB wireframe
+    if (state.aabbEnabled !== 0) {
+        const mn=state.aabbMin, mx=state.aabbMax;
+        const c = [
+            [mn[0],mn[1],mn[2]],[mx[0],mn[1],mn[2]],[mn[0],mx[1],mn[2]],[mx[0],mx[1],mn[2]],
+            [mn[0],mn[1],mx[2]],[mx[0],mn[1],mx[2]],[mn[0],mx[1],mx[2]],[mx[0],mx[1],mx[2]],
+        ];
+        const g = 0.4, col = [0,1,g,1]; // green-ish
+        const edges = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
+        for (const [a,b] of edges) edge(c[a],c[b], col[0],col[1],col[2],col[3]);
+    }
+
+    return new Float32Array(v);
+}
+
 function render() {
     requestAnimationFrame(render);
     if (!device || !outputBuf || pointCount===0) return;
@@ -1109,6 +1274,8 @@ function render() {
     ruData[50]=state.aabbMin[0]; ruData[51]=state.aabbMin[1]; ruData[52]=state.aabbMin[2];
     ruData[53]=state.aabbMax[0]; ruData[54]=state.aabbMax[1]; ruData[55]=state.aabbMax[2];
     ruData[56]=state.aabbEnabled;
+    ruData[57]=state.csgMode;
+    ruData[58]=state.gizmoAlpha;
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
@@ -1127,6 +1294,19 @@ function render() {
     pass.setVertexBuffer(1, outputBuf);
     pass.setIndexBuffer(quadIBuf, 'uint16');
     pass.drawIndexedIndirect(indirectBuf, 0);
+
+    // Wireframe gizmos (slab + AABB indicators)
+    if (state.gizmoAlpha > 0.01 && (state.slabEnabled || state.aabbEnabled !== 0)) {
+        const wv = buildWireVerts(sn);
+        if (wv.length > 0) {
+            device.queue.writeBuffer(wireVBuf, 0, wv);
+            pass.setPipeline(wirePipeline);
+            pass.setBindGroup(0, renderBG);
+            pass.setVertexBuffer(0, wireVBuf);
+            pass.draw(wv.length / 7);  // 7 floats per vertex (pos3 + col4)
+        }
+    }
+
     pass.end();
     device.queue.submit([enc.finish()]);
 }
@@ -1298,6 +1478,7 @@ document.getElementById('sAYMin').oninput=e=>{state.aabbMin[1]=parseFloat(e.targ
 document.getElementById('sAYMax').oninput=e=>{state.aabbMax[1]=parseFloat(e.target.value);document.getElementById('vAYMax').innerText=parseFloat(e.target.value).toFixed(1);};
 document.getElementById('sAZMin').oninput=e=>{state.aabbMin[2]=parseFloat(e.target.value);document.getElementById('vAZMin').innerText=parseFloat(e.target.value).toFixed(1);};
 document.getElementById('sAZMax').oninput=e=>{state.aabbMax[2]=parseFloat(e.target.value);document.getElementById('vAZMax').innerText=parseFloat(e.target.value).toFixed(1);};
+document.getElementById('sGizmo').oninput=e=>{state.gizmoAlpha=parseFloat(e.target.value);};
 
 const dz=document.getElementById('dropZone');
 document.addEventListener('dragenter',e=>{e.preventDefault();dz.style.display='flex';});
