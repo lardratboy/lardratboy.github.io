@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Nested Mosaic — PoC v1</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0f; color: #ccc; font-family: 'Consolas', 'SF Mono', monospace; overflow: hidden; }
+
+    #canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+
+    /* --- Control panel --- */
+    #panel {
+        position: fixed; top: 16px; left: 16px; z-index: 10;
+        background: rgba(12, 12, 20, 0.92); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 6px; padding: 16px 18px; width: 260px;
+        backdrop-filter: blur(12px);
+        box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+        max-height: calc(100vh - 32px); overflow-y: auto;
+    }
+    #panel::-webkit-scrollbar { width: 4px; }
+    #panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+    #panel h1 { font-size: 13px; font-weight: 700; color: #7af; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 12px; }
+
+    .ctrl { margin-bottom: 10px; }
+    .ctrl label { display: flex; justify-content: space-between; font-size: 11px; color: #888; margin-bottom: 3px; }
+    .ctrl label span.val { color: #7af; min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+    .ctrl input[type=range] {
+        width: 100%; height: 3px; -webkit-appearance: none; appearance: none;
+        background: #1a1a2e; border-radius: 2px; outline: none;
+    }
+    .ctrl input[type=range]::-webkit-slider-thumb {
+        -webkit-appearance: none; width: 12px; height: 12px;
+        background: #3366cc; border: 2px solid #7af; border-radius: 50%; cursor: pointer;
+    }
+    .ctrl input[type=range]::-moz-range-thumb {
+        width: 12px; height: 12px; background: #3366cc; border: 2px solid #7af;
+        border-radius: 50%; cursor: pointer;
+    }
+
+    .sep { border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 10px 0; }
+    .tier-label { font-size: 9px; color: #555; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
+
+    .btn-row { display: flex; gap: 4px; margin-bottom: 10px; }
+    .btn-row button {
+        flex: 1; padding: 5px 0; font-size: 11px; font-family: inherit;
+        background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);
+        color: #666; border-radius: 4px; cursor: pointer; transition: all 0.15s;
+    }
+    .btn-row button.active {
+        background: rgba(51,102,204,0.25); border-color: #3366cc; color: #7af;
+    }
+    .btn-row button:hover { border-color: #555; }
+
+    /* Palette selector */
+    .palette-row { display: flex; gap: 3px; margin-bottom: 10px; flex-wrap: wrap; }
+    .palette-btn {
+        flex: 0 0 auto; padding: 3px 7px; font-size: 9px; font-family: inherit;
+        background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
+        color: #666; border-radius: 3px; cursor: pointer; transition: all 0.15s;
+    }
+    .palette-btn.active { background: rgba(51,102,204,0.2); border-color: #3366cc; color: #7af; }
+    .palette-btn:hover { border-color: #555; }
+
+    .demo-row { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
+    .demo-row button {
+        flex: 1 1 auto; min-width: 50px; padding: 4px 0; font-size: 10px; font-family: inherit;
+        background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
+        color: #777; border-radius: 3px; cursor: pointer; transition: all 0.15s;
+    }
+    .demo-row button:hover { border-color: #555; color: #aaa; }
+
+    #stats { font-size: 10px; color: #555; line-height: 1.6; margin-top: 6px; }
+    #stats .num { color: #7af; }
+
+    .export-btn {
+        width: 100%; padding: 6px 0; margin-bottom: 10px; font-size: 11px; font-family: inherit;
+        background: rgba(80, 180, 120, 0.12); border: 1px solid rgba(80, 180, 120, 0.3);
+        color: #6c9; border-radius: 4px; cursor: pointer; transition: all 0.15s;
+        letter-spacing: 0.5px;
+    }
+    .export-btn:hover { background: rgba(80, 180, 120, 0.22); border-color: #6c9; }
+    .export-btn:active { background: rgba(80, 180, 120, 0.35); }
+
+    /* --- Drop zone --- */
+    #dropZone {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 100;
+        display: none; background: rgba(0,0,0,0.75); backdrop-filter: blur(6px);
+        justify-content: center; align-items: center;
+    }
+    #dropZone .inner {
+        padding: 40px 60px; border: 2px dashed rgba(119,170,255,0.4);
+        border-radius: 12px; background: rgba(12,12,20,0.9); text-align: center;
+    }
+    #dropZone .icon { font-size: 36px; color: #7af; margin-bottom: 10px; }
+    #dropZone .text { font-size: 16px; color: #7af; }
+    #dropZone .sub { font-size: 11px; color: #666; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<div id="dropZone">
+    <div class="inner">
+        <div class="icon">&#8681;</div>
+        <div class="text">Drop any file</div>
+        <div class="sub">Bytes interpreted as uint8 triples &bull; 2 MB dedup table</div>
+    </div>
+</div>
+
+<div id="panel">
+    <h1>Nested Mosaic</h1>
+
+    <div class="btn-row">
+        <button id="btn3d" class="active" onclick="setMode(0)">3D Spatial</button>
+        <button id="btnTiled" onclick="setMode(1)">Tiled 2D</button>
+    </div>
+
+    <div class="tier-label">Gaps &mdash; hierarchy tiers</div>
+    <div class="ctrl">
+        <label>Level 0 &mdash; outer (16&sup3;) <span class="val" id="vGap0">0.30</span></label>
+        <input type="range" id="sGap0" min="0" max="3" step="0.01" value="0.30">
+    </div>
+    <div class="ctrl">
+        <label>Level 1 &mdash; mid (4&sup3;) <span class="val" id="vGap1">0.15</span></label>
+        <input type="range" id="sGap1" min="0" max="3" step="0.01" value="0.15">
+    </div>
+    <div class="ctrl">
+        <label>Level 2 &mdash; inner (4&sup3;) <span class="val" id="vGap2">0.05</span></label>
+        <input type="range" id="sGap2" min="0" max="3" step="0.01" value="0.05">
+    </div>
+    <div class="ctrl">
+        <label>Inflation <span class="val" id="vInfl">0.50</span></label>
+        <input type="range" id="sInfl" min="0" max="1" step="0.01" value="0.50">
+    </div>
+
+    <hr class="sep">
+
+    <div class="tier-label">Palette</div>
+    <div class="palette-row" id="paletteRow"></div>
+
+    <div class="ctrl">
+        <label>Point Size <span class="val" id="vPt">2.0</span></label>
+        <input type="range" id="sPt" min="0.5" max="8" step="0.1" value="2.0">
+    </div>
+
+    <div class="btn-row">
+        <button id="btnGlow" class="active" onclick="setBlend('glow')">Additive Glow</button>
+        <button id="btnSolid" onclick="setBlend('solid')">Solid</button>
+    </div>
+
+    <div class="btn-row">
+        <button id="btnInsert" class="active" onclick="setSort('insertion')">Insertion Order</button>
+        <button id="btnMorton" onclick="setSort('morton')">Morton Z-order</button>
+    </div>
+
+    <button id="btnExport" class="export-btn" onclick="exportPLY()">Export PLY</button>
+
+    <hr class="sep">
+
+    <div class="demo-row">
+        <button onclick="loadDemo('thomas')">Thomas</button>
+        <button onclick="loadDemo('lorenz')">Lorenz</button>
+        <button onclick="loadDemo('aizawa')">Aizawa</button>
+    </div>
+    <div class="demo-row">
+        <button onclick="loadDemo('halvorsen')">Halvorsen</button>
+        <button onclick="loadDemo('sierpinski')">Sierpinski</button>
+        <button onclick="loadDemo('random')">Random</button>
+    </div>
+
+    <div id="stats">Drop a file or choose a demo to begin.</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128/examples/js/controls/OrbitControls.js"></script>
+<script>
+// =============================================================================
+//  NESTED MOSAIC — PoC v1.1
+//  3-level [4,2,2]: 16³→4³→4³  |  palettes  |  Morton sort  |  gap inflation
+// =============================================================================
+
+const BITS = [4, 2, 2];
+const L = BITS.length;
+const D = BITS.map(b => 1 << b);                       // [16, 4, 4]
+const B = BITS.reduce((a, b) => a + b, 0);             // 8
+const ZCOLS = D.map(d => Math.floor(Math.sqrt(d)));     // [4, 2, 2]
+const ZROWS = D.map((d, i) => Math.ceil(d / ZCOLS[i]));
+const TILEDW = D.map((d, i) => ZCOLS[i] * d);
+const TILEDH = D.map((d, i) => ZROWS[i] * d);
+const SHIFTS = [];
+{ let s = 0; for (let i = L - 1; i >= 0; i--) { SHIFTS[i] = s; s += BITS[i]; } }
+
+// --- 8 palettes (7 from theory + Depth) ---
+const PALETTES = {
+    spectrum: { name:'Spectrum',stops:[[0,0,0],[0,0,0],[0,0,0],[0,0,0]], rgb:true },
+    depth:    { name:'Depth',   stops:[[0,0,0],[0,0,0],[0,0,0],[0,0,0]], perLevel:true },
+    inferno:  { name:'Inferno', stops:[[0.001,0.0,0.014],[0.416,0.09,0.432],[0.929,0.412,0.145],[0.988,0.998,0.645]] },
+    neon:     { name:'Neon',    stops:[[0.05,0.02,0.25],[0.1,0.7,0.9],[0.85,0.15,0.85],[1,1,1]] },
+    aurora:   { name:'Aurora',  stops:[[0.02,0.15,0.14],[0.1,0.6,0.3],[0.2,0.85,0.7],[0.6,0.95,0.7]] },
+    ember:    { name:'Ember',   stops:[[0.02,0.0,0.0],[0.7,0.1,0.05],[0.95,0.5,0.1],[1.0,0.85,0.3]] },
+    frost:    { name:'Frost',   stops:[[0.1,0.02,0.2],[0.15,0.2,0.7],[0.3,0.75,0.9],[0.85,0.95,1.0]] },
+    mono:     { name:'Mono',    stops:[[0.05,0.05,0.05],[0.3,0.3,0.3],[0.7,0.7,0.7],[1,1,1]] }
+};
+const PAL_ORDER = ['spectrum','depth','inferno','neon','aurora','ember','frost','mono'];
+
+// --- State ---
+const state = {
+    mode: 0, gap: [0.30, 0.15, 0.05], inflate: 0.50,
+    pointSize: 2.0, blend: 'glow', palette: 'spectrum',
+    sortOrder: 'insertion', tupleCount: 0, uniqueCount: 0, fileName: ''
+};
+
+let cachedPacked = null, cachedMortonKeys = null, cachedUniqueCount = 0;
+let scene, camera, renderer, controls, pointsMesh = null;
+
+// =============================================================================
+//  VERTEX SHADER — unpack + palette + position reconstruct
+// =============================================================================
+const vertexShader = `
+    attribute vec4 a_packed;
+    uniform float u_div[3];
+
+    uniform float u_step3d[3];
+    uniform vec3  u_center3d;
+    uniform float u_scale3d;
+
+    uniform float u_stepX[3];
+    uniform float u_stepY[3];
+    uniform float u_zCols[3];
+    uniform vec2  u_centerTiled;
+    uniform float u_scaleTiled;
+
+    uniform float u_mode;
+    uniform float u_pointSize;
+    uniform float u_palette;
+    uniform vec3  u_pal0, u_pal1, u_pal2, u_pal3;
+
+    varying vec3 v_color;
+
+    vec3 unpack(float p) {
+        float ix = floor(p / 65536.0);
+        float iy = floor(mod(p, 65536.0) / 256.0);
+        float iz = mod(p, 256.0);
+        return vec3(ix, iy, iz);
+    }
+
+    void main() {
+        vec3 i0 = unpack(a_packed.x);
+        vec3 i1 = unpack(a_packed.y);
+        vec3 i2 = unpack(a_packed.z);
+
+        // === Color ===
+        if (u_palette > 1.5) {
+            // Depth: R = level0 luminance, G = level1, B = level2
+            float r = dot(i0, vec3(1.0)) / (3.0 * (u_div[0] - 1.0));
+            float g = dot(i1, vec3(1.0)) / (3.0 * (u_div[1] - 1.0));
+            float b = dot(i2, vec3(1.0)) / (3.0 * (u_div[2] - 1.0));
+            v_color = vec3(r, g, b);
+        } else {
+            // Mixed-radix accumulation → nc ≈ (rx, ry, rz)
+            vec3 nc = vec3(0.0);
+            nc = (nc + i2) / u_div[2];
+            nc = (nc + i1) / u_div[1];
+            nc = (nc + i0) / u_div[0];
+
+            if (u_palette < 0.5) {
+                v_color = nc; // Spectrum: direct RGB
+            } else {
+                // Ramp palette
+                float t = clamp(dot(nc, vec3(0.35, 0.45, 0.20)), 0.0, 1.0);
+                float s = t * 3.0;
+                if (s < 1.0) v_color = mix(u_pal0, u_pal1, s);
+                else if (s < 2.0) v_color = mix(u_pal1, u_pal2, s - 1.0);
+                else v_color = mix(u_pal2, u_pal3, s - 2.0);
+            }
+        }
+
+        vec3 pos;
+        if (u_mode < 0.5) {
+            pos = i0 * u_step3d[0] + i1 * u_step3d[1] + i2 * u_step3d[2];
+            pos = (pos - u_center3d) * u_scale3d;
+        } else {
+            float px = 0.0, py = 0.0;
+            float tc, tr;
+
+            tc = floor(mod(i0.z, u_zCols[0])); tr = floor(i0.z / u_zCols[0]);
+            px += (tc * u_div[0] + i0.x) * u_stepX[0];
+            py += (tr * u_div[0] + i0.y) * u_stepY[0];
+
+            tc = floor(mod(i1.z, u_zCols[1])); tr = floor(i1.z / u_zCols[1]);
+            px += (tc * u_div[1] + i1.x) * u_stepX[1];
+            py += (tr * u_div[1] + i1.y) * u_stepY[1];
+
+            tc = floor(mod(i2.z, u_zCols[2])); tr = floor(i2.z / u_zCols[2]);
+            px += (tc * u_div[2] + i2.x) * u_stepX[2];
+            py += (tr * u_div[2] + i2.y) * u_stepY[2];
+
+            pos = vec3((px - u_centerTiled.x) * u_scaleTiled,
+                       (py - u_centerTiled.y) * u_scaleTiled, 0.0);
+        }
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+        gl_PointSize = u_pointSize;
+    }
+`;
+
+const fragGlow = `
+    varying vec3 v_color;
+    void main() {
+        vec2 pc = gl_PointCoord - vec2(0.5);
+        float g = exp(-dot(pc,pc) * 8.0);
+        if (g < 0.01) discard;
+        gl_FragColor = vec4(v_color * g * 1.3, g);
+    }
+`;
+const fragSolid = `
+    varying vec3 v_color;
+    void main() {
+        vec2 pc = gl_PointCoord - vec2(0.5);
+        float d = dot(pc,pc);
+        if (d > 0.25) discard;
+        gl_FragColor = vec4(v_color, smoothstep(0.25, 0.15, d) * 0.92);
+    }
+`;
+
+// =============================================================================
+//  PIPELINE: bytes → decompose → dedup → pack + Morton keys
+// =============================================================================
+function processData(bytes) {
+    const tupleCount = Math.floor(bytes.length / 3);
+    if (tupleCount === 0) return null;
+
+    const bitTable = new Uint32Array(1 << (3 * B - 5)); // 2 MB
+    const packed = new Float32Array(tupleCount * 4);
+    const mortonKeys = new Uint32Array(tupleCount);
+    let wi = 0, ki = 0;
+
+    const d0 = D[0], d1 = D[1], d2 = D[2];
+    const s0 = SHIFTS[0], s1 = SHIFTS[1], twoB = 2 * B;
+
+    for (let t = 0; t < tupleCount; t++) {
+        const base = t * 3;
+        const rx = bytes[base]     * 0.003921568627;
+        const ry = bytes[base + 1] * 0.003921568627;
+        const rz = bytes[base + 2] * 0.003921568627;
+
+        // Level 0 (d=16)
+        const ix0 = Math.min(d0 - 1, (rx * d0) | 0);
+        const iy0 = Math.min(d0 - 1, (ry * d0) | 0);
+        const iz0 = Math.min(d0 - 1, (rz * d0) | 0);
+        const rX0 = rx * d0 - ix0, rY0 = ry * d0 - iy0, rZ0 = rz * d0 - iz0;
+
+        // Level 1 (d=4)
+        const ix1 = Math.min(d1 - 1, (rX0 * d1) | 0);
+        const iy1 = Math.min(d1 - 1, (rY0 * d1) | 0);
+        const iz1 = Math.min(d1 - 1, (rZ0 * d1) | 0);
+        const rX1 = rX0 * d1 - ix1, rY1 = rY0 * d1 - iy1, rZ1 = rZ0 * d1 - iz1;
+
+        // Level 2 (d=4)
+        const ix2 = Math.min(d2 - 1, (rX1 * d2) | 0);
+        const iy2 = Math.min(d2 - 1, (rY1 * d2) | 0);
+        const iz2 = Math.min(d2 - 1, (rZ1 * d2) | 0);
+
+        // Composite 8-bit coords → 24-bit flat index
+        const fX = (ix0 << s0) | (ix1 << s1) | ix2;
+        const fY = (iy0 << s0) | (iy1 << s1) | iy2;
+        const fZ = (iz0 << s0) | (iz1 << s1) | iz2;
+        const flat = (fZ << twoB) | (fY << B) | fX;
+
+        const word = flat >>> 5, mask = 1 << (flat & 0x1F);
+        if ((bitTable[word] & mask) === 0) {
+            bitTable[word] |= mask;
+
+            packed[wi]     = (ix0 << 16) | (iy0 << 8) | iz0;
+            packed[wi + 1] = (ix1 << 16) | (iy1 << 8) | iz1;
+            packed[wi + 2] = (ix2 << 16) | (iy2 << 8) | iz2;
+            packed[wi + 3] = 0;
+            wi += 4;
+
+            // Morton: interleave B=8 bits per axis → 24-bit key
+            let m = 0;
+            for (let b = B - 1; b >= 0; b--) {
+                m = (m << 3) | (((fZ >> b) & 1) << 2) | (((fY >> b) & 1) << 1) | ((fX >> b) & 1);
+            }
+            mortonKeys[ki++] = m;
+        }
+    }
+
+    const uc = wi / 4;
+    return {
+        packed: new Float32Array(packed.buffer, 0, wi),
+        mortonKeys: new Uint32Array(mortonKeys.buffer, 0, uc),
+        tupleCount, uniqueCount: uc
+    };
+}
+
+// =============================================================================
+//  MORTON SORT
+// =============================================================================
+function mortonSort(packed, keys, count) {
+    const idx = new Uint32Array(count);
+    for (let i = 0; i < count; i++) idx[i] = i;
+    idx.sort((a, b) => keys[a] - keys[b]);
+
+    const out = new Float32Array(count * 4);
+    for (let i = 0; i < count; i++) {
+        const s = idx[i] * 4, d = i * 4;
+        out[d] = packed[s]; out[d+1] = packed[s+1]; out[d+2] = packed[s+2]; out[d+3] = packed[s+3];
+    }
+    return out;
+}
+
+// =============================================================================
+//  UNIFORMS — O(L), every slider change
+// =============================================================================
+function computeAndSetUniforms() {
+    if (!pointsMesh) return;
+    const g = state.gap, p = state.inflate;
+
+    const inf = [1, 1 + g[0] * p, 0];
+    inf[2] = inf[1] * (1 + g[1] * p);
+
+    // 3D isotropic strides (bottom-up)
+    const s3 = [0, D[2] + (D[2]-1)*g[2], 1];
+    s3[0] = s3[1] * (D[1] + (D[1]-1)*g[1]);
+    const st3 = [ s3[0]*(1+g[0]), s3[1]*(1+g[1])*inf[1], 1*(1+g[2])*inf[2] ];
+    const mx3 = (D[0]-1)*st3[0] + (D[1]-1)*st3[1] + (D[2]-1)*st3[2];
+
+    // Tiled 2D strides
+    const sX=[0,TILEDW[2]+(TILEDW[2]-1)*g[2],1], sY=[0,TILEDH[2]+(TILEDH[2]-1)*g[2],1];
+    sX[0] = sX[1]*(TILEDW[1]+(TILEDW[1]-1)*g[1]);
+    sY[0] = sY[1]*(TILEDH[1]+(TILEDH[1]-1)*g[1]);
+    const stX = [ sX[0]*(1+g[0]), sX[1]*(1+g[1])*inf[1], 1*(1+g[2])*inf[2] ];
+    const stY = [ sY[0]*(1+g[0]), sY[1]*(1+g[1])*inf[1], 1*(1+g[2])*inf[2] ];
+    const mTX = (TILEDW[0]-1)*stX[0]+(TILEDW[1]-1)*stX[1]+(TILEDW[2]-1)*stX[2];
+    const mTY = (TILEDH[0]-1)*stY[0]+(TILEDH[1]-1)*stY[1]+(TILEDH[2]-1)*stY[2];
+    const mT = Math.max(mTX, mTY);
+
+    const pal = PALETTES[state.palette];
+    const u = pointsMesh.material.uniforms;
+    u.u_div.value     = [D[0],D[1],D[2]];
+    u.u_step3d.value  = st3;
+    u.u_center3d.value.set(mx3/2, mx3/2, mx3/2);
+    u.u_scale3d.value = 4/Math.max(mx3,1e-6);
+    u.u_stepX.value   = stX;
+    u.u_stepY.value   = stY;
+    u.u_zCols.value   = [ZCOLS[0],ZCOLS[1],ZCOLS[2]];
+    u.u_centerTiled.value.set(mTX/2, mTY/2);
+    u.u_scaleTiled.value = 4/Math.max(mT,1e-6);
+    u.u_mode.value    = state.mode;
+    u.u_pointSize.value = state.pointSize * window.devicePixelRatio;
+    u.u_palette.value = pal.rgb ? 0 : pal.perLevel ? 2 : 1;
+    u.u_pal0.value.set(...pal.stops[0]);
+    u.u_pal1.value.set(...pal.stops[1]);
+    u.u_pal2.value.set(...pal.stops[2]);
+    u.u_pal3.value.set(...pal.stops[3]);
+}
+
+// =============================================================================
+//  THREE.js
+// =============================================================================
+function initScene() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0a0f);
+    camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.01, 200);
+    camera.position.set(3.2, 2.8, 3.2);
+    renderer = new THREE.WebGLRenderer({ antialias: false });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.insertBefore(renderer.domElement, document.body.firstChild);
+    renderer.domElement.id = 'canvas';
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true; controls.dampingFactor = 0.12;
+    addEventListener('resize', () => {
+        camera.aspect = innerWidth/innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+        if (pointsMesh) pointsMesh.material.uniforms.u_pointSize.value = state.pointSize * devicePixelRatio;
+    });
+}
+
+function uploadBuffer(buf, count) {
+    if (pointsMesh) { scene.remove(pointsMesh); pointsMesh.geometry.dispose(); pointsMesh.material.dispose(); }
+    const geo = new THREE.BufferGeometry();
+    const a = new THREE.BufferAttribute(buf, 4); a.setUsage(THREE.StaticDrawUsage);
+    geo.setAttribute('a_packed', a);
+    geo.setDrawRange(0, count);
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count*3), 3));
+
+    const mat = new THREE.ShaderMaterial({
+        vertexShader,
+        fragmentShader: state.blend==='glow' ? fragGlow : fragSolid,
+        uniforms: {
+            u_div:{value:[16,4,4]}, u_step3d:{value:[0,0,0]},
+            u_center3d:{value:new THREE.Vector3()}, u_scale3d:{value:1},
+            u_stepX:{value:[0,0,0]}, u_stepY:{value:[0,0,0]},
+            u_zCols:{value:[4,2,2]}, u_centerTiled:{value:new THREE.Vector2()}, u_scaleTiled:{value:1},
+            u_mode:{value:0}, u_pointSize:{value:2},
+            u_palette:{value:0},
+            u_pal0:{value:new THREE.Vector3()}, u_pal1:{value:new THREE.Vector3()},
+            u_pal2:{value:new THREE.Vector3()}, u_pal3:{value:new THREE.Vector3()}
+        },
+        transparent:true, depthTest:false, depthWrite:false, blending:THREE.AdditiveBlending
+    });
+    pointsMesh = new THREE.Points(geo, mat);
+    pointsMesh.frustumCulled = false;
+    scene.add(pointsMesh);
+    applyBlendMode();
+    computeAndSetUniforms();
+}
+
+function applyBlendMode() {
+    if (!pointsMesh) return;
+    const m = pointsMesh.material;
+    if (state.blend === 'glow') {
+        m.fragmentShader = fragGlow; m.blending = THREE.AdditiveBlending; m.depthTest = false; m.depthWrite = false;
+    } else {
+        m.fragmentShader = fragSolid; m.blending = THREE.NormalBlending; m.depthTest = true; m.depthWrite = true;
+    }
+    m.needsUpdate = true;
+}
+
+// =============================================================================
+//  LOAD → PROCESS → UPLOAD
+// =============================================================================
+function loadBytes(bytes, name) {
+    const t0 = performance.now();
+    const r = processData(bytes);
+    const dtP = (performance.now() - t0).toFixed(1);
+    if (!r || r.uniqueCount === 0) { document.getElementById('stats').textContent = 'No data.'; return; }
+
+    cachedPacked = r.packed; cachedMortonKeys = r.mortonKeys; cachedUniqueCount = r.uniqueCount;
+    state.tupleCount = r.tupleCount; state.uniqueCount = r.uniqueCount; state.fileName = name;
+
+    let buf, dtS = '';
+    if (state.sortOrder === 'morton') {
+        const t1 = performance.now();
+        buf = mortonSort(cachedPacked, cachedMortonKeys, cachedUniqueCount);
+        dtS = ` + ${(performance.now()-t1).toFixed(1)}ms sort`;
+    } else { buf = cachedPacked; }
+
+    uploadBuffer(buf, cachedUniqueCount);
+    updateStats(dtP + 'ms' + dtS);
+    console.log(`[NM] "${name}": ${r.tupleCount.toLocaleString()}→${r.uniqueCount.toLocaleString()} in ${dtP}ms${dtS}`);
+}
+
+function applySort() {
+    if (!cachedPacked) return;
+    const buf = state.sortOrder === 'morton'
+        ? mortonSort(cachedPacked, cachedMortonKeys, cachedUniqueCount)
+        : cachedPacked;
+    uploadBuffer(buf, cachedUniqueCount);
+}
+
+// =============================================================================
+//  PLY EXPORT — CPU-side mirror of vertex shader reconstruction
+// =============================================================================
+function exportPLY() {
+    if (!pointsMesh) return;
+
+    // Read the active packed buffer from the geometry
+    const packedAttr = pointsMesh.geometry.getAttribute('a_packed');
+    const count = packedAttr.count;
+    const arr = packedAttr.array;
+
+    // --- Recompute strides (mirrors computeAndSetUniforms exactly) ---
+    const g = state.gap, p = state.inflate;
+    const inf = [1, 1 + g[0] * p, 0];
+    inf[2] = inf[1] * (1 + g[1] * p);
+
+    // 3D
+    const s3 = [0, D[2] + (D[2]-1)*g[2], 1];
+    s3[0] = s3[1] * (D[1] + (D[1]-1)*g[1]);
+    const st3 = [ s3[0]*(1+g[0]), s3[1]*(1+g[1])*inf[1], 1*(1+g[2])*inf[2] ];
+    const mx3 = (D[0]-1)*st3[0] + (D[1]-1)*st3[1] + (D[2]-1)*st3[2];
+    const ctr3 = mx3 / 2;
+    const scl3 = 4 / Math.max(mx3, 1e-6);
+
+    // Tiled
+    const sX=[0,TILEDW[2]+(TILEDW[2]-1)*g[2],1], sY=[0,TILEDH[2]+(TILEDH[2]-1)*g[2],1];
+    sX[0] = sX[1]*(TILEDW[1]+(TILEDW[1]-1)*g[1]);
+    sY[0] = sY[1]*(TILEDH[1]+(TILEDH[1]-1)*g[1]);
+    const stX = [ sX[0]*(1+g[0]), sX[1]*(1+g[1])*inf[1], 1*(1+g[2])*inf[2] ];
+    const stY = [ sY[0]*(1+g[0]), sY[1]*(1+g[1])*inf[1], 1*(1+g[2])*inf[2] ];
+    const mTX = (TILEDW[0]-1)*stX[0]+(TILEDW[1]-1)*stX[1]+(TILEDW[2]-1)*stX[2];
+    const mTY = (TILEDH[0]-1)*stY[0]+(TILEDH[1]-1)*stY[1]+(TILEDH[2]-1)*stY[2];
+    const mT = Math.max(mTX, mTY);
+    const sclT = 4 / Math.max(mT, 1e-6);
+
+    // Palette config
+    const pal = PALETTES[state.palette];
+    const palMode = pal.rgb ? 0 : pal.perLevel ? 2 : 1; // 0=spectrum, 1=ramp, 2=depth
+
+    // --- Unpack helper (mirrors shader) ---
+    function unpack(val) {
+        const ix = Math.floor(val / 65536);
+        const iy = Math.floor((val % 65536) / 256);
+        const iz = val % 256;
+        return [ix, iy, iz];
+    }
+
+    // --- Build PLY lines ---
+    const lines = [];
+    for (let i = 0; i < count; i++) {
+        const p0 = arr[i * 4], p1 = arr[i * 4 + 1], p2 = arr[i * 4 + 2];
+        const i0 = unpack(p0), i1 = unpack(p1), i2 = unpack(p2);
+
+        // === Position ===
+        let x, y, z;
+        if (state.mode === 0) {
+            // 3D isotropic
+            x = (i0[0]*st3[0] + i1[0]*st3[1] + i2[0]*st3[2] - ctr3) * scl3;
+            y = (i0[1]*st3[0] + i1[1]*st3[1] + i2[1]*st3[2] - ctr3) * scl3;
+            z = (i0[2]*st3[0] + i1[2]*st3[1] + i2[2]*st3[2] - ctr3) * scl3;
+        } else {
+            // Tiled 2D
+            const tc0 = i0[2] % ZCOLS[0], tr0 = Math.floor(i0[2] / ZCOLS[0]);
+            const tc1 = i1[2] % ZCOLS[1], tr1 = Math.floor(i1[2] / ZCOLS[1]);
+            const tc2 = i2[2] % ZCOLS[2], tr2 = Math.floor(i2[2] / ZCOLS[2]);
+
+            const px = (tc0*D[0]+i0[0])*stX[0] + (tc1*D[1]+i1[0])*stX[1] + (tc2*D[2]+i2[0])*stX[2];
+            const py = (tr0*D[0]+i0[1])*stY[0] + (tr1*D[1]+i1[1])*stY[1] + (tr2*D[2]+i2[1])*stY[2];
+
+            x = (px - mTX/2) * sclT;
+            y = (py - mTY/2) * sclT;
+            z = 0;
+        }
+
+        // === Color ===
+        let r, cg, b;
+        if (palMode === 2) {
+            // Depth: per-level luminance → R, G, B
+            r = (i0[0] + i0[1] + i0[2]) / (3 * (D[0] - 1));
+            cg = (i1[0] + i1[1] + i1[2]) / (3 * (D[1] - 1));
+            b = (i2[0] + i2[1] + i2[2]) / (3 * (D[2] - 1));
+        } else {
+            // Mixed-radix accumulation → nc
+            let nx = 0, ny = 0, nz = 0;
+            nx = (nx + i2[0]) / D[2]; ny = (ny + i2[1]) / D[2]; nz = (nz + i2[2]) / D[2];
+            nx = (nx + i1[0]) / D[1]; ny = (ny + i1[1]) / D[1]; nz = (nz + i1[2]) / D[1];
+            nx = (nx + i0[0]) / D[0]; ny = (ny + i0[1]) / D[0]; nz = (nz + i0[2]) / D[0];
+
+            if (palMode === 0) {
+                // Spectrum: direct RGB
+                r = nx; cg = ny; b = nz;
+            } else {
+                // Ramp palette
+                const t = Math.max(0, Math.min(1, nx*0.35 + ny*0.45 + nz*0.20));
+                const s = t * 3;
+                const stops = pal.stops;
+                let c;
+                if (s < 1) {
+                    const f = s;
+                    c = [stops[0][0]+(stops[1][0]-stops[0][0])*f, stops[0][1]+(stops[1][1]-stops[0][1])*f, stops[0][2]+(stops[1][2]-stops[0][2])*f];
+                } else if (s < 2) {
+                    const f = s - 1;
+                    c = [stops[1][0]+(stops[2][0]-stops[1][0])*f, stops[1][1]+(stops[2][1]-stops[1][1])*f, stops[1][2]+(stops[2][2]-stops[1][2])*f];
+                } else {
+                    const f = s - 2;
+                    c = [stops[2][0]+(stops[3][0]-stops[2][0])*f, stops[2][1]+(stops[3][1]-stops[2][1])*f, stops[2][2]+(stops[3][2]-stops[2][2])*f];
+                }
+                r = c[0]; cg = c[1]; b = c[2];
+            }
+        }
+
+        const cr = Math.max(0, Math.min(255, Math.round(r * 255)));
+        const ccg = Math.max(0, Math.min(255, Math.round(cg * 255)));
+        const cb = Math.max(0, Math.min(255, Math.round(b * 255)));
+
+        lines.push(`${x.toFixed(6)} ${y.toFixed(6)} ${z.toFixed(6)} ${cr} ${ccg} ${cb}`);
+    }
+
+    // --- Assemble PLY ---
+    const header = [
+        'ply',
+        'format ascii 1.0',
+        `comment Nested Mosaic export — ${state.fileName}`,
+        `comment mode=${state.mode===0?'3D':'tiled'} palette=${state.palette} gaps=[${g}] inflate=${state.inflate}`,
+        `element vertex ${count}`,
+        'property float x',
+        'property float y',
+        'property float z',
+        'property uchar red',
+        'property uchar green',
+        'property uchar blue',
+        'end_header'
+    ].join('\n');
+
+    const blob = new Blob([header + '\n' + lines.join('\n') + '\n'], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (state.fileName || 'mosaic').replace(/\.[^.]+$/, '') + '.ply';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    console.log(`[PLY] Exported ${count.toLocaleString()} vertices as ${a.download}`);
+}
+
+function updateStats(timing) {
+    const dp = state.tupleCount > 0 ? ((1-state.uniqueCount/state.tupleCount)*100).toFixed(1) : '0';
+    const de = 1 << B;
+    document.getElementById('stats').innerHTML =
+        `<b style="color:#aaa">${state.fileName}</b><br>` +
+        `Tuples: <span class="num">${state.tupleCount.toLocaleString()}</span><br>` +
+        `Unique: <span class="num">${state.uniqueCount.toLocaleString()}</span> (dedup <span class="num">${dp}%</span>)<br>` +
+        `Hierarchy: <span class="num">[4,2,2]</span> → ${D.join('³→')}³<br>` +
+        `D<sub>eff</sub>=<span class="num">${de}</span>/axis &bull; ${(de**3).toLocaleString()} cells<br>` +
+        `GPU: <span class="num">${(state.uniqueCount*16/1024).toFixed(1)}KB</span>` +
+        (timing ? ` &bull; <span class="num">${timing}</span>` : '');
+}
+
+// =============================================================================
+//  DEMO GENERATORS
+// =============================================================================
+function genAttractor(type, n) {
+    n = n || 400000;
+    const W = 2000;
+    let x,y,z,dt;
+    switch(type){
+        case'thomas':    x=1.1;y=-0.5;z=0.3;dt=0.04;break;
+        case'lorenz':    x=0.1;y=0;z=0;dt=0.005;break;
+        case'aizawa':    x=0.1;y=0;z=0;dt=0.005;break;
+        case'halvorsen': x=-1.5;y=-1.2;z=2.3;dt=0.005;break;
+        default:         x=0.1;y=0;z=0;dt=0.005;
+    }
+    const xs=new Float64Array(n),ys=new Float64Array(n),zs=new Float64Array(n);
+    let xn=-Infinity,xx=Infinity,yn=-Infinity,yx=Infinity,zn=-Infinity,zx=Infinity;
+    xn=yn=zn=Infinity; xx=yx=zx=-Infinity;
+
+    for(let i=0;i<W+n;i++){
+        let dx,dy,dz;
+        switch(type){
+            case'thomas':{const b=0.208186;dx=Math.sin(y)-b*x;dy=Math.sin(z)-b*y;dz=Math.sin(x)-b*z;break;}
+            case'lorenz':{const s=10,r=28,bt=8/3;dx=s*(y-x);dy=x*(r-z)-y;dz=x*y-bt*z;break;}
+            case'aizawa':{const a=0.95,b=0.7,c=0.6,dd=3.5,e=0.25,f=0.1;dx=(z-b)*x-dd*y;dy=dd*x+(z-b)*y;dz=c+a*z-z*z*z/3-(x*x+y*y)*(1+e*z)+f*z*x*x*x;break;}
+            case'halvorsen':{const a=1.89;dx=-a*x-4*y-4*z-y*y;dy=-a*y-4*z-4*x-z*z;dz=-a*z-4*x-4*y-x*x;break;}
+        }
+        x+=dx*dt;y+=dy*dt;z+=dz*dt;
+        if(i>=W){const j=i-W;xs[j]=x;ys[j]=y;zs[j]=z;
+            if(x<xn)xn=x;if(x>xx)xx=x;if(y<yn)yn=y;if(y>yx)yx=y;if(z<zn)zn=z;if(z>zx)zx=z;}
+    }
+    const rx=xx-xn||1,ry=yx-yn||1,rz=zx-zn||1;
+    const b=new Uint8Array(n*3);
+    for(let i=0;i<n;i++){
+        b[i*3]=Math.min(255,Math.max(0,Math.round(255*(xs[i]-xn)/rx)));
+        b[i*3+1]=Math.min(255,Math.max(0,Math.round(255*(ys[i]-yn)/ry)));
+        b[i*3+2]=Math.min(255,Math.max(0,Math.round(255*(zs[i]-zn)/rz)));
+    }
+    return b;
+}
+
+function genSierpinski(n) {
+    n=n||400000;
+    const v=[[0,0,0],[1,0,0],[.5,Math.sqrt(3)/2,0],[.5,Math.sqrt(3)/6,Math.sqrt(6)/3]];
+    let x=.25,y=.25,z=.25;
+    const b=new Uint8Array(n*3), sy=Math.sqrt(3)/2, sz=Math.sqrt(6)/3;
+    for(let i=0;i<n;i++){
+        const p=v[(Math.random()*4)|0];x=(x+p[0])*.5;y=(y+p[1])*.5;z=(z+p[2])*.5;
+        b[i*3]=Math.min(255,Math.max(0,Math.round(255*x)));
+        b[i*3+1]=Math.min(255,Math.max(0,Math.round(255*y/sy)));
+        b[i*3+2]=Math.min(255,Math.max(0,Math.round(255*z/sz)));
+    }
+    return b;
+}
+
+function genRandom(n){n=n||500000;const b=new Uint8Array(n*3);for(let i=0;i<b.length;i++)b[i]=Math.random()*256|0;return b;}
+
+function loadDemo(type){
+    const map={thomas:'Thomas',lorenz:'Lorenz',aizawa:'Aizawa',halvorsen:'Halvorsen',sierpinski:'Sierpinski',random:'Random'};
+    const n = type==='random' ? 500000 : 400000;
+    const bytes = type==='sierpinski' ? genSierpinski(n) : type==='random' ? genRandom(n) : genAttractor(type,n);
+    loadBytes(bytes, `${map[type]} (${(n/1000)|0}K)`);
+}
+
+// =============================================================================
+//  FILE DROP
+// =============================================================================
+function setupDragDrop(){
+    const dz=document.getElementById('dropZone');
+    document.addEventListener('dragenter',e=>{e.preventDefault();dz.style.display='flex';});
+    dz.addEventListener('dragleave',e=>{e.preventDefault();dz.style.display='none';});
+    dz.addEventListener('dragover',e=>e.preventDefault());
+    dz.addEventListener('drop',e=>{e.preventDefault();dz.style.display='none';
+        const f=e.dataTransfer.files[0];if(f){const r=new FileReader();
+        r.onload=ev=>loadBytes(new Uint8Array(ev.target.result),f.name);r.readAsArrayBuffer(f);}});
+}
+
+// =============================================================================
+//  UI CONTROLS
+// =============================================================================
+function setupControls(){
+    wire('sGap0','vGap0',v=>{state.gap[0]=v;computeAndSetUniforms();},v=>v.toFixed(2));
+    wire('sGap1','vGap1',v=>{state.gap[1]=v;computeAndSetUniforms();},v=>v.toFixed(2));
+    wire('sGap2','vGap2',v=>{state.gap[2]=v;computeAndSetUniforms();},v=>v.toFixed(2));
+    wire('sInfl','vInfl',v=>{state.inflate=v;computeAndSetUniforms();},v=>v.toFixed(2));
+    wire('sPt','vPt',v=>{state.pointSize=v;computeAndSetUniforms();},v=>v.toFixed(1));
+}
+function wire(sid,vid,fn,fmt){
+    const s=document.getElementById(sid),e=document.getElementById(vid);
+    s.addEventListener('input',()=>{const v=parseFloat(s.value);e.textContent=fmt(v);fn(v);});
+}
+
+function buildPaletteUI(){
+    const row=document.getElementById('paletteRow');
+    PAL_ORDER.forEach(k=>{
+        const b=document.createElement('button');b.className='palette-btn'+(k===state.palette?' active':'');
+        b.textContent=PALETTES[k].name;b.dataset.key=k;b.onclick=()=>setPalette(k);row.appendChild(b);
+    });
+}
+function setPalette(k){state.palette=k;
+    document.querySelectorAll('.palette-btn').forEach(b=>b.classList.toggle('active',b.dataset.key===k));
+    computeAndSetUniforms();}
+
+function setMode(m){state.mode=m;
+    document.getElementById('btn3d').classList.toggle('active',m===0);
+    document.getElementById('btnTiled').classList.toggle('active',m===1);
+    computeAndSetUniforms();
+    camera.position.set(m?0:3.2, m?0:2.8, m?6:3.2);
+    camera.lookAt(0,0,0);controls.target.set(0,0,0);controls.update();}
+
+function setBlend(m){state.blend=m;
+    document.getElementById('btnGlow').classList.toggle('active',m==='glow');
+    document.getElementById('btnSolid').classList.toggle('active',m==='solid');
+    applyBlendMode();}
+
+function setSort(o){state.sortOrder=o;
+    document.getElementById('btnInsert').classList.toggle('active',o==='insertion');
+    document.getElementById('btnMorton').classList.toggle('active',o==='morton');
+    applySort();}
+
+// =============================================================================
+//  RUN
+// =============================================================================
+function animate(){requestAnimationFrame(animate);controls.update();renderer.render(scene,camera);}
+
+initScene(); setupControls(); buildPaletteUI(); setupDragDrop(); animate();
+loadDemo('thomas');
+</script>
+</body>
+</html>
