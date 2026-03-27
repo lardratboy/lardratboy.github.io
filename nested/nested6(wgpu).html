@@ -153,10 +153,9 @@
         <input type="range" id="sShift" min="0" max="22" step="1" value="22">
     </div>
 
-    <div class="btn-grid" style="grid-template-columns: 1fr 1fr 1fr; margin-top:10px;">
-        <button onclick="generateDemo('lorenz')">Lorenz</button>
+    <div class="btn-grid" style="grid-template-columns: 1fr 1fr; margin-top:10px;">
+        <button onclick="generateDemo()">Demo</button>
         <button onclick="recenterCamera()">Re-center</button>
-        <button onclick="generateDemo('noise')">Random</button>
     </div>
 
     <div id="stats" class="stats">Initializing WebGPU…</div>
@@ -1327,23 +1326,7 @@ function render() {
 }
 
 // =============================================================================
-//  ENCODERS (CPU — for demo generation)
-// =============================================================================
-
-function fp16ToF32(u16){let s=(u16>>15)&1,e=(u16>>10)&0x1F,m=u16&0x3FF;if(e===0)return(s?-1:1)*Math.pow(2,-14)*(m/1024);if(e===31)return m?NaN:(s?-Infinity:Infinity);return(s?-1:1)*Math.pow(2,e-15)*(1+m/1024);}
-function bf16ToF32(u16){let s=(u16>>15)&1,e=(u16>>7)&0xFF,m=u16&0x7F;if(e===0)return(s?-1:1)*Math.pow(2,-126)*(m/128);if(e===255)return m?NaN:(s?-Infinity:Infinity);return(s?-1:1)*Math.pow(2,e-127)*(1+m/128);}
-function fp8E4M3ToF32(u8){let s=(u8>>7)&1,e=(u8>>3)&0xF,m=u8&0x7;if(e===0)return(s?-1:1)*Math.pow(2,-6)*(m/8);return(s?-1:1)*Math.pow(2,e-7)*(1+m/8);}
-function fp8E5M2ToF32(u8){let s=(u8>>7)&1,e=(u8>>2)&0x1F,m=u8&0x3;if(e===0)return(s?-1:1)*Math.pow(2,-14)*(m/4);return(s?-1:1)*Math.pow(2,e-15)*(1+m/4);}
-function fp4ToF32(u8){let s=(u8>>3)&1,e=(u8>>1)&0x3,m=u8&1;if(e===0)return(s?-1:1)*0.5*(m/2);return(s?-1:1)*Math.pow(2,e-1)*(1+m/2);}
-function f32ToFp16(v){const b=new ArrayBuffer(4),f=new Float32Array(b),u=new Uint32Array(b);f[0]=v;const bits=u[0],s=(bits>>>31)&1,e=(bits>>>23)&0xFF,m=bits&0x7FFFFF;if(e===0xFF)return(s<<15)|0x7C00|(m?0x200:0);const ue=e-127;if(ue>15)return(s<<15)|0x7C00;if(ue<-14){const sh=-14-ue;if(sh>24)return s<<15;return(s<<15)|(((0x800000|m)>>(sh+13))&0x3FF);}return(s<<15)|((ue+15)<<10)|(m>>13);}
-function f32ToBf16(v){const b=new ArrayBuffer(4),f=new Float32Array(b),u=new Uint32Array(b);f[0]=v;return u[0]>>>16;}
-function f32ToFp8E4M3(v){let best=0,bd=Infinity;for(let b=0;b<256;b++){const d=fp8E4M3ToF32(b);if(!isFinite(d))continue;if(Math.abs(d-v)<bd){bd=Math.abs(d-v);best=b;}}return best;}
-function f32ToFp8E5M2(v){let best=0,bd=Infinity;for(let b=0;b<256;b++){const d=fp8E5M2ToF32(b);if(!isFinite(d))continue;if(Math.abs(d-v)<bd){bd=Math.abs(d-v);best=b;}}return best;}
-function f32ToFp4(v){let best=0,bd=Infinity;for(let b=0;b<16;b++){if(Math.abs(fp4ToF32(b)-v)<bd){bd=Math.abs(fp4ToF32(b)-v);best=b;}}return best;}
-function normToFloat(n){return Math.atanh(2*Math.max(0.01,Math.min(0.99,n))-1);}
-
-// =============================================================================
-//  DEMO GENERATION (CPU)
+//  DEMO GENERATION (CPU — uint32 Lorenz attractor)
 // =============================================================================
 
 function recenterCamera() {
@@ -1353,40 +1336,25 @@ function recenterCamera() {
     camTarget[0] = 0; camTarget[1] = 0; camTarget[2] = 0;
 }
 
-function generateDemo(shape) {
-    const f=state.format, isLE=state.isLE, num=100000;
-    const is4Bit=f.endsWith('4'), isFloat=f.startsWith('fp')||f==='bf16';
-    const byteStep=getByteStep(f);
-    const buf=new ArrayBuffer(num*byteStep), v=new DataView(buf);
-    let x=0.1,y=0,z=0; state.fileName="DEMO: "+shape.toUpperCase();
+function generateDemo() {
+    const num = 100000;
+    const buf = new ArrayBuffer(num * 12); // 3 × uint32 per tuple
+    const v = new DataView(buf);
+    let x = 0.1, y = 0, z = 0;
+    state.fileName = "DEMO: LORENZ";
+    state.format = 'uint32';
+    document.getElementById('selFormat').value = 'uint32';
 
-    for(let i=0;i<num;i++){
-        let nx,ny,nz;
-        if(shape==='lorenz'){let dx=10*(y-x),dy=x*(28-z)-y,dz=x*y-(8/3)*z;x+=dx*0.005;y+=dy*0.005;z+=dz*0.005;nx=(x+25)/50;ny=(y+30)/60;nz=z/50;}
-        else{nx=Math.random();ny=Math.random();nz=Math.random();}
-        nx=Math.max(0,Math.min(1,nx));ny=Math.max(0,Math.min(1,ny));nz=Math.max(0,Math.min(1,nz));
-        const norms=[nx,ny,nz],off=i*byteStep;
-
-        if(is4Bit){
-            if(f==='uint4'){const nibs=norms.map(n=>Math.round(n*15));v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
-            else if(f==='int4'){const nibs=norms.map(n=>{let s=Math.round(n*15)-8;return s<0?s+16:s;});v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
-            else if(f==='fp4'){const nibs=norms.map(n=>f32ToFp4(normToFloat(n)));v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
-        }else if(isFloat){
-            const fv=norms.map(n=>normToFloat(n));
-            if(f==='fp32'){for(let j=0;j<3;j++)v.setFloat32(off+j*4,fv[j],isLE);}
-            else if(f==='fp64'){for(let j=0;j<3;j++)v.setFloat64(off+j*8,fv[j],isLE);}
-            else if(f==='fp16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,f32ToFp16(fv[j]),isLE);}
-            else if(f==='bf16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,f32ToBf16(fv[j]),isLE);}
-            else if(f==='fp8_e4m3'){for(let j=0;j<3;j++)v.setUint8(off+j,f32ToFp8E4M3(fv[j]));}
-            else if(f==='fp8_e5m2'){for(let j=0;j<3;j++)v.setUint8(off+j,f32ToFp8E5M2(fv[j]));}
-        }else{
-            if(f==='uint32'){for(let j=0;j<3;j++)v.setUint32(off+j*4,norms[j]*4294967295,isLE);}
-            else if(f==='int32'){for(let j=0;j<3;j++)v.setInt32(off+j*4,norms[j]*4294967295-2147483648,isLE);}
-            else if(f==='uint16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,norms[j]*65535,isLE);}
-            else if(f==='int16'){for(let j=0;j<3;j++)v.setInt16(off+j*2,norms[j]*65535-32768,isLE);}
-            else if(f==='uint8'){for(let j=0;j<3;j++)v.setUint8(off+j,norms[j]*255);}
-            else if(f==='int8'){for(let j=0;j<3;j++)v.setInt8(off+j,norms[j]*255-128);}
-        }
+    for (let i = 0; i < num; i++) {
+        const dx = 10 * (y - x), dy = x * (28 - z) - y, dz = x * y - (8/3) * z;
+        x += dx * 0.005; y += dy * 0.005; z += dz * 0.005;
+        const nx = Math.max(0, Math.min(1, (x + 25) / 50));
+        const ny = Math.max(0, Math.min(1, (y + 30) / 60));
+        const nz = Math.max(0, Math.min(1, z / 50));
+        const off = i * 12;
+        v.setUint32(off,     nx * 4294967295, true);
+        v.setUint32(off + 4, ny * 4294967295, true);
+        v.setUint32(off + 8, nz * 4294967295, true);
     }
     state.file = null;
     state.fileSize = buf.byteLength;
@@ -1515,7 +1483,7 @@ document.addEventListener('drop',e=>{e.preventDefault();dz.style.display='none';
     const ok=await initWebGPU();
     if(!ok)return;
     render();
-    generateDemo('lorenz');
+    generateDemo();
 })();
 
 </script>
