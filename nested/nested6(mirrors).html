@@ -1,0 +1,1580 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Unified Strata — WebGPU</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #050508; color: #ccc; font-family: 'Consolas', 'SF Mono', monospace; overflow: hidden; }
+    canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+
+    .panel {
+        position: fixed; top: 16px; z-index: 10;
+        background: rgba(8, 8, 12, 0.96); border: 1px solid rgba(0, 255, 255, 0.2);
+        border-radius: 12px; padding: 18px; width: 300px;
+        backdrop-filter: blur(20px); box-shadow: 0 0 50px rgba(0,0,0,0.9);
+        max-height: calc(100vh - 32px); overflow-y: auto;
+    }
+    #panelL { left: 16px; }
+    #panelR { right: 16px; }
+    .panel::-webkit-scrollbar { width: 4px; }
+    .panel::-webkit-scrollbar-thumb { background: #222; }
+
+    h1 { font-size: 14px; font-weight: 700; color: #0ff; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 5px; }
+    .sub-h1 { font-size: 9px; color: #446; margin-bottom: 15px; }
+    .group-label { font-size: 9px; color: #558; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 1px; margin-top: 10px; }
+    .ctrl { margin-bottom: 12px; }
+    .ctrl label { display: flex; justify-content: space-between; font-size: 10px; color: #888; margin-bottom: 4px; }
+    .ctrl label span.val { color: #0ff; font-weight: bold; }
+    input[type=range] { width: 100%; height: 4px; cursor: pointer; accent-color: #0ff; -webkit-appearance: none; appearance: none; background: #112; }
+    input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 12px; width: 12px; border-radius: 50%; background: #0ff; }
+    .btn-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 10px; }
+    button { padding: 6px 2px; font-size: 9px; background: #0a0a1a; border: 1px solid #114; color: #558; cursor: pointer; border-radius: 4px; font-family: inherit; transition: 0.2s; }
+    button:hover { border-color: #0ff; color: #0ff; }
+    button.active { background: #035; color: #0ff; border-color: #0ff; }
+
+    select { width: 100%; padding: 8px 10px; font-size: 11px; font-family: inherit;
+        background: #0a0a1a; color: #0ff; border: 1px solid rgba(0,255,255,0.2);
+        border-radius: 6px; cursor: pointer; appearance: none; -webkit-appearance: none;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2300ffff'/%3E%3C/svg%3E");
+        background-repeat: no-repeat; background-position: right 10px center;
+        margin-bottom: 10px; outline: none; transition: 0.2s;
+    }
+    select:hover, select:focus { border-color: #0ff; box-shadow: 0 0 8px rgba(0,255,255,0.15); }
+    select option { background: #0a0a1a; color: #ccc; }
+    .select-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+    .file-btn { width: 100%; background: #0ff; color: #000; font-weight: bold; border: none; padding: 10px; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; border-radius: 6px; margin-bottom: 10px; }
+    .export-btn { width: 100%; background: rgba(0, 255, 100, 0.15); color: #0f6; border: 1px solid #0f6; padding: 10px; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; border-radius: 6px; margin-top: 10px; font-weight: bold; }
+    .export-btn:hover { background: #0f6; color: #000; }
+    .stats { font-size: 10px; color: #446; border-top: 1px solid #113; padding-top: 10px; line-height: 1.5; margin-top: 10px; }
+    b { color: #7af; }
+    #dropZone {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 100;
+        display: none; background: rgba(0,0,0,0.8); justify-content: center; align-items: center;
+        border: 4px dashed #0ff; pointer-events: none;
+    }
+    #gpuError {
+        display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        z-index: 200; background: #1a0008; border: 1px solid #f00; border-radius: 12px;
+        padding: 30px; max-width: 500px; text-align: center; color: #f66;
+    }
+</style>
+</head>
+<body>
+
+<div id="gpuError">
+    <h1 style="color:#f00; margin-bottom:15px;">WebGPU Not Available</h1>
+    <p style="font-size:12px; line-height:1.6;">This tool requires WebGPU. Use Chrome 113+, Edge 113+, or Safari 18+.</p>
+</div>
+
+<div id="dropZone"><h1 style="color:#0ff">INJECT BYTESTREAM</h1></div>
+
+<div id="panelL" class="panel">
+    <h1>Unified Strata</h1>
+    <div class="sub-h1">WebGPU Compute · Multi-Scale Forensic Geometry</div>
+
+    <button class="file-btn" onclick="document.getElementById('fIn').click()">Open Binary File</button>
+    <input type="file" id="fIn" style="display:none" onchange="handleFile(this.files)">
+
+    <div class="group-label">Scrub Timeline</div>
+    <div class="ctrl">
+        <label>File Offset <span class="val" id="vOff">0%</span></label>
+        <input type="range" id="sOff" min="0" max="100" step="0.1" value="0">
+    </div>
+    <div class="ctrl">
+        <label>Window Size (MB) <span class="val" id="vWin">32.0</span></label>
+        <input type="range" id="sWin" min="0.1" max="256" step="0.1" value="32">
+    </div>
+    <div class="group-label">Data Type</div>
+    <select id="selFormat" onchange="setFormat(this.value)">
+        <optgroup label="Integer">
+            <option value="uint4">uint4</option>
+            <option value="uint8">uint8</option>
+            <option value="uint16">uint16</option>
+            <option value="uint32" selected>uint32</option>
+            <option value="int4">int4</option>
+            <option value="int8">int8</option>
+            <option value="int16">int16</option>
+            <option value="int32">int32</option>
+        </optgroup>
+        <optgroup label="Floating Point">
+            <option value="fp4">fp4 (E2M1)</option>
+            <option value="fp8_e4m3">fp8 (E4M3)</option>
+            <option value="fp8_e5m2">fp8 (E5M2)</option>
+            <option value="fp16">fp16</option>
+            <option value="bf16">bf16</option>
+            <option value="fp32">fp32</option>
+            <option value="fp64">fp64</option>
+        </optgroup>
+    </select>
+
+    <div class="select-row">
+        <div>
+            <div class="group-label">Endianness</div>
+            <select id="selEndian" onchange="setEndian(this.value==='le')">
+                <option value="le" selected>Little Endian</option>
+                <option value="be">Big Endian</option>
+            </select>
+        </div>
+        <div>
+            <div class="group-label">Projection</div>
+            <select id="selMode" onchange="setMode(parseInt(this.value))">
+                <option value="0" selected>3D Spatial</option>
+                <option value="1">Tiled 2D</option>
+                <option value="2">Atlas 3D</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="ctrl">
+        <label>Depth Scale <span class="val" id="vDepth">1.00</span></label>
+        <input type="range" id="sDepth" min="0" max="1" step="0.01" value="1.00">
+    </div>
+
+    <div class="group-label">Hierarchy Gaps</div>
+    <div class="ctrl">
+        <label>Macro Gap <span class="val" id="vG0">0.25</span></label>
+        <input type="range" id="sG0" min="0" max="2" step="0.01" value="0.25">
+    </div>
+    <div class="ctrl">
+        <label>Meso Gap <span class="val" id="vG1">0.10</span></label>
+        <input type="range" id="sG1" min="0" max="2" step="0.01" value="0.10">
+    </div>
+    <div class="ctrl">
+        <label>Micro Gap <span class="val" id="vG2">0.05</span></label>
+        <input type="range" id="sG2" min="0" max="1" step="0.01" value="0.05">
+    </div>
+    <div class="ctrl">
+        <label>Gap Inflate <span class="val" id="vInf">0.50</span></label>
+        <input type="range" id="sInf" min="0" max="1" step="0.01" value="0.50">
+    </div>
+    <div class="ctrl">
+        <label>Dive (Bit Shift) <span class="val" id="vShift">22</span></label>
+        <input type="range" id="sShift" min="0" max="22" step="1" value="22">
+    </div>
+
+    <div class="btn-grid" style="grid-template-columns: 1fr 1fr 1fr; margin-top:10px;">
+        <button onclick="generateDemo('lorenz')">Lorenz</button>
+        <button onclick="recenterCamera()">Re-center</button>
+        <button onclick="generateDemo('noise')">Random</button>
+    </div>
+
+    <div id="stats" class="stats">Initializing WebGPU…</div>
+</div>
+
+<div id="panelR" class="panel">
+    <div class="group-label">Rendering</div>
+    <div class="ctrl">
+        <label>Point Size <span class="val" id="vPts">1.00</span></label>
+        <input type="range" id="sPts" min="0.1" max="4" step="0.01" value="1">
+    </div>
+    <div class="ctrl">
+        <label>Center Gravity <span class="val" id="vProx">0.00</span></label>
+        <input type="range" id="sProx" min="0" max="1" step="0.01" value="0">
+    </div>
+    <div class="select-row">
+        <div>
+            <div class="group-label">Gravity Focus</div>
+            <select id="selGravTarget" onchange="state.gravityTarget=parseInt(this.value)">
+                <option value="0" selected>World Center</option>
+                <option value="1">Camera Target</option>
+            </select>
+        </div>
+        <div>
+            <div class="group-label">Falloff Curve</div>
+            <select id="selFalloff" onchange="state.falloffCurve=parseInt(this.value)">
+                <option value="0" selected>Quadratic</option>
+                <option value="1">Linear</option>
+                <option value="2">Inverse Square</option>
+                <option value="3">Logarithmic</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="group-label" style="display:flex;justify-content:space-between;align-items:center;">
+        Cross-Section Slab
+        <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbSlab" onchange="state.slabEnabled=this.checked" style="accent-color:#0ff;"> On</label>
+    </div>
+    <div class="select-row">
+        <div>
+            <div class="group-label">Slab Axis</div>
+            <select id="selSlabAxis" onchange="state.slabAxis=parseInt(this.value)">
+                <option value="0">X Axis</option>
+                <option value="1" selected>Y Axis</option>
+                <option value="2">Z Axis</option>
+                <option value="3">View-Aligned</option>
+            </select>
+        </div>
+        <div style="display:flex;flex-direction:column;justify-content:flex-end;">
+        </div>
+    </div>
+    <div class="ctrl">
+        <label>Position <span class="val" id="vSlabPos">0.00</span></label>
+        <input type="range" id="sSlabPos" min="-5" max="5" step="0.01" value="0">
+    </div>
+    <div class="ctrl">
+        <label>Thickness <span class="val" id="vSlabThk">2.00</span></label>
+        <input type="range" id="sSlabThk" min="0.01" max="5" step="0.01" value="2">
+    </div>
+    <div class="ctrl">
+        <label>Soft Edge <span class="val" id="vSlabSoft">0.20</span></label>
+        <input type="range" id="sSlabSoft" min="0" max="1" step="0.01" value="0.2">
+    </div>
+
+    <div class="select-row">
+        <div>
+            <div class="group-label">CSG Compose</div>
+            <select id="selCSG" onchange="state.csgMode=parseInt(this.value)">
+                <option value="0" selected>Intersect</option>
+                <option value="1">Union</option>
+                <option value="2">Subtract</option>
+            </select>
+        </div>
+        <div>
+            <div class="group-label">Gizmo Alpha</div>
+            <div class="ctrl" style="margin-top:6px;">
+                <input type="range" id="sGizmo" min="0" max="1" step="0.01" value="0.3" style="width:100%;">
+            </div>
+        </div>
+    </div>
+
+    <div class="group-label" style="display:flex;justify-content:space-between;align-items:center;">
+        Clip Volume (AABB)
+        <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbAABB" onchange="state.aabbEnabled=this.checked?1:0" style="accent-color:#0ff;"> On</label>
+    </div>
+    <div class="select-row">
+        <div>
+            <div class="group-label">AABB Mode</div>
+            <select id="selAABBMode" onchange="state.aabbEnabled=parseInt(this.value);document.getElementById('cbAABB').checked=this.value!=='0'">
+                <option value="0" selected>Off</option>
+                <option value="1">Include</option>
+                <option value="-1">Exclude</option>
+            </select>
+        </div>
+        <div></div>
+    </div>
+    <div class="ctrl">
+        <label>X Min <span class="val" id="vAXMin">-5.00</span></label>
+        <input type="range" id="sAXMin" min="-5" max="5" step="0.1" value="-5">
+    </div>
+    <div class="ctrl">
+        <label>X Max <span class="val" id="vAXMax">5.00</span></label>
+        <input type="range" id="sAXMax" min="-5" max="5" step="0.1" value="5">
+    </div>
+    <div class="ctrl">
+        <label>Y Min <span class="val" id="vAYMin">-5.00</span></label>
+        <input type="range" id="sAYMin" min="-5" max="5" step="0.1" value="-5">
+    </div>
+    <div class="ctrl">
+        <label>Y Max <span class="val" id="vAYMax">5.00</span></label>
+        <input type="range" id="sAYMax" min="-5" max="5" step="0.1" value="5">
+    </div>
+    <div class="ctrl">
+        <label>Z Min <span class="val" id="vAZMin">-5.00</span></label>
+        <input type="range" id="sAZMin" min="-5" max="5" step="0.1" value="-5">
+    </div>
+    <div class="ctrl">
+        <label>Z Max <span class="val" id="vAZMax">5.00</span></label>
+        <input type="range" id="sAZMax" min="-5" max="5" step="0.1" value="5">
+    </div>
+
+    <button class="export-btn" onclick="exportPLY()">Export .PLY Cloud</button>
+
+    <div class="group-label" style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
+        Mirror Crystal
+        <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbMirror" onchange="state.mirrorEnabled=this.checked" style="accent-color:#0ff;"> On</label>
+    </div>
+    <div class="ctrl">
+        <label>Lattice Size <span class="val" id="vLattice">1</span></label>
+        <input type="range" id="sLattice" min="1" max="3" step="1" value="1">
+    </div>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+
+// =============================================================================
+//  WGSL — COMPUTE SHADER
+// =============================================================================
+
+const COMPUTE_WGSL = `
+struct Params {
+    format: u32, isLE: u32, shift: u32, tupleCount: u32,
+    byteStep: u32, wSize: u32, _p0: u32, _p1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> raw: array<u32>;
+@group(0) @binding(1) var<storage, read_write> bitTable: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<storage, read_write> indirect: array<atomic<u32>>;
+@group(0) @binding(4) var<uniform> P: Params;
+
+fn rU8(off: u32) -> u32 { return (raw[off >> 2u] >> ((off & 3u) * 8u)) & 0xFFu; }
+
+fn rU16(off: u32) -> u32 {
+    let lo = rU8(off); let hi = rU8(off + 1u);
+    return select(lo | (hi << 8u), (lo << 8u) | hi, P.isLE == 0u);
+}
+
+fn rU32(off: u32) -> u32 {
+    let b0 = rU8(off); let b1 = rU8(off+1u); let b2 = rU8(off+2u); let b3 = rU8(off+3u);
+    return select(b0|(b1<<8u)|(b2<<16u)|(b3<<24u), (b0<<24u)|(b1<<16u)|(b2<<8u)|b3, P.isLE==0u);
+}
+
+// Fast-path: 4-byte aligned LE read (1 load vs 4 loads + shifts)
+fn rU32a(off: u32) -> u32 {
+    if (P.isLE != 0u) { return raw[off >> 2u]; }
+    return rU32(off);
+}
+
+// Fast-path: 2-byte aligned LE read (1 load + select vs 2 loads + shifts)
+fn rU16a(off: u32) -> u32 {
+    if (P.isLE != 0u) {
+        let w = raw[off >> 2u];
+        return select(w & 0xFFFFu, w >> 16u, (off & 2u) != 0u);
+    }
+    return rU16(off);
+}
+
+fn dFp16(bits: u32) -> f32 {
+    let s=f32((bits>>15u)&1u); let e=(bits>>10u)&0x1Fu; let m=bits&0x3FFu;
+    let sign=1.0-2.0*s;
+    if(e==0u){return sign*exp2(-14.0)*(f32(m)/1024.0);}
+    if(e==31u){return select(sign*65504.0,0.0,m!=0u);}
+    return sign*exp2(f32(e)-15.0)*(1.0+f32(m)/1024.0);
+}
+fn dBf16(bits: u32) -> f32 {
+    let s=f32((bits>>15u)&1u); let e=(bits>>7u)&0xFFu; let m=bits&0x7Fu;
+    let sign=1.0-2.0*s;
+    if(e==0u){return sign*exp2(-126.0)*(f32(m)/128.0);}
+    if(e==255u){return select(sign*3.4e38,0.0,m!=0u);}
+    return sign*exp2(f32(e)-127.0)*(1.0+f32(m)/128.0);
+}
+fn dFp8E4M3(bits: u32) -> f32 {
+    let s=f32((bits>>7u)&1u); let e=(bits>>3u)&0xFu; let m=bits&0x7u;
+    let sign=1.0-2.0*s;
+    if(e==0u){return sign*exp2(-6.0)*(f32(m)/8.0);}
+    return sign*exp2(f32(e)-7.0)*(1.0+f32(m)/8.0);
+}
+fn dFp8E5M2(bits: u32) -> f32 {
+    let s=f32((bits>>7u)&1u); let e=(bits>>2u)&0x1Fu; let m=bits&0x3u;
+    let sign=1.0-2.0*s;
+    if(e==0u){return sign*exp2(-14.0)*(f32(m)/4.0);}
+    return sign*exp2(f32(e)-15.0)*(1.0+f32(m)/4.0);
+}
+fn dFp4(bits: u32) -> f32 {
+    let s=f32((bits>>3u)&1u); let e=(bits>>1u)&0x3u; let m=bits&1u;
+    let sign=1.0-2.0*s;
+    if(e==0u){return sign*0.5*(f32(m)/2.0);}
+    return sign*exp2(f32(e)-1.0)*(1.0+f32(m)/2.0);
+}
+fn dF64(off: u32) -> f32 {
+    let lo=rU32a(off); let hi=rU32a(off+4u);
+    let s=f32((hi>>31u)&1u); let sign=1.0-2.0*s;
+    let e=i32((hi>>20u)&0x7FFu)-1023;
+    let mHi=hi&0xFFFFFu;
+    if(e==1024){return select(sign*3.4e38,0.0,(mHi|lo)!=0u);}
+    if(e==-1023){return sign*exp2(-1022.0)*(f32(mHi)/f32(0x100000u));}
+    return sign*exp2(f32(e))*(1.0+f32(mHi)/f32(0x100000u));
+}
+
+fn tanhMap(fv: f32) -> u32 {
+    let t=tanh(clamp(fv,-20.0,20.0));
+    return u32(clamp(t*0.5+0.5,0.0,1.0)*4294967295.0);
+}
+
+const S: f32 = 4294967295.0;
+
+// Workgroup-local accumulation: reduces global atomic contention ~256×
+var<workgroup> wg_count: atomic<u32>;
+var<workgroup> wg_base: u32;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_index) lid: u32
+) {
+    // Phase 0: Reset workgroup counter
+    if (lid == 0u) { atomicStore(&wg_count, 0u); }
+    workgroupBarrier();
+
+    // Phase 1: Decode, dedup, pack — each thread works independently
+    let idx = gid.x;
+    var isUnique = false;
+    var localSlot = 0u;
+    var packed: array<f32, 4>;
+
+    if (idx < P.tupleCount) {
+        let off = idx * P.byteStep;
+        var vals: array<u32, 3>;
+
+        switch(P.format){
+            case 0u{for(var j=0u;j<3u;j++){vals[j]=rU32a(off+j*4u);}}
+            case 1u{for(var j=0u;j<3u;j++){vals[j]=rU32a(off+j*4u)^0x80000000u;}}
+            case 2u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU16a(off+j*2u))/65535.0*S);}}
+            case 3u{for(var j=0u;j<3u;j++){let v=rU16a(off+j*2u);let sv=select(i32(v),i32(v)-65536,v>32767u);vals[j]=u32(f32(sv+32768)/65535.0*S);}}
+            case 4u{for(var j=0u;j<3u;j++){vals[j]=u32(f32(rU8(off+j))/255.0*S);}}
+            case 5u{for(var j=0u;j<3u;j++){let b=rU8(off+j);let sv=select(i32(b),i32(b)-256,b>127u);vals[j]=u32(f32(sv+128)/255.0*S);}}
+            case 6u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=u32(f32((b0>>4u)&0xFu)/15.0*S);vals[1]=u32(f32(b0&0xFu)/15.0*S);vals[2]=u32(f32((b1>>4u)&0xFu)/15.0*S);}
+            case 7u{let b0=rU8(off);let b1=rU8(off+1u);var nibs:array<u32,3>;nibs[0]=(b0>>4u)&0xFu;nibs[1]=b0&0xFu;nibs[2]=(b1>>4u)&0xFu;for(var j=0u;j<3u;j++){let n=nibs[j];let sv=select(i32(n),i32(n)-16,n>7u);vals[j]=u32(f32(sv+8)/15.0*S);}}
+            case 8u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(bitcast<f32>(rU32a(off+j*4u)));}}
+            case 9u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dF64(off+j*8u));}}
+            case 10u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp16(rU16a(off+j*2u)));}}
+            case 11u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dBf16(rU16a(off+j*2u)));}}
+            case 12u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E4M3(rU8(off+j)));}}
+            case 13u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E5M2(rU8(off+j)));}}
+            case 14u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=tanhMap(dFp4(b0>>4u));vals[1]=tanhMap(dFp4(b0&0xFu));vals[2]=tanhMap(dFp4(b1>>4u));}
+            default{}
+        }
+
+        let vx=vals[0]; let vy=vals[1]; let vz=vals[2];
+        let dx=(vx>>P.shift)&0x3FFu; let dy=(vy>>P.shift)&0x3FFu; let dz=(vz>>P.shift)&0x3FFu;
+        let key=(dz<<20u)|(dy<<10u)|dx;
+
+        let old = atomicOr(&bitTable[key>>5u], 1u<<(key&31u));
+        if ((old & (1u<<(key&31u))) == 0u) {
+            isUnique = true;
+            // Get local slot within this workgroup (workgroup-local atomic — fast)
+            localSlot = atomicAdd(&wg_count, 1u);
+            // Pack output into registers
+            packed[0] = f32((((vx>>28u)&0xFu)<<16u) | (((vy>>28u)&0xFu)<<8u) | ((vz>>28u)&0xFu));
+            packed[1] = f32((((vx>>24u)&0xFu)<<16u) | (((vy>>24u)&0xFu)<<8u) | ((vz>>24u)&0xFu));
+            packed[2] = f32((((vx>>20u)&0xFu)<<16u) | (((vy>>20u)&0xFu)<<8u) | ((vz>>20u)&0xFu));
+            let cr=(dx*255u)/1023u; let cg=(dy*255u)/1023u; let cb=(dz*255u)/1023u;
+            packed[3] = f32((cr<<16u) | (cg<<8u) | cb);
+        }
+    }
+
+    // Phase 2: Thread 0 reserves a global block for the entire workgroup
+    workgroupBarrier();
+    if (lid == 0u) {
+        wg_base = atomicAdd(&indirect[1], atomicLoad(&wg_count));
+    }
+    workgroupBarrier();
+
+    // Phase 3: Each unique thread writes at globalBase + localSlot
+    if (isUnique) {
+        let b = (wg_base + localSlot) * 4u;
+        output[b]     = packed[0];
+        output[b+1u]  = packed[1];
+        output[b+2u]  = packed[2];
+        output[b+3u]  = packed[3];
+    }
+}
+`;
+
+// =============================================================================
+//  WGSL — RENDER SHADERS
+// =============================================================================
+
+const RENDER_WGSL = `
+struct RParams {
+    mvp: mat4x4<f32>,
+    s0: f32, s1: f32, s2: f32, center: f32,
+    scale: f32, pointSize: f32, vpW: f32, vpH: f32,
+    mode: f32, stepX0: f32, stepX1: f32, stepX2: f32,
+    stepY0: f32, stepY1: f32, stepY2: f32,
+    tiledCenterX: f32, tiledCenterY: f32, tiledScale: f32,
+    proximityStrength: f32, falloffCurve: f32,
+    gravTargetX: f32, gravTargetY: f32, gravTargetZ: f32,
+    depthScale: f32, subRotSinY: f32, subRotCosY: f32,
+    subRotSinX: f32, subRotCosX: f32,
+    slabNX: f32, slabNY: f32, slabNZ: f32,
+    slabOffset: f32, slabHalfT: f32, slabSoft: f32,
+    aabbMinX: f32, aabbMinY: f32, aabbMinZ: f32,
+    aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
+    aabbMode: f32, csgMode: f32, gizmoAlpha: f32,
+    mirrorX: f32, mirrorY: f32, mirrorZ: f32,
+    offsetX: f32, offsetY: f32, offsetZ: f32, _p0: f32,
+};
+
+@group(0) @binding(0) var<uniform> R: RParams;
+
+struct VSOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) worldPos: vec3<f32>,
+};
+
+@vertex
+fn vs(
+    @location(0) qOff: vec2<f32>,
+    @location(1) pk: vec4<f32>,
+) -> VSOut {
+    let raw0=u32(pk.x); let raw1=u32(pk.y); let raw2=u32(pk.z); let raw3=u32(pk.w);
+
+    // Unpack tier indices: (ix << 16) | (iy << 8) | iz
+    let p0=vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
+    let p1=vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
+    let p2=vec3(f32((raw2>>16u)&0xFFu), f32((raw2>>8u)&0xFFu), f32(raw2&0xFFu));
+    let col=vec3(f32((raw3>>16u)&0xFFu)/255.0, f32((raw3>>8u)&0xFFu)/255.0, f32(raw3&0xFFu)/255.0);
+
+    var world: vec3<f32>;
+
+    if (R.mode < 0.5) {
+        // 3D isotropic
+        world = (p0*R.s0 + p1*R.s1 + p2*R.s2 - vec3(R.center)) * R.scale;
+    } else if (R.mode < 1.5) {
+        // Tiled 2D — fold Z into tile grid per tier
+        let ZCOLS = 4u;
+        let D = 16.0;
+
+        let iz0=u32(p0.z); let iz1=u32(p1.z); let iz2=u32(p2.z);
+
+        let fx0 = f32(iz0 % ZCOLS) * D + p0.x;
+        let fy0 = f32(iz0 / ZCOLS) * D + p0.y;
+        let fx1 = f32(iz1 % ZCOLS) * D + p1.x;
+        let fy1 = f32(iz1 / ZCOLS) * D + p1.y;
+        let fx2 = f32(iz2 % ZCOLS) * D + p2.x;
+        let fy2 = f32(iz2 / ZCOLS) * D + p2.y;
+
+        let px = fx0*R.stepX0 + fx1*R.stepX1 + fx2*R.stepX2;
+        let py = fy0*R.stepY0 + fy1*R.stepY1 + fy2*R.stepY2;
+
+        world = vec3(
+            (px - R.tiledCenterX) * R.tiledScale,
+            (py - R.tiledCenterY) * R.tiledScale,
+            0.0
+        );
+    } else {
+        // Atlas 3D: macro tiled flat + meso/micro 3D with sub-rotation
+        let ZCOLS = 4u;
+        let D = 16.0;
+
+        // Macro: fold z into tile grid (tier 0 only)
+        let iz0 = u32(p0.z);
+        let flatX = f32(iz0 % ZCOLS) * D + p0.x;
+        let flatY = f32(iz0 / ZCOLS) * D + p0.y;
+
+        // Meso+Micro: combine into local [-0.5, 0.5]³ for centered rotation
+        var local = vec3(
+            (p1.x * 16.0 + p2.x) / 255.0,
+            (p1.y * 16.0 + p2.y) / 255.0,
+            (p1.z * 16.0 + p2.z) / 255.0
+        ) - 0.5;
+
+        // Apply sub-scene rotation (middle-drag, same axes as orbit camera)
+        // Y-rotation (horizontal drag)
+        let rx = local.x * R.subRotCosY - local.z * R.subRotSinY;
+        let rz = local.x * R.subRotSinY + local.z * R.subRotCosY;
+        local = vec3(rx, local.y, rz);
+        // X-rotation (vertical drag)
+        let ry = local.y * R.subRotCosX - local.z * R.subRotSinX;
+        let rz2 = local.y * R.subRotSinX + local.z * R.subRotCosX;
+        local = vec3(local.x, ry, rz2);
+
+        // Compose: flat macro grid + 3D local offset
+        let cubeSize = R.stepX0 * 0.8;
+        let px = flatX * R.stepX0 + (local.x + 0.5) * cubeSize;
+        let py = flatY * R.stepY0 + (local.y + 0.5) * cubeSize;
+        let pz = (local.z + 0.5) * cubeSize * R.depthScale;
+
+        world = vec3(
+            (px - R.tiledCenterX) * R.tiledScale,
+            (py - R.tiledCenterY) * R.tiledScale,
+            pz * R.tiledScale
+        );
+    }
+
+    // Center-proximity sizing with selectable gravity target and falloff curve
+    let gravCenter = vec3(R.gravTargetX, R.gravTargetY, R.gravTargetZ);
+    let dist = length(world - gravCenter);
+    let normDist = clamp(dist / 5.0, 0.0, 1.0);
+
+    // Falloff curves: 0=quadratic, 1=linear, 2=inverse-square, 3=logarithmic
+    var prox = 0.0;
+    let curve = u32(R.falloffCurve + 0.5);
+    switch (curve) {
+        case 1u{ prox = 1.0 - normDist; }
+        case 2u{ prox = 1.0 / (1.0 + dist * dist * 0.16); }
+        case 3u{ prox = 1.0 - log(1.0 + dist) / log(6.0); }
+        default{ let p = 1.0 - normDist; prox = p * p; }
+    }
+    prox = clamp(prox, 0.0, 1.0);
+    let size = R.pointSize * mix(1.0, 0.5 + 1.5 * prox, R.proximityStrength);
+
+    // Mirror + lattice offset
+    let mWorld = world * vec3(R.mirrorX, R.mirrorY, R.mirrorZ) + vec3(R.offsetX, R.offsetY, R.offsetZ);
+
+    var clip = R.mvp * vec4(mWorld, 1.0);
+    clip = vec4(clip.xy + qOff*size*clip.w/vec2(R.vpW, R.vpH), clip.zw);
+
+    // Brightness: dim periphery, bright center
+    let proxBright = mix(1.0, 0.4 + 1.2 * prox, R.proximityStrength);
+
+    var o:VSOut;
+    o.pos=clip; o.color=(col+0.1) * proxBright; o.uv=qOff; o.worldPos=mWorld;
+    return o;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4<f32> {
+    // Compute signed distances (negative = inside)
+    var slabDist = -999.0;
+    let hasSlab = R.slabHalfT > 0.0;
+    if (hasSlab) {
+        let slabN = vec3(R.slabNX, R.slabNY, R.slabNZ);
+        let d = dot(in.worldPos, slabN) - R.slabOffset;
+        slabDist = abs(d) - R.slabHalfT;
+    }
+
+    var aabbDist = -999.0;
+    let hasAABB = abs(R.aabbMode) > 0.5;
+    if (hasAABB) {
+        let aMin = vec3(R.aabbMinX, R.aabbMinY, R.aabbMinZ);
+        let aMax = vec3(R.aabbMaxX, R.aabbMaxY, R.aabbMaxZ);
+        let dMin = aMin - in.worldPos;
+        let dMax = in.worldPos - aMax;
+        aabbDist = max(max(max(dMin.x, dMax.x), max(dMin.y, dMax.y)), max(dMin.z, dMax.z));
+        if (R.aabbMode < 0.0) { aabbDist = -aabbDist; }
+    }
+
+    // CSG composition (only when both active)
+    var cd: f32;
+    if (hasSlab && hasAABB) {
+        let csg = u32(R.csgMode + 0.5);
+        switch (csg) {
+            case 1u { cd = min(slabDist, aabbDist); }
+            case 2u { cd = max(slabDist, -aabbDist); }
+            default { cd = max(slabDist, aabbDist); }
+        }
+    } else if (hasSlab) {
+        cd = slabDist;
+    } else if (hasAABB) {
+        cd = aabbDist;
+    } else {
+        cd = -999.0;
+    }
+
+    // Discard + soft edge
+    let soft = max(R.slabSoft, 0.001);
+    if (cd > soft) { discard; }
+    var alpha = 1.0;
+    if (cd > 0.0) {
+        alpha = 1.0 - smoothstep(0.0, soft, cd);
+    }
+
+    // Point sprite circle
+    if (dot(in.uv, in.uv) > 1.0) { discard; }
+    return vec4(in.color * alpha, alpha);
+}
+`;
+
+// =============================================================================
+//  WGSL — WIREFRAME SHADER (reuses RParams uniform for MVP + gizmoAlpha)
+// =============================================================================
+
+const WIRE_WGSL = `
+struct RParams {
+    mvp: mat4x4<f32>,
+    s0: f32, s1: f32, s2: f32, center: f32,
+    scale: f32, pointSize: f32, vpW: f32, vpH: f32,
+    mode: f32, stepX0: f32, stepX1: f32, stepX2: f32,
+    stepY0: f32, stepY1: f32, stepY2: f32,
+    tiledCenterX: f32, tiledCenterY: f32, tiledScale: f32,
+    proximityStrength: f32, falloffCurve: f32,
+    gravTargetX: f32, gravTargetY: f32, gravTargetZ: f32,
+    depthScale: f32, subRotSinY: f32, subRotCosY: f32,
+    subRotSinX: f32, subRotCosX: f32,
+    slabNX: f32, slabNY: f32, slabNZ: f32,
+    slabOffset: f32, slabHalfT: f32, slabSoft: f32,
+    aabbMinX: f32, aabbMinY: f32, aabbMinZ: f32,
+    aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
+    aabbMode: f32, csgMode: f32, gizmoAlpha: f32,
+    mirrorX: f32, mirrorY: f32, mirrorZ: f32,
+    offsetX: f32, offsetY: f32, offsetZ: f32, _p0: f32,
+};
+@group(0) @binding(0) var<uniform> R: RParams;
+
+struct WOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) col: vec4<f32>,
+};
+
+@vertex fn wvs(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>) -> WOut {
+    var o: WOut;
+    o.pos = R.mvp * vec4(p, 1.0);
+    o.col = vec4(c.rgb, c.a * R.gizmoAlpha);
+    return o;
+}
+
+@fragment fn wfs(in: WOut) -> @location(0) vec4<f32> {
+    return in.col;
+}
+`;
+// =============================================================================
+
+const FORMAT_ID = {
+    'uint32':0,'int32':1,'uint16':2,'int16':3,'uint8':4,'int8':5,'uint4':6,'int4':7,
+    'fp32':8,'fp64':9,'fp16':10,'bf16':11,'fp8_e4m3':12,'fp8_e5m2':13,'fp4':14
+};
+
+let state = {
+    format: 'uint32', isLE: true, shift: 22,
+    gaps: [0.25, 0.1, 0.05], inflate: 0.5,
+    file: null, fileSize: 0, buffer: null, fileName: "Internal",
+    mode: 0, // 0 = 3D, 1 = Tiled 2D, 2 = Atlas 3D
+    proximity: 0,
+    pointScale: 1.0,
+    gravityTarget: 0,
+    falloffCurve: 0,
+    depthScale: 1.0,
+    subRotX: 0,
+    subRotY: 0,
+    scrubOffset: 0, // 0–1 (percentage of file)
+    scrubWindowMB: 32,
+    slabEnabled: false,
+    slabAxis: 1,
+    slabPosition: 0,
+    slabThickness: 2.0,
+    slabSoftEdge: 0.2,
+    aabbEnabled: 0,
+    aabbMin: [-5, -5, -5],
+    aabbMax: [5, 5, 5],
+    csgMode: 0,       // 0=intersect, 1=union, 2=subtract
+    gizmoAlpha: 0.3,
+    mirrorEnabled: false,
+    latticeSize: 1,
+};
+
+function getWordSize(f) {
+    if (['uint16','int16','fp16','bf16'].includes(f)) return 2;
+    if (['uint8','int8','fp8_e4m3','fp8_e5m2','fp4','uint4','int4'].includes(f)) return 1;
+    if (f === 'fp64') return 8;
+    return 4;
+}
+function getByteStep(f) { return f.endsWith('4') ? 2 : getWordSize(f) * 3; }
+
+function computeInflation() {
+    const g = state.gaps, p = state.inflate;
+    // §7.2: inflate[i] = Π_{j=0}^{i-1} (1 + g_j × p)
+    const inf0 = 1;
+    const inf1 = 1 + g[0] * p;
+    const inf2 = inf1 * (1 + g[1] * p);
+    return [inf0, inf1, inf2];
+}
+
+function computeStrides() {
+    const g = state.gaps;
+    const inf = computeInflation();
+    // Base strides (bottom-up, no inflation)
+    const s2 = 1.0 + g[2], s1 = 15.0 * s2 * (1.0 + g[1]), s0 = 15.0 * s1 * (1.0 + g[0]);
+    // Apply inflation: step_inflated[i] = step[i] × inflate[i]
+    const is0 = s0 * inf[0], is1 = s1 * inf[1], is2 = s2 * inf[2];
+    const max = 15.0 * is0 + 15.0 * is1 + 15.0 * is2;
+    return { s0: is0, s1: is1, s2: is2, max, ctr: max / 2, scl: 5.0 / max };
+}
+
+function computeTiledStrides() {
+    const g = state.gaps;
+    const inf = computeInflation();
+    const D = 16, ZCOLS = 4, TW = ZCOLS * D; // d=16, sqrt(16)=4, tiledW=64
+
+    // Bottom-up stride computation (§6.2)
+    const strX2 = 1, strY2 = 1;
+    const strX1 = TW * strX2 * (1 + g[2]);
+    const strY1 = TW * strY2 * (1 + g[2]);
+    const strX0 = TW * strX1 * (1 + g[1]);
+    const strY0 = TW * strY1 * (1 + g[1]);
+
+    // Step = stride * (1 + own gap) × inflation (§7.5)
+    const stepX0 = strX0 * (1 + g[0]) * inf[0], stepY0 = strY0 * (1 + g[0]) * inf[0];
+    const stepX1 = strX1 * (1 + g[1]) * inf[1], stepY1 = strY1 * (1 + g[1]) * inf[1];
+    const stepX2 = strX2 * (1 + g[2]) * inf[2], stepY2 = strY2 * (1 + g[2]) * inf[2];
+
+    // Max flat coord = (ZCOLS-1)*D + (D-1) = 63
+    const maxX = 63 * stepX0 + 63 * stepX1 + 63 * stepX2;
+    const maxY = 63 * stepY0 + 63 * stepY1 + 63 * stepY2;
+    const maxE = Math.max(maxX, maxY);
+
+    return {
+        stepX0, stepY0, stepX1, stepY1, stepX2, stepY2,
+        centerX: maxX / 2, centerY: maxY / 2, scale: 5.0 / maxE
+    };
+}
+
+// =============================================================================
+//  MATRIX MATH + ORBIT CAMERA
+// =============================================================================
+
+function mat4Persp(fov, asp, n, f) {
+    const t = 1/Math.tan(fov/2), nf = 1/(n-f);
+    return new Float32Array([t/asp,0,0,0, 0,t,0,0, 0,0,(f+n)*nf,-1, 0,0,2*f*n*nf,0]);
+}
+
+function mat4LookAt(eye, tgt, up) {
+    let zx=eye[0]-tgt[0],zy=eye[1]-tgt[1],zz=eye[2]-tgt[2];
+    let l=1/Math.hypot(zx,zy,zz); zx*=l;zy*=l;zz*=l;
+    let xx=up[1]*zz-up[2]*zy, xy=up[2]*zx-up[0]*zz, xz=up[0]*zy-up[1]*zx;
+    l=1/Math.hypot(xx,xy,xz); xx*=l;xy*=l;xz*=l;
+    let yx=zy*xz-zz*xy, yy=zz*xx-zx*xz, yz=zx*xy-zy*xx;
+    return new Float32Array([
+        xx,yx,zx,0, xy,yy,zy,0, xz,yz,zz,0,
+        -(xx*eye[0]+xy*eye[1]+xz*eye[2]),
+        -(yx*eye[0]+yy*eye[1]+yz*eye[2]),
+        -(zx*eye[0]+zy*eye[1]+zz*eye[2]), 1
+    ]);
+}
+
+function mat4Mul(a, b) {
+    const o = new Float32Array(16);
+    for (let i=0;i<4;i++) for (let j=0;j<4;j++)
+        o[j*4+i] = a[i]*b[j*4]+a[4+i]*b[j*4+1]+a[8+i]*b[j*4+2]+a[12+i]*b[j*4+3];
+    return o;
+}
+
+let camTheta=Math.PI*0.25, camPhi=Math.PI*0.35, camRadius=8;
+let camTarget=[0,0,0];
+let isDrag=false, isPan=false, isDolly=false, lastMX=0, lastMY=0;
+const CAM_THROUGH_THRESHOLD = 0.5;
+function applyCamRadius(newRadius) {
+    // Through-zoom: when radius would shrink below threshold, push target forward instead
+    newRadius = Math.min(500, newRadius);
+    if (newRadius < CAM_THROUGH_THRESHOLD) {
+        const excess = CAM_THROUGH_THRESHOLD - newRadius;
+        const sp=Math.sin(camPhi), cp=Math.cos(camPhi), st=Math.sin(camTheta), ct=Math.cos(camTheta);
+        // Forward = eye-to-target direction (unit vector)
+        camTarget[0] -= sp*ct * excess;
+        camTarget[1] -= cp    * excess;
+        camTarget[2] -= sp*st * excess;
+        camRadius = CAM_THROUGH_THRESHOLD;
+    } else {
+        camRadius = newRadius;
+    }
+}
+
+function getMVP(asp) {
+    const sp=Math.sin(camPhi),cp=Math.cos(camPhi),st=Math.sin(camTheta),ct=Math.cos(camTheta);
+    const eye=[camTarget[0]+camRadius*sp*ct, camTarget[1]+camRadius*cp, camTarget[2]+camRadius*sp*st];
+    return mat4Mul(mat4Persp(Math.PI/3, asp, 0.01, 1000), mat4LookAt(eye, camTarget, [0,1,0]));
+}
+
+// =============================================================================
+//  WEBGPU CORE
+// =============================================================================
+
+let device, context, canvasEl, canvasFmt;
+let computePipeline, renderPipeline, wirePipeline;
+let rawDataBuf, bitTableBuf, outputBuf, indirectBuf, computeUniformBuf;
+let renderUniformBuf, quadVBuf, quadIBuf, wireVBuf;
+let computeBGL, renderBGL, renderBG;
+let depthTex, depthView;
+let pointCount = 0;
+
+const BIT_TABLE_SIZE = (1 << 25) * 4;
+const UNIFORM_BYTES = 66 * 4; // 66 f32 fields in RParams = 264 bytes
+const MIRROR_SIGNS = [
+    [1,1,1], [-1,1,1], [1,-1,1], [1,1,-1],
+    [-1,-1,1], [-1,1,-1], [1,-1,-1], [-1,-1,-1]
+];
+let uniformStride = 512; // bytes per instance, set after device creation
+
+async function initWebGPU() {
+    if (!navigator.gpu) { document.getElementById('gpuError').style.display='block'; return false; }
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference:'high-performance' });
+    if (!adapter) { document.getElementById('gpuError').style.display='block'; return false; }
+
+    const limits = {};
+    const want = { maxStorageBufferBindingSize: 512*1024*1024, maxBufferSize: 1024*1024*1024 };
+    for (const [k,v] of Object.entries(want)) limits[k] = Math.min(v, adapter.limits[k]);
+    device = await adapter.requestDevice({ requiredLimits: limits });
+
+    // Compute dynamic uniform buffer stride (must be multiple of alignment, >= struct size)
+    const align = device.limits.minUniformBufferOffsetAlignment;
+    uniformStride = Math.ceil(UNIFORM_BYTES / align) * align;
+
+    canvasEl = document.getElementById('canvas');
+    canvasEl.width = innerWidth; canvasEl.height = innerHeight;
+    context = canvasEl.getContext('webgpu');
+    canvasFmt = navigator.gpu.getPreferredCanvasFormat();
+    context.configure({ device, format: canvasFmt, alphaMode: 'premultiplied' });
+
+    mkDepth();
+    mkPipelines();
+    mkStaticBufs();
+
+    // Mouse
+    canvasEl.addEventListener('mousedown', e => {
+        if (e.button===0) isDrag=true; if (e.button===1) isDolly=true; if (e.button===2) isPan=true;
+        lastMX=e.clientX; lastMY=e.clientY;
+        if (e.button===1) e.preventDefault();
+    });
+    addEventListener('mousemove', e => {
+        const dx=e.clientX-lastMX, dy=e.clientY-lastMY;
+        lastMX=e.clientX; lastMY=e.clientY;
+        if (isDrag) { camTheta+=dx*0.005; camPhi=Math.max(0.05,Math.min(Math.PI-0.05,camPhi-dy*0.005)); }
+        if (isPan) {
+            const st=Math.sin(camTheta),ct=Math.cos(camTheta);
+            const sp=Math.sin(camPhi),cp=Math.cos(camPhi);
+            const r=[-st,0,ct], u=[-cp*ct,sp,-cp*st], ps=camRadius*0.002;
+            for(let i=0;i<3;i++) camTarget[i]+=(r[i]*dx+u[i]*dy)*ps;
+        }
+        if (isDolly) {
+            if (state.mode === 2) {
+                state.subRotY += dx * 0.01;
+                state.subRotX += dy * 0.01;
+            } else {
+                applyCamRadius(camRadius * (1 - dy * 0.005));
+            }
+        }
+    });
+    addEventListener('mouseup', ()=>{ isDrag=false; isPan=false; isDolly=false; });
+    canvasEl.addEventListener('contextmenu', e=>e.preventDefault());
+    canvasEl.addEventListener('auxclick', e=>e.preventDefault());
+    canvasEl.addEventListener('mousedown', e=>{ if(e.button===1) e.preventDefault(); });
+    canvasEl.addEventListener('wheel', e=>{
+        applyCamRadius(camRadius * (1 + e.deltaY * 0.001));
+    }, {passive:true});
+    addEventListener('resize', ()=>{ canvasEl.width=innerWidth; canvasEl.height=innerHeight; mkDepth(); });
+
+    return true;
+}
+
+function mkDepth() {
+    if (depthTex) depthTex.destroy();
+    depthTex = device.createTexture({
+        size:[canvasEl.width,canvasEl.height], format:'depth24plus',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+    });
+    depthView = depthTex.createView();
+}
+
+function mkPipelines() {
+    const cs = device.createShaderModule({code: COMPUTE_WGSL});
+    computeBGL = device.createBindGroupLayout({ entries:[
+        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
+        {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
+    ]});
+    computePipeline = device.createComputePipeline({
+        layout: device.createPipelineLayout({bindGroupLayouts:[computeBGL]}),
+        compute:{module:cs,entryPoint:'main'}
+    });
+
+    const rs = device.createShaderModule({code: RENDER_WGSL});
+    renderBGL = device.createBindGroupLayout({ entries:[
+        {binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform',hasDynamicOffset:true}},
+    ]});
+    renderPipeline = device.createRenderPipeline({
+        layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
+        vertex:{ module:rs, entryPoint:'vs', buffers:[
+            { // Slot 0: quad vertices (per-vertex)
+                arrayStride:8, stepMode:'vertex',
+                attributes:[{shaderLocation:0,offset:0,format:'float32x2'}]
+            },
+            { // Slot 1: packed point data (per-instance)
+                arrayStride:16, stepMode:'instance',
+                attributes:[{shaderLocation:1,offset:0,format:'float32x4'}]
+            },
+        ]},
+        fragment:{ module:rs, entryPoint:'fs', targets:[{format:canvasFmt, blend:{
+            color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha'},
+            alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha'},
+        }}]},
+        primitive:{topology:'triangle-list'},
+        depthStencil:{format:'depth24plus',depthWriteEnabled:true,depthCompare:'less'},
+    });
+
+    // Wireframe pipeline — line-list, no depth write, alpha blending
+    const ws = device.createShaderModule({code: WIRE_WGSL});
+    wirePipeline = device.createRenderPipeline({
+        layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
+        vertex:{ module:ws, entryPoint:'wvs', buffers:[{
+            arrayStride: 28, stepMode:'vertex',
+            attributes:[
+                {shaderLocation:0, offset:0, format:'float32x3'},
+                {shaderLocation:1, offset:12, format:'float32x4'},
+            ]
+        }]},
+        fragment:{ module:ws, entryPoint:'wfs', targets:[{format:canvasFmt, blend:{
+            color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha'},
+            alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha'},
+        }}]},
+        primitive:{topology:'line-list'},
+        depthStencil:{format:'depth24plus',depthWriteEnabled:false,depthCompare:'less'},
+    });
+}
+
+function mkStaticBufs() {
+    quadVBuf = device.createBuffer({size:32,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(quadVBuf,0,new Float32Array([-1,-1, 1,-1, -1,1, 1,1]));
+    quadIBuf = device.createBuffer({size:12,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(quadIBuf,0,new Uint16Array([0,1,2, 2,1,3]));
+    computeUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    const maxMirrorInstances = 8 * 5 * 5 * 5; // 8 signs × max 5³ lattice
+    renderUniformBuf = device.createBuffer({size:maxMirrorInstances*uniformStride,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    renderBG = device.createBindGroup({ layout:renderBGL, entries:[
+        {binding:0,resource:{buffer:renderUniformBuf,offset:0,size:uniformStride}},
+    ]});
+    wireVBuf = device.createBuffer({size:4096,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
+    bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+    indirectBuf = device.createBuffer({
+        size:20,
+        usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC,
+    });
+
+    // Fix #1: Output buffer — allocate once at max capacity
+    const maxOutBytes = Math.min(
+        MAX_OUTPUT_POINTS * BYTES_PER_POINT,
+        device.limits.maxStorageBufferBindingSize
+    );
+    outputBuf = device.createBuffer({
+        size: maxOutBytes,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_SRC,
+    });
+
+    // Fix #2: Raw staging buffer — allocate once at chunk size, reuse every dispatch
+    const rawBufSize = Math.ceil(CHUNK_BYTES / 4) * 4; // 128MB aligned
+    rawDataBuf = device.createBuffer({
+        size: rawBufSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+}
+
+// =============================================================================
+//  COMPUTE DISPATCH (chunked — streams data in 128MB pages)
+// =============================================================================
+
+const CHUNK_BYTES = 128 * 1024 * 1024; // 128MB raw data per chunk
+const BYTES_PER_POINT = 16; // 4 packed floats × 4 bytes
+const MAX_OUTPUT_POINTS = 48 * 1024 * 1024; // 48M unique points cap (was 16M at 48 bytes)
+
+// Pre-allocated staging arrays to avoid per-chunk GC
+const computeUniformData = new Uint32Array(8);
+const indirectResetData = new Uint32Array([6, 0, 0, 0, 0]);
+
+let loadingWindow = false;
+let windowDirty = false;
+
+async function loadWindow() {
+    if (!state.file && !state.buffer) return;
+    if (!state.file) { runCompute(); return; }
+    if (loadingWindow) { windowDirty = true; return; }
+    loadingWindow = true;
+    windowDirty = false;
+
+    try {
+        const byteStep = getByteStep(state.format);
+        const fileSize = state.fileSize;
+
+        const startByte = Math.min(
+            Math.floor((state.scrubOffset * fileSize) / byteStep) * byteStep,
+            Math.max(0, fileSize - byteStep)
+        );
+        const windowBytes = Math.min(
+            Math.round(state.scrubWindowMB * 1024 * 1024),
+            fileSize - startByte
+        );
+        if (windowBytes < byteStep) { loadingWindow = false; return; }
+
+        const blob = state.file.slice(startByte, startByte + windowBytes);
+        state.buffer = await blob.arrayBuffer();
+        runCompute();
+    } catch(e) {
+        console.warn('loadWindow error:', e);
+    }
+    loadingWindow = false;
+    if (windowDirty) loadWindow();
+}
+
+async function runCompute() {
+    if (!state.buffer || !device) return;
+    const byteLen = state.buffer.byteLength;
+    const byteStep = getByteStep(state.format);
+    const totalTuples = Math.floor(byteLen / byteStep);
+    if (totalTuples === 0) return;
+
+    const statsEl = document.getElementById('stats');
+
+    // Fix #8: Only clear the region of bitTable that this shift level can touch
+    // At shift=22 (10 bits/axis): full 128MB. At shift=28 (4 bits/axis): ~2MB.
+    const bitsPerAxis = Math.min(10, 32 - state.shift);
+    const maxPerAxis = (1 << bitsPerAxis) - 1;
+    const maxKey = (maxPerAxis << 20) | (maxPerAxis << 10) | maxPerAxis;
+    const clearBytes = Math.min(Math.ceil((maxKey + 1) / 32) * 4, BIT_TABLE_SIZE);
+    const initEnc = device.createCommandEncoder();
+    initEnc.clearBuffer(bitTableBuf, 0, clearBytes);
+    device.queue.submit([initEnc.finish()]);
+    device.queue.writeBuffer(indirectBuf, 0, indirectResetData);
+
+    // Chunk the input
+    const MAX_DISPATCH = 65535 * 256;
+    const chunkTuples = Math.min(Math.floor(CHUNK_BYTES / byteStep), MAX_DISPATCH);
+    const totalChunks = Math.ceil(totalTuples / chunkTuples);
+    const srcBytes = new Uint8Array(state.buffer);
+
+    // Fix #4: Bind group is stable — rawDataBuf, outputBuf, etc. are all reused
+    const computeBG = device.createBindGroup({ layout: computeBGL, entries: [
+        { binding: 0, resource: { buffer: rawDataBuf } },
+        { binding: 1, resource: { buffer: bitTableBuf } },
+        { binding: 2, resource: { buffer: outputBuf } },
+        { binding: 3, resource: { buffer: indirectBuf } },
+        { binding: 4, resource: { buffer: computeUniformBuf } },
+    ]});
+
+    for (let chunk = 0; chunk < totalChunks; chunk++) {
+        const startTuple = chunk * chunkTuples;
+        const count = Math.min(chunkTuples, totalTuples - startTuple);
+        const chunkByteOff = startTuple * byteStep;
+        const chunkByteLen = count * byteStep;
+
+        // Fix #3: Direct upload, 4-byte aligned
+        const alignedLen = Math.ceil(chunkByteLen / 4) * 4;
+        if (chunkByteOff + alignedLen <= srcBytes.length) {
+            // Source has enough bytes — read the aligned amount directly (extra 1-3 bytes are harmless)
+            device.queue.writeBuffer(rawDataBuf, 0, srcBytes, chunkByteOff, alignedLen);
+        } else {
+            // Final chunk boundary — pad the tail
+            const tmp = new Uint8Array(alignedLen);
+            tmp.set(srcBytes.subarray(chunkByteOff, chunkByteOff + chunkByteLen));
+            device.queue.writeBuffer(rawDataBuf, 0, tmp);
+        }
+
+        // Uniforms for this chunk (reuse pre-allocated array)
+        computeUniformData[0] = FORMAT_ID[state.format];
+        computeUniformData[1] = state.isLE ? 1 : 0;
+        computeUniformData[2] = state.shift;
+        computeUniformData[3] = count;
+        computeUniformData[4] = byteStep;
+        computeUniformData[5] = getWordSize(state.format);
+        device.queue.writeBuffer(computeUniformBuf, 0, computeUniformData);
+
+        // Dispatch
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(computePipeline);
+        pass.setBindGroup(0, computeBG);
+        pass.dispatchWorkgroups(Math.ceil(count / 256));
+        pass.end();
+        device.queue.submit([enc.finish()]);
+
+        // Yield between chunks to keep page responsive + show progress
+        if (totalChunks > 1) {
+            await device.queue.onSubmittedWorkDone();
+            statsEl.innerHTML = `Processing: <b>chunk ${chunk + 1}/${totalChunks}</b> · ${((chunk + 1) / totalChunks * 100).toFixed(0)}%`;
+        }
+    }
+
+    // Readback final point count
+    const rb = device.createBuffer({ size: 20, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(indirectBuf, 0, rb, 0, 20);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    pointCount = new Uint32Array(rb.getMappedRange())[1];
+    rb.unmap(); rb.destroy();
+
+    const mbFull = (state.fileSize / (1024 * 1024)).toFixed(1);
+    const mbWin = (byteLen / (1024 * 1024)).toFixed(1);
+    const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
+    const offPct = (state.scrubOffset * 100).toFixed(1);
+    const mirrorInst = state.mirrorEnabled ? 8 * Math.pow(state.latticeSize, 3) : 1;
+    const mirrorLabel = mirrorInst > 1 ? ` · Mirrors: <b>×${mirrorInst}</b>` : '';
+    statsEl.innerHTML =
+        `Source: <b>${state.fileName}</b> (${mbFull} MB)<br>` +
+        `Window: <b>${mbWin} MB</b> @ ${offPct}% · Nodes: <b>${pointCount.toLocaleString()}</b>${mirrorLabel}<br>` +
+        `GPU: <b>${mbOut} MB</b> · Chunks: <b>${totalChunks}</b> · <b>WebGPU</b>`;
+}
+
+// =============================================================================
+//  RENDER LOOP
+// =============================================================================
+
+// Pre-allocated uniform staging (66 floats base data per instance)
+const ruBase = new Float32Array(66);
+// Staging buffer for all mirror instances (allocated once, max 1000 instances × 512 bytes)
+const mirrorStagingMax = 1000;
+let mirrorStagingBuf = null; // ArrayBuffer, allocated after device creation
+
+function ensureMirrorStaging() {
+    if (!mirrorStagingBuf) mirrorStagingBuf = new ArrayBuffer(mirrorStagingMax * uniformStride);
+}
+
+// Cached stride results — recomputed only when gaps/inflate change
+let cachedStrides = null;
+let cachedTiledStrides = null;
+let lastGapKey = '';
+
+function updateCachedStrides() {
+    const key = state.gaps.join(',') + ',' + state.inflate;
+    if (key !== lastGapKey) {
+        lastGapKey = key;
+        cachedStrides = computeStrides();
+        cachedTiledStrides = computeTiledStrides();
+    }
+}
+
+function buildWireVerts(sn) {
+    const v = []; // [x,y,z, r,g,b,a, ...] per vertex, 7 floats each
+    const S = 6.0;
+
+    // Helper: push an edge (two vertices with same color)
+    function edge(a, b, r, g, bl, al) {
+        v.push(a[0],a[1],a[2], r,g,bl,al, b[0],b[1],b[2], r,g,bl,al);
+    }
+
+    // Slab wireframe
+    if (state.slabEnabled) {
+        // Tangent vectors perpendicular to slab normal
+        let t1, t2;
+        const ax=Math.abs(sn[0]),ay=Math.abs(sn[1]),az=Math.abs(sn[2]);
+        if (ay < 0.99) {
+            t1 = [sn[1]*0-0*sn[2], sn[2]*0-sn[0]*0, sn[0]*0-sn[1]*0]; // cross(sn,[0,0,1]) first
+            t1 = [-sn[2], 0, sn[0]]; // cross with (0,1,0) simplified
+            if (ay > ax && ay > az) t1 = [sn[2], 0, -sn[0]]; // if Y-dominant, cross with (0,0,1)
+            // Actually let's do it properly
+            t1 = [0-sn[2]*0, sn[2]*0-sn[0]*0, sn[0]*0-0]; // wrong approach, let me just do cross products
+        }
+        // Proper cross product with up or right
+        const up = (Math.abs(sn[1]) < 0.99) ? [0,1,0] : [1,0,0];
+        t1 = [
+            sn[1]*up[2]-sn[2]*up[1],
+            sn[2]*up[0]-sn[0]*up[2],
+            sn[0]*up[1]-sn[1]*up[0]
+        ];
+        const len1 = Math.sqrt(t1[0]*t1[0]+t1[1]*t1[1]+t1[2]*t1[2]);
+        if (len1 > 0) { t1[0]/=len1; t1[1]/=len1; t1[2]/=len1; }
+        t2 = [
+            sn[1]*t1[2]-sn[2]*t1[1],
+            sn[2]*t1[0]-sn[0]*t1[2],
+            sn[0]*t1[1]-sn[1]*t1[0]
+        ];
+
+        for (const sign of [-1, 1]) {
+            const d = state.slabPosition + sign * state.slabThickness * 0.5;
+            const cx=sn[0]*d, cy=sn[1]*d, cz=sn[2]*d;
+            const c = [];
+            for (const s1 of [-S, S]) for (const s2 of [-S, S]) {
+                c.push([cx+t1[0]*s1+t2[0]*s2, cy+t1[1]*s1+t2[1]*s2, cz+t1[2]*s1+t2[2]*s2]);
+            }
+            edge(c[0],c[1], 0,1,1,1); edge(c[1],c[3], 0,1,1,1);
+            edge(c[3],c[2], 0,1,1,1); edge(c[2],c[0], 0,1,1,1);
+        }
+    }
+
+    // AABB wireframe
+    if (state.aabbEnabled !== 0) {
+        const mn=state.aabbMin, mx=state.aabbMax;
+        const c = [
+            [mn[0],mn[1],mn[2]],[mx[0],mn[1],mn[2]],[mn[0],mx[1],mn[2]],[mx[0],mx[1],mn[2]],
+            [mn[0],mn[1],mx[2]],[mx[0],mn[1],mx[2]],[mn[0],mx[1],mx[2]],[mx[0],mx[1],mx[2]],
+        ];
+        const g = 0.4, col = [0,1,g,1]; // green-ish
+        const edges = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
+        for (const [a,b] of edges) edge(c[a],c[b], col[0],col[1],col[2],col[3]);
+    }
+
+    return new Float32Array(v);
+}
+
+function render() {
+    requestAnimationFrame(render);
+    if (!device || !outputBuf || pointCount===0) return;
+    const w=canvasEl.width, h=canvasEl.height;
+    if (w===0||h===0) return;
+
+    updateCachedStrides();
+    ensureMirrorStaging();
+
+    const st = cachedStrides;
+    const ti = cachedTiledStrides;
+    const mvp = getMVP(w/h);
+
+    // Fill base uniform data (shared across all mirror instances)
+    ruBase.set(mvp, 0);
+    ruBase[16]=st.s0; ruBase[17]=st.s1; ruBase[18]=st.s2; ruBase[19]=st.ctr; ruBase[20]=st.scl;
+    ruBase[21]=Math.max(1.0, Math.min(16.0, 30.0 / camRadius)) * state.pointScale; ruBase[22]=w; ruBase[23]=h;
+    ruBase[24]=state.mode;
+    ruBase[25]=ti.stepX0; ruBase[26]=ti.stepX1; ruBase[27]=ti.stepX2;
+    ruBase[28]=ti.stepY0; ruBase[29]=ti.stepY1; ruBase[30]=ti.stepY2;
+    ruBase[31]=ti.centerX; ruBase[32]=ti.centerY; ruBase[33]=ti.scale;
+    ruBase[34]=state.proximity;
+    ruBase[35]=state.falloffCurve;
+    if (state.gravityTarget === 1) {
+        ruBase[36]=camTarget[0]; ruBase[37]=camTarget[1]; ruBase[38]=camTarget[2];
+    } else {
+        ruBase[36]=0; ruBase[37]=0; ruBase[38]=0;
+    }
+    ruBase[39]=state.depthScale;
+    ruBase[40]=Math.sin(state.subRotY);
+    ruBase[41]=Math.cos(state.subRotY);
+    ruBase[42]=Math.sin(state.subRotX);
+    ruBase[43]=Math.cos(state.subRotX);
+    const slabNormals = [[1,0,0],[0,1,0],[0,0,1]];
+    let sn;
+    if (state.slabAxis === 3) {
+        const sp2=Math.sin(camPhi),cp2=Math.cos(camPhi),st2=Math.sin(camTheta),ct2=Math.cos(camTheta);
+        sn = [sp2*ct2, cp2, sp2*st2];
+    } else {
+        sn = slabNormals[state.slabAxis];
+    }
+    ruBase[44]=sn[0]; ruBase[45]=sn[1]; ruBase[46]=sn[2];
+    ruBase[47]=state.slabPosition;
+    ruBase[48]=state.slabEnabled ? state.slabThickness * 0.5 : 0;
+    ruBase[49]=state.slabSoftEdge;
+    ruBase[50]=state.aabbMin[0]; ruBase[51]=state.aabbMin[1]; ruBase[52]=state.aabbMin[2];
+    ruBase[53]=state.aabbMax[0]; ruBase[54]=state.aabbMax[1]; ruBase[55]=state.aabbMax[2];
+    ruBase[56]=state.aabbEnabled;
+    ruBase[57]=state.csgMode;
+    ruBase[58]=state.gizmoAlpha;
+
+    // Compute mirror instances
+    const signs = state.mirrorEnabled ? MIRROR_SIGNS : [[1,1,1]];
+    const N = state.mirrorEnabled ? state.latticeSize : 1;
+    const halfOff = (N - 1) / 2;
+    const extent = st.max * st.scl * 2; // world-space width of one tile
+    let numInst = 0;
+
+    for (let lx = 0; lx < N; lx++)
+      for (let ly = 0; ly < N; ly++)
+        for (let lz = 0; lz < N; lz++)
+          for (const m of signs) {
+            const view = new Float32Array(mirrorStagingBuf, numInst * uniformStride, 66);
+            view.set(ruBase);
+            view[59] = m[0]; view[60] = m[1]; view[61] = m[2];
+            view[62] = (lx - halfOff) * extent;
+            view[63] = (ly - halfOff) * extent;
+            view[64] = (lz - halfOff) * extent;
+            view[65] = 0; // padding
+            numInst++;
+          }
+
+    device.queue.writeBuffer(renderUniformBuf, 0, new Uint8Array(mirrorStagingBuf, 0, numInst * uniformStride));
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+        colorAttachments:[{
+            view: context.getCurrentTexture().createView(),
+            clearValue:{r:0.008,g:0.008,b:0.016,a:1}, loadOp:'clear', storeOp:'store',
+        }],
+        depthStencilAttachment:{
+            view:depthView, depthClearValue:1.0, depthLoadOp:'clear', depthStoreOp:'store',
+        }
+    });
+    pass.setPipeline(renderPipeline);
+    pass.setVertexBuffer(0, quadVBuf);
+    pass.setVertexBuffer(1, outputBuf);
+    pass.setIndexBuffer(quadIBuf, 'uint16');
+
+    // Draw each mirror instance with a different dynamic uniform offset
+    for (let i = 0; i < numInst; i++) {
+        pass.setBindGroup(0, renderBG, [i * uniformStride]);
+        pass.drawIndexedIndirect(indirectBuf, 0);
+    }
+
+    // Wireframe gizmos — draw once with identity mirror (offset 0)
+    if (state.gizmoAlpha > 0.01 && (state.slabEnabled || state.aabbEnabled !== 0)) {
+        const wv = buildWireVerts(sn);
+        if (wv.length > 0) {
+            device.queue.writeBuffer(wireVBuf, 0, wv);
+            pass.setPipeline(wirePipeline);
+            pass.setBindGroup(0, renderBG, [0]);
+            pass.setVertexBuffer(0, wireVBuf);
+            pass.draw(wv.length / 7);
+        }
+    }
+
+    pass.end();
+    device.queue.submit([enc.finish()]);
+}
+
+// =============================================================================
+//  ENCODERS (CPU — for demo generation)
+// =============================================================================
+
+function fp16ToF32(u16){let s=(u16>>15)&1,e=(u16>>10)&0x1F,m=u16&0x3FF;if(e===0)return(s?-1:1)*Math.pow(2,-14)*(m/1024);if(e===31)return m?NaN:(s?-Infinity:Infinity);return(s?-1:1)*Math.pow(2,e-15)*(1+m/1024);}
+function bf16ToF32(u16){let s=(u16>>15)&1,e=(u16>>7)&0xFF,m=u16&0x7F;if(e===0)return(s?-1:1)*Math.pow(2,-126)*(m/128);if(e===255)return m?NaN:(s?-Infinity:Infinity);return(s?-1:1)*Math.pow(2,e-127)*(1+m/128);}
+function fp8E4M3ToF32(u8){let s=(u8>>7)&1,e=(u8>>3)&0xF,m=u8&0x7;if(e===0)return(s?-1:1)*Math.pow(2,-6)*(m/8);return(s?-1:1)*Math.pow(2,e-7)*(1+m/8);}
+function fp8E5M2ToF32(u8){let s=(u8>>7)&1,e=(u8>>2)&0x1F,m=u8&0x3;if(e===0)return(s?-1:1)*Math.pow(2,-14)*(m/4);return(s?-1:1)*Math.pow(2,e-15)*(1+m/4);}
+function fp4ToF32(u8){let s=(u8>>3)&1,e=(u8>>1)&0x3,m=u8&1;if(e===0)return(s?-1:1)*0.5*(m/2);return(s?-1:1)*Math.pow(2,e-1)*(1+m/2);}
+function f32ToFp16(v){const b=new ArrayBuffer(4),f=new Float32Array(b),u=new Uint32Array(b);f[0]=v;const bits=u[0],s=(bits>>>31)&1,e=(bits>>>23)&0xFF,m=bits&0x7FFFFF;if(e===0xFF)return(s<<15)|0x7C00|(m?0x200:0);const ue=e-127;if(ue>15)return(s<<15)|0x7C00;if(ue<-14){const sh=-14-ue;if(sh>24)return s<<15;return(s<<15)|(((0x800000|m)>>(sh+13))&0x3FF);}return(s<<15)|((ue+15)<<10)|(m>>13);}
+function f32ToBf16(v){const b=new ArrayBuffer(4),f=new Float32Array(b),u=new Uint32Array(b);f[0]=v;return u[0]>>>16;}
+function f32ToFp8E4M3(v){let best=0,bd=Infinity;for(let b=0;b<256;b++){const d=fp8E4M3ToF32(b);if(!isFinite(d))continue;if(Math.abs(d-v)<bd){bd=Math.abs(d-v);best=b;}}return best;}
+function f32ToFp8E5M2(v){let best=0,bd=Infinity;for(let b=0;b<256;b++){const d=fp8E5M2ToF32(b);if(!isFinite(d))continue;if(Math.abs(d-v)<bd){bd=Math.abs(d-v);best=b;}}return best;}
+function f32ToFp4(v){let best=0,bd=Infinity;for(let b=0;b<16;b++){if(Math.abs(fp4ToF32(b)-v)<bd){bd=Math.abs(fp4ToF32(b)-v);best=b;}}return best;}
+function normToFloat(n){return Math.atanh(2*Math.max(0.01,Math.min(0.99,n))-1);}
+
+// =============================================================================
+//  DEMO GENERATION (CPU)
+// =============================================================================
+
+function recenterCamera() {
+    camTheta = Math.PI * 0.25;
+    camPhi = Math.PI * 0.35;
+    camRadius = 8;
+    camTarget[0] = 0; camTarget[1] = 0; camTarget[2] = 0;
+}
+
+function generateDemo(shape) {
+    const f=state.format, isLE=state.isLE, num=100000;
+    const is4Bit=f.endsWith('4'), isFloat=f.startsWith('fp')||f==='bf16';
+    const byteStep=getByteStep(f);
+    const buf=new ArrayBuffer(num*byteStep), v=new DataView(buf);
+    let x=0.1,y=0,z=0; state.fileName="DEMO: "+shape.toUpperCase();
+
+    for(let i=0;i<num;i++){
+        let nx,ny,nz;
+        if(shape==='lorenz'){let dx=10*(y-x),dy=x*(28-z)-y,dz=x*y-(8/3)*z;x+=dx*0.005;y+=dy*0.005;z+=dz*0.005;nx=(x+25)/50;ny=(y+30)/60;nz=z/50;}
+        else{nx=Math.random();ny=Math.random();nz=Math.random();}
+        nx=Math.max(0,Math.min(1,nx));ny=Math.max(0,Math.min(1,ny));nz=Math.max(0,Math.min(1,nz));
+        const norms=[nx,ny,nz],off=i*byteStep;
+
+        if(is4Bit){
+            if(f==='uint4'){const nibs=norms.map(n=>Math.round(n*15));v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
+            else if(f==='int4'){const nibs=norms.map(n=>{let s=Math.round(n*15)-8;return s<0?s+16:s;});v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
+            else if(f==='fp4'){const nibs=norms.map(n=>f32ToFp4(normToFloat(n)));v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
+        }else if(isFloat){
+            const fv=norms.map(n=>normToFloat(n));
+            if(f==='fp32'){for(let j=0;j<3;j++)v.setFloat32(off+j*4,fv[j],isLE);}
+            else if(f==='fp64'){for(let j=0;j<3;j++)v.setFloat64(off+j*8,fv[j],isLE);}
+            else if(f==='fp16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,f32ToFp16(fv[j]),isLE);}
+            else if(f==='bf16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,f32ToBf16(fv[j]),isLE);}
+            else if(f==='fp8_e4m3'){for(let j=0;j<3;j++)v.setUint8(off+j,f32ToFp8E4M3(fv[j]));}
+            else if(f==='fp8_e5m2'){for(let j=0;j<3;j++)v.setUint8(off+j,f32ToFp8E5M2(fv[j]));}
+        }else{
+            if(f==='uint32'){for(let j=0;j<3;j++)v.setUint32(off+j*4,norms[j]*4294967295,isLE);}
+            else if(f==='int32'){for(let j=0;j<3;j++)v.setInt32(off+j*4,norms[j]*4294967295-2147483648,isLE);}
+            else if(f==='uint16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,norms[j]*65535,isLE);}
+            else if(f==='int16'){for(let j=0;j<3;j++)v.setInt16(off+j*2,norms[j]*65535-32768,isLE);}
+            else if(f==='uint8'){for(let j=0;j<3;j++)v.setUint8(off+j,norms[j]*255);}
+            else if(f==='int8'){for(let j=0;j<3;j++)v.setInt8(off+j,norms[j]*255-128);}
+        }
+    }
+    state.file = null;
+    state.fileSize = buf.byteLength;
+    state.buffer = buf;
+    runCompute();
+}
+
+// =============================================================================
+//  PLY EXPORT (GPU readback)
+// =============================================================================
+
+async function exportPLY() {
+    if(!outputBuf||pointCount===0)return;
+    const st=computeStrides();
+    const readSize=pointCount*BYTES_PER_POINT;
+    const rb=device.createBuffer({size:readSize,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    const enc=device.createCommandEncoder();
+    enc.copyBufferToBuffer(outputBuf,0,rb,0,readSize);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const d=new Float32Array(rb.getMappedRange());
+
+    let lines=["ply","format ascii 1.0",
+        `comment Generated by Unified Strata WebGPU — ${state.fileName}`,
+        `comment Type: ${state.format} Endian: ${state.isLE?'LE':'BE'} Dive: ${state.shift}`,
+        `element vertex ${pointCount}`,
+        "property float x","property float y","property float z",
+        "property uchar red","property uchar green","property uchar blue","end_header"];
+    for(let i=0;i<pointCount;i++){
+        const b=i*4;
+        // Unpack tiers
+        const raw0=d[b]|0, raw1=d[b+1]|0, raw2=d[b+2]|0, raw3=d[b+3]|0;
+        const p0x=(raw0>>16)&0xFF, p0y=(raw0>>8)&0xFF, p0z=raw0&0xFF;
+        const p1x=(raw1>>16)&0xFF, p1y=(raw1>>8)&0xFF, p1z=raw1&0xFF;
+        const p2x=(raw2>>16)&0xFF, p2y=(raw2>>8)&0xFF, p2z=raw2&0xFF;
+
+        const wx=(p0x*st.s0+p1x*st.s1+p2x*st.s2-st.ctr)*st.scl;
+        const wy=(p0y*st.s0+p1y*st.s1+p2y*st.s2-st.ctr)*st.scl;
+        const wz=(p0z*st.s0+p1z*st.s1+p2z*st.s2-st.ctr)*st.scl;
+
+        // Unpack color (already 0-255) + apply +0.1 brightness boost
+        const r=Math.min(255,((raw3>>16)&0xFF)+25);
+        const g=Math.min(255,((raw3>>8)&0xFF)+25);
+        const bl=Math.min(255,(raw3&0xFF)+25);
+        lines.push(`${wx.toFixed(6)} ${wy.toFixed(6)} ${wz.toFixed(6)} ${r} ${g} ${bl}`);
+    }
+    rb.unmap(); rb.destroy();
+    const blob=new Blob([lines.join("\n")],{type:"text/plain"});
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement("a");
+    link.href=url; link.download=`${state.fileName.replace(/[^a-z0-9]/gi,'_')}_strata.ply`;
+    link.click();
+}
+
+// =============================================================================
+//  UI HANDLERS
+// =============================================================================
+
+function setFormat(f){state.format=f;document.getElementById('selFormat').value=f;runCompute();}
+function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=le?'le':'be';runCompute();}
+function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);state.subRotX=0;state.subRotY=0;}
+function handleFile(files){
+    if(!files[0])return;
+    const f = files[0];
+    state.file = f;
+    state.fileSize = f.size;
+    state.fileName = f.name;
+
+    const mb = f.size / (1024 * 1024);
+    const winSlider = document.getElementById('sWin');
+    winSlider.max = Math.max(1, Math.ceil(mb));
+    const defWin = Math.min(32, mb);
+    winSlider.value = defWin; state.scrubWindowMB = defWin;
+    document.getElementById('vWin').innerText = defWin.toFixed(1);
+
+    document.getElementById('sOff').value = 0; state.scrubOffset = 0;
+    document.getElementById('vOff').innerText = '0%';
+
+    loadWindow();
+}
+// Fix #9: Debounced dispatchers — coalesce rapid slider changes
+let computeRAF = 0;
+function scheduleCompute() {
+    cancelAnimationFrame(computeRAF);
+    computeRAF = requestAnimationFrame(() => runCompute());
+}
+let windowRAF = 0;
+function scheduleLoadWindow() {
+    cancelAnimationFrame(windowRAF);
+    windowRAF = requestAnimationFrame(() => loadWindow());
+}
+document.getElementById('sOff').oninput=e=>{state.scrubOffset=parseFloat(e.target.value)/100;document.getElementById('vOff').innerText=parseFloat(e.target.value).toFixed(1)+'%';scheduleLoadWindow();};
+document.getElementById('sWin').oninput=e=>{state.scrubWindowMB=parseFloat(e.target.value);document.getElementById('vWin').innerText=parseFloat(e.target.value).toFixed(1);scheduleLoadWindow();};
+document.getElementById('sG0').oninput=e=>{state.gaps[0]=parseFloat(e.target.value);document.getElementById('vG0').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sG1').oninput=e=>{state.gaps[1]=parseFloat(e.target.value);document.getElementById('vG1').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sG2').oninput=e=>{state.gaps[2]=parseFloat(e.target.value);document.getElementById('vG2').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sInf').oninput=e=>{state.inflate=parseFloat(e.target.value);document.getElementById('vInf').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sPts').oninput=e=>{state.pointScale=parseFloat(e.target.value);document.getElementById('vPts').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sDepth').oninput=e=>{state.depthScale=parseFloat(e.target.value);document.getElementById('vDepth').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sProx').oninput=e=>{state.proximity=parseFloat(e.target.value);document.getElementById('vProx').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;scheduleCompute();};
+// Slab handlers
+document.getElementById('sSlabPos').oninput=e=>{state.slabPosition=parseFloat(e.target.value);document.getElementById('vSlabPos').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sSlabThk').oninput=e=>{state.slabThickness=parseFloat(e.target.value);document.getElementById('vSlabThk').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sSlabSoft').oninput=e=>{state.slabSoftEdge=parseFloat(e.target.value);document.getElementById('vSlabSoft').innerText=parseFloat(e.target.value).toFixed(2);};
+// AABB handlers
+document.getElementById('sAXMin').oninput=e=>{state.aabbMin[0]=parseFloat(e.target.value);document.getElementById('vAXMin').innerText=parseFloat(e.target.value).toFixed(1);};
+document.getElementById('sAXMax').oninput=e=>{state.aabbMax[0]=parseFloat(e.target.value);document.getElementById('vAXMax').innerText=parseFloat(e.target.value).toFixed(1);};
+document.getElementById('sAYMin').oninput=e=>{state.aabbMin[1]=parseFloat(e.target.value);document.getElementById('vAYMin').innerText=parseFloat(e.target.value).toFixed(1);};
+document.getElementById('sAYMax').oninput=e=>{state.aabbMax[1]=parseFloat(e.target.value);document.getElementById('vAYMax').innerText=parseFloat(e.target.value).toFixed(1);};
+document.getElementById('sAZMin').oninput=e=>{state.aabbMin[2]=parseFloat(e.target.value);document.getElementById('vAZMin').innerText=parseFloat(e.target.value).toFixed(1);};
+document.getElementById('sAZMax').oninput=e=>{state.aabbMax[2]=parseFloat(e.target.value);document.getElementById('vAZMax').innerText=parseFloat(e.target.value).toFixed(1);};
+document.getElementById('sGizmo').oninput=e=>{state.gizmoAlpha=parseFloat(e.target.value);};
+document.getElementById('sLattice').oninput=e=>{state.latticeSize=parseInt(e.target.value);document.getElementById('vLattice').innerText=e.target.value;};
+
+const dz=document.getElementById('dropZone');
+document.addEventListener('dragenter',e=>{e.preventDefault();dz.style.display='flex';});
+document.addEventListener('dragover',e=>e.preventDefault());
+dz.addEventListener('dragleave',e=>{e.preventDefault();dz.style.display='none';});
+document.addEventListener('drop',e=>{e.preventDefault();dz.style.display='none';handleFile(e.dataTransfer.files);});
+
+// =============================================================================
+//  BOOT
+// =============================================================================
+
+(async()=>{
+    const ok=await initWebGPU();
+    if(!ok)return;
+    render();
+    generateDemo('lorenz');
+})();
+
+</script>
+</body>
+</html>
