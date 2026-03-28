@@ -175,6 +175,17 @@
         <label>Center Gravity <span class="val" id="vProx">0.00</span></label>
         <input type="range" id="sProx" min="0" max="1" step="0.01" value="0">
     </div>
+    <div class="group-label">Color Palette</div>
+    <select id="selPalette" onchange="state.palette=parseInt(this.value)">
+        <option value="0" selected>Spectrum (Direct)</option>
+        <option value="1">Inferno</option>
+        <option value="2">Neon</option>
+        <option value="3">Aurora</option>
+        <option value="4">Ember</option>
+        <option value="5">Frost</option>
+        <option value="6">Mono</option>
+        <option value="7">Tier Color</option>
+    </select>
     <div class="select-row">
         <div>
             <div class="group-label">Gravity Focus</div>
@@ -481,7 +492,7 @@ struct RParams {
     slabOffset: f32, slabHalfT: f32, slabSoft: f32,
     aabbMinX: f32, aabbMinY: f32, aabbMinZ: f32,
     aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
-    aabbMode: f32, csgMode: f32, gizmoAlpha: f32, _p0: f32,
+    aabbMode: f32, csgMode: f32, gizmoAlpha: f32, palette: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
@@ -596,8 +607,53 @@ fn vs(
     // Brightness: dim periphery, bright center
     let proxBright = mix(1.0, 0.4 + 1.2 * prox, R.proximityStrength);
 
+    // Palette remapping (palette 0 = pass-through = current behavior)
+    var mapped = col;
+    let pal = u32(R.palette + 0.5);
+    if (pal > 0u) {
+        if (pal == 7u) {
+            // Tier Color: R=macro, G=meso, B=micro activity
+            mapped = vec3(length(p0)/15.0, length(p1)/15.0, length(p2)/15.0);
+        } else {
+            let t = clamp(dot(col, vec3(0.35, 0.45, 0.20)), 0.0, 1.0);
+            var c0: vec3<f32>; var c1: vec3<f32>;
+            var c2: vec3<f32>; var c3: vec3<f32>;
+            switch (pal) {
+                case 1u {  // Inferno
+                    c0=vec3(0.05,0.0,0.08); c1=vec3(0.55,0.08,0.52);
+                    c2=vec3(0.93,0.47,0.11); c3=vec3(0.99,0.99,0.60);
+                }
+                case 2u {  // Neon
+                    c0=vec3(0.02,0.02,0.15); c1=vec3(0.0,0.8,0.9);
+                    c2=vec3(0.85,0.15,0.85); c3=vec3(1.0,1.0,1.0);
+                }
+                case 3u {  // Aurora
+                    c0=vec3(0.0,0.1,0.12); c1=vec3(0.1,0.6,0.3);
+                    c2=vec3(0.0,0.85,0.75); c3=vec3(0.7,0.95,0.7);
+                }
+                case 4u {  // Ember
+                    c0=vec3(0.05,0.01,0.0); c1=vec3(0.7,0.1,0.0);
+                    c2=vec3(0.95,0.55,0.1); c3=vec3(1.0,0.85,0.35);
+                }
+                case 5u {  // Frost
+                    c0=vec3(0.1,0.0,0.2); c1=vec3(0.15,0.2,0.7);
+                    c2=vec3(0.0,0.7,0.9); c3=vec3(0.85,0.95,1.0);
+                }
+                case 6u {  // Mono
+                    c0=vec3(0.05,0.05,0.05); c1=vec3(0.35,0.35,0.35);
+                    c2=vec3(0.67,0.67,0.67); c3=vec3(1.0,1.0,1.0);
+                }
+                default { c0=col; c1=col; c2=col; c3=col; }
+            }
+            let s = t * 3.0;
+            if (s < 1.0) { mapped = mix(c0, c1, s); }
+            else if (s < 2.0) { mapped = mix(c1, c2, s - 1.0); }
+            else { mapped = mix(c2, c3, s - 2.0); }
+        }
+    }
+
     var o:VSOut;
-    o.pos=clip; o.color=(col+0.1) * proxBright; o.uv=qOff; o.worldPos=world;
+    o.pos=clip; o.color=(mapped+0.1) * proxBright; o.uv=qOff; o.worldPos=world;
     return o;
 }
 
@@ -674,7 +730,7 @@ struct RParams {
     slabOffset: f32, slabHalfT: f32, slabSoft: f32,
     aabbMinX: f32, aabbMinY: f32, aabbMinZ: f32,
     aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
-    aabbMode: f32, csgMode: f32, gizmoAlpha: f32, _p0: f32,
+    aabbMode: f32, csgMode: f32, gizmoAlpha: f32, palette: f32,
 };
 @group(0) @binding(0) var<uniform> R: RParams;
 
@@ -725,6 +781,7 @@ let state = {
     aabbMax: [5, 5, 5],
     csgMode: 0,       // 0=intersect, 1=union, 2=subtract
     gizmoAlpha: 0.3,
+    palette: 0,
 };
 
 function getWordSize(f) {
@@ -1298,6 +1355,7 @@ function render() {
     ruData[56]=state.aabbEnabled;
     ruData[57]=state.csgMode;
     ruData[58]=state.gizmoAlpha;
+    ruData[59]=state.palette;
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
