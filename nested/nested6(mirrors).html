@@ -152,11 +152,14 @@
         <label>Dive (Bit Shift) <span class="val" id="vShift">22</span></label>
         <input type="range" id="sShift" min="0" max="22" step="1" value="22">
     </div>
+    <div class="ctrl">
+        <label>Zoom Depth <span class="val" id="vZoom">20</span></label>
+        <input type="range" id="sZoom" min="0" max="20" step="4" value="20">
+    </div>
 
-    <div class="btn-grid" style="grid-template-columns: 1fr 1fr 1fr; margin-top:10px;">
-        <button onclick="generateDemo('lorenz')">Lorenz</button>
+    <div class="btn-grid" style="grid-template-columns: 1fr 1fr; margin-top:10px;">
+        <button onclick="generateDemo()">Demo</button>
         <button onclick="recenterCamera()">Re-center</button>
-        <button onclick="generateDemo('noise')">Random</button>
     </div>
 
     <div id="stats" class="stats">Initializing WebGPU…</div>
@@ -172,6 +175,17 @@
         <label>Center Gravity <span class="val" id="vProx">0.00</span></label>
         <input type="range" id="sProx" min="0" max="1" step="0.01" value="0">
     </div>
+    <div class="group-label">Color Palette</div>
+    <select id="selPalette" onchange="state.palette=parseInt(this.value)">
+        <option value="0" selected>Spectrum (Direct)</option>
+        <option value="1">Inferno</option>
+        <option value="2">Neon</option>
+        <option value="3">Aurora</option>
+        <option value="4">Ember</option>
+        <option value="5">Frost</option>
+        <option value="6">Mono</option>
+        <option value="7">Tier Color</option>
+    </select>
     <div class="select-row">
         <div>
             <div class="group-label">Gravity Focus</div>
@@ -278,16 +292,23 @@
         <input type="range" id="sAZMax" min="-5" max="5" step="0.1" value="5">
     </div>
 
-    <button class="export-btn" onclick="exportPLY()">Export .PLY Cloud</button>
-
-    <div class="group-label" style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
-        Mirror Crystal
-        <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbMirror" onchange="state.mirrorEnabled=this.checked" style="accent-color:#0ff;"> On</label>
+    <div class="group-label">Symmetry</div>
+    <div style="display:flex;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+        <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbComplement" onchange="state.mirrorComplement=this.checked" style="accent-color:#f0f;"> Complement</label>
+        <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbMirX" onchange="state.mirrorAxes[0]=this.checked" style="accent-color:#f66;"> X</label>
+        <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbMirY" onchange="state.mirrorAxes[1]=this.checked" style="accent-color:#6f6;"> Y</label>
+        <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbMirZ" onchange="state.mirrorAxes[2]=this.checked" style="accent-color:#66f;"> Z</label>
     </div>
     <div class="ctrl">
-        <label>Lattice Size <span class="val" id="vLattice">1</span></label>
-        <input type="range" id="sLattice" min="1" max="3" step="1" value="1">
+        <label>Kaleidoscope <span class="val" id="vKaleido">Off</span></label>
+        <input type="range" id="sKaleido" min="0" max="16" step="1" value="0">
     </div>
+    <div class="ctrl">
+        <label>Mirror Alpha <span class="val" id="vMirrorAlpha">0.60</span></label>
+        <input type="range" id="sMirrorAlpha" min="0.1" max="1" step="0.01" value="0.6">
+    </div>
+
+    <button class="export-btn" onclick="exportPLY()">Export .PLY Cloud</button>
 </div>
 
 <canvas id="canvas"></canvas>
@@ -301,7 +322,7 @@
 const COMPUTE_WGSL = `
 struct Params {
     format: u32, isLE: u32, shift: u32, tupleCount: u32,
-    byteStep: u32, wSize: u32, _p0: u32, _p1: u32,
+    byteStep: u32, wSize: u32, _p0: u32, tierShift: u32,
 };
 
 @group(0) @binding(0) var<storage, read> raw: array<u32>;
@@ -438,9 +459,12 @@ fn main(
             // Get local slot within this workgroup (workgroup-local atomic — fast)
             localSlot = atomicAdd(&wg_count, 1u);
             // Pack output into registers
-            packed[0] = f32((((vx>>28u)&0xFu)<<16u) | (((vy>>28u)&0xFu)<<8u) | ((vz>>28u)&0xFu));
-            packed[1] = f32((((vx>>24u)&0xFu)<<16u) | (((vy>>24u)&0xFu)<<8u) | ((vz>>24u)&0xFu));
-            packed[2] = f32((((vx>>20u)&0xFu)<<16u) | (((vy>>20u)&0xFu)<<8u) | ((vz>>20u)&0xFu));
+            let t0s = P.tierShift + 8u;
+            let t1s = P.tierShift + 4u;
+            let t2s = P.tierShift;
+            packed[0] = f32((((vx>>t0s)&0xFu)<<16u) | (((vy>>t0s)&0xFu)<<8u) | ((vz>>t0s)&0xFu));
+            packed[1] = f32((((vx>>t1s)&0xFu)<<16u) | (((vy>>t1s)&0xFu)<<8u) | ((vz>>t1s)&0xFu));
+            packed[2] = f32((((vx>>t2s)&0xFu)<<16u) | (((vy>>t2s)&0xFu)<<8u) | ((vz>>t2s)&0xFu));
             let cr=(dx*255u)/1023u; let cg=(dy*255u)/1023u; let cb=(dz*255u)/1023u;
             packed[3] = f32((cr<<16u) | (cg<<8u) | cb);
         }
@@ -484,9 +508,11 @@ struct RParams {
     slabOffset: f32, slabHalfT: f32, slabSoft: f32,
     aabbMinX: f32, aabbMinY: f32, aabbMinZ: f32,
     aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
-    aabbMode: f32, csgMode: f32, gizmoAlpha: f32,
-    mirrorX: f32, mirrorY: f32, mirrorZ: f32,
-    offsetX: f32, offsetY: f32, offsetZ: f32, _p0: f32,
+    aabbMode: f32, csgMode: f32, gizmoAlpha: f32, palette: f32,
+    mirrorScaleX: f32, mirrorScaleY: f32, mirrorScaleZ: f32,
+    mirrorComplement: f32,
+    mirrorRotSin: f32, mirrorRotCos: f32,
+    mirrorAlpha: f32, _mpad: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
@@ -506,10 +532,17 @@ fn vs(
     let raw0=u32(pk.x); let raw1=u32(pk.y); let raw2=u32(pk.z); let raw3=u32(pk.w);
 
     // Unpack tier indices: (ix << 16) | (iy << 8) | iz
-    let p0=vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
-    let p1=vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
-    let p2=vec3(f32((raw2>>16u)&0xFFu), f32((raw2>>8u)&0xFFu), f32(raw2&0xFFu));
+    var p0=vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
+    var p1=vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
+    var p2=vec3(f32((raw2>>16u)&0xFFu), f32((raw2>>8u)&0xFFu), f32(raw2&0xFFu));
     let col=vec3(f32((raw3>>16u)&0xFFu)/255.0, f32((raw3>>8u)&0xFFu)/255.0, f32(raw3&0xFFu)/255.0);
+
+    // Value-space complement: flip every tier index to its mirror
+    if (R.mirrorComplement > 0.5) {
+        p0 = vec3(15.0) - p0;
+        p1 = vec3(15.0) - p1;
+        p2 = vec3(15.0) - p2;
+    }
 
     var world: vec3<f32>;
 
@@ -578,6 +611,14 @@ fn vs(
         );
     }
 
+    // Axis mirror: flip world coordinates across enabled planes
+    world = world * vec3(R.mirrorScaleX, R.mirrorScaleY, R.mirrorScaleZ);
+
+    // Kaleidoscope: rotate around Y axis
+    let kx = world.x * R.mirrorRotCos - world.z * R.mirrorRotSin;
+    let kz = world.x * R.mirrorRotSin + world.z * R.mirrorRotCos;
+    world = vec3(kx, world.y, kz);
+
     // Center-proximity sizing with selectable gravity target and falloff curve
     let gravCenter = vec3(R.gravTargetX, R.gravTargetY, R.gravTargetZ);
     let dist = length(world - gravCenter);
@@ -595,17 +636,64 @@ fn vs(
     prox = clamp(prox, 0.0, 1.0);
     let size = R.pointSize * mix(1.0, 0.5 + 1.5 * prox, R.proximityStrength);
 
-    // Mirror + lattice offset
-    let mWorld = world * vec3(R.mirrorX, R.mirrorY, R.mirrorZ) + vec3(R.offsetX, R.offsetY, R.offsetZ);
-
-    var clip = R.mvp * vec4(mWorld, 1.0);
+    var clip = R.mvp * vec4(world, 1.0);
     clip = vec4(clip.xy + qOff*size*clip.w/vec2(R.vpW, R.vpH), clip.zw);
 
     // Brightness: dim periphery, bright center
     let proxBright = mix(1.0, 0.4 + 1.2 * prox, R.proximityStrength);
 
+    // Palette remapping (palette 0 = pass-through = current behavior)
+    var mapped = col;
+    let pal = u32(R.palette + 0.5);
+    if (pal > 0u) {
+        if (pal == 7u) {
+            // Tier Color: R=macro, G=meso, B=micro activity
+            mapped = vec3(length(p0)/15.0, length(p1)/15.0, length(p2)/15.0);
+        } else {
+            let t = clamp(dot(col, vec3(0.35, 0.45, 0.20)), 0.0, 1.0);
+            var c0: vec3<f32>; var c1: vec3<f32>;
+            var c2: vec3<f32>; var c3: vec3<f32>;
+            switch (pal) {
+                case 1u {  // Inferno
+                    c0=vec3(0.05,0.0,0.08); c1=vec3(0.55,0.08,0.52);
+                    c2=vec3(0.93,0.47,0.11); c3=vec3(0.99,0.99,0.60);
+                }
+                case 2u {  // Neon
+                    c0=vec3(0.02,0.02,0.15); c1=vec3(0.0,0.8,0.9);
+                    c2=vec3(0.85,0.15,0.85); c3=vec3(1.0,1.0,1.0);
+                }
+                case 3u {  // Aurora
+                    c0=vec3(0.0,0.1,0.12); c1=vec3(0.1,0.6,0.3);
+                    c2=vec3(0.0,0.85,0.75); c3=vec3(0.7,0.95,0.7);
+                }
+                case 4u {  // Ember
+                    c0=vec3(0.05,0.01,0.0); c1=vec3(0.7,0.1,0.0);
+                    c2=vec3(0.95,0.55,0.1); c3=vec3(1.0,0.85,0.35);
+                }
+                case 5u {  // Frost
+                    c0=vec3(0.1,0.0,0.2); c1=vec3(0.15,0.2,0.7);
+                    c2=vec3(0.0,0.7,0.9); c3=vec3(0.85,0.95,1.0);
+                }
+                case 6u {  // Mono
+                    c0=vec3(0.05,0.05,0.05); c1=vec3(0.35,0.35,0.35);
+                    c2=vec3(0.67,0.67,0.67); c3=vec3(1.0,1.0,1.0);
+                }
+                default { c0=col; c1=col; c2=col; c3=col; }
+            }
+            let s = t * 3.0;
+            if (s < 1.0) { mapped = mix(c0, c1, s); }
+            else if (s < 2.0) { mapped = mix(c1, c2, s - 1.0); }
+            else { mapped = mix(c2, c3, s - 2.0); }
+        }
+    }
+
+    // Complement color: invert after palette for clear visual distinction
+    if (R.mirrorComplement > 0.5) {
+        mapped = vec3(1.0) - mapped;
+    }
+
     var o:VSOut;
-    o.pos=clip; o.color=(col+0.1) * proxBright; o.uv=qOff; o.worldPos=mWorld;
+    o.pos=clip; o.color=(mapped+0.1) * proxBright; o.uv=qOff; o.worldPos=world;
     return o;
 }
 
@@ -658,7 +746,8 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 
     // Point sprite circle
     if (dot(in.uv, in.uv) > 1.0) { discard; }
-    return vec4(in.color * alpha, alpha);
+    let ma = R.mirrorAlpha;
+    return vec4(in.color * alpha * ma, alpha * ma);
 }
 `;
 
@@ -682,9 +771,11 @@ struct RParams {
     slabOffset: f32, slabHalfT: f32, slabSoft: f32,
     aabbMinX: f32, aabbMinY: f32, aabbMinZ: f32,
     aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
-    aabbMode: f32, csgMode: f32, gizmoAlpha: f32,
-    mirrorX: f32, mirrorY: f32, mirrorZ: f32,
-    offsetX: f32, offsetY: f32, offsetZ: f32, _p0: f32,
+    aabbMode: f32, csgMode: f32, gizmoAlpha: f32, palette: f32,
+    mirrorScaleX: f32, mirrorScaleY: f32, mirrorScaleZ: f32,
+    mirrorComplement: f32,
+    mirrorRotSin: f32, mirrorRotCos: f32,
+    mirrorAlpha: f32, _mpad: f32,
 };
 @group(0) @binding(0) var<uniform> R: RParams;
 
@@ -712,7 +803,7 @@ const FORMAT_ID = {
 };
 
 let state = {
-    format: 'uint32', isLE: true, shift: 22,
+    format: 'uint32', isLE: true, shift: 22, tierShift: 20,
     gaps: [0.25, 0.1, 0.05], inflate: 0.5,
     file: null, fileSize: 0, buffer: null, fileName: "Internal",
     mode: 0, // 0 = 3D, 1 = Tiled 2D, 2 = Atlas 3D
@@ -735,8 +826,11 @@ let state = {
     aabbMax: [5, 5, 5],
     csgMode: 0,       // 0=intersect, 1=union, 2=subtract
     gizmoAlpha: 0.3,
-    mirrorEnabled: false,
-    latticeSize: 1,
+    palette: 0,
+    mirrorComplement: false,
+    mirrorAxes: [false, false, false],
+    kaleidoN: 0,
+    mirrorAlpha: 0.6,
 };
 
 function getWordSize(f) {
@@ -859,17 +953,15 @@ let device, context, canvasEl, canvasFmt;
 let computePipeline, renderPipeline, wirePipeline;
 let rawDataBuf, bitTableBuf, outputBuf, indirectBuf, computeUniformBuf;
 let renderUniformBuf, quadVBuf, quadIBuf, wireVBuf;
-let computeBGL, renderBGL, renderBG;
+let computeBGL, renderBGL;
 let depthTex, depthView;
 let pointCount = 0;
 
+const MIRROR_MAX = 16;
+const mirrorUniformBufs = [];
+const mirrorBindGroups = [];
+
 const BIT_TABLE_SIZE = (1 << 25) * 4;
-const UNIFORM_BYTES = 66 * 4; // 66 f32 fields in RParams = 264 bytes
-const MIRROR_SIGNS = [
-    [1,1,1], [-1,1,1], [1,-1,1], [1,1,-1],
-    [-1,-1,1], [-1,1,-1], [1,-1,-1], [-1,-1,-1]
-];
-let uniformStride = 512; // bytes per instance, set after device creation
 
 async function initWebGPU() {
     if (!navigator.gpu) { document.getElementById('gpuError').style.display='block'; return false; }
@@ -880,10 +972,6 @@ async function initWebGPU() {
     const want = { maxStorageBufferBindingSize: 512*1024*1024, maxBufferSize: 1024*1024*1024 };
     for (const [k,v] of Object.entries(want)) limits[k] = Math.min(v, adapter.limits[k]);
     device = await adapter.requestDevice({ requiredLimits: limits });
-
-    // Compute dynamic uniform buffer stride (must be multiple of alignment, >= struct size)
-    const align = device.limits.minUniformBufferOffsetAlignment;
-    uniformStride = Math.ceil(UNIFORM_BYTES / align) * align;
 
     canvasEl = document.getElementById('canvas');
     canvasEl.width = innerWidth; canvasEl.height = innerHeight;
@@ -957,7 +1045,7 @@ function mkPipelines() {
 
     const rs = device.createShaderModule({code: RENDER_WGSL});
     renderBGL = device.createBindGroupLayout({ entries:[
-        {binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform',hasDynamicOffset:true}},
+        {binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},
     ]});
     renderPipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
@@ -1005,11 +1093,15 @@ function mkStaticBufs() {
     quadIBuf = device.createBuffer({size:12,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
     device.queue.writeBuffer(quadIBuf,0,new Uint16Array([0,1,2, 2,1,3]));
     computeUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    const maxMirrorInstances = 8 * 5 * 5 * 5; // 8 signs × max 5³ lattice
-    renderUniformBuf = device.createBuffer({size:maxMirrorInstances*uniformStride,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    renderBG = device.createBindGroup({ layout:renderBGL, entries:[
-        {binding:0,resource:{buffer:renderUniformBuf,offset:0,size:uniformStride}},
-    ]});
+    // Mirror uniform buffer pool: 16 slots × 272 bytes each
+    for (let i = 0; i < MIRROR_MAX; i++) {
+        mirrorUniformBufs[i] = device.createBuffer({size:272,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+        mirrorBindGroups[i] = device.createBindGroup({ layout:renderBGL, entries:[
+            {binding:0,resource:{buffer:mirrorUniformBufs[i]}},
+        ]});
+    }
+    renderUniformBuf = mirrorUniformBufs[0];
+    renderBG = mirrorBindGroups[0];
     wireVBuf = device.createBuffer({size:4096,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
     bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     indirectBuf = device.createBuffer({
@@ -1141,6 +1233,7 @@ async function runCompute() {
         computeUniformData[3] = count;
         computeUniformData[4] = byteStep;
         computeUniformData[5] = getWordSize(state.format);
+        computeUniformData[7] = state.tierShift;
         device.queue.writeBuffer(computeUniformBuf, 0, computeUniformData);
 
         // Dispatch
@@ -1172,27 +1265,66 @@ async function runCompute() {
     const mbWin = (byteLen / (1024 * 1024)).toFixed(1);
     const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
     const offPct = (state.scrubOffset * 100).toFixed(1);
-    const mirrorInst = state.mirrorEnabled ? 8 * Math.pow(state.latticeSize, 3) : 1;
-    const mirrorLabel = mirrorInst > 1 ? ` · Mirrors: <b>×${mirrorInst}</b>` : '';
     statsEl.innerHTML =
         `Source: <b>${state.fileName}</b> (${mbFull} MB)<br>` +
-        `Window: <b>${mbWin} MB</b> @ ${offPct}% · Nodes: <b>${pointCount.toLocaleString()}</b>${mirrorLabel}<br>` +
+        `Window: <b>${mbWin} MB</b> @ ${offPct}% · Nodes: <b>${pointCount.toLocaleString()}</b><br>` +
         `GPU: <b>${mbOut} MB</b> · Chunks: <b>${totalChunks}</b> · <b>WebGPU</b>`;
+}
+
+// =============================================================================
+//  MIRROR INSTANCE COMPUTATION
+// =============================================================================
+
+function computeMirrorInstances() {
+    const insts = [];
+    const useKaleido = state.kaleidoN >= 2;
+    const alpha = state.mirrorAlpha;
+
+    // Primary instance (always present)
+    insts.push({ scX:1, scY:1, scZ:1, comp:0, rSin:0, rCos:1, alpha:1.0 });
+
+    // Value-space complement of primary
+    if (state.mirrorComplement) {
+        insts.push({ scX:1, scY:1, scZ:1, comp:1, rSin:0, rCos:1, alpha:alpha });
+    }
+
+    if (useKaleido) {
+        // Kaleidoscope: N-fold rotation around Y (skip k=0, that's the primary)
+        for (let k = 1; k < state.kaleidoN && insts.length < MIRROR_MAX; k++) {
+            const a = (2 * Math.PI * k) / state.kaleidoN;
+            insts.push({ scX:1, scY:1, scZ:1, comp:0, rSin:Math.sin(a), rCos:Math.cos(a), alpha:alpha });
+            if (state.mirrorComplement && insts.length < MIRROR_MAX) {
+                insts.push({ scX:1, scY:1, scZ:1, comp:1, rSin:Math.sin(a), rCos:Math.cos(a), alpha:alpha*0.8 });
+            }
+        }
+    } else {
+        // Axis mirrors: generate all non-identity combos of enabled axes
+        const ax = state.mirrorAxes;
+        if (ax[0] || ax[1] || ax[2]) {
+            for (let mask = 1; mask < 8 && insts.length < MIRROR_MAX; mask++) {
+                const sx = (mask & 1) && ax[0] ? -1 : 1;
+                const sy = (mask & 2) && ax[1] ? -1 : 1;
+                const sz = (mask & 4) && ax[2] ? -1 : 1;
+                if (sx === 1 && sy === 1 && sz === 1) continue;
+                insts.push({ scX:sx, scY:sy, scZ:sz, comp:0, rSin:0, rCos:1, alpha:alpha });
+                if (state.mirrorComplement && insts.length < MIRROR_MAX) {
+                    insts.push({ scX:sx, scY:sy, scZ:sz, comp:1, rSin:0, rCos:1, alpha:alpha*0.8 });
+                }
+            }
+        }
+    }
+    return insts;
 }
 
 // =============================================================================
 //  RENDER LOOP
 // =============================================================================
 
-// Pre-allocated uniform staging (66 floats base data per instance)
-const ruBase = new Float32Array(66);
-// Staging buffer for all mirror instances (allocated once, max 1000 instances × 512 bytes)
-const mirrorStagingMax = 1000;
-let mirrorStagingBuf = null; // ArrayBuffer, allocated after device creation
+// Pre-allocated uniform staging buffer (avoids GC per frame)
+const ruData = new Float32Array(68);
 
-function ensureMirrorStaging() {
-    if (!mirrorStagingBuf) mirrorStagingBuf = new ArrayBuffer(mirrorStagingMax * uniformStride);
-}
+// Cached bind group — uniform-only, created once
+let renderBG = null;
 
 // Cached stride results — recomputed only when gaps/inflate change
 let cachedStrides = null;
@@ -1278,32 +1410,32 @@ function render() {
     if (w===0||h===0) return;
 
     updateCachedStrides();
-    ensureMirrorStaging();
 
     const st = cachedStrides;
     const ti = cachedTiledStrides;
     const mvp = getMVP(w/h);
 
-    // Fill base uniform data (shared across all mirror instances)
-    ruBase.set(mvp, 0);
-    ruBase[16]=st.s0; ruBase[17]=st.s1; ruBase[18]=st.s2; ruBase[19]=st.ctr; ruBase[20]=st.scl;
-    ruBase[21]=Math.max(1.0, Math.min(16.0, 30.0 / camRadius)) * state.pointScale; ruBase[22]=w; ruBase[23]=h;
-    ruBase[24]=state.mode;
-    ruBase[25]=ti.stepX0; ruBase[26]=ti.stepX1; ruBase[27]=ti.stepX2;
-    ruBase[28]=ti.stepY0; ruBase[29]=ti.stepY1; ruBase[30]=ti.stepY2;
-    ruBase[31]=ti.centerX; ruBase[32]=ti.centerY; ruBase[33]=ti.scale;
-    ruBase[34]=state.proximity;
-    ruBase[35]=state.falloffCurve;
+    ruData.set(mvp, 0);
+    ruData[16]=st.s0; ruData[17]=st.s1; ruData[18]=st.s2; ruData[19]=st.ctr; ruData[20]=st.scl;
+    ruData[21]=Math.max(1.0, Math.min(16.0, 30.0 / camRadius)) * state.pointScale; ruData[22]=w; ruData[23]=h;
+    ruData[24]=state.mode;
+    ruData[25]=ti.stepX0; ruData[26]=ti.stepX1; ruData[27]=ti.stepX2;
+    ruData[28]=ti.stepY0; ruData[29]=ti.stepY1; ruData[30]=ti.stepY2;
+    ruData[31]=ti.centerX; ruData[32]=ti.centerY; ruData[33]=ti.scale;
+    ruData[34]=state.proximity;
+    ruData[35]=state.falloffCurve;
+    // Gravity focus: world center (0,0,0) or camera orbit target
     if (state.gravityTarget === 1) {
-        ruBase[36]=camTarget[0]; ruBase[37]=camTarget[1]; ruBase[38]=camTarget[2];
+        ruData[36]=camTarget[0]; ruData[37]=camTarget[1]; ruData[38]=camTarget[2];
     } else {
-        ruBase[36]=0; ruBase[37]=0; ruBase[38]=0;
+        ruData[36]=0; ruData[37]=0; ruData[38]=0;
     }
-    ruBase[39]=state.depthScale;
-    ruBase[40]=Math.sin(state.subRotY);
-    ruBase[41]=Math.cos(state.subRotY);
-    ruBase[42]=Math.sin(state.subRotX);
-    ruBase[43]=Math.cos(state.subRotX);
+    ruData[39]=state.depthScale;
+    ruData[40]=Math.sin(state.subRotY);
+    ruData[41]=Math.cos(state.subRotY);
+    ruData[42]=Math.sin(state.subRotX);
+    ruData[43]=Math.cos(state.subRotX);
+    // Slab normal from axis selection
     const slabNormals = [[1,0,0],[0,1,0],[0,0,1]];
     let sn;
     if (state.slabAxis === 3) {
@@ -1312,38 +1444,28 @@ function render() {
     } else {
         sn = slabNormals[state.slabAxis];
     }
-    ruBase[44]=sn[0]; ruBase[45]=sn[1]; ruBase[46]=sn[2];
-    ruBase[47]=state.slabPosition;
-    ruBase[48]=state.slabEnabled ? state.slabThickness * 0.5 : 0;
-    ruBase[49]=state.slabSoftEdge;
-    ruBase[50]=state.aabbMin[0]; ruBase[51]=state.aabbMin[1]; ruBase[52]=state.aabbMin[2];
-    ruBase[53]=state.aabbMax[0]; ruBase[54]=state.aabbMax[1]; ruBase[55]=state.aabbMax[2];
-    ruBase[56]=state.aabbEnabled;
-    ruBase[57]=state.csgMode;
-    ruBase[58]=state.gizmoAlpha;
+    ruData[44]=sn[0]; ruData[45]=sn[1]; ruData[46]=sn[2];
+    ruData[47]=state.slabPosition;
+    ruData[48]=state.slabEnabled ? state.slabThickness * 0.5 : 0;
+    ruData[49]=state.slabSoftEdge;
+    ruData[50]=state.aabbMin[0]; ruData[51]=state.aabbMin[1]; ruData[52]=state.aabbMin[2];
+    ruData[53]=state.aabbMax[0]; ruData[54]=state.aabbMax[1]; ruData[55]=state.aabbMax[2];
+    ruData[56]=state.aabbEnabled;
+    ruData[57]=state.csgMode;
+    ruData[58]=state.gizmoAlpha;
+    ruData[59]=state.palette;
 
-    // Compute mirror instances
-    const signs = state.mirrorEnabled ? MIRROR_SIGNS : [[1,1,1]];
-    const N = state.mirrorEnabled ? state.latticeSize : 1;
-    const halfOff = (N - 1) / 2;
-    const extent = st.max * st.scl * 2; // world-space width of one tile
-    let numInst = 0;
-
-    for (let lx = 0; lx < N; lx++)
-      for (let ly = 0; ly < N; ly++)
-        for (let lz = 0; lz < N; lz++)
-          for (const m of signs) {
-            const view = new Float32Array(mirrorStagingBuf, numInst * uniformStride, 66);
-            view.set(ruBase);
-            view[59] = m[0]; view[60] = m[1]; view[61] = m[2];
-            view[62] = (lx - halfOff) * extent;
-            view[63] = (ly - halfOff) * extent;
-            view[64] = (lz - halfOff) * extent;
-            view[65] = 0; // padding
-            numInst++;
-          }
-
-    device.queue.writeBuffer(renderUniformBuf, 0, new Uint8Array(mirrorStagingBuf, 0, numInst * uniformStride));
+    // Compute mirror instances and write per-instance uniforms
+    const mirrorInsts = computeMirrorInstances();
+    for (let mi = 0; mi < mirrorInsts.length; mi++) {
+        const inst = mirrorInsts[mi];
+        ruData[60]=inst.scX; ruData[61]=inst.scY; ruData[62]=inst.scZ;
+        ruData[63]=inst.comp;
+        ruData[64]=inst.rSin; ruData[65]=inst.rCos;
+        ruData[66]=inst.alpha;
+        ruData[67]=0;
+        device.queue.writeBuffer(mirrorUniformBufs[mi], 0, ruData);
+    }
 
     const enc = device.createCommandEncoder();
     const pass = enc.beginRenderPass({
@@ -1360,19 +1482,19 @@ function render() {
     pass.setVertexBuffer(1, outputBuf);
     pass.setIndexBuffer(quadIBuf, 'uint16');
 
-    // Draw each mirror instance with a different dynamic uniform offset
-    for (let i = 0; i < numInst; i++) {
-        pass.setBindGroup(0, renderBG, [i * uniformStride]);
+    // Multi-draw: one pass per mirror instance
+    for (let mi = 0; mi < mirrorInsts.length; mi++) {
+        pass.setBindGroup(0, mirrorBindGroups[mi]);
         pass.drawIndexedIndirect(indirectBuf, 0);
     }
 
-    // Wireframe gizmos — draw once with identity mirror (offset 0)
+    // Wireframe gizmos (slab + AABB indicators)
     if (state.gizmoAlpha > 0.01 && (state.slabEnabled || state.aabbEnabled !== 0)) {
         const wv = buildWireVerts(sn);
         if (wv.length > 0) {
             device.queue.writeBuffer(wireVBuf, 0, wv);
             pass.setPipeline(wirePipeline);
-            pass.setBindGroup(0, renderBG, [0]);
+            pass.setBindGroup(0, mirrorBindGroups[0]);
             pass.setVertexBuffer(0, wireVBuf);
             pass.draw(wv.length / 7);
         }
@@ -1383,23 +1505,7 @@ function render() {
 }
 
 // =============================================================================
-//  ENCODERS (CPU — for demo generation)
-// =============================================================================
-
-function fp16ToF32(u16){let s=(u16>>15)&1,e=(u16>>10)&0x1F,m=u16&0x3FF;if(e===0)return(s?-1:1)*Math.pow(2,-14)*(m/1024);if(e===31)return m?NaN:(s?-Infinity:Infinity);return(s?-1:1)*Math.pow(2,e-15)*(1+m/1024);}
-function bf16ToF32(u16){let s=(u16>>15)&1,e=(u16>>7)&0xFF,m=u16&0x7F;if(e===0)return(s?-1:1)*Math.pow(2,-126)*(m/128);if(e===255)return m?NaN:(s?-Infinity:Infinity);return(s?-1:1)*Math.pow(2,e-127)*(1+m/128);}
-function fp8E4M3ToF32(u8){let s=(u8>>7)&1,e=(u8>>3)&0xF,m=u8&0x7;if(e===0)return(s?-1:1)*Math.pow(2,-6)*(m/8);return(s?-1:1)*Math.pow(2,e-7)*(1+m/8);}
-function fp8E5M2ToF32(u8){let s=(u8>>7)&1,e=(u8>>2)&0x1F,m=u8&0x3;if(e===0)return(s?-1:1)*Math.pow(2,-14)*(m/4);return(s?-1:1)*Math.pow(2,e-15)*(1+m/4);}
-function fp4ToF32(u8){let s=(u8>>3)&1,e=(u8>>1)&0x3,m=u8&1;if(e===0)return(s?-1:1)*0.5*(m/2);return(s?-1:1)*Math.pow(2,e-1)*(1+m/2);}
-function f32ToFp16(v){const b=new ArrayBuffer(4),f=new Float32Array(b),u=new Uint32Array(b);f[0]=v;const bits=u[0],s=(bits>>>31)&1,e=(bits>>>23)&0xFF,m=bits&0x7FFFFF;if(e===0xFF)return(s<<15)|0x7C00|(m?0x200:0);const ue=e-127;if(ue>15)return(s<<15)|0x7C00;if(ue<-14){const sh=-14-ue;if(sh>24)return s<<15;return(s<<15)|(((0x800000|m)>>(sh+13))&0x3FF);}return(s<<15)|((ue+15)<<10)|(m>>13);}
-function f32ToBf16(v){const b=new ArrayBuffer(4),f=new Float32Array(b),u=new Uint32Array(b);f[0]=v;return u[0]>>>16;}
-function f32ToFp8E4M3(v){let best=0,bd=Infinity;for(let b=0;b<256;b++){const d=fp8E4M3ToF32(b);if(!isFinite(d))continue;if(Math.abs(d-v)<bd){bd=Math.abs(d-v);best=b;}}return best;}
-function f32ToFp8E5M2(v){let best=0,bd=Infinity;for(let b=0;b<256;b++){const d=fp8E5M2ToF32(b);if(!isFinite(d))continue;if(Math.abs(d-v)<bd){bd=Math.abs(d-v);best=b;}}return best;}
-function f32ToFp4(v){let best=0,bd=Infinity;for(let b=0;b<16;b++){if(Math.abs(fp4ToF32(b)-v)<bd){bd=Math.abs(fp4ToF32(b)-v);best=b;}}return best;}
-function normToFloat(n){return Math.atanh(2*Math.max(0.01,Math.min(0.99,n))-1);}
-
-// =============================================================================
-//  DEMO GENERATION (CPU)
+//  DEMO GENERATION (CPU — uint32 Lorenz attractor)
 // =============================================================================
 
 function recenterCamera() {
@@ -1409,40 +1515,25 @@ function recenterCamera() {
     camTarget[0] = 0; camTarget[1] = 0; camTarget[2] = 0;
 }
 
-function generateDemo(shape) {
-    const f=state.format, isLE=state.isLE, num=100000;
-    const is4Bit=f.endsWith('4'), isFloat=f.startsWith('fp')||f==='bf16';
-    const byteStep=getByteStep(f);
-    const buf=new ArrayBuffer(num*byteStep), v=new DataView(buf);
-    let x=0.1,y=0,z=0; state.fileName="DEMO: "+shape.toUpperCase();
+function generateDemo() {
+    const num = 100000;
+    const buf = new ArrayBuffer(num * 12); // 3 × uint32 per tuple
+    const v = new DataView(buf);
+    let x = 0.1, y = 0, z = 0;
+    state.fileName = "DEMO: LORENZ";
+    state.format = 'uint32';
+    document.getElementById('selFormat').value = 'uint32';
 
-    for(let i=0;i<num;i++){
-        let nx,ny,nz;
-        if(shape==='lorenz'){let dx=10*(y-x),dy=x*(28-z)-y,dz=x*y-(8/3)*z;x+=dx*0.005;y+=dy*0.005;z+=dz*0.005;nx=(x+25)/50;ny=(y+30)/60;nz=z/50;}
-        else{nx=Math.random();ny=Math.random();nz=Math.random();}
-        nx=Math.max(0,Math.min(1,nx));ny=Math.max(0,Math.min(1,ny));nz=Math.max(0,Math.min(1,nz));
-        const norms=[nx,ny,nz],off=i*byteStep;
-
-        if(is4Bit){
-            if(f==='uint4'){const nibs=norms.map(n=>Math.round(n*15));v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
-            else if(f==='int4'){const nibs=norms.map(n=>{let s=Math.round(n*15)-8;return s<0?s+16:s;});v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
-            else if(f==='fp4'){const nibs=norms.map(n=>f32ToFp4(normToFloat(n)));v.setUint8(off,(nibs[0]<<4)|nibs[1]);v.setUint8(off+1,nibs[2]<<4);}
-        }else if(isFloat){
-            const fv=norms.map(n=>normToFloat(n));
-            if(f==='fp32'){for(let j=0;j<3;j++)v.setFloat32(off+j*4,fv[j],isLE);}
-            else if(f==='fp64'){for(let j=0;j<3;j++)v.setFloat64(off+j*8,fv[j],isLE);}
-            else if(f==='fp16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,f32ToFp16(fv[j]),isLE);}
-            else if(f==='bf16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,f32ToBf16(fv[j]),isLE);}
-            else if(f==='fp8_e4m3'){for(let j=0;j<3;j++)v.setUint8(off+j,f32ToFp8E4M3(fv[j]));}
-            else if(f==='fp8_e5m2'){for(let j=0;j<3;j++)v.setUint8(off+j,f32ToFp8E5M2(fv[j]));}
-        }else{
-            if(f==='uint32'){for(let j=0;j<3;j++)v.setUint32(off+j*4,norms[j]*4294967295,isLE);}
-            else if(f==='int32'){for(let j=0;j<3;j++)v.setInt32(off+j*4,norms[j]*4294967295-2147483648,isLE);}
-            else if(f==='uint16'){for(let j=0;j<3;j++)v.setUint16(off+j*2,norms[j]*65535,isLE);}
-            else if(f==='int16'){for(let j=0;j<3;j++)v.setInt16(off+j*2,norms[j]*65535-32768,isLE);}
-            else if(f==='uint8'){for(let j=0;j<3;j++)v.setUint8(off+j,norms[j]*255);}
-            else if(f==='int8'){for(let j=0;j<3;j++)v.setInt8(off+j,norms[j]*255-128);}
-        }
+    for (let i = 0; i < num; i++) {
+        const dx = 10 * (y - x), dy = x * (28 - z) - y, dz = x * y - (8/3) * z;
+        x += dx * 0.005; y += dy * 0.005; z += dz * 0.005;
+        const nx = Math.max(0, Math.min(1, (x + 25) / 50));
+        const ny = Math.max(0, Math.min(1, (y + 30) / 60));
+        const nz = Math.max(0, Math.min(1, z / 50));
+        const off = i * 12;
+        v.setUint32(off,     nx * 4294967295, true);
+        v.setUint32(off + 4, ny * 4294967295, true);
+        v.setUint32(off + 8, nz * 4294967295, true);
     }
     state.file = null;
     state.fileSize = buf.byteLength;
@@ -1465,36 +1556,48 @@ async function exportPLY() {
     await rb.mapAsync(GPUMapMode.READ);
     const d=new Float32Array(rb.getMappedRange());
 
-    let lines=["ply","format ascii 1.0",
+    // Build ASCII header
+    const header = [
+        "ply",
+        "format binary_little_endian 1.0",
         `comment Generated by Unified Strata WebGPU — ${state.fileName}`,
-        `comment Type: ${state.format} Endian: ${state.isLE?'LE':'BE'} Dive: ${state.shift}`,
+        `comment Type: ${state.format} Endian: ${state.isLE?'LE':'BE'} Dive: ${state.shift} Zoom: ${state.tierShift}`,
         `element vertex ${pointCount}`,
-        "property float x","property float y","property float z",
-        "property uchar red","property uchar green","property uchar blue","end_header"];
-    for(let i=0;i<pointCount;i++){
-        const b=i*4;
-        // Unpack tiers
+        "property float x", "property float y", "property float z",
+        "property uchar red", "property uchar green", "property uchar blue",
+        "end_header\n"  // trailing newline marks end of header
+    ].join("\n");
+    const headerBytes = new TextEncoder().encode(header);
+
+    // Binary payload: 3 floats + 3 bytes = 15 bytes per vertex
+    const vertexBytes = 15;
+    const payload = new ArrayBuffer(pointCount * vertexBytes);
+    const dv = new DataView(payload);
+
+    for (let i = 0; i < pointCount; i++) {
+        const b = i * 4;
         const raw0=d[b]|0, raw1=d[b+1]|0, raw2=d[b+2]|0, raw3=d[b+3]|0;
         const p0x=(raw0>>16)&0xFF, p0y=(raw0>>8)&0xFF, p0z=raw0&0xFF;
         const p1x=(raw1>>16)&0xFF, p1y=(raw1>>8)&0xFF, p1z=raw1&0xFF;
         const p2x=(raw2>>16)&0xFF, p2y=(raw2>>8)&0xFF, p2z=raw2&0xFF;
 
-        const wx=(p0x*st.s0+p1x*st.s1+p2x*st.s2-st.ctr)*st.scl;
-        const wy=(p0y*st.s0+p1y*st.s1+p2y*st.s2-st.ctr)*st.scl;
-        const wz=(p0z*st.s0+p1z*st.s1+p2z*st.s2-st.ctr)*st.scl;
-
-        // Unpack color (already 0-255) + apply +0.1 brightness boost
-        const r=Math.min(255,((raw3>>16)&0xFF)+25);
-        const g=Math.min(255,((raw3>>8)&0xFF)+25);
-        const bl=Math.min(255,(raw3&0xFF)+25);
-        lines.push(`${wx.toFixed(6)} ${wy.toFixed(6)} ${wz.toFixed(6)} ${r} ${g} ${bl}`);
+        const off = i * vertexBytes;
+        dv.setFloat32(off,     (p0x*st.s0+p1x*st.s1+p2x*st.s2-st.ctr)*st.scl, true);
+        dv.setFloat32(off + 4, (p0y*st.s0+p1y*st.s1+p2y*st.s2-st.ctr)*st.scl, true);
+        dv.setFloat32(off + 8, (p0z*st.s0+p1z*st.s1+p2z*st.s2-st.ctr)*st.scl, true);
+        dv.setUint8(off + 12, Math.min(255, ((raw3>>16)&0xFF) + 25));
+        dv.setUint8(off + 13, Math.min(255, ((raw3>>8)&0xFF) + 25));
+        dv.setUint8(off + 14, Math.min(255, (raw3&0xFF) + 25));
     }
+
     rb.unmap(); rb.destroy();
-    const blob=new Blob([lines.join("\n")],{type:"text/plain"});
-    const url=URL.createObjectURL(blob);
-    const link=document.createElement("a");
-    link.href=url; link.download=`${state.fileName.replace(/[^a-z0-9]/gi,'_')}_strata.ply`;
+    const blob = new Blob([headerBytes, payload], {type: "application/octet-stream"});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${state.fileName.replace(/[^a-z0-9]/gi,'_')}_strata.ply`;
     link.click();
+    URL.revokeObjectURL(url);
 }
 
 // =============================================================================
@@ -1544,6 +1647,7 @@ document.getElementById('sPts').oninput=e=>{state.pointScale=parseFloat(e.target
 document.getElementById('sDepth').oninput=e=>{state.depthScale=parseFloat(e.target.value);document.getElementById('vDepth').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sProx').oninput=e=>{state.proximity=parseFloat(e.target.value);document.getElementById('vProx').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;scheduleCompute();};
+document.getElementById('sZoom').oninput=e=>{state.tierShift=parseInt(e.target.value);document.getElementById('vZoom').innerText=e.target.value;scheduleCompute();};
 // Slab handlers
 document.getElementById('sSlabPos').oninput=e=>{state.slabPosition=parseFloat(e.target.value);document.getElementById('vSlabPos').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sSlabThk').oninput=e=>{state.slabThickness=parseFloat(e.target.value);document.getElementById('vSlabThk').innerText=parseFloat(e.target.value).toFixed(2);};
@@ -1556,7 +1660,8 @@ document.getElementById('sAYMax').oninput=e=>{state.aabbMax[1]=parseFloat(e.targ
 document.getElementById('sAZMin').oninput=e=>{state.aabbMin[2]=parseFloat(e.target.value);document.getElementById('vAZMin').innerText=parseFloat(e.target.value).toFixed(1);};
 document.getElementById('sAZMax').oninput=e=>{state.aabbMax[2]=parseFloat(e.target.value);document.getElementById('vAZMax').innerText=parseFloat(e.target.value).toFixed(1);};
 document.getElementById('sGizmo').oninput=e=>{state.gizmoAlpha=parseFloat(e.target.value);};
-document.getElementById('sLattice').oninput=e=>{state.latticeSize=parseInt(e.target.value);document.getElementById('vLattice').innerText=e.target.value;};
+document.getElementById('sKaleido').oninput=e=>{const v=parseInt(e.target.value);state.kaleidoN=v;document.getElementById('vKaleido').innerText=v<2?'Off':v+'-fold';};
+document.getElementById('sMirrorAlpha').oninput=e=>{state.mirrorAlpha=parseFloat(e.target.value);document.getElementById('vMirrorAlpha').innerText=parseFloat(e.target.value).toFixed(2);};
 
 const dz=document.getElementById('dropZone');
 document.addEventListener('dragenter',e=>{e.preventDefault();dz.style.display='flex';});
@@ -1572,7 +1677,7 @@ document.addEventListener('drop',e=>{e.preventDefault();dz.style.display='none';
     const ok=await initWebGPU();
     if(!ok)return;
     render();
-    generateDemo('lorenz');
+    generateDemo();
 })();
 
 </script>
