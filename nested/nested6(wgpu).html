@@ -13,7 +13,7 @@
         background: rgba(8, 8, 12, 0.96); border: 1px solid rgba(0, 255, 255, 0.2);
         border-radius: 12px; padding: 18px; width: 300px;
         backdrop-filter: blur(20px); box-shadow: 0 0 50px rgba(0,0,0,0.9);
-        max-height: calc(100vh - 32px); overflow-y: auto;
+        max-height: calc(100vh - 32px); overflow-y: auto; overflow-x: hidden;
     }
     #panelL { left: 16px; }
     #panelR { right: 16px; }
@@ -43,7 +43,7 @@
     select:hover, select:focus { border-color: #0ff; box-shadow: 0 0 8px rgba(0,255,255,0.15); }
     select option { background: #0a0a1a; color: #ccc; }
     .select-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
-    .file-btn { width: 100%; background: #0ff; color: #000; font-weight: bold; border: none; padding: 10px; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; border-radius: 6px; margin-bottom: 10px; }
+    .file-btn { width: 100%; min-width: 0; background: #0ff; color: #000; font-weight: bold; border: none; padding: 10px; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; border-radius: 6px; margin-bottom: 10px; }
     .export-btn { width: 100%; background: rgba(0, 255, 100, 0.15); color: #0f6; border: 1px solid #0f6; padding: 10px; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; border-radius: 6px; margin-top: 10px; font-weight: bold; }
     .export-btn:hover { background: #0f6; color: #000; }
     .stats { font-size: 10px; color: #446; border-top: 1px solid #113; padding-top: 10px; line-height: 1.5; margin-top: 10px; }
@@ -67,15 +67,19 @@
     <p style="font-size:12px; line-height:1.6;">This tool requires WebGPU. Use Chrome 113+, Edge 113+, or Safari 18+.</p>
 </div>
 
-<div id="dropZone"><h1 style="color:#0ff">INJECT BYTESTREAM</h1></div>
+<div id="dropZone"><h1 style="color:#0ff">INJECT BYTESTREAM</h1><p style="color:#558;font-size:12px;margin-top:8px;">Drop files, images, or paste URLs</p></div>
 <div id="selRect" style="position:fixed;border:1px dashed #0ff;background:rgba(0,255,255,0.06);pointer-events:none;display:none;z-index:5;box-shadow:0 0 12px rgba(0,255,255,0.15);"></div>
 
 <div id="panelL" class="panel">
     <h1>Unified Strata</h1>
     <div class="sub-h1">WebGPU Compute · Multi-Scale Forensic Geometry</div>
 
-    <button class="file-btn" onclick="document.getElementById('fIn').click()">Open Binary File</button>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+        <button class="file-btn" style="margin-bottom:0;" onclick="document.getElementById('fIn').click()">Open File</button>
+        <button class="file-btn" style="margin-bottom:0;background:#0af;" onclick="document.getElementById('fInImg').click()">IMG</button>
+    </div>
     <input type="file" id="fIn" style="display:none" onchange="handleFile(this.files)">
+    <input type="file" id="fInImg" style="display:none" accept="image/*" onchange="handleFile(this.files)">
 
     <div class="group-label">Scrub Timeline</div>
     <div class="ctrl">
@@ -106,6 +110,10 @@
             <option value="bf16">bf16</option>
             <option value="fp32">fp32</option>
             <option value="fp64">fp64</option>
+        </optgroup>
+        <optgroup label="Image">
+            <option value="img_rgb">Image → RGB (decoded pixels)</option>
+            <option value="img_raw">Image → Raw (encoded bytes)</option>
         </optgroup>
     </select>
 
@@ -903,7 +911,8 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 const FORMAT_ID = {
     'uint32':0,'int32':1,'uint16':2,'int16':3,'uint8':4,'int8':5,'uint4':6,'int4':7,
-    'fp32':8,'fp64':9,'fp16':10,'bf16':11,'fp8_e4m3':12,'fp8_e5m2':13,'fp4':14
+    'fp32':8,'fp64':9,'fp16':10,'bf16':11,'fp8_e4m3':12,'fp8_e5m2':13,'fp4':14,
+    'img_rgb':4,'img_raw':4  // Image formats — both decode as uint8 triplets on the GPU
 };
 
 let state = {
@@ -932,11 +941,14 @@ let state = {
     gizmoAlpha: 0.3,
     palette: 0,
     selectionActive: false,
+    // Image support: keep both decoded pixels and original file
+    imageFile: null,        // original File object for raw-bytes mode
+    decodedImageBuf: null,  // decoded RGB ArrayBuffer (alpha stripped)
 };
 
 function getWordSize(f) {
     if (['uint16','int16','fp16','bf16'].includes(f)) return 2;
-    if (['uint8','int8','fp8_e4m3','fp8_e5m2','fp4','uint4','int4'].includes(f)) return 1;
+    if (['uint8','int8','fp8_e4m3','fp8_e5m2','fp4','uint4','int4','img_rgb','img_raw'].includes(f)) return 1;
     if (f === 'fp64') return 8;
     return 4;
 }
@@ -1847,12 +1859,89 @@ async function exportPLY() {
 //  UI HANDLERS
 // =============================================================================
 
-function setFormat(f){state.format=f;document.getElementById('selFormat').value=f;runCompute();}
+function setFormat(f){
+    const wasImage = state.format.startsWith('img_');
+    state.format=f;
+    document.getElementById('selFormat').value=f;
+
+    if(f === 'img_rgb' && state.decodedImageBuf){
+        // Switch to decoded pixel buffer
+        state.buffer = state.decodedImageBuf;
+        state.file = null;
+        state.fileSize = state.decodedImageBuf.byteLength;
+        const mb = state.fileSize / (1024*1024);
+        const winSlider = document.getElementById('sWin');
+        winSlider.max = Math.max(1, Math.ceil(mb));
+        winSlider.value = Math.ceil(mb); state.scrubWindowMB = mb;
+        document.getElementById('vWin').innerText = mb.toFixed(1);
+        runCompute();
+    } else if(f === 'img_raw' && state.imageFile){
+        // Switch to raw encoded bytes of the original image file
+        state.file = state.imageFile;
+        state.fileSize = state.imageFile.size;
+        const mb = state.imageFile.size / (1024*1024);
+        const winSlider = document.getElementById('sWin');
+        winSlider.max = Math.max(1, Math.ceil(mb));
+        const defWin = Math.min(32, mb);
+        winSlider.value = defWin; state.scrubWindowMB = defWin;
+        document.getElementById('vWin').innerText = defWin.toFixed(1);
+        loadWindow();
+    } else if(wasImage && !f.startsWith('img_') && state.imageFile){
+        // Switching from image mode to a regular dtype — use raw file bytes
+        state.file = state.imageFile;
+        state.fileSize = state.imageFile.size;
+        const mb = state.imageFile.size / (1024*1024);
+        const winSlider = document.getElementById('sWin');
+        winSlider.max = Math.max(1, Math.ceil(mb));
+        const defWin = Math.min(32, mb);
+        winSlider.value = defWin; state.scrubWindowMB = defWin;
+        document.getElementById('vWin').innerText = defWin.toFixed(1);
+        loadWindow();
+    } else {
+        runCompute();
+    }
+}
 function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=le?'le':'be';runCompute();}
 function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);state.subRotX=0;state.subRotY=0;}
 function handleFile(files){
     if(!files[0])return;
     const f = files[0];
+
+    // Image? Decode to raw RGB bytes — it's just data
+    if(f.type.startsWith('image/')){
+        state.imageFile = f;  // keep original for raw-bytes mode
+        const reader = new FileReader();
+        reader.onload = function(e){
+            const img = new Image();
+            img.onload = function(){
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+                const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                // Strip alpha — RGBA→RGB, it's just a byte stream now
+                const pixelCount = canvas.width * canvas.height;
+                const rgb = new Uint8Array(pixelCount * 3);
+                for(let i=0, ri=0, si=0; i<pixelCount; i++, ri+=3, si+=4){
+                    rgb[ri]   = rgba[si];
+                    rgb[ri+1] = rgba[si+1];
+                    rgb[ri+2] = rgba[si+2];
+                }
+                state.decodedImageBuf = rgb.buffer;  // stash for mode switching
+                ingestBuffer(rgb.buffer, f.name + ` (${canvas.width}×${canvas.height})`, 'img_rgb');
+            };
+            img.src = e.target.result;
+        };
+        reader.readAsDataURL(f);
+        return;
+    }
+
+    // Non-image file: clear image state
+    state.imageFile = null;
+    state.decodedImageBuf = null;
+
+    // Binary file — existing path
     state.file = f;
     state.fileSize = f.size;
     state.fileName = f.name;
@@ -1868,6 +1957,69 @@ function handleFile(files){
     document.getElementById('vOff').innerText = '0%';
 
     loadWindow();
+}
+
+// Shared entry point for in-memory buffers (decoded images, fetched data, etc.)
+function ingestBuffer(arrayBuffer, name, autoFormat){
+    state.file = null;  // no File object — entire buffer is in memory
+    state.buffer = arrayBuffer;
+    state.fileSize = arrayBuffer.byteLength;
+    state.fileName = name || 'ingested';
+
+    if(autoFormat){
+        setFormat(autoFormat);
+    }
+
+    const mb = arrayBuffer.byteLength / (1024 * 1024);
+    const winSlider = document.getElementById('sWin');
+    winSlider.max = Math.max(1, Math.ceil(mb));
+    winSlider.value = Math.ceil(mb); state.scrubWindowMB = mb;
+    document.getElementById('vWin').innerText = mb.toFixed(1);
+    document.getElementById('sOff').value = 0; state.scrubOffset = 0;
+    document.getElementById('vOff').innerText = '0%';
+
+    runCompute();
+}
+
+// Fetch arbitrary URL — binary or image, we don't care
+async function tryFetchURL(src){
+    try{
+        const url = new URL(src, document.baseURI);
+        const response = await fetch(url.href);
+        if(!response.ok) return;
+        const contentType = response.headers.get('content-type') || '';
+        const blob = await response.blob();
+
+        if(contentType.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)(\?|$)/i.test(src)){
+            // Route through image decoder
+            const blobWithType = new Blob([blob], {type: contentType.startsWith('image/') ? contentType : 'image/png'});
+            const file = new File([blobWithType], url.pathname.split('/').pop() || 'fetched', {type: blobWithType.type});
+            handleFile([file]);
+        } else {
+            // Raw binary
+            const buf = await blob.arrayBuffer();
+            ingestBuffer(buf, url.pathname.split('/').pop() || src.slice(0,40));
+        }
+    } catch(e){
+        console.log('fetch failed:', src, e.message);
+    }
+}
+
+// Handle non-file drops (dragged images from browser, HTML fragments)
+function handleNonFileDrop(text){
+    // Dragged image from another tab often arrives as HTML with <img src="...">
+    if(text.includes('<img')){
+        try{
+            const doc = new DOMParser().parseFromString(text, 'text/html');
+            const img = doc.querySelector('img');
+            if(img && img.src) tryFetchURL(img.src);
+            return;
+        } catch(_){}
+    }
+    // Plain URL?
+    if(/^https?:\/\//i.test(text.trim())){
+        tryFetchURL(text.trim());
+    }
 }
 // Fix #9: Debounced dispatchers — coalesce rapid slider changes
 let computeRAF = 0;
@@ -1908,7 +2060,38 @@ const dz=document.getElementById('dropZone');
 document.addEventListener('dragenter',e=>{e.preventDefault();dz.style.display='flex';});
 document.addEventListener('dragover',e=>e.preventDefault());
 dz.addEventListener('dragleave',e=>{e.preventDefault();dz.style.display='none';});
-document.addEventListener('drop',e=>{e.preventDefault();dz.style.display='none';handleFile(e.dataTransfer.files);});
+document.addEventListener('drop',e=>{
+    e.preventDefault();
+    dz.style.display='none';
+    // Real files? Use existing path
+    if(e.dataTransfer.files && e.dataTransfer.files.length > 0){
+        handleFile(e.dataTransfer.files);
+        return;
+    }
+    // Non-file drops: dragged images, URLs, HTML fragments
+    for(let i=0; i<e.dataTransfer.items.length; i++){
+        const item = e.dataTransfer.items[i];
+        if(item.kind==='string'){
+            item.getAsString(s => handleNonFileDrop(s));
+        }
+    }
+});
+
+// Clipboard: paste images or URLs directly
+document.addEventListener('paste', e=>{
+    e.preventDefault();
+    const items = (e.clipboardData || window.clipboardData).items;
+    for(let item of items){
+        if(item.kind === 'file'){
+            handleFile([item.getAsFile()]);
+        } else if(item.kind === 'string'){
+            item.getAsString(s => {
+                const trimmed = s.trim();
+                if(/^https?:\/\//i.test(trimmed)) tryFetchURL(trimmed);
+            });
+        }
+    }
+});
 
 // =============================================================================
 //  BOOT
@@ -1918,7 +2101,15 @@ document.addEventListener('drop',e=>{e.preventDefault();dz.style.display='none';
     const ok=await initWebGPU();
     if(!ok)return;
     render();
-    generateDemo();
+
+    // ?fetch= URL parameter — load data from any URL at boot
+    const fetchArg = new URL(document.URL).searchParams.get('fetch');
+    if(fetchArg){
+        console.log('Boot fetch:', fetchArg);
+        tryFetchURL(fetchArg);
+    } else {
+        generateDemo();
+    }
 })();
 
 </script>
