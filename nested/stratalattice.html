@@ -74,11 +74,10 @@
     .tier-1 { color: #6f6; background: rgba(100,255,100,0.1); border: 1px solid rgba(100,255,100,0.2); }
     .tier-2 { color: #66f; background: rgba(100,100,255,0.1); border: 1px solid rgba(100,100,255,0.2); }
     .blend-track { background: linear-gradient(90deg, #f06 0%, #60f 100%) !important; }
-    .anim-btn { width: 100%; background: rgba(255,0,255,0.15); color: #f0f; border: 1px solid #f0f;
+    .export-btn { width: 100%; background: rgba(0, 255, 100, 0.15); color: #0f6; border: 1px solid #0f6;
         padding: 10px; text-transform: uppercase; letter-spacing: 1px; cursor: pointer;
         border-radius: 6px; font-weight: bold; font-family: inherit; transition: 0.2s; }
-    .anim-btn:hover { background: #f0f; color: #000; }
-    .anim-btn.active { background: #f0f; color: #000; }
+    .export-btn:hover { background: #0f6; color: #000; }
 </style>
 </head>
 <body>
@@ -270,13 +269,9 @@
     </details>
 
     <details open>
-        <summary>Animation</summary>
+        <summary>Export</summary>
         <div class="section-body">
-    <button class="anim-btn" id="btnAnim" onclick="toggleAnimation()">▶ Animate</button>
-    <div class="ctrl" style="margin-top:10px;">
-        <label>Speed <span class="val" id="vAnimSpeed">1.00</span></label>
-        <input type="range" id="sAnimSpeed" min="0.1" max="5" step="0.1" value="1">
-    </div>
+    <button class="export-btn" onclick="exportPLY()">Export .PLY Cloud</button>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px;">
         <button onclick="resetRotations()">Reset All</button>
         <button onclick="randomizeRotations()">Randomize</button>
@@ -573,8 +568,6 @@ let state = {
     palette: 0,
     blend: 0.0,
     rot: [[0,0,0], [0,0,0], [0,0,0]],
-    animating: false,
-    animSpeed: 1.0,
     scrubOffset: 0,
     scrubWindowMB: 32,
     imageFile: null,
@@ -681,6 +674,7 @@ let depthTex, depthView;
 let pointCount = 0;
 
 const BIT_TABLE_SIZE = (1 << 25) * 4;
+const BYTES_PER_POINT = 16;
 
 async function initWebGPU() {
     if (!navigator.gpu) { document.getElementById('gpuError').style.display='block'; return false; }
@@ -768,7 +762,6 @@ function mkStaticBufs() {
     bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
 
     const MAX_OUTPUT_POINTS = 48 * 1024 * 1024;
-    const BYTES_PER_POINT = 16;
     indirectBuf = device.createBuffer({ size:20, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC });
     const maxOutBytes = Math.min(MAX_OUTPUT_POINTS * BYTES_PER_POINT, device.limits.maxStorageBufferBindingSize);
     outputBuf = device.createBuffer({ size: maxOutBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_SRC });
@@ -899,13 +892,6 @@ function render() {
     const w=canvasEl.width, h=canvasEl.height;
     if (w===0||h===0) return;
 
-    if (state.animating) {
-        const dt = state.animSpeed * 0.3;
-        state.rot[0][1] += dt * 0.7; state.rot[1][0] += dt * 1.1; state.rot[1][2] += dt * 0.4; state.rot[2][1] += dt * 1.9; state.rot[2][2] += dt * 0.8;
-        for (let t = 0; t < 3; t++) for (let a = 0; a < 3; a++) { state.rot[t][a] = ((state.rot[t][a] + 180) % 360 + 360) % 360 - 180; }
-        syncRotSliders();
-    }
-
     updateCachedStrides();
     if (!renderBG) { renderBG = device.createBindGroup({ layout:renderBGL, entries:[ {binding:0,resource:{buffer:renderUniformBuf}}, ]}); }
 
@@ -993,7 +979,106 @@ function handleNonFileDrop(text){
     ingestBuffer(new TextEncoder().encode(trimmed).buffer, "Dropped text");
 }
 
-function toggleAnimation() { state.animating = !state.animating; const btn = document.getElementById('btnAnim'); btn.textContent = state.animating ? '⏸ Pause' : '▶ Animate'; btn.classList.toggle('active', state.animating); }
+// Apply mat4 rotation to vec3 (w=0, rotation only)
+function mat4RotVec3(m, v) {
+    return [
+        m[0]*v[0] + m[4]*v[1] + m[8]*v[2],
+        m[1]*v[0] + m[5]*v[1] + m[9]*v[2],
+        m[2]*v[0] + m[6]*v[1] + m[10]*v[2]
+    ];
+}
+
+async function exportPLY() {
+    if (!outputBuf || pointCount === 0) return;
+    const st = computeStrides();
+    const blend = state.blend;
+    const R0 = buildRotationMatrix(state.rot[0][0], state.rot[0][1], state.rot[0][2]);
+    const R1 = buildRotationMatrix(state.rot[1][0], state.rot[1][1], state.rot[1][2]);
+    const R2 = buildRotationMatrix(state.rot[2][0], state.rot[2][1], state.rot[2][2]);
+
+    // Local centers: 7.5 * stride per tier
+    const c0 = 7.5 * st.s0, c1 = 7.5 * st.s1, c2 = 7.5 * st.s2;
+
+    // Readback point data from GPU
+    const readSize = pointCount * BYTES_PER_POINT;
+    const rb = device.createBuffer({ size: readSize, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(outputBuf, 0, rb, 0, readSize);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const d = new Float32Array(rb.getMappedRange());
+
+    const vertexBytes = 15; // 3 floats (12 bytes) + 3 uint8 (3 bytes)
+    const header = [
+        "ply",
+        "format binary_little_endian 1.0",
+        `comment Generated by Strata Lattice — ${state.fileName}`,
+        `comment Type: ${state.format} Dive: ${state.shift} Zoom: ${state.tierShift}`,
+        `comment Blend: ${blend.toFixed(2)} Rot0: [${state.rot[0]}] Rot1: [${state.rot[1]}] Rot2: [${state.rot[2]}]`,
+        `element vertex ${pointCount}`,
+        "property float x", "property float y", "property float z",
+        "property uchar red", "property uchar green", "property uchar blue",
+        "end_header\n"
+    ].join("\n");
+    const headerBytes = new TextEncoder().encode(header);
+    const payload = new ArrayBuffer(pointCount * vertexBytes);
+    const dv = new DataView(payload);
+
+    for (let i = 0; i < pointCount; i++) {
+        const b = i * 4;
+        const raw0 = d[b] | 0, raw1 = d[b+1] | 0, raw2 = d[b+2] | 0, raw3 = d[b+3] | 0;
+
+        // Unpack tier indices
+        const p0 = [(raw0>>16)&0xFF, (raw0>>8)&0xFF, raw0&0xFF];
+        const p1 = [(raw1>>16)&0xFF, (raw1>>8)&0xFF, raw1&0xFF];
+        const p2 = [(raw2>>16)&0xFF, (raw2>>8)&0xFF, raw2&0xFF];
+
+        // Scale by strides
+        const t0 = [p0[0]*st.s0, p0[1]*st.s0, p0[2]*st.s0];
+        const t1 = [p1[0]*st.s1, p1[1]*st.s1, p1[2]*st.s1];
+        const t2 = [p2[0]*st.s2, p2[1]*st.s2, p2[2]*st.s2];
+
+        // ADDITIVE: rotate each tier around its local center
+        const a0 = mat4RotVec3(R0, [t0[0]-c0, t0[1]-c0, t0[2]-c0]);
+        const a1 = mat4RotVec3(R1, [t1[0]-c1, t1[1]-c1, t1[2]-c1]);
+        const a2 = mat4RotVec3(R2, [t2[0]-c2, t2[1]-c2, t2[2]-c2]);
+        const pos_add = [
+            a0[0]+c0 + a1[0]+c1 + a2[0]+c2,
+            a0[1]+c0 + a1[1]+c1 + a2[1]+c2,
+            a0[2]+c0 + a1[2]+c1 + a2[2]+c2
+        ];
+
+        // NESTED: hierarchical rotation
+        const n2 = mat4RotVec3(R2, [t2[0]-c2, t2[1]-c2, t2[2]-c2]);
+        const n2r = [n2[0]+c2, n2[1]+c2, n2[2]+c2];
+        const n1 = mat4RotVec3(R1, [t1[0]+n2r[0]-c1, t1[1]+n2r[1]-c1, t1[2]+n2r[2]-c1]);
+        const n1r = [n1[0]+c1, n1[1]+c1, n1[2]+c1];
+        const n0 = mat4RotVec3(R0, [t0[0]+n1r[0]-c0, t0[1]+n1r[1]-c0, t0[2]+n1r[2]-c0]);
+        const pos_nest = [n0[0]+c0, n0[1]+c0, n0[2]+c0];
+
+        // Blend and center/scale
+        const off = i * vertexBytes;
+        for (let ax = 0; ax < 3; ax++) {
+            const raw_p = pos_add[ax] + blend * (pos_nest[ax] - pos_add[ax]);
+            dv.setFloat32(off + ax*4, (raw_p - st.ctr) * st.scl, true);
+        }
+        dv.setUint8(off + 12, Math.min(255, ((raw3>>16)&0xFF) + 25));
+        dv.setUint8(off + 13, Math.min(255, ((raw3>>8)&0xFF) + 25));
+        dv.setUint8(off + 14, Math.min(255, (raw3&0xFF) + 25));
+    }
+
+    rb.unmap(); rb.destroy();
+
+    const blob = new Blob([headerBytes, payload], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${state.fileName.replace(/[^a-z0-9]/gi, '_')}_lattice.ply`;
+    link.click();
+    URL.revokeObjectURL(url);
+    console.log(`Exported ${pointCount} particles as PLY (blend=${blend.toFixed(2)})`);
+}
+
 function resetRotations() { state.rot = [[0,0,0], [0,0,0], [0,0,0]]; state.blend = 0; document.getElementById('sBlend').value = 0; syncRotSliders(); }
 function randomizeRotations() { for (let t = 0; t < 3; t++) for (let a = 0; a < 3; a++) { state.rot[t][a] = Math.round(Math.random() * 360 - 180); } syncRotSliders(); }
 function syncRotSliders() { ['X','Y','Z'].forEach((axis, a) => { for (let t = 0; t < 3; t++) { const el = document.getElementById(`sR${t}${axis}`); if (el) el.value = Math.round(state.rot[t][a]); const vel = document.getElementById(`vR${t}${axis}`); if (vel) vel.innerText = Math.round(state.rot[t][a]) + '°'; } }); }
@@ -1012,7 +1097,6 @@ document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.valu
 document.getElementById('sZoom').oninput=e=>{state.tierShift=parseInt(e.target.value);document.getElementById('vZoom').innerText=e.target.value;scheduleCompute();};
 document.getElementById('sPts').oninput=e=>{state.pointScale=parseFloat(e.target.value);document.getElementById('vPts').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sBlend').oninput=e=>{state.blend=parseFloat(e.target.value);document.getElementById('vBlend').innerText=parseFloat(e.target.value).toFixed(2);};
-document.getElementById('sAnimSpeed').oninput=e=>{state.animSpeed=parseFloat(e.target.value);document.getElementById('vAnimSpeed').innerText=parseFloat(e.target.value).toFixed(2);};
 
 ['X','Y','Z'].forEach((axis, a) => { for (let t = 0; t < 3; t++) { document.getElementById(`sR${t}${axis}`).oninput = e => { state.rot[t][a] = parseFloat(e.target.value); document.getElementById(`vR${t}${axis}`).innerText = Math.round(state.rot[t][a]) + '°'; }; } });
 
