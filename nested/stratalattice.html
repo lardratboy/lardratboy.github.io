@@ -90,7 +90,6 @@
 
 <div id="dropZone"><h1 style="color:#0ff">INJECT BYTESTREAM</h1><p style="color:#558;font-size:12px;margin-top:8px;">Drop files, images, or paste URLs</p></div>
 
-<!-- LEFT PANEL: Data Controls -->
 <div id="panelL" class="panel">
     <h1>Strata Lattice</h1>
     <div class="sub-h1">WebGPU · Per-Tier Matrix Transforms</div>
@@ -187,7 +186,6 @@
     <div id="stats" class="stats">Initializing WebGPU…</div>
 </div>
 
-<!-- RIGHT PANEL: Lattice Controls -->
 <div id="panelR" class="panel">
     <details open>
         <summary>Composition</summary>
@@ -292,7 +290,7 @@
 <script>
 
 // =============================================================================
-//  WGSL — COMPUTE SHADER (identical to Stratum kernel)
+//  WGSL — COMPUTE SHADER
 // =============================================================================
 
 const COMPUTE_WGSL = `
@@ -382,7 +380,6 @@ fn tanhMap(fv: f32) -> u32 {
 
 const S: f32 = 4294967295.0;
 
-// Workgroup-local accumulation: reduces global atomic contention ~256×
 var<workgroup> wg_count: atomic<u32>;
 var<workgroup> wg_base: u32;
 
@@ -391,11 +388,9 @@ fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_index) lid: u32
 ) {
-    // Phase 0: Reset workgroup counter
     if (lid == 0u) { atomicStore(&wg_count, 0u); }
     workgroupBarrier();
 
-    // Phase 1: Decode, dedup, pack — each thread works independently
     let idx = gid.x;
     var isUnique = false;
     var localSlot = 0u;
@@ -431,9 +426,7 @@ fn main(
         let old = atomicOr(&bitTable[key>>5u], 1u<<(key&31u));
         if ((old & (1u<<(key&31u))) == 0u) {
             isUnique = true;
-            // Get local slot within this workgroup (workgroup-local atomic — fast)
             localSlot = atomicAdd(&wg_count, 1u);
-            // Pack output into registers
             let t0s = P.tierShift + 8u;
             let t1s = P.tierShift + 4u;
             let t2s = P.tierShift;
@@ -445,14 +438,12 @@ fn main(
         }
     }
 
-    // Phase 2: Thread 0 reserves a global block for the entire workgroup
     workgroupBarrier();
     if (lid == 0u) {
         wg_base = atomicAdd(&indirect[1], atomicLoad(&wg_count));
     }
     workgroupBarrier();
 
-    // Phase 3: Each unique thread writes at globalBase + localSlot
     if (isUnique) {
         let b = (wg_base + localSlot) * 4u;
         output[b]     = packed[0];
@@ -464,7 +455,7 @@ fn main(
 `;
 
 // =============================================================================
-//  WGSL — RENDER SHADER (per-tier matrix transforms)
+//  WGSL — RENDER SHADER (Updated for Centered Rotation)
 // =============================================================================
 
 const RENDER_WGSL = `
@@ -494,28 +485,32 @@ fn vs(
 ) -> VSOut {
     let raw0=u32(pk.x); let raw1=u32(pk.y); let raw2=u32(pk.z); let raw3=u32(pk.w);
 
-    // Unpack tier indices
     let p0=vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
     let p1=vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
     let p2=vec3(f32((raw2>>16u)&0xFFu), f32((raw2>>8u)&0xFFu), f32(raw2&0xFFu));
     let col=vec3(f32((raw3>>16u)&0xFFu)/255.0, f32((raw3>>8u)&0xFFu)/255.0, f32(raw3&0xFFu)/255.0);
 
-    // Scale tier contributions by scalar strides
     let t0 = p0 * R.s0;
     let t1 = p1 * R.s1;
     let t2 = p2 * R.s2;
 
-    // ADDITIVE: each tier rotated independently, then summed
-    let pos_add = (R.R0 * vec4(t0, 0.0)).xyz
-                + (R.R1 * vec4(t1, 0.0)).xyz
-                + (R.R2 * vec4(t2, 0.0)).xyz;
+    // LOCAL CENTERS: each grid is 16^3, so the center of the local space is index 7.5
+    let cV = vec3(7.5);
+    let c0 = cV * R.s0;
+    let c1 = cV * R.s1;
+    let c2 = cV * R.s2;
 
-    // NESTED: outer rotations carry inner contributions
-    let n2 = (R.R2 * vec4(t2, 0.0)).xyz;
-    let n1 = (R.R1 * vec4(t1 + n2, 0.0)).xyz;
-    let pos_nest = (R.R0 * vec4(t0 + n1, 0.0)).xyz;
+    // ADDITIVE: Rotate each tier around its own local center, then sum results
+    let pos0 = (R.R0 * vec4(t0 - c0, 0.0)).xyz + c0;
+    let pos1 = (R.R1 * vec4(t1 - c1, 0.0)).xyz + c1;
+    let pos2 = (R.R2 * vec4(t2 - c2, 0.0)).xyz + c2;
+    let pos_add = pos0 + pos1 + pos2;
 
-    // Blend between the two composition modes
+    // NESTED: Hierarchical rotation around local centers
+    let n2 = (R.R2 * vec4(t2 - c2, 0.0)).xyz + c2;
+    let n1 = (R.R1 * vec4(t1 + n2 - c1, 0.0)).xyz + c1;
+    let pos_nest = (R.R0 * vec4(t0 + n1 - c0, 0.0)).xyz + c0;
+
     let raw_pos = mix(pos_add, pos_nest, R.blend);
     let world = (raw_pos - vec3(R.center)) * R.scale;
 
@@ -523,7 +518,6 @@ fn vs(
     var clip = R.mvp * vec4(world, 1.0);
     clip = vec4(clip.xy + qOff * size * clip.w / vec2(R.vpW, R.vpH), clip.zw);
 
-    // Palette remapping
     var mapped = col;
     let pal = u32(R.palette + 0.5);
     if (pal > 0u) {
@@ -531,21 +525,21 @@ fn vs(
             mapped = vec3(length(p0)/15.0, length(p1)/15.0, length(p2)/15.0);
         } else {
             let t = clamp(dot(col, vec3(0.35, 0.45, 0.20)), 0.0, 1.0);
-            var c0: vec3<f32>; var c1: vec3<f32>;
-            var c2: vec3<f32>; var c3: vec3<f32>;
+            var cA: vec3<f32>; var cB: vec3<f32>;
+            var cC: vec3<f32>; var cD: vec3<f32>;
             switch (pal) {
-                case 1u { c0=vec3(0.05,0.0,0.08); c1=vec3(0.55,0.08,0.52); c2=vec3(0.93,0.47,0.11); c3=vec3(0.99,0.99,0.60); }
-                case 2u { c0=vec3(0.02,0.02,0.15); c1=vec3(0.0,0.8,0.9); c2=vec3(0.85,0.15,0.85); c3=vec3(1.0,1.0,1.0); }
-                case 3u { c0=vec3(0.0,0.1,0.12); c1=vec3(0.1,0.6,0.3); c2=vec3(0.0,0.85,0.75); c3=vec3(0.7,0.95,0.7); }
-                case 4u { c0=vec3(0.05,0.01,0.0); c1=vec3(0.7,0.1,0.0); c2=vec3(0.95,0.55,0.1); c3=vec3(1.0,0.85,0.35); }
-                case 5u { c0=vec3(0.1,0.0,0.2); c1=vec3(0.15,0.2,0.7); c2=vec3(0.0,0.7,0.9); c3=vec3(0.85,0.95,1.0); }
-                case 6u { c0=vec3(0.05,0.05,0.05); c1=vec3(0.35,0.35,0.35); c2=vec3(0.67,0.67,0.67); c3=vec3(1.0,1.0,1.0); }
-                default { c0=col; c1=col; c2=col; c3=col; }
+                case 1u { cA=vec3(0.05,0.0,0.08); cB=vec3(0.55,0.08,0.52); cC=vec3(0.93,0.47,0.11); cD=vec3(0.99,0.99,0.60); }
+                case 2u { cA=vec3(0.02,0.02,0.15); cB=vec3(0.0,0.8,0.9); cC=vec3(0.85,0.15,0.85); cD=vec3(1.0,1.0,1.0); }
+                case 3u { cA=vec3(0.0,0.1,0.12); cB=vec3(0.1,0.6,0.3); cC=vec3(0.0,0.85,0.75); cD=vec3(0.7,0.95,0.7); }
+                case 4u { cA=vec3(0.05,0.01,0.0); cB=vec3(0.7,0.1,0.0); cC=vec3(0.95,0.55,0.1); cD=vec3(1.0,0.85,0.35); }
+                case 5u { cA=vec3(0.1,0.0,0.2); cB=vec3(0.15,0.2,0.7); cC=vec3(0.0,0.7,0.9); cD=vec3(0.85,0.95,1.0); }
+                case 6u { cA=vec3(0.05,0.05,0.05); cB=vec3(0.35,0.35,0.35); cC=vec3(0.67,0.67,0.67); cD=vec3(1.0,1.0,1.0); }
+                default { cA=col; cB=col; cC=col; cD=col; }
             }
             let s = t * 3.0;
-            if (s < 1.0) { mapped = mix(c0, c1, s); }
-            else if (s < 2.0) { mapped = mix(c1, c2, s - 1.0); }
-            else { mapped = mix(c2, c3, s - 2.0); }
+            if (s < 1.0) { mapped = mix(cA, cB, s); }
+            else if (s < 2.0) { mapped = mix(cB, cC, s - 1.0); }
+            else { mapped = mix(cC, cD, s - 2.0); }
         }
     }
 
@@ -578,9 +572,7 @@ let state = {
     pointScale: 1.0,
     palette: 0,
     blend: 0.0,
-    // Per-tier rotation (degrees)
     rot: [[0,0,0], [0,0,0], [0,0,0]],
-    // Animation
     animating: false,
     animSpeed: 1.0,
     scrubOffset: 0,
@@ -616,25 +608,13 @@ function computeStrides() {
 }
 
 // =============================================================================
-//  MATRIX MATH — rotation builder + orbit camera
+//  MATRIX MATH
 // =============================================================================
 
-function mat4Identity() {
-    return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
-}
-
-function mat4RotX(rad) {
-    const c = Math.cos(rad), s = Math.sin(rad);
-    return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]);
-}
-function mat4RotY(rad) {
-    const c = Math.cos(rad), s = Math.sin(rad);
-    return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]);
-}
-function mat4RotZ(rad) {
-    const c = Math.cos(rad), s = Math.sin(rad);
-    return new Float32Array([c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]);
-}
+function mat4Identity() { return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]); }
+function mat4RotX(rad) { const c = Math.cos(rad), s = Math.sin(rad); return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]); }
+function mat4RotY(rad) { const c = Math.cos(rad), s = Math.sin(rad); return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]); }
+function mat4RotZ(rad) { const c = Math.cos(rad), s = Math.sin(rad); return new Float32Array([c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]); }
 
 function mat4Mul(a, b) {
     const o = new Float32Array(16);
@@ -644,9 +624,7 @@ function mat4Mul(a, b) {
 }
 
 function buildRotationMatrix(degX, degY, degZ) {
-    const rx = degX * Math.PI / 180;
-    const ry = degY * Math.PI / 180;
-    const rz = degZ * Math.PI / 180;
+    const rx = degX * Math.PI / 180, ry = degY * Math.PI / 180, rz = degZ * Math.PI / 180;
     return mat4Mul(mat4RotZ(rz), mat4Mul(mat4RotY(ry), mat4RotX(rx)));
 }
 
@@ -679,13 +657,9 @@ function applyCamRadius(newRadius) {
     if (newRadius < CAM_THROUGH_THRESHOLD) {
         const excess = CAM_THROUGH_THRESHOLD - newRadius;
         const sp=Math.sin(camPhi), cp=Math.cos(camPhi), st=Math.sin(camTheta), ct=Math.cos(camTheta);
-        camTarget[0] -= sp*ct * excess;
-        camTarget[1] -= cp    * excess;
-        camTarget[2] -= sp*st * excess;
+        camTarget[0] -= sp*ct * excess; camTarget[1] -= cp * excess; camTarget[2] -= sp*st * excess;
         camRadius = CAM_THROUGH_THRESHOLD;
-    } else {
-        camRadius = newRadius;
-    }
+    } else { camRadius = newRadius; }
 }
 
 function getMVP(asp) {
@@ -728,7 +702,6 @@ async function initWebGPU() {
     mkPipelines();
     mkStaticBufs();
 
-    // Mouse — orbit camera
     canvasEl.addEventListener('mousedown', e => {
         if (e.button===0) isDrag=true; if (e.button===1) isDolly=true; if (e.button===2) isPan=true;
         lastMX=e.clientX; lastMY=e.clientY;
@@ -749,20 +722,14 @@ async function initWebGPU() {
     addEventListener('mouseup', () => { isDrag=isPan=isDolly=false; });
     canvasEl.addEventListener('wheel', e => { e.preventDefault(); applyCamRadius(camRadius * (1 + e.deltaY*0.001)); }, {passive:false});
     canvasEl.addEventListener('contextmenu', e => e.preventDefault());
-    addEventListener('resize', () => {
-        canvasEl.width=innerWidth; canvasEl.height=innerHeight;
-        mkDepth();
-    });
+    addEventListener('resize', () => { canvasEl.width=innerWidth; canvasEl.height=innerHeight; mkDepth(); });
 
     return true;
 }
 
 function mkDepth() {
     if (depthTex) depthTex.destroy();
-    depthTex = device.createTexture({
-        size:[canvasEl.width,canvasEl.height], format:'depth24plus',
-        usage: GPUTextureUsage.RENDER_ATTACHMENT
-    });
+    depthTex = device.createTexture({ size:[canvasEl.width,canvasEl.height], format:'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
     depthView = depthTex.createView();
 }
 
@@ -775,27 +742,17 @@ function mkPipelines() {
         {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
         {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
     ]});
-    computePipeline = device.createComputePipeline({
-        layout: device.createPipelineLayout({bindGroupLayouts:[computeBGL]}),
-        compute:{module:cs,entryPoint:'main'}
-    });
+    computePipeline = device.createComputePipeline({ layout: device.createPipelineLayout({bindGroupLayouts:[computeBGL]}), compute:{module:cs,entryPoint:'main'} });
 
     const rs = device.createShaderModule({code: RENDER_WGSL});
-    renderBGL = device.createBindGroupLayout({ entries:[
-        {binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},
-    ]});
+    renderBGL = device.createBindGroupLayout({ entries:[ {binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}}, ]});
     renderPipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
         vertex:{ module:rs, entryPoint:'vs', buffers:[
-            { arrayStride:8, stepMode:'vertex',
-              attributes:[{shaderLocation:0,offset:0,format:'float32x2'}] },
-            { arrayStride:16, stepMode:'instance',
-              attributes:[{shaderLocation:1,offset:0,format:'float32x4'}] },
+            { arrayStride:8, stepMode:'vertex', attributes:[{shaderLocation:0,offset:0,format:'float32x2'}] },
+            { arrayStride:16, stepMode:'instance', attributes:[{shaderLocation:1,offset:0,format:'float32x4'}] },
         ]},
-        fragment:{ module:rs, entryPoint:'fs', targets:[{format:canvasFmt, blend:{
-            color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha'},
-            alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha'},
-        }}]},
+        fragment:{ module:rs, entryPoint:'fs', targets:[{format:canvasFmt, blend:{ color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha'}, alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha'}, }}]},
         primitive:{topology:'triangle-list'},
         depthStencil:{format:'depth24plus',depthWriteEnabled:true,depthCompare:'less'},
     });
@@ -807,26 +764,16 @@ function mkStaticBufs() {
     quadIBuf = device.createBuffer({size:12,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
     device.queue.writeBuffer(quadIBuf,0,new Uint16Array([0,1,2, 2,1,3]));
     computeUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    // 4 mat4 (mvp + R0 + R1 + R2) = 256 bytes + 16 extra floats = 320 bytes
     renderUniformBuf = device.createBuffer({size:320,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
 
     const MAX_OUTPUT_POINTS = 48 * 1024 * 1024;
     const BYTES_PER_POINT = 16;
-    indirectBuf = device.createBuffer({
-        size:20,
-        usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC,
-    });
+    indirectBuf = device.createBuffer({ size:20, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC });
     const maxOutBytes = Math.min(MAX_OUTPUT_POINTS * BYTES_PER_POINT, device.limits.maxStorageBufferBindingSize);
-    outputBuf = device.createBuffer({
-        size: maxOutBytes,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_SRC,
-    });
+    outputBuf = device.createBuffer({ size: maxOutBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_SRC });
     const rawBufSize = Math.ceil(128 * 1024 * 1024 / 4) * 4;
-    rawDataBuf = device.createBuffer({
-        size: rawBufSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
+    rawDataBuf = device.createBuffer({ size: rawBufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
 }
 
 // =============================================================================
@@ -834,11 +781,8 @@ function mkStaticBufs() {
 // =============================================================================
 
 const CHUNK_BYTES = 128 * 1024 * 1024;
-const BYTES_PER_POINT = 16;
-const MAX_OUTPUT_POINTS = 48 * 1024 * 1024;
 const computeUniformData = new Uint32Array(8);
 const indirectResetData = new Uint32Array([6, 0, 0, 0, 0]);
-
 let loadingWindow = false, windowDirty = false;
 
 async function loadWindow() {
@@ -849,10 +793,7 @@ async function loadWindow() {
     try {
         const byteStep = getByteStep(state.format);
         const fileSize = state.fileSize;
-        const startByte = Math.min(
-            Math.floor((state.scrubOffset * fileSize) / byteStep) * byteStep,
-            Math.max(0, fileSize - byteStep)
-        );
+        const startByte = Math.min(Math.floor((state.scrubOffset * fileSize) / byteStep) * byteStep, Math.max(0, fileSize - byteStep));
         const windowBytes = Math.min(Math.round(state.scrubWindowMB * 1024 * 1024), fileSize - startByte);
         if (windowBytes < byteStep) { loadingWindow = false; return; }
         const blob = state.file.slice(startByte, startByte + windowBytes);
@@ -871,7 +812,6 @@ async function runCompute() {
     if (totalTuples === 0) return;
 
     const statsEl = document.getElementById('stats');
-
     const bitsPerAxis = Math.min(10, 32 - state.shift);
     const maxPerAxis = (1 << bitsPerAxis) - 1;
     const maxKey = (maxPerAxis << 20) | (maxPerAxis << 10) | maxPerAxis;
@@ -899,7 +839,6 @@ async function runCompute() {
         const count = Math.min(chunkTuples, totalTuples - startTuple);
         const chunkByteOff = startTuple * byteStep;
         const chunkByteLen = count * byteStep;
-
         const alignedLen = Math.ceil(chunkByteLen / 4) * 4;
         if (chunkByteOff + alignedLen <= srcBytes.length) {
             device.queue.writeBuffer(rawDataBuf, 0, srcBytes, chunkByteOff, alignedLen);
@@ -908,7 +847,6 @@ async function runCompute() {
             tmp.set(srcBytes.subarray(chunkByteOff, chunkByteOff + chunkByteLen));
             device.queue.writeBuffer(rawDataBuf, 0, tmp);
         }
-
         computeUniformData[0] = FORMAT_ID[state.format];
         computeUniformData[1] = state.isLE ? 1 : 0;
         computeUniformData[2] = state.shift;
@@ -925,11 +863,7 @@ async function runCompute() {
         pass.dispatchWorkgroups(Math.ceil(count / 256));
         pass.end();
         device.queue.submit([enc.finish()]);
-
-        if (totalChunks > 1) {
-            await device.queue.onSubmittedWorkDone();
-            statsEl.innerHTML = `Processing: <b>chunk ${chunk + 1}/${totalChunks}</b>`;
-        }
+        if (totalChunks > 1) { await device.queue.onSubmittedWorkDone(); statsEl.innerHTML = `Processing: <b>chunk ${chunk + 1}/${totalChunks}</b>`; }
     }
 
     const rb = device.createBuffer({ size: 20, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -942,18 +876,14 @@ async function runCompute() {
 
     const mbFull = (state.fileSize / (1024 * 1024)).toFixed(1);
     const mbWin = (byteLen / (1024 * 1024)).toFixed(1);
-    const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
-    statsEl.innerHTML =
-        `Source: <b>${state.fileName}</b> (${mbFull} MB)<br>` +
-        `Window: <b>${mbWin} MB</b> · Nodes: <b>${pointCount.toLocaleString()}</b><br>` +
-        `GPU: <b>${mbOut} MB</b> · Chunks: <b>${totalChunks}</b>`;
+    const mbOut = (pointCount * 16 / (1024 * 1024)).toFixed(1);
+    statsEl.innerHTML = `Source: <b>${state.fileName}</b> (${mbFull} MB)<br>Window: <b>${mbWin} MB</b> · Nodes: <b>${pointCount.toLocaleString()}</b><br>GPU: <b>${mbOut} MB</b> · Chunks: <b>${totalChunks}</b>`;
 }
 
 // =============================================================================
 //  RENDER LOOP
 // =============================================================================
 
-// Uniform staging: 4 × mat4 (64 floats) + 8 scalar floats = 72 floats = 288 bytes → pad to 80 (320 bytes)
 const ruData = new Float32Array(80);
 let renderBG = null;
 let cachedStrides = null, lastGapKey = '';
@@ -969,28 +899,15 @@ function render() {
     const w=canvasEl.width, h=canvasEl.height;
     if (w===0||h===0) return;
 
-    // Animation update
     if (state.animating) {
         const dt = state.animSpeed * 0.3;
-        state.rot[0][1] += dt * 0.7;   // Tier 0: slow Y orbit
-        state.rot[1][0] += dt * 1.1;   // Tier 1: medium X tumble
-        state.rot[1][2] += dt * 0.4;
-        state.rot[2][1] += dt * 1.9;   // Tier 2: fast Y spin
-        state.rot[2][2] += dt * 0.8;
-        // Update slider displays (wrap to ±180)
-        for (let t = 0; t < 3; t++) for (let a = 0; a < 3; a++) {
-            state.rot[t][a] = ((state.rot[t][a] + 180) % 360 + 360) % 360 - 180;
-        }
+        state.rot[0][1] += dt * 0.7; state.rot[1][0] += dt * 1.1; state.rot[1][2] += dt * 0.4; state.rot[2][1] += dt * 1.9; state.rot[2][2] += dt * 0.8;
+        for (let t = 0; t < 3; t++) for (let a = 0; a < 3; a++) { state.rot[t][a] = ((state.rot[t][a] + 180) % 360 + 360) % 360 - 180; }
         syncRotSliders();
     }
 
     updateCachedStrides();
-
-    if (!renderBG) {
-        renderBG = device.createBindGroup({ layout:renderBGL, entries:[
-            {binding:0,resource:{buffer:renderUniformBuf}},
-        ]});
-    }
+    if (!renderBG) { renderBG = device.createBindGroup({ layout:renderBGL, entries:[ {binding:0,resource:{buffer:renderUniformBuf}}, ]}); }
 
     const st = cachedStrides;
     const mvp = getMVP(w/h);
@@ -998,222 +915,92 @@ function render() {
     const R1 = buildRotationMatrix(state.rot[1][0], state.rot[1][1], state.rot[1][2]);
     const R2 = buildRotationMatrix(state.rot[2][0], state.rot[2][1], state.rot[2][2]);
 
-    ruData.set(mvp, 0);   // offset 0: mvp
-    ruData.set(R0, 16);   // offset 64: R0
-    ruData.set(R1, 32);   // offset 128: R1
-    ruData.set(R2, 48);   // offset 192: R2
-    // Scalars at offset 256 (float index 64)
-    ruData[64] = st.s0;
-    ruData[65] = st.s1;
-    ruData[66] = st.s2;
-    ruData[67] = st.ctr;
-    ruData[68] = st.scl;
-    ruData[69] = state.blend;
-    ruData[70] = Math.max(1.0, Math.min(16.0, 30.0 / camRadius)) * state.pointScale;
-    ruData[71] = w;
-    ruData[72] = h;
-    ruData[73] = state.palette;
+    ruData.set(mvp, 0); ruData.set(R0, 16); ruData.set(R1, 32); ruData.set(R2, 48);
+    ruData[64] = st.s0; ruData[65] = st.s1; ruData[66] = st.s2; ruData[67] = st.ctr;
+    ruData[68] = st.scl; ruData[69] = state.blend; ruData[70] = Math.max(1.0, Math.min(16.0, 30.0 / camRadius)) * state.pointScale;
+    ruData[71] = w; ruData[72] = h; ruData[73] = state.palette;
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
     const pass = enc.beginRenderPass({
-        colorAttachments:[{
-            view: context.getCurrentTexture().createView(),
-            clearValue:{r:0.008,g:0.008,b:0.016,a:1}, loadOp:'clear', storeOp:'store',
-        }],
-        depthStencilAttachment:{
-            view:depthView, depthClearValue:1.0, depthLoadOp:'clear', depthStoreOp:'store',
-        }
+        colorAttachments:[{ view: context.getCurrentTexture().createView(), clearValue:{r:0.008,g:0.008,b:0.016,a:1}, loadOp:'clear', storeOp:'store', }],
+        depthStencilAttachment:{ view:depthView, depthClearValue:1.0, depthLoadOp:'clear', depthStoreOp:'store', }
     });
-    pass.setPipeline(renderPipeline);
-    pass.setBindGroup(0, renderBG);
-    pass.setVertexBuffer(0, quadVBuf);
-    pass.setVertexBuffer(1, outputBuf);
-    pass.setIndexBuffer(quadIBuf, 'uint16');
-    pass.drawIndexedIndirect(indirectBuf, 0);
-    pass.end();
-    device.queue.submit([enc.finish()]);
+    pass.setPipeline(renderPipeline); pass.setBindGroup(0, renderBG); pass.setVertexBuffer(0, quadVBuf); pass.setVertexBuffer(1, outputBuf); pass.setIndexBuffer(quadIBuf, 'uint16');
+    pass.drawIndexedIndirect(indirectBuf, 0); pass.end(); device.queue.submit([enc.finish()]);
 }
 
 // =============================================================================
-//  DEMO GENERATION
+//  UI & DEMO
 // =============================================================================
 
 function recenterCamera() { camTarget=[0,0,0]; camRadius=8; camTheta=Math.PI*0.25; camPhi=Math.PI*0.35; }
-
 function generateDemo() {
     const num = 100000;
     const buf = new ArrayBuffer(num * 12);
     const v = new DataView(buf);
     let x = 0.1, y = 0, z = 0;
-    state.fileName = "DEMO: LORENZ";
-    state.format = 'uint32';
-    document.getElementById('selFormat').value = 'uint32';
-
+    state.fileName = "DEMO: LORENZ"; state.format = 'uint32'; document.getElementById('selFormat').value = 'uint32';
     for (let i = 0; i < num; i++) {
         const dx = 10 * (y - x), dy = x * (28 - z) - y, dz = x * y - (8/3) * z;
         x += dx * 0.005; y += dy * 0.005; z += dz * 0.005;
-        const nx = Math.max(0, Math.min(1, (x + 25) / 50));
-        const ny = Math.max(0, Math.min(1, (y + 30) / 60));
-        const nz = Math.max(0, Math.min(1, z / 50));
-        const off = i * 12;
-        v.setUint32(off,     nx * 4294967295, true);
-        v.setUint32(off + 4, ny * 4294967295, true);
-        v.setUint32(off + 8, nz * 4294967295, true);
+        const nx = Math.max(0, Math.min(1, (x + 25) / 50)), ny = Math.max(0, Math.min(1, (y + 30) / 60)), nz = Math.max(0, Math.min(1, z / 50));
+        v.setUint32(i*12, nx * 4294967295, true); v.setUint32(i*12 + 4, ny * 4294967295, true); v.setUint32(i*12 + 8, nz * 4294967295, true);
     }
-    state.file = null;
-    state.fileSize = buf.byteLength;
-    state.buffer = buf;
-    runCompute();
+    state.file = null; state.fileSize = buf.byteLength; state.buffer = buf; runCompute();
 }
-
-// =============================================================================
-//  UI HANDLERS
-// =============================================================================
 
 function setFormat(f){
-    const wasImage = state.format.startsWith('img_');
-    state.format=f;
-    document.getElementById('selFormat').value=f;
-    if(f === 'img_rgb' && state.decodedImageBuf){
-        state.buffer = state.decodedImageBuf; state.file = null;
-        state.fileSize = state.decodedImageBuf.byteLength;
-        const mb = state.fileSize / (1024*1024);
-        const ws = document.getElementById('sWin');
-        ws.max = Math.max(1, Math.ceil(mb)); ws.value = Math.ceil(mb);
-        state.scrubWindowMB = mb;
-        document.getElementById('vWin').innerText = mb.toFixed(1);
-        runCompute();
-    } else if(f === 'img_raw' && state.imageFile){
-        state.file = state.imageFile; state.fileSize = state.imageFile.size;
-        const mb = state.imageFile.size / (1024*1024);
-        const ws = document.getElementById('sWin');
-        ws.max = Math.max(1, Math.ceil(mb));
-        const dw = Math.min(32, mb); ws.value = dw; state.scrubWindowMB = dw;
-        document.getElementById('vWin').innerText = dw.toFixed(1);
-        loadWindow();
-    } else if(wasImage && !f.startsWith('img_') && state.imageFile){
-        state.file = state.imageFile; state.fileSize = state.imageFile.size;
-        const mb = state.imageFile.size / (1024*1024);
-        const ws = document.getElementById('sWin');
-        ws.max = Math.max(1, Math.ceil(mb));
-        const dw = Math.min(32, mb); ws.value = dw; state.scrubWindowMB = dw;
-        document.getElementById('vWin').innerText = dw.toFixed(1);
-        loadWindow();
-    } else { runCompute(); }
+    const wasImage = state.format.startsWith('img_'); state.format=f;
+    if(f === 'img_rgb' && state.decodedImageBuf){ state.buffer = state.decodedImageBuf; state.fileSize = state.decodedImageBuf.byteLength; runCompute(); }
+    else if (state.file) loadWindow(); else runCompute();
 }
-function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=le?'le':'be';runCompute();}
+function setEndian(le){state.isLE=le; runCompute();}
 
 function handleFile(files){
     if(!files[0])return;
     const f = files[0];
     if(f.type.startsWith('image/')){
-        state.imageFile = f;
         const reader = new FileReader();
-        reader.onload = function(e){
+        reader.onload = e => {
             const img = new Image();
-            img.onload = function(){
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                canvas.width = img.width; canvas.height = img.height;
-                ctx.drawImage(img, 0, 0);
-                const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-                const pixelCount = canvas.width * canvas.height;
-                const rgb = new Uint8Array(pixelCount * 3);
-                for(let i=0, ri=0, si=0; i<pixelCount; i++, ri+=3, si+=4){
-                    rgb[ri]=rgba[si]; rgb[ri+1]=rgba[si+1]; rgb[ri+2]=rgba[si+2];
-                }
-                state.decodedImageBuf = rgb.buffer;
-                ingestBuffer(rgb.buffer, f.name + ` (${canvas.width}×${canvas.height})`, 'img_rgb');
+            img.onload = () => {
+                const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d'); canvas.width = img.width; canvas.height = img.height;
+                ctx.drawImage(img, 0, 0); const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                const rgb = new Uint8Array(img.width * img.height * 3);
+                for(let i=0, ri=0, si=0; i<img.width*img.height; i++, ri+=3, si+=4){ rgb[ri]=rgba[si]; rgb[ri+1]=rgba[si+1]; rgb[ri+2]=rgba[si+2]; }
+                ingestBuffer(rgb.buffer, f.name + ` (${img.width}×${img.height})`, 'img_rgb');
             };
             img.src = e.target.result;
         };
-        reader.readAsDataURL(f);
-        return;
+        reader.readAsDataURL(f); return;
     }
-    state.imageFile = null; state.decodedImageBuf = null;
-    state.file = f; state.fileSize = f.size; state.fileName = f.name;
-    const mb = f.size / (1024 * 1024);
-    const ws = document.getElementById('sWin');
-    ws.max = Math.max(1, Math.ceil(mb));
-    const dw = Math.min(32, mb); ws.value = dw; state.scrubWindowMB = dw;
-    document.getElementById('vWin').innerText = dw.toFixed(1);
-    document.getElementById('sOff').value = 0; state.scrubOffset = 0;
-    document.getElementById('vOff').innerText = '0%';
-    loadWindow();
+    state.file = f; state.fileSize = f.size; state.fileName = f.name; loadWindow();
 }
 
 function ingestBuffer(arrayBuffer, name, autoFormat){
-    state.buffer = arrayBuffer; state.file = null;
-    state.fileSize = arrayBuffer.byteLength; state.fileName = name;
-    if (autoFormat) setFormat(autoFormat);
-    const mb = arrayBuffer.byteLength / (1024 * 1024);
-    const ws = document.getElementById('sWin');
-    ws.max = Math.max(1, Math.ceil(mb)); ws.value = Math.ceil(mb);
-    state.scrubWindowMB = mb;
-    document.getElementById('vWin').innerText = mb.toFixed(1);
-    document.getElementById('sOff').value = 0; state.scrubOffset = 0;
-    document.getElementById('vOff').innerText = '0%';
+    state.buffer = arrayBuffer; state.file = null; state.fileSize = arrayBuffer.byteLength; state.fileName = name;
+    if (autoFormat) { state.format = autoFormat; document.getElementById('selFormat').value = autoFormat; }
     runCompute();
 }
 
 async function tryFetchURL(src){
-    const statsEl = document.getElementById('stats');
-    statsEl.innerHTML = `Fetching: <b>${src}</b>…`;
-    try {
-        const r = await fetch(src);
-        if (!r.ok) throw new Error(r.statusText);
-        const buf = await r.arrayBuffer();
-        ingestBuffer(buf, src.split('/').pop() || 'fetched');
-    } catch(e) { statsEl.innerHTML = `Fetch failed: <b>${e.message}</b>`; }
+    try { const r = await fetch(src); if (!r.ok) throw new Error(); ingestBuffer(await r.arrayBuffer(), src.split('/').pop()); } catch(e) {}
 }
 
 function handleNonFileDrop(text){
-    const trimmed = text.trim();
-    if (/^https?:\/\//i.test(trimmed)) { tryFetchURL(trimmed); return; }
-    const enc = new TextEncoder();
-    ingestBuffer(enc.encode(trimmed).buffer, `Dropped text (${trimmed.length} chars)`);
+    const trimmed = text.trim(); if (/^https?:\/\//i.test(trimmed)) { tryFetchURL(trimmed); return; }
+    ingestBuffer(new TextEncoder().encode(trimmed).buffer, "Dropped text");
 }
 
-// Lattice-specific controls
-function toggleAnimation() {
-    state.animating = !state.animating;
-    const btn = document.getElementById('btnAnim');
-    btn.textContent = state.animating ? '⏸ Pause' : '▶ Animate';
-    btn.classList.toggle('active', state.animating);
-}
+function toggleAnimation() { state.animating = !state.animating; const btn = document.getElementById('btnAnim'); btn.textContent = state.animating ? '⏸ Pause' : '▶ Animate'; btn.classList.toggle('active', state.animating); }
+function resetRotations() { state.rot = [[0,0,0], [0,0,0], [0,0,0]]; state.blend = 0; document.getElementById('sBlend').value = 0; syncRotSliders(); }
+function randomizeRotations() { for (let t = 0; t < 3; t++) for (let a = 0; a < 3; a++) { state.rot[t][a] = Math.round(Math.random() * 360 - 180); } syncRotSliders(); }
+function syncRotSliders() { ['X','Y','Z'].forEach((axis, a) => { for (let t = 0; t < 3; t++) { const el = document.getElementById(`sR${t}${axis}`); if (el) el.value = Math.round(state.rot[t][a]); const vel = document.getElementById(`vR${t}${axis}`); if (vel) vel.innerText = Math.round(state.rot[t][a]) + '°'; } }); }
 
-function resetRotations() {
-    state.rot = [[0,0,0], [0,0,0], [0,0,0]];
-    state.blend = 0;
-    document.getElementById('sBlend').value = 0;
-    document.getElementById('vBlend').innerText = '0.00';
-    syncRotSliders();
-}
-
-function randomizeRotations() {
-    for (let t = 0; t < 3; t++) for (let a = 0; a < 3; a++) {
-        state.rot[t][a] = Math.round(Math.random() * 360 - 180);
-    }
-    syncRotSliders();
-}
-
-function syncRotSliders() {
-    const axes = ['X','Y','Z'];
-    for (let t = 0; t < 3; t++) for (let a = 0; a < 3; a++) {
-        const id = `sR${t}${axes[a]}`;
-        const vid = `vR${t}${axes[a]}`;
-        const el = document.getElementById(id);
-        const vel = document.getElementById(vid);
-        if (el) el.value = Math.round(state.rot[t][a]);
-        if (vel) vel.innerText = Math.round(state.rot[t][a]) + '°';
-    }
-}
-
-// Slider wiring
 let computeRAF = 0, windowRAF = 0;
-function scheduleCompute() { cancelAnimationFrame(computeRAF); computeRAF = requestAnimationFrame(() => runCompute()); }
-function scheduleLoadWindow() { cancelAnimationFrame(windowRAF); windowRAF = requestAnimationFrame(() => loadWindow()); }
+function scheduleCompute() { cancelAnimationFrame(computeRAF); computeRAF = requestAnimationFrame(runCompute); }
+function scheduleLoadWindow() { cancelAnimationFrame(windowRAF); windowRAF = requestAnimationFrame(loadWindow); }
 
 document.getElementById('sOff').oninput=e=>{state.scrubOffset=parseFloat(e.target.value)/100;document.getElementById('vOff').innerText=parseFloat(e.target.value).toFixed(1)+'%';scheduleLoadWindow();};
 document.getElementById('sWin').oninput=e=>{state.scrubWindowMB=parseFloat(e.target.value);document.getElementById('vWin').innerText=parseFloat(e.target.value).toFixed(1);scheduleLoadWindow();};
@@ -1227,55 +1014,16 @@ document.getElementById('sPts').oninput=e=>{state.pointScale=parseFloat(e.target
 document.getElementById('sBlend').oninput=e=>{state.blend=parseFloat(e.target.value);document.getElementById('vBlend').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sAnimSpeed').oninput=e=>{state.animSpeed=parseFloat(e.target.value);document.getElementById('vAnimSpeed').innerText=parseFloat(e.target.value).toFixed(2);};
 
-// Per-tier rotation sliders
-['X','Y','Z'].forEach((axis, a) => {
-    for (let t = 0; t < 3; t++) {
-        const id = `sR${t}${axis}`;
-        const vid = `vR${t}${axis}`;
-        document.getElementById(id).oninput = e => {
-            state.rot[t][a] = parseFloat(e.target.value);
-            document.getElementById(vid).innerText = Math.round(state.rot[t][a]) + '°';
-        };
-    }
-});
+['X','Y','Z'].forEach((axis, a) => { for (let t = 0; t < 3; t++) { document.getElementById(`sR${t}${axis}`).oninput = e => { state.rot[t][a] = parseFloat(e.target.value); document.getElementById(`vR${t}${axis}`).innerText = Math.round(state.rot[t][a]) + '°'; }; } });
 
-// Drag & drop
 const dz=document.getElementById('dropZone');
 document.addEventListener('dragenter',e=>{e.preventDefault();dz.style.display='flex';});
-document.addEventListener('dragover',e=>e.preventDefault());
 dz.addEventListener('dragleave',e=>{e.preventDefault();dz.style.display='none';});
-document.addEventListener('drop',e=>{
-    e.preventDefault(); dz.style.display='none';
-    if(e.dataTransfer.files && e.dataTransfer.files.length > 0){ handleFile(e.dataTransfer.files); return; }
-    for(let i=0; i<e.dataTransfer.items.length; i++){
-        const item = e.dataTransfer.items[i];
-        if(item.kind==='string'){ item.getAsString(s => handleNonFileDrop(s)); }
-    }
-});
+document.addEventListener('dragover',e=>e.preventDefault());
+document.addEventListener('drop',e=>{ e.preventDefault(); dz.style.display='none'; if(e.dataTransfer.files.length > 0){ handleFile(e.dataTransfer.files); } else { e.dataTransfer.items[0].getAsString(handleNonFileDrop); } });
+document.addEventListener('paste', e=>{ const items = (e.clipboardData || window.clipboardData).items; for(let item of items){ if(item.kind === 'file') handleFile([item.getAsFile()]); else if(item.kind === 'string') item.getAsString(s => { if(/^https?:\/\//i.test(s.trim())) tryFetchURL(s.trim()); }); } });
 
-document.addEventListener('paste', e=>{
-    e.preventDefault();
-    const items = (e.clipboardData || window.clipboardData).items;
-    for(let item of items){
-        if(item.kind === 'file'){ handleFile([item.getAsFile()]); }
-        else if(item.kind === 'string'){
-            item.getAsString(s => { const t=s.trim(); if(/^https?:\/\//i.test(t)) tryFetchURL(t); });
-        }
-    }
-});
-
-// =============================================================================
-//  BOOT
-// =============================================================================
-
-(async()=>{
-    const ok=await initWebGPU();
-    if(!ok)return;
-    render();
-
-    const fetchArg = new URL(document.URL).searchParams.get('fetch');
-    if(fetchArg){ tryFetchURL(fetchArg); } else { generateDemo(); }
-})();
+(async()=>{ if(await initWebGPU()) { render(); const fArg = new URL(document.URL).searchParams.get('fetch'); if(fArg) tryFetchURL(fArg); else generateDemo(); } })();
 
 </script>
 </body>
