@@ -175,8 +175,8 @@
         <input type="range" id="sInf" min="0" max="1" step="0.01" value="0.50">
     </div>
     <div class="ctrl">
-        <label>Dive (Bit Shift) <span class="val" id="vShift">22</span></label>
-        <input type="range" id="sShift" min="0" max="22" step="1" value="22">
+        <label>Dive (Bit Shift) <span class="val" id="vShift">23</span></label>
+        <input type="range" id="sShift" min="0" max="23" step="1" value="23">
     </div>
     <div class="ctrl">
         <label>Zoom Depth <span class="val" id="vZoom">20</span></label>
@@ -204,6 +204,10 @@
     <div class="ctrl">
         <label>Center Gravity <span class="val" id="vProx">0.00</span></label>
         <input type="range" id="sProx" min="0" max="1" step="0.01" value="0">
+    </div>
+    <div class="ctrl">
+        <label>Density Strength <span class="val" id="vDens">0.00</span></label>
+        <input type="range" id="sDens" min="0" max="1" step="0.01" value="0">
     </div>
         </div>
     </details>
@@ -240,6 +244,36 @@
             </select>
         </div>
     </div>
+        </div>
+    </details>
+
+    <details>
+        <summary>Volume Density</summary>
+        <div class="section-body">
+    <div class="select-row">
+        <div>
+            <div class="group-label">Density Curve</div>
+            <select id="selDensCurve" onchange="state.densityCurve=parseInt(this.value)">
+                <option value="0" selected>Log</option>
+                <option value="1">Quadratic</option>
+                <option value="2">Sigmoid</option>
+                <option value="3">Step</option>
+            </select>
+        </div>
+        <div>
+            <div class="group-label">Density Mode</div>
+            <select id="selDensMode" onchange="state.densityMode=parseInt(this.value)">
+                <option value="0" selected>Current Window</option>
+                <option value="1">Cumulative</option>
+            </select>
+        </div>
+    </div>
+    <div class="ctrl">
+        <label>Threshold <span class="val" id="vDensThresh">1000</span></label>
+        <input type="range" id="sDensThresh" min="0" max="12" step="0.1" value="6.9">
+    </div>
+    <div style="font-size:9px;color:#446;margin-bottom:8px;text-align:right;">Log scale: 10^<span id="vDensThreshExp">6.9</span> ≈ <span id="vDensThreshVal">~8M</span></div>
+    <button style="width:100%;padding:6px;font-size:9px;background:#0a0a1a;border:1px solid #114;color:#558;cursor:pointer;border-radius:4px;font-family:inherit;" onclick="resetAccumulation()">Reset Accumulation</button>
         </div>
     </details>
 
@@ -370,6 +404,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 @group(0) @binding(3) var<storage, read_write> indirect: array<atomic<u32>>;
 @group(0) @binding(4) var<uniform> P: Params;
+@group(0) @binding(5) var<storage, read_write> countTable: array<atomic<u32>>;
 
 fn rU8(off: u32) -> u32 { return (raw[off >> 2u] >> ((off & 3u) * 8u)) & 0xFFu; }
 
@@ -490,8 +525,15 @@ fn main(
         }
 
         let vx=vals[0]; let vy=vals[1]; let vz=vals[2];
-        let dx=(vx>>P.shift)&0x3FFu; let dy=(vy>>P.shift)&0x3FFu; let dz=(vz>>P.shift)&0x3FFu;
-        let key=(dz<<20u)|(dy<<10u)|dx;
+        let dx=(vx>>P.shift)&0x1FFu; let dy=(vy>>P.shift)&0x1FFu; let dz=(vz>>P.shift)&0x1FFu;
+        let key=(dz<<18u)|(dy<<9u)|dx;
+
+        // Count at meso resolution (8 bits/axis = tier0+tier1, 24-bit key)
+        let mx = (vx >> (P.tierShift + 4u)) & 0xFFu;
+        let my = (vy >> (P.tierShift + 4u)) & 0xFFu;
+        let mz = (vz >> (P.tierShift + 4u)) & 0xFFu;
+        let mesoKey = (mx << 16u) | (my << 8u) | mz;
+        atomicAdd(&countTable[mesoKey], 1u);
 
         let old = atomicOr(&bitTable[key>>5u], 1u<<(key&31u));
         if ((old & (1u<<(key&31u))) == 0u) {
@@ -505,7 +547,7 @@ fn main(
             packed[0] = f32((((vx>>t0s)&0xFu)<<16u) | (((vy>>t0s)&0xFu)<<8u) | ((vz>>t0s)&0xFu));
             packed[1] = f32((((vx>>t1s)&0xFu)<<16u) | (((vy>>t1s)&0xFu)<<8u) | ((vz>>t1s)&0xFu));
             packed[2] = f32((((vx>>t2s)&0xFu)<<16u) | (((vy>>t2s)&0xFu)<<8u) | ((vz>>t2s)&0xFu));
-            let cr=(dx*255u)/1023u; let cg=(dy*255u)/1023u; let cb=(dz*255u)/1023u;
+            let cr=(dx*255u)/511u; let cg=(dy*255u)/511u; let cb=(dz*255u)/511u;
             packed[3] = f32((cr<<16u) | (cg<<8u) | cb);
         }
     }
@@ -550,10 +592,13 @@ struct RParams {
     aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
     aabbMode: f32, csgMode: f32, gizmoAlpha: f32, palette: f32,
     pulsePhase: f32, selectionActive: f32,
+    densityStrength: f32, densityCurve: f32,
+    maxCount: f32, densityThreshold: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
 @group(0) @binding(1) var<storage, read> selection: array<u32>;
+@group(0) @binding(2) var<storage, read> countTable: array<u32>;
 
 struct VSOut {
     @builtin(position) pos: vec4<f32>,
@@ -660,6 +705,35 @@ fn vs(
     prox = clamp(prox, 0.0, 1.0);
     var size = R.pointSize * mix(1.0, 0.5 + 1.5 * prox, R.proximityStrength);
 
+    // ---- Stage 4: Density (volume) ----
+    var density = 0.0;
+    if (R.densityStrength > 0.0 && R.maxCount > 0.0) {
+        let mesoX = u32(p0.x) * 16u + u32(p1.x);
+        let mesoY = u32(p0.y) * 16u + u32(p1.y);
+        let mesoZ = u32(p0.z) * 16u + u32(p1.z);
+        let mKey = (mesoX << 16u) | (mesoY << 8u) | mesoZ;
+        let rawCount = countTable[mKey];
+        let dcurve = u32(R.densityCurve + 0.5);
+        switch (dcurve) {
+            case 1u {
+                let d = log2(f32(rawCount) + 1.0) / log2(R.maxCount + 1.0);
+                density = d * d;
+            }
+            case 2u {
+                let x = f32(rawCount) / max(R.densityThreshold, 1.0);
+                density = x / (1.0 + x);
+            }
+            case 3u {
+                density = select(0.0, 1.0, f32(rawCount) > R.densityThreshold);
+            }
+            default {
+                density = log2(f32(rawCount) + 1.0) / log2(R.maxCount + 1.0);
+            }
+        }
+        density = clamp(density, 0.0, 1.0);
+        size = size * mix(1.0, 0.5 + 1.5 * density, R.densityStrength);
+    }
+
     // Selection pulse: read per-particle flag from selection buffer
     let selWord = selection[instIdx >> 2u];
     let selByte = (selWord >> ((instIdx & 3u) * 8u)) & 0xFFu;
@@ -671,8 +745,9 @@ fn vs(
     var clip = R.mvp * vec4(world, 1.0);
     clip = vec4(clip.xy + qOff*size*clip.w/vec2(R.vpW, R.vpH), clip.zw);
 
-    // Brightness: dim periphery, bright center
+    // Brightness: dim periphery, bright center + density
     let proxBright = mix(1.0, 0.4 + 1.2 * prox, R.proximityStrength);
+    let densBright = mix(1.0, 0.4 + 1.2 * density, R.densityStrength);
     let selBright = mix(1.0, 1.0 + pulse * 0.8, sel);
 
     // Palette remapping (palette 0 = pass-through = current behavior)
@@ -721,7 +796,7 @@ fn vs(
     }
 
     var o:VSOut;
-    o.pos=clip; o.color=(mapped+0.1) * proxBright * selBright; o.uv=qOff; o.worldPos=world;
+    o.pos=clip; o.color=(mapped+0.1) * proxBright * densBright * selBright; o.uv=qOff; o.worldPos=world;
     return o;
 }
 
@@ -800,8 +875,12 @@ struct RParams {
     aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
     aabbMode: f32, csgMode: f32, gizmoAlpha: f32, palette: f32,
     pulsePhase: f32, selectionActive: f32,
+    densityStrength: f32, densityCurve: f32,
+    maxCount: f32, densityThreshold: f32,
 };
 @group(0) @binding(0) var<uniform> R: RParams;
+@group(0) @binding(1) var<storage, read> _selection: array<u32>;
+@group(0) @binding(2) var<storage, read> _countTable: array<u32>;
 
 struct WOut {
     @builtin(position) pos: vec4<f32>,
@@ -843,6 +922,8 @@ struct RParams {
     aabbMaxX: f32, aabbMaxY: f32, aabbMaxZ: f32,
     aabbMode: f32, csgMode: f32, gizmoAlpha: f32, palette: f32,
     pulsePhase: f32, selectionActive: f32,
+    densityStrength: f32, densityCurve: f32,
+    maxCount: f32, densityThreshold: f32,
 };
 
 struct SelectRect {
@@ -963,7 +1044,7 @@ const FORMAT_ID = {
 };
 
 let state = {
-    format: 'uint32', isLE: true, shift: 22, tierShift: 20,
+    format: 'uint32', isLE: true, shift: 23, tierShift: 20,
     gaps: [0.25, 0.1, 0.05], inflate: 0.5,
     file: null, fileSize: 0, buffer: null, fileName: "Internal",
     mode: 0, // 0 = 3D, 1 = Tiled 2D, 2 = Atlas 3D
@@ -988,6 +1069,10 @@ let state = {
     gizmoAlpha: 0.3,
     palette: 0,
     selectionActive: false,
+    densityStrength: 0,
+    densityCurve: 0,      // 0=log, 1=quadratic, 2=sigmoid, 3=step
+    densityMode: 0,       // 0=reset per dispatch, 1=cumulative
+    densityThreshold: 7943282,  // 10^6.9
     // Image support: keep both decoded pixels and original file
     imageFile: null,        // original File object for raw-bytes mode
     decodedImageBuf: null,  // decoded RGB ArrayBuffer (alpha stripped)
@@ -1111,15 +1196,30 @@ function getMVP(asp) {
 // =============================================================================
 
 let device, context, canvasEl, canvasFmt;
-let computePipeline, renderPipeline, wirePipeline, selectPipeline;
+let computePipeline, renderPipeline, wirePipeline, selectPipeline, reducePipeline;
 let rawDataBuf, bitTableBuf, outputBuf, indirectBuf, computeUniformBuf;
+let countTableBuf, maxCountBuf;
 let renderUniformBuf, quadVBuf, quadIBuf, wireVBuf;
 let selectionBuf, selectUniformBuf;
-let computeBGL, renderBGL, selectBGL;
+let computeBGL, renderBGL, selectBGL, reduceBGL;
 let depthTex, depthView;
 let pointCount = 0;
 
-const BIT_TABLE_SIZE = (1 << 25) * 4;
+const BIT_TABLE_SIZE = (1 << 22) * 4;  // 16 MB: 2^27 bits (9-bit/axis dedupe)
+const COUNT_TABLE_SIZE = (1 << 24) * 4; // 64 MB: 16M meso cells × u32
+let maxCountValue = 0;
+
+const REDUCE_WGSL = `
+@group(0) @binding(0) var<storage, read> counts: array<u32>;
+@group(0) @binding(1) var<storage, read_write> result: array<atomic<u32>>;
+
+@compute @workgroup_size(256)
+fn reduceMax(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= arrayLength(&counts)) { return; }
+    let val = counts[gid.x];
+    atomicMax(&result[0], val);
+}
+`;
 
 async function initWebGPU() {
     if (!navigator.gpu) { document.getElementById('gpuError').style.display='block'; return false; }
@@ -1239,6 +1339,7 @@ function mkPipelines() {
         {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
         {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
         {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
+        {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
     ]});
     computePipeline = device.createComputePipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[computeBGL]}),
@@ -1249,6 +1350,7 @@ function mkPipelines() {
     renderBGL = device.createBindGroupLayout({ entries:[
         {binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},
         {binding:1,visibility:GPUShaderStage.VERTEX,buffer:{type:'read-only-storage'}},
+        {binding:2,visibility:GPUShaderStage.VERTEX,buffer:{type:'read-only-storage'}},
     ]});
     renderPipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
@@ -1301,6 +1403,17 @@ function mkPipelines() {
         layout: device.createPipelineLayout({bindGroupLayouts:[selectBGL]}),
         compute:{module:ss,entryPoint:'selectMain'}
     });
+
+    // Reduction pipeline (maxCount over countTable)
+    const reds = device.createShaderModule({code: REDUCE_WGSL});
+    reduceBGL = device.createBindGroupLayout({ entries:[
+        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
+        {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+    ]});
+    reducePipeline = device.createComputePipeline({
+        layout: device.createPipelineLayout({bindGroupLayouts:[reduceBGL]}),
+        compute:{module:reds,entryPoint:'reduceMax'}
+    });
 }
 
 function mkStaticBufs() {
@@ -1309,9 +1422,13 @@ function mkStaticBufs() {
     quadIBuf = device.createBuffer({size:12,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
     device.queue.writeBuffer(quadIBuf,0,new Uint16Array([0,1,2, 2,1,3]));
     computeUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    renderUniformBuf = device.createBuffer({size:256,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    renderUniformBuf = device.createBuffer({size:288,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     wireVBuf = device.createBuffer({size:4096,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
     bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+
+    // Density count table (meso resolution: 16M cells × u32)
+    countTableBuf = device.createBuffer({size:COUNT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+    maxCountBuf = device.createBuffer({size:4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
 
     // Selection buffers
     const selBufSize = Math.ceil(MAX_OUTPUT_POINTS / 4) * 4;
@@ -1402,13 +1519,17 @@ async function runCompute() {
     const statsEl = document.getElementById('stats');
 
     // Fix #8: Only clear the region of bitTable that this shift level can touch
-    // At shift=22 (10 bits/axis): full 128MB. At shift=28 (4 bits/axis): ~2MB.
-    const bitsPerAxis = Math.min(10, 32 - state.shift);
+    // At shift=23 (9 bits/axis): full 16MB. At shift=28 (4 bits/axis): ~32KB.
+    const bitsPerAxis = Math.min(9, 32 - state.shift);
     const maxPerAxis = (1 << bitsPerAxis) - 1;
-    const maxKey = (maxPerAxis << 20) | (maxPerAxis << 10) | maxPerAxis;
+    const maxKey = (maxPerAxis << 18) | (maxPerAxis << 9) | maxPerAxis;
     const clearBytes = Math.min(Math.ceil((maxKey + 1) / 32) * 4, BIT_TABLE_SIZE);
     const initEnc = device.createCommandEncoder();
     initEnc.clearBuffer(bitTableBuf, 0, clearBytes);
+    // Clear count table (skip in cumulative mode)
+    if (state.densityMode === 0) {
+        initEnc.clearBuffer(countTableBuf, 0, COUNT_TABLE_SIZE);
+    }
     device.queue.submit([initEnc.finish()]);
     device.queue.writeBuffer(indirectBuf, 0, indirectResetData);
 
@@ -1425,6 +1546,7 @@ async function runCompute() {
         { binding: 2, resource: { buffer: outputBuf } },
         { binding: 3, resource: { buffer: indirectBuf } },
         { binding: 4, resource: { buffer: computeUniformBuf } },
+        { binding: 5, resource: { buffer: countTableBuf } },
     ]});
 
     for (let chunk = 0; chunk < totalChunks; chunk++) {
@@ -1471,22 +1593,40 @@ async function runCompute() {
         }
     }
 
-    // Readback final point count
-    const rb = device.createBuffer({ size: 20, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    // Reduction: find max count across all meso cells
+    device.queue.writeBuffer(maxCountBuf, 0, new Uint32Array([0]));
+    const redBG = device.createBindGroup({ layout:reduceBGL, entries:[
+        {binding:0, resource:{buffer:countTableBuf}},
+        {binding:1, resource:{buffer:maxCountBuf}},
+    ]});
+    const redEnc = device.createCommandEncoder();
+    const redPass = redEnc.beginComputePass();
+    redPass.setPipeline(reducePipeline);
+    redPass.setBindGroup(0, redBG);
+    redPass.dispatchWorkgroups(Math.min(65535, Math.ceil((1 << 24) / 256)));
+    redPass.end();
+    device.queue.submit([redEnc.finish()]);
+
+    // Readback point count + max density count
+    const rb = device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = device.createCommandEncoder();
     enc.copyBufferToBuffer(indirectBuf, 0, rb, 0, 20);
+    enc.copyBufferToBuffer(maxCountBuf, 0, rb, 20, 4);
     device.queue.submit([enc.finish()]);
     await rb.mapAsync(GPUMapMode.READ);
-    pointCount = new Uint32Array(rb.getMappedRange())[1];
+    const rbData = new Uint32Array(rb.getMappedRange());
+    pointCount = rbData[1];
+    maxCountValue = rbData[5];
     rb.unmap(); rb.destroy();
 
     const mbFull = (state.fileSize / (1024 * 1024)).toFixed(1);
     const mbWin = (byteLen / (1024 * 1024)).toFixed(1);
     const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
     const offPct = (state.scrubOffset * 100).toFixed(1);
+    const densInfo = maxCountValue > 0 ? ` · Peak: <b>${maxCountValue.toLocaleString()}</b>×` : '';
     statsEl.innerHTML =
         `Source: <b>${state.fileName}</b> (${mbFull} MB)<br>` +
-        `Window: <b>${mbWin} MB</b> @ ${offPct}% · Nodes: <b>${pointCount.toLocaleString()}</b><br>` +
+        `Window: <b>${mbWin} MB</b> @ ${offPct}% · Nodes: <b>${pointCount.toLocaleString()}</b>${densInfo}<br>` +
         `GPU: <b>${mbOut} MB</b> · Chunks: <b>${totalChunks}</b> · <b>WebGPU</b>`;
 }
 
@@ -1495,7 +1635,7 @@ async function runCompute() {
 // =============================================================================
 
 // Pre-allocated uniform staging buffer (avoids GC per frame)
-const ruData = new Float32Array(64);
+const ruData = new Float32Array(72);
 
 // Cached bind group — uniform-only, created once
 let renderBG = null;
@@ -1505,6 +1645,7 @@ function ensureRenderBindGroup() {
     renderBG = device.createBindGroup({ layout:renderBGL, entries:[
         {binding:0,resource:{buffer:renderUniformBuf}},
         {binding:1,resource:{buffer:selectionBuf}},
+        {binding:2,resource:{buffer:countTableBuf}},
     ]});
 }
 
@@ -1639,6 +1780,10 @@ function render() {
     ruData[59]=state.palette;
     ruData[60]=Math.sin(performance.now() * 0.004);
     ruData[61]=state.selectionActive ? 1.0 : 0.0;
+    ruData[62]=state.densityStrength;
+    ruData[63]=state.densityCurve;
+    ruData[64]=maxCountValue;
+    ruData[65]=state.densityThreshold;
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
@@ -2088,6 +2233,14 @@ document.getElementById('sInf').oninput=e=>{state.inflate=parseFloat(e.target.va
 document.getElementById('sPts').oninput=e=>{state.pointScale=parseFloat(e.target.value);document.getElementById('vPts').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sDepth').oninput=e=>{state.depthScale=parseFloat(e.target.value);document.getElementById('vDepth').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sProx').oninput=e=>{state.proximity=parseFloat(e.target.value);document.getElementById('vProx').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sDens').oninput=e=>{state.densityStrength=parseFloat(e.target.value);document.getElementById('vDens').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sDensThresh').oninput=e=>{
+    const exp=parseFloat(e.target.value);
+    state.densityThreshold=Math.pow(10,exp);
+    document.getElementById('vDensThreshExp').innerText=exp.toFixed(1);
+    const v=Math.pow(10,exp);
+    document.getElementById('vDensThreshVal').innerText=v>=1e6?'~'+(v/1e6).toFixed(1)+'M':v>=1e3?'~'+(v/1e3).toFixed(1)+'K':Math.round(v);
+};
 document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;scheduleCompute();};
 document.getElementById('sZoom').oninput=e=>{state.tierShift=parseInt(e.target.value);document.getElementById('vZoom').innerText=e.target.value;scheduleCompute();};
 // Slab handlers
@@ -2139,6 +2292,14 @@ document.addEventListener('paste', e=>{
         }
     }
 });
+
+function resetAccumulation() {
+    if (!device || !countTableBuf) return;
+    const enc = device.createCommandEncoder();
+    enc.clearBuffer(countTableBuf, 0, COUNT_TABLE_SIZE);
+    device.queue.submit([enc.finish()]);
+    maxCountValue = 0;
+}
 
 // =============================================================================
 //  BOOT
