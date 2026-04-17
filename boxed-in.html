@@ -1091,6 +1091,7 @@ class InputManager {
         this.excludeSelectors = opts.excludeSelectors || []; // overlay selectors to ignore touches on
 
         this._tapCallbacks = [];
+        this._hoverCallbacks = [];
         this._lastTouchTime = 0;
         this._touchStartPos = null;
         this.hasUserInteracted = false;
@@ -1099,6 +1100,11 @@ class InputManager {
     }
 
     onTap(fn) { this._tapCallbacks.push(fn); }
+    onHover(fn) { this._hoverCallbacks.push(fn); }
+
+    _fireHover(clientX, clientY) {
+        for (const fn of this._hoverCallbacks) fn(clientX, clientY);
+    }
 
     _fireTap(clientX, clientY) {
         if (!this.hasUserInteracted) {
@@ -1138,6 +1144,17 @@ class InputManager {
             if (dist <= this.tapThreshold) this._fireTap(t.clientX, t.clientY);
             this._touchStartPos = null;
         }, { passive: false });
+
+        // Hover / pointer move
+        window.addEventListener('mousemove', e => {
+            this._fireHover(e.clientX, e.clientY);
+        });
+        this.domElement.addEventListener('touchmove', e => {
+            if (e.touches.length > 0) {
+                const t = e.touches[0];
+                this._fireHover(t.clientX, t.clientY);
+            }
+        }, { passive: true });
     }
 }
 
@@ -1342,6 +1359,7 @@ class GameState {
     update(delta) {}    // called each frame
     render(delta) {}    // called each frame after update
     onTap(x, y) {}      // called on input tap
+    onHover(x, y) {}    // called on pointer move
     onResize() {}       // called on window resize
 }
 
@@ -1373,6 +1391,11 @@ class StateManager {
         inputManager.onTap((x, y) => {
             const state = this.current();
             if (state) state.onTap(x, y);
+        });
+
+        inputManager.onHover((x, y) => {
+            const state = this.current();
+            if (state) state.onHover(x, y);
         });
     }
 
@@ -1794,6 +1817,47 @@ class SceneManager {
 }
 
 // ============================================
+// UNBOXED ENGINE — LOOP MANAGER
+// ============================================
+// Lightweight animation loop for games that
+// manage their own THREE.js. Provides the same
+// hook interface as SceneManager so StateManager
+// wiring works identically.
+// ============================================
+class LoopManager {
+    constructor() {
+        this._updateHooks = [];
+        this._renderHooks = [];
+        this._resizeHook = null;
+        this._running = false;
+        this._lastTime = 0;
+        window.addEventListener('resize', () => this._onResize());
+    }
+    onUpdate(fn) { this._updateHooks.push(fn); }
+    onRender(fn) { this._renderHooks.push(fn); }
+    onResize(fn) { this._resizeHook = fn; }
+    start() {
+        if (this._running) return;
+        this._running = true;
+        this._lastTime = performance.now();
+        this._tick();
+    }
+    stop() { this._running = false; }
+    _tick() {
+        if (!this._running) return;
+        requestAnimationFrame(() => this._tick());
+        const now = performance.now();
+        const delta = (now - this._lastTime) / 1000;
+        this._lastTime = now;
+        for (const fn of this._updateHooks) fn(delta);
+        for (const fn of this._renderHooks) fn(delta);
+    }
+    _onResize() {
+        if (this._resizeHook) this._resizeHook();
+    }
+}
+
+// ============================================
 // UNBOXED BOOTSTRAP
 // ============================================
 // The main entry point. Games call Unboxed.run()
@@ -1814,6 +1878,7 @@ const Unboxed = {
     ParticlePool,
     CameraSolver,
     SceneManager,
+    LoopManager,
 
     // Framework singletons (created before run)
     soundEngine,
@@ -1834,12 +1899,14 @@ const Unboxed = {
 
     run(config = {}) {
         const {
-            // Scene config
+            // Scene config — pass false to skip SceneManager entirely
             scene: sceneConfig = {},
             // Input config
             input: inputConfig = {},
             // Sound registrations
             sounds = {},
+            // Raw loop callback for self-rendering games (used when scene: false)
+            loop = null,
             // Game init callback — receives the engine object
             init = () => {},
         } = config;
@@ -1849,16 +1916,25 @@ const Unboxed = {
             soundEngine.registerAll(sounds);
         }
 
-        // Create scene
-        this.sceneManager = new SceneManager(sceneConfig);
-        this.scene = this.sceneManager.scene;
-        this.camera = this.sceneManager.camera;
-        this.renderer = this.sceneManager.renderer;
-        this.particles = this.sceneManager.particles;
-        this.starfield = this.sceneManager.starfield;
-
-        // Create input manager
-        this.inputManager = new InputManager(this.renderer.domElement, inputConfig);
+        if (sceneConfig === false) {
+            // Bare loop mode — game manages its own THREE.js rendering
+            this.sceneManager = new LoopManager();
+            if (loop) {
+                this.sceneManager.onUpdate(loop);
+            }
+            // Input: use specified domElement or fall back to document.body
+            const inputDom = inputConfig.domElement || document.body;
+            this.inputManager = new InputManager(inputDom, inputConfig);
+        } else {
+            // Full scene mode — framework manages THREE.js
+            this.sceneManager = new SceneManager(sceneConfig);
+            this.scene = this.sceneManager.scene;
+            this.camera = this.sceneManager.camera;
+            this.renderer = this.sceneManager.renderer;
+            this.particles = this.sceneManager.particles;
+            this.starfield = this.sceneManager.starfield;
+            this.inputManager = new InputManager(this.renderer.domElement, inputConfig);
+        }
 
         // Wire state routing
         this.stateManager.wire(this.sceneManager, this.inputManager);
