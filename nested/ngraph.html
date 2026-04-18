@@ -1,0 +1,1037 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ngraph — Shape Constellation</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700&family=Instrument+Serif:ital@0;1&display=swap');
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        .hidden { display: none !important; }
+
+        :root {
+            --bg-deep: #0a0a14;
+            --bg-mid: #0f1023;
+            --surface: rgba(255,255,255,0.04);
+            --surface-hover: rgba(255,255,255,0.08);
+            --border: rgba(255,255,255,0.08);
+            --text-primary: #e8e6f0;
+            --text-muted: rgba(255,255,255,0.45);
+            --accent-cyan: #4ecdc4;
+            --accent-coral: #ff6b6b;
+            --accent-gold: #ffd93d;
+            --accent-lavender: #c792ea;
+            --accent-mint: #7bed9f;
+            --edge-growth: rgba(78,205,196,0.25);
+            --edge-rotation: rgba(199,128,234,0.3);
+            --edge-reflection: rgba(255,217,61,0.25);
+            --edge-mutation: rgba(255,255,255,0.1);
+        }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
+            background: var(--bg-deep);
+            color: var(--text-primary);
+            font-family: 'DM Sans', sans-serif;
+        }
+
+        /* Subtle grid background */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background:
+                radial-gradient(circle at 25% 35%, rgba(78,205,196,0.06) 0%, transparent 50%),
+                radial-gradient(circle at 75% 65%, rgba(199,128,234,0.05) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        #graph-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            z-index: 1;
+        }
+
+        svg { display: block; }
+
+        /* Control panel */
+        .controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-width: 260px;
+        }
+
+        .panel {
+            background: rgba(15,16,35,0.92);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 16px;
+        }
+
+        .panel-title {
+            font-family: 'Instrument Serif', serif;
+            font-size: 22px;
+            font-style: italic;
+            color: var(--accent-cyan);
+            margin-bottom: 4px;
+            letter-spacing: -0.02em;
+        }
+
+        .panel-subtitle {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-bottom: 14px;
+            line-height: 1.4;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+        }
+        .stat-row:last-child { border-bottom: none; }
+        .stat-label { color: var(--text-muted); }
+        .stat-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+        .edge-toggles {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            padding: 6px 8px;
+            border-radius: 8px;
+            transition: background 0.15s;
+            font-size: 12px;
+        }
+        .toggle-row:hover { background: var(--surface-hover); }
+
+        .toggle-swatch {
+            width: 18px;
+            height: 4px;
+            border-radius: 2px;
+            flex-shrink: 0;
+        }
+        .toggle-swatch.growth { background: var(--accent-cyan); }
+        .toggle-swatch.rotation { background: var(--accent-lavender); border-style: dashed; }
+        .toggle-swatch.reflection { background: var(--accent-gold); }
+        .toggle-swatch.mutation { background: rgba(255,255,255,0.3); }
+
+        .toggle-row input[type="checkbox"] {
+            appearance: none;
+            width: 14px;
+            height: 14px;
+            border: 2px solid var(--border);
+            border-radius: 4px;
+            flex-shrink: 0;
+            cursor: pointer;
+            position: relative;
+            transition: all 0.15s;
+        }
+        .toggle-row input[type="checkbox"]:checked {
+            background: var(--accent-cyan);
+            border-color: var(--accent-cyan);
+        }
+        .toggle-row input[type="checkbox"]:checked::after {
+            content: '✓';
+            position: absolute;
+            top: -2px;
+            left: 1px;
+            font-size: 10px;
+            color: var(--bg-deep);
+            font-weight: 900;
+        }
+
+        .toggle-text { color: var(--text-primary); flex: 1; }
+        .toggle-count { color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+
+        /* Layout buttons */
+        .layout-btns {
+            display: flex;
+            gap: 4px;
+            margin-top: 10px;
+        }
+
+        .layout-btn {
+            flex: 1;
+            padding: 7px 0;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: transparent;
+            color: var(--text-muted);
+            font-family: 'DM Sans', sans-serif;
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .layout-btn:hover { background: var(--surface-hover); color: var(--text-primary); }
+        .layout-btn.active {
+            background: rgba(78,205,196,0.15);
+            border-color: rgba(78,205,196,0.4);
+            color: var(--accent-cyan);
+        }
+
+        /* Color mode */
+        .color-btns {
+            display: flex;
+            gap: 4px;
+            margin-top: 8px;
+        }
+        .color-btn {
+            flex: 1;
+            padding: 6px 0;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: transparent;
+            color: var(--text-muted);
+            font-family: 'DM Sans', sans-serif;
+            font-size: 10px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .color-btn:hover { background: var(--surface-hover); color: var(--text-primary); }
+        .color-btn.active {
+            background: rgba(78,205,196,0.15);
+            border-color: rgba(78,205,196,0.4);
+            color: var(--accent-cyan);
+        }
+
+        /* Tooltip */
+        .tooltip {
+            position: fixed;
+            pointer-events: none;
+            background: rgba(10,10,20,0.95);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(78,205,196,0.3);
+            border-radius: 12px;
+            padding: 14px 16px;
+            z-index: 200;
+            opacity: 0;
+            transition: opacity 0.15s;
+            min-width: 140px;
+        }
+        .tooltip.visible { opacity: 1; }
+        .tooltip-shape { margin-bottom: 8px; }
+        .tooltip-shape svg { display: block; }
+        .tooltip-info { font-size: 11px; color: var(--text-muted); line-height: 1.6; }
+        .tooltip-info strong { color: var(--text-primary); font-weight: 700; }
+        .tooltip-pips { display: flex; gap: 4px; margin-top: 6px; }
+        .tooltip-pip {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+
+        /* Info badge bottom-right */
+        .info-badge {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 100;
+            font-size: 11px;
+            color: var(--text-muted);
+            background: rgba(15,16,35,0.8);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 10px 14px;
+            line-height: 1.5;
+            pointer-events: none;
+        }
+        .info-badge kbd {
+            display: inline-block;
+            padding: 1px 5px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 10px;
+            color: var(--text-primary);
+            background: var(--surface);
+        }
+
+        /* No-data state */
+        .no-data {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+            text-align: center;
+            padding: 40px;
+        }
+        .no-data h1 {
+            font-family: 'Instrument Serif', serif;
+            font-size: 36px;
+            font-style: italic;
+            color: var(--accent-cyan);
+            margin-bottom: 12px;
+        }
+        .no-data p {
+            font-size: 14px;
+            color: var(--text-muted);
+            max-width: 400px;
+            line-height: 1.7;
+            margin-bottom: 8px;
+        }
+        .no-data .gen-btn {
+            margin-top: 20px;
+            padding: 12px 28px;
+            background: linear-gradient(135deg, var(--accent-cyan), #44a08d);
+            border: none;
+            border-radius: 999px;
+            color: white;
+            font-family: 'DM Sans', sans-serif;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: transform 0.15s;
+        }
+        .no-data .gen-btn:hover { transform: translateY(-2px); }
+    </style>
+</head>
+<body>
+    <div id="graph-container"></div>
+
+    <div class="tooltip" id="tooltip">
+        <div class="tooltip-shape" id="tooltip-shape"></div>
+        <div class="tooltip-info" id="tooltip-info"></div>
+    </div>
+
+    <div class="no-data hidden" id="no-data-screen">
+        <h1>Shape Constellation</h1>
+        <p>No shape collection found. Play Shape Collector first to discover shapes, or generate a demo collection to explore the graph.</p>
+        <button class="gen-btn" id="gen-demo-btn">Generate Demo Collection</button>
+    </div>
+
+    <div class="controls" id="controls">
+        <div class="panel">
+            <div class="panel-title">ngraph</div>
+            <div class="panel-subtitle">Shape collection as explorable constellation</div>
+            <div class="stat-row"><span class="stat-label">Shapes</span><span class="stat-value" id="stat-nodes">0</span></div>
+            <div class="stat-row"><span class="stat-label">Connections</span><span class="stat-value" id="stat-edges">0</span></div>
+            <div class="stat-row"><span class="stat-label">Layers (sizes)</span><span class="stat-value" id="stat-layers">0</span></div>
+
+            <div class="edge-toggles">
+                <label class="toggle-row" title="Parent-child: add one cell">
+                    <input type="checkbox" checked data-edge="growth">
+                    <span class="toggle-swatch growth"></span>
+                    <span class="toggle-text">Growth</span>
+                    <span class="toggle-count" id="count-growth">0</span>
+                </label>
+                <label class="toggle-row" title="90°/180°/270° rotation">
+                    <input type="checkbox" data-edge="rotation">
+                    <span class="toggle-swatch rotation"></span>
+                    <span class="toggle-text">Rotation</span>
+                    <span class="toggle-count" id="count-rotation">0</span>
+                </label>
+                <label class="toggle-row" title="Mirror image">
+                    <input type="checkbox" data-edge="reflection">
+                    <span class="toggle-swatch reflection"></span>
+                    <span class="toggle-text">Reflection</span>
+                    <span class="toggle-count" id="count-reflection">0</span>
+                </label>
+                <label class="toggle-row" title="Move one cell">
+                    <input type="checkbox" data-edge="mutation">
+                    <span class="toggle-swatch mutation"></span>
+                    <span class="toggle-text">Mutation</span>
+                    <span class="toggle-count" id="count-mutation">0</span>
+                </label>
+            </div>
+
+            <div class="layout-btns">
+                <button class="layout-btn active" data-layout="force">Force</button>
+                <button class="layout-btn" data-layout="radial">Radial</button>
+                <button class="layout-btn" data-layout="layers">Layers</button>
+            </div>
+
+            <div class="color-btns">
+                <button class="color-btn active" data-color="size">By Size</button>
+                <button class="color-btn" data-color="rainbow">Rainbow %</button>
+                <button class="color-btn" data-color="count">Frequency</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="info-badge">
+        <kbd>Scroll</kbd> zoom · <kbd>Drag</kbd> pan · Hover nodes for details
+    </div>
+
+    <script>
+    // ======================= POLYOMINO MATH =======================
+
+    function parseSignature(sig) {
+        return sig.split('|').map(s => {
+            const [r, c] = s.split(',').map(Number);
+            return [r, c];
+        });
+    }
+
+    function cellsToSignature(cells) {
+        const minR = Math.min(...cells.map(c => c[0]));
+        const minC = Math.min(...cells.map(c => c[1]));
+        return cells.map(c => `${c[0]-minR},${c[1]-minC}`)
+                    .sort()
+                    .join('|');
+    }
+
+    function normalizeCells(cells) {
+        const minR = Math.min(...cells.map(c => c[0]));
+        const minC = Math.min(...cells.map(c => c[1]));
+        return cells.map(c => [c[0]-minR, c[1]-minC])
+                    .sort((a,b) => a[0]-b[0] || a[1]-b[1]);
+    }
+
+    function rotateCells90(cells) {
+        return cells.map(([r,c]) => [c, -r]);
+    }
+
+    function reflectCellsH(cells) {
+        return cells.map(([r,c]) => [r, -c]);
+    }
+
+    function cellsEqual(a, b) {
+        if (a.length !== b.length) return false;
+        const na = normalizeCells(a);
+        const nb = normalizeCells(b);
+        return na.every((c,i) => c[0]===nb[i][0] && c[1]===nb[i][1]);
+    }
+
+    function isRotationOf(cellsA, cellsB) {
+        if (cellsA.length !== cellsB.length) return false;
+        let rot = cellsA;
+        for (let i = 1; i <= 3; i++) {
+            rot = rotateCells90(rot);
+            if (cellsEqual(rot, cellsB)) return true;
+        }
+        return false;
+    }
+
+    function isReflectionOf(cellsA, cellsB) {
+        if (cellsA.length !== cellsB.length) return false;
+        // horizontal flip
+        if (cellsEqual(reflectCellsH(cellsA), cellsB)) return true;
+        // vertical flip
+        if (cellsEqual(cellsA.map(([r,c]) => [-r,c]), cellsB)) return true;
+        // diagonal flips (rotation + reflection)
+        let rot = cellsA;
+        for (let i = 0; i < 4; i++) {
+            if (cellsEqual(reflectCellsH(rot), cellsB)) return true;
+            rot = rotateCells90(rot);
+        }
+        return false;
+    }
+
+    function isGrowthOf(smallerCells, largerCells) {
+        if (largerCells.length !== smallerCells.length + 1) return false;
+        const smallSet = new Set(smallerCells.map(c => c.join(',')));
+        let extras = 0;
+        for (const cell of normalizeCells(largerCells)) {
+            // We need to check all translations of smaller within larger
+        }
+        // Better approach: check if removing any single cell from larger yields smaller
+        const normLarger = normalizeCells(largerCells);
+        for (let i = 0; i < normLarger.length; i++) {
+            const remaining = [...normLarger.slice(0,i), ...normLarger.slice(i+1)];
+            // Check connectivity of remaining
+            if (isConnected(remaining) && cellsEqual(remaining, smallerCells)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function isConnected(cells) {
+        if (cells.length <= 1) return true;
+        const set = new Set(cells.map(c => c.join(',')));
+        const visited = new Set();
+        const queue = [cells[0].join(',')];
+        visited.add(queue[0]);
+        while (queue.length) {
+            const [r,c] = queue.shift().split(',').map(Number);
+            for (const [dr,dc] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+                const key = `${r+dr},${c+dc}`;
+                if (set.has(key) && !visited.has(key)) {
+                    visited.add(key);
+                    queue.push(key);
+                }
+            }
+        }
+        return visited.size === cells.length;
+    }
+
+    function isMutationOf(cellsA, cellsB) {
+        if (cellsA.length !== cellsB.length) return false;
+        const normA = normalizeCells(cellsA);
+        const normB = normalizeCells(cellsB);
+        const setA = new Set(normA.map(c => c.join(',')));
+        const setB = new Set(normB.map(c => c.join(',')));
+        let onlyA = 0, onlyB = 0;
+        for (const k of setA) if (!setB.has(k)) onlyA++;
+        for (const k of setB) if (!setA.has(k)) onlyB++;
+        return onlyA === 1 && onlyB === 1;
+    }
+
+    // ======================= GRAPH CONSTRUCTION =======================
+
+    function buildGraph(collection) {
+        const sigs = Object.keys(collection);
+        const nodes = sigs.map(sig => {
+            const cells = parseSignature(sig);
+            const data = collection[sig];
+            const maxR = Math.max(...cells.map(c => c[0])) + 1;
+            const maxC = Math.max(...cells.map(c => c[1])) + 1;
+            const colorCount = data.colors.filter(Boolean).length;
+            return {
+                id: sig,
+                cells,
+                cellCount: cells.length,
+                width: maxC,
+                height: maxR,
+                count: data.count,
+                colors: data.colors,
+                colorCount,
+                rainbowPct: colorCount / data.colors.length
+            };
+        });
+
+        // Sort by cell count for efficient edge computation
+        nodes.sort((a,b) => a.cellCount - b.cellCount);
+
+        const edges = [];
+        const edgeCounts = { growth: 0, rotation: 0, reflection: 0, mutation: 0 };
+
+        // Compute edges — O(n²) but n is manageable for collections < 500
+        for (let i = 0; i < nodes.length; i++) {
+            for (let j = i + 1; j < nodes.length; j++) {
+                const a = nodes[i], b = nodes[j];
+                const sizeDiff = b.cellCount - a.cellCount;
+
+                if (sizeDiff === 0) {
+                    // Same size: check rotation, reflection, mutation
+                    if (isRotationOf(a.cells, b.cells)) {
+                        edges.push({ source: a.id, target: b.id, type: 'rotation' });
+                        edgeCounts.rotation++;
+                    } else if (isReflectionOf(a.cells, b.cells)) {
+                        edges.push({ source: a.id, target: b.id, type: 'reflection' });
+                        edgeCounts.reflection++;
+                    } else if (isMutationOf(a.cells, b.cells)) {
+                        edges.push({ source: a.id, target: b.id, type: 'mutation' });
+                        edgeCounts.mutation++;
+                    }
+                } else if (sizeDiff === 1) {
+                    // Adjacent size: check growth
+                    if (isGrowthOf(a.cells, b.cells)) {
+                        edges.push({ source: a.id, target: b.id, type: 'growth' });
+                        edgeCounts.growth++;
+                    }
+                }
+                // Size difference > 1 — nodes sorted by size, so all remaining j have sizeDiff >= this
+                if (sizeDiff > 1) break;
+            }
+        }
+
+        return { nodes, edges, edgeCounts };
+    }
+
+    // ======================= DEMO DATA GENERATOR =======================
+
+    function generateDemoCollection() {
+        const collection = {};
+        const COLORS_LEN = 5;
+
+        // Generate polyominoes by growing from a single cell
+        function growFrom(cells, maxSize, results) {
+            const sig = cellsToSignature(cells);
+            if (results.has(sig)) return;
+            results.set(sig, cells);
+            if (cells.length >= maxSize) return;
+
+            const cellSet = new Set(cells.map(c => c.join(',')));
+            const neighbors = new Set();
+
+            for (const [r,c] of cells) {
+                for (const [dr,dc] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+                    const key = `${r+dr},${c+dc}`;
+                    if (!cellSet.has(key)) neighbors.add(key);
+                }
+            }
+
+            for (const n of neighbors) {
+                const [nr,nc] = n.split(',').map(Number);
+                const newCells = [...cells, [nr,nc]];
+                const norm = normalizeCells(newCells);
+                growFrom(norm, maxSize, results);
+            }
+        }
+
+        const allShapes = new Map();
+        growFrom([[0,0]], 6, allShapes); // Generate up to hexominoes
+
+        // Pick a subset for the demo — more small shapes, fewer large ones
+        const bySize = {};
+        for (const [sig, cells] of allShapes) {
+            const n = cells.length;
+            if (!bySize[n]) bySize[n] = [];
+            bySize[n].push(sig);
+        }
+
+        const picks = [];
+        // Take all shapes up to size 4, random subset of larger ones
+        for (const [size, sigs] of Object.entries(bySize)) {
+            const n = parseInt(size);
+            if (n <= 4) {
+                picks.push(...sigs);
+            } else if (n === 5) {
+                const shuffled = sigs.sort(() => Math.random() - 0.5);
+                picks.push(...shuffled.slice(0, Math.min(25, sigs.length)));
+            } else {
+                const shuffled = sigs.sort(() => Math.random() - 0.5);
+                picks.push(...shuffled.slice(0, Math.min(15, sigs.length)));
+            }
+        }
+
+        for (const sig of picks) {
+            const colors = new Array(COLORS_LEN).fill(false);
+            const numColors = 1 + Math.floor(Math.random() * COLORS_LEN);
+            const indices = [0,1,2,3,4].sort(() => Math.random()-0.5).slice(0, numColors);
+            indices.forEach(i => colors[i] = true);
+            collection[sig] = {
+                count: 1 + Math.floor(Math.random() * 8),
+                colors
+            };
+        }
+
+        localStorage.setItem('starblast_collection_v3', JSON.stringify(collection));
+        return collection;
+    }
+
+    // ======================= VISUALIZATION =======================
+
+    const GAME_COLORS = ['#ff6b6b', '#7bed9f', '#5f9ee9', '#c792ea', '#ffd93d'];
+    const SIZE_COLORS = ['#4ecdc4', '#48dbfb', '#a29bfe', '#fd79a8', '#fdcb6e', '#e17055', '#00b894', '#6c5ce7'];
+
+    let currentLayout = 'force';
+    let currentColorMode = 'size';
+    let activeEdgeTypes = new Set(['growth']);
+    let simulation = null;
+    let graphData = null;
+
+    function getNodeColor(node) {
+        if (currentColorMode === 'size') {
+            return SIZE_COLORS[(node.cellCount - 1) % SIZE_COLORS.length];
+        } else if (currentColorMode === 'rainbow') {
+            const t = node.rainbowPct;
+            if (t >= 1) return '#ffd93d';
+            if (t >= 0.6) return '#7bed9f';
+            if (t >= 0.3) return '#48dbfb';
+            return 'rgba(255,255,255,0.35)';
+        } else { // count
+            const maxCount = Math.max(...graphData.nodes.map(n => n.count));
+            const t = node.count / maxCount;
+            const r = Math.round(78 + t * 177);
+            const g = Math.round(205 - t * 100);
+            const b = Math.round(196 - t * 90);
+            return `rgb(${r},${g},${b})`;
+        }
+    }
+
+    function getEdgeColor(type) {
+        const map = {
+            growth: 'rgba(78,205,196,0.35)',
+            rotation: 'rgba(199,128,234,0.3)',
+            reflection: 'rgba(255,217,61,0.25)',
+            mutation: 'rgba(255,255,255,0.12)'
+        };
+        return map[type] || 'rgba(255,255,255,0.1)';
+    }
+
+    function getEdgeDash(type) {
+        if (type === 'rotation') return '4,3';
+        if (type === 'reflection') return '2,3';
+        if (type === 'mutation') return '1,3';
+        return 'none';
+    }
+
+    function renderShapeSVG(cells, size, color) {
+        const maxR = Math.max(...cells.map(c => c[0])) + 1;
+        const maxC = Math.max(...cells.map(c => c[1])) + 1;
+        const gridDim = Math.max(maxR, maxC);
+        const cellSize = size / gridDim;
+        const gap = Math.max(1, cellSize * 0.1);
+
+        let rects = '';
+        for (const [r,c] of cells) {
+            rects += `<rect x="${c*cellSize + gap/2}" y="${r*cellSize + gap/2}" width="${cellSize - gap}" height="${cellSize - gap}" rx="${Math.max(1, cellSize*0.15)}" fill="${color}" />`;
+        }
+        return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${rects}</svg>`;
+    }
+
+    function initVisualization(collection) {
+        graphData = buildGraph(collection);
+        const { nodes, edges, edgeCounts } = graphData;
+
+        // Update stats
+        document.getElementById('stat-nodes').textContent = nodes.length;
+        document.getElementById('stat-edges').textContent = edges.length;
+        const layers = new Set(nodes.map(n => n.cellCount));
+        document.getElementById('stat-layers').textContent = layers.size;
+        document.getElementById('count-growth').textContent = edgeCounts.growth;
+        document.getElementById('count-rotation').textContent = edgeCounts.rotation;
+        document.getElementById('count-reflection').textContent = edgeCounts.reflection;
+        document.getElementById('count-mutation').textContent = edgeCounts.mutation;
+
+        const container = document.getElementById('graph-container');
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+
+        // Create SVG
+        const svg = d3.select('#graph-container')
+            .append('svg')
+            .attr('width', width)
+            .attr('height', height);
+
+        // Zoom behavior
+        const g = svg.append('g');
+        const zoom = d3.zoom()
+            .scaleExtent([0.1, 8])
+            .on('zoom', (event) => {
+                g.attr('transform', event.transform);
+            });
+        svg.call(zoom);
+
+        // Initial zoom to fit
+        const initialScale = Math.min(width, height) / 800;
+        svg.call(zoom.transform, d3.zoomIdentity
+            .translate(width/2, height/2)
+            .scale(Math.max(0.4, Math.min(1.5, initialScale))));
+
+        // Edge layer
+        const edgeLayer = g.append('g').attr('class', 'edges');
+        // Node layer
+        const nodeLayer = g.append('g').attr('class', 'nodes');
+
+        // Node size based on cell count
+        function nodeRadius(n) {
+            return 10 + n.cellCount * 3.5;
+        }
+
+        // Build link data with references
+        const linkData = edges.map(e => ({
+            source: e.source,
+            target: e.target,
+            type: e.type
+        }));
+
+        // Draw edges
+        const edgeElements = edgeLayer.selectAll('line')
+            .data(linkData)
+            .enter()
+            .append('line')
+            .attr('stroke', d => getEdgeColor(d.type))
+            .attr('stroke-width', d => d.type === 'growth' ? 1.5 : 1)
+            .attr('stroke-dasharray', d => getEdgeDash(d.type))
+            .attr('opacity', d => activeEdgeTypes.has(d.type) ? 1 : 0)
+            .attr('pointer-events', 'none');
+
+        // Draw nodes
+        const nodeGroups = nodeLayer.selectAll('g.node')
+            .data(nodes, d => d.id)
+            .enter()
+            .append('g')
+            .attr('class', 'node')
+            .style('cursor', 'pointer')
+            .call(d3.drag()
+                .on('start', dragStarted)
+                .on('drag', dragged)
+                .on('end', dragEnded));
+
+        // Background circle for interaction
+        nodeGroups.append('circle')
+            .attr('r', d => nodeRadius(d))
+            .attr('fill', 'rgba(0,0,0,0.01)')
+            .attr('stroke', 'none');
+
+        // Shape glyph
+        nodeGroups.each(function(d) {
+            const r = nodeRadius(d);
+            const size = r * 1.6;
+            const color = getNodeColor(d);
+            const svgStr = renderShapeSVG(d.cells, size, color);
+
+            const foreignObject = d3.select(this)
+                .append('foreignObject')
+                .attr('width', size)
+                .attr('height', size)
+                .attr('x', -size/2)
+                .attr('y', -size/2)
+                .style('pointer-events', 'none')
+                .style('overflow', 'visible');
+
+            foreignObject.append('xhtml:div')
+                .style('width', size + 'px')
+                .style('height', size + 'px')
+                .style('display', 'flex')
+                .style('align-items', 'center')
+                .style('justify-content', 'center')
+                .style('pointer-events', 'none')
+                .html(svgStr);
+        });
+
+        // Glow ring for rainbow-complete shapes
+        nodeGroups.filter(d => d.rainbowPct >= 1)
+            .insert('circle', ':first-child')
+            .attr('r', d => nodeRadius(d) + 4)
+            .attr('fill', 'none')
+            .attr('stroke', '#ffd93d')
+            .attr('stroke-width', 2)
+            .attr('opacity', 0.6)
+            .style('filter', 'drop-shadow(0 0 6px rgba(255,217,61,0.5))');
+
+        // Tooltip
+        const tooltip = document.getElementById('tooltip');
+        const tooltipShape = document.getElementById('tooltip-shape');
+        const tooltipInfo = document.getElementById('tooltip-info');
+
+        nodeGroups.on('mouseenter', (event, d) => {
+            const svgHtml = renderShapeSVG(d.cells, 48, getNodeColor(d));
+            tooltipShape.innerHTML = svgHtml;
+
+            const pips = d.colors.map((has, i) =>
+                `<span class="tooltip-pip" style="background:${has ? GAME_COLORS[i] : 'transparent'}; border-color:${has ? GAME_COLORS[i] : 'rgba(255,255,255,0.15)'}"></span>`
+            ).join('');
+
+            tooltipInfo.innerHTML = `
+                <strong>${d.cellCount}-cell shape</strong><br>
+                Found <strong>${d.count}×</strong><br>
+                Colors: ${d.colorCount}/5 ${d.rainbowPct >= 1 ? '🌈' : ''}
+                <div class="tooltip-pips">${pips}</div>
+            `;
+
+            tooltip.classList.add('visible');
+
+            // Highlight connected
+            const connectedIds = new Set();
+            linkData.forEach(l => {
+                const sid = typeof l.source === 'object' ? l.source.id : l.source;
+                const tid = typeof l.target === 'object' ? l.target.id : l.target;
+                if (sid === d.id && activeEdgeTypes.has(l.type)) connectedIds.add(tid);
+                if (tid === d.id && activeEdgeTypes.has(l.type)) connectedIds.add(sid);
+            });
+
+            nodeGroups.style('opacity', n => n.id === d.id || connectedIds.has(n.id) ? 1 : 0.15);
+            edgeElements.attr('opacity', l => {
+                const sid = typeof l.source === 'object' ? l.source.id : l.source;
+                const tid = typeof l.target === 'object' ? l.target.id : l.target;
+                if (!activeEdgeTypes.has(l.type)) return 0;
+                return (sid === d.id || tid === d.id) ? 0.8 : 0.05;
+            });
+        });
+
+        nodeGroups.on('mousemove', (event) => {
+            tooltip.style.left = (event.clientX + 16) + 'px';
+            tooltip.style.top = (event.clientY - 20) + 'px';
+        });
+
+        nodeGroups.on('mouseleave', () => {
+            tooltip.classList.remove('visible');
+            nodeGroups.style('opacity', 1);
+            edgeElements.attr('opacity', d => activeEdgeTypes.has(d.type) ? 1 : 0);
+        });
+
+        // Force simulation
+        simulation = d3.forceSimulation(nodes)
+            .force('link', d3.forceLink(linkData)
+                .id(d => d.id)
+                .distance(d => {
+                    if (d.type === 'rotation') return 40;
+                    if (d.type === 'reflection') return 50;
+                    if (d.type === 'growth') return 70;
+                    return 80;
+                })
+                .strength(d => activeEdgeTypes.has(d.type) ? 0.4 : 0))
+            .force('charge', d3.forceManyBody()
+                .strength(d => -80 - d.cellCount * 15))
+            .force('center', d3.forceCenter(0, 0))
+            .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 4))
+            .force('y', d3.forceY(d => (d.cellCount - 3) * 80).strength(0.08))
+            .alphaDecay(0.02)
+            .on('tick', ticked);
+
+        function ticked() {
+            edgeElements
+                .attr('x1', d => d.source.x)
+                .attr('y1', d => d.source.y)
+                .attr('x2', d => d.target.x)
+                .attr('y2', d => d.target.y);
+
+            nodeGroups.attr('transform', d => `translate(${d.x},${d.y})`);
+        }
+
+        function dragStarted(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x; d.fy = d.y;
+        }
+        function dragged(event, d) {
+            d.fx = event.x; d.fy = event.y;
+        }
+        function dragEnded(event, d) {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null; d.fy = null;
+        }
+
+        // ---- Edge toggle handlers ----
+        document.querySelectorAll('.toggle-row input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener('change', (e) => {
+                const type = e.target.dataset.edge;
+                if (e.target.checked) activeEdgeTypes.add(type);
+                else activeEdgeTypes.delete(type);
+
+                edgeElements.attr('opacity', d => activeEdgeTypes.has(d.type) ? 1 : 0);
+
+                // Update link force strengths
+                simulation.force('link').strength(d => activeEdgeTypes.has(d.type) ? 0.4 : 0);
+                simulation.alpha(0.5).restart();
+            });
+        });
+
+        // ---- Layout toggle handlers ----
+        document.querySelectorAll('.layout-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.layout-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentLayout = btn.dataset.layout;
+                applyLayout(nodes, width, height);
+            });
+        });
+
+        function applyLayout(nodes, w, h) {
+            simulation.stop();
+
+            if (currentLayout === 'force') {
+                // Reset positions and restart force
+                nodes.forEach(d => { d.fx = null; d.fy = null; });
+                simulation
+                    .force('center', d3.forceCenter(0, 0))
+                    .force('y', d3.forceY(d => (d.cellCount - 3) * 80).strength(0.08))
+                    .force('x', null);
+                simulation.alpha(1).restart();
+            } else if (currentLayout === 'radial') {
+                const sizeGroups = {};
+                nodes.forEach(d => {
+                    if (!sizeGroups[d.cellCount]) sizeGroups[d.cellCount] = [];
+                    sizeGroups[d.cellCount].push(d);
+                });
+                const sizes = Object.keys(sizeGroups).map(Number).sort((a,b) => a-b);
+
+                sizes.forEach((size, ringIdx) => {
+                    const group = sizeGroups[size];
+                    const radius = (ringIdx + 1) * 90;
+                    group.forEach((d, i) => {
+                        const angle = (i / group.length) * Math.PI * 2 - Math.PI / 2;
+                        d.fx = Math.cos(angle) * radius;
+                        d.fy = Math.sin(angle) * radius;
+                    });
+                });
+
+                simulation.force('center', null).force('y', null);
+                simulation.alpha(0.8).restart();
+
+            } else if (currentLayout === 'layers') {
+                const sizeGroups = {};
+                nodes.forEach(d => {
+                    if (!sizeGroups[d.cellCount]) sizeGroups[d.cellCount] = [];
+                    sizeGroups[d.cellCount].push(d);
+                });
+                const sizes = Object.keys(sizeGroups).map(Number).sort((a,b) => a-b);
+
+                sizes.forEach((size, layerIdx) => {
+                    const group = sizeGroups[size];
+                    const y = (layerIdx - sizes.length/2) * 100;
+                    group.forEach((d, i) => {
+                        const x = (i - group.length/2) * 55;
+                        d.fx = x;
+                        d.fy = y;
+                    });
+                });
+
+                simulation.force('center', null).force('y', null);
+                simulation.alpha(0.5).restart();
+            }
+        }
+
+        // ---- Color mode handlers ----
+        document.querySelectorAll('.color-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentColorMode = btn.dataset.color;
+
+                // Re-render node shapes
+                nodeGroups.each(function(d) {
+                    const r = nodeRadius(d);
+                    const size = r * 1.6;
+                    const color = getNodeColor(d);
+                    const svgStr = renderShapeSVG(d.cells, size, color);
+                    d3.select(this).select('foreignObject div').html(svgStr);
+                });
+            });
+        });
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            const w = container.clientWidth;
+            const h = container.clientHeight;
+            svg.attr('width', w).attr('height', h);
+        });
+    }
+
+    // ======================= INIT =======================
+
+    function init() {
+        let collection = null;
+        try {
+            collection = JSON.parse(localStorage.getItem('starblast_collection_v3'));
+        } catch(e) {}
+
+        if (!collection || Object.keys(collection).length === 0) {
+            document.getElementById('no-data-screen').classList.remove('hidden');
+            document.getElementById('controls').style.display = 'none';
+
+            document.getElementById('gen-demo-btn').addEventListener('click', () => {
+                const demo = generateDemoCollection();
+                document.getElementById('no-data-screen').classList.add('hidden');
+                document.getElementById('controls').style.display = '';
+                initVisualization(demo);
+            });
+        } else {
+            initVisualization(collection);
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
