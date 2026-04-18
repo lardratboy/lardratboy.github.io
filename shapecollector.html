@@ -390,11 +390,11 @@
             border-radius: 6px;
         }
 
-        .color-pips {
+        .color-pips, .perm-pips {
             display: flex;
             flex-wrap: wrap;
             justify-content: center;
-            margin-top: clamp(4px, 1.5vmin, 8px);
+            margin-top: clamp(3px, 1vmin, 5px);
             gap: 2px;
         }
 
@@ -403,6 +403,35 @@
             height: clamp(4px, 1.5vmin, 6px);
             border-radius: 50%;
             box-shadow: 0 0 6px currentColor;
+        }
+
+        .color-pip.empty {
+            background: rgba(255,255,255,0.12) !important;
+            box-shadow: none;
+        }
+
+        .perm-pip {
+            width: clamp(4px, 1.3vmin, 5px);
+            height: clamp(4px, 1.3vmin, 5px);
+            border-radius: 1px;
+            transform: rotate(45deg);
+        }
+
+        .perm-pip.found {
+            background: #67e8f9;
+            box-shadow: 0 0 4px #67e8f9;
+        }
+
+        .perm-pip.empty {
+            background: rgba(255,255,255,0.12);
+        }
+
+        .perm-divider {
+            width: 1px;
+            height: clamp(4px, 1.3vmin, 5px);
+            background: rgba(255,255,255,0.1);
+            margin: 0 1px;
+            transform: rotate(45deg);
         }
 
         .shape-count {
@@ -591,12 +620,17 @@
                 <div class="stats-bar">
                     <div class="stat-item">
                         <span class="stat-value" id="stat-total-shapes">0</span>
-                        <span class="stat-label">Shapes Found</span>
+                        <span class="stat-label">Families</span>
                     </div>
                     <div class="stat-divider"></div>
                     <div class="stat-item">
                         <span class="stat-value" id="stat-complete-sets">0</span>
-                        <span class="stat-label">Complete Sets</span>
+                        <span class="stat-label">🌈 Rainbows</span>
+                    </div>
+                    <div class="stat-divider"></div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="stat-complete-perms">0</span>
+                        <span class="stat-label">🔄 Perms</span>
                     </div>
                 </div>
                 
@@ -635,7 +669,12 @@
                     <div class="stat-divider"></div>
                     <div class="stat-item">
                         <span class="stat-value" id="stat-session-complete">0</span>
-                        <span class="stat-label">Sets Completed</span>
+                        <span class="stat-label">🌈 Sets</span>
+                    </div>
+                    <div class="stat-divider"></div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="stat-session-perms">0</span>
+                        <span class="stat-label">🔄 Perms</span>
                     </div>
                 </div>
 
@@ -735,6 +774,7 @@
             sfxUI() { this.playBloop(330, 0.1, 'sine', 0.05); }
             sfxDiscovery() { [523, 659, 784].forEach((f, i) => setTimeout(() => this.playBloop(f, 0.15, 'sine', 0.06), i * 80)); }
             sfxRainbow() { [523, 659, 783, 1046].forEach((f, i) => setTimeout(() => this.playBloop(f, 0.5, 'sine', 0.08), i * 100)); }
+            sfxPermComplete() { [440, 554, 659, 880].forEach((f, i) => setTimeout(() => this.playBloop(f, 0.3, 'triangle', 0.07), i * 70)); }
             sfxGameOver() { [261, 196, 164].forEach((f, i) => setTimeout(() => this.playBloop(f, 0.6, 'sine', 0.1), i * 250)); }
         }
 
@@ -882,11 +922,149 @@
         let powers = { bomb: 2, shuffle: 2, beam: 2 };
         let isPaused = false;
         
-        let collection = JSON.parse(localStorage.getItem('starblast_collection_v3')) || {};
+        // ==================== V4 BIT-PACKED COLLECTION ====================
+        const COLOR_BITS = 0;
+        const PERM_BITS = 5;
+        const COLOR_MASK = 0x001F;
+        const PERM_MASK = 0x1FE0;
+        const ALL_COLORS = 0x001F;
+        const ALL_PERMS = 0xFF;
+
+        function setColor(bits, colorIndex) {
+            return (bits | (1 << (COLOR_BITS + colorIndex))) >>> 0;
+        }
+        function setPermutations(bits, permMask) {
+            return (bits | (permMask << PERM_BITS)) >>> 0;
+        }
+        function hasAllColors(bits) {
+            return (bits & COLOR_MASK) === ALL_COLORS;
+        }
+        function hasAllPermutations(bits) {
+            return ((bits >> PERM_BITS) & ALL_PERMS) === ALL_PERMS;
+        }
+        function popcount(v) {
+            v = v - ((v >> 1) & 0x55555555);
+            v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+            return ((v + (v >> 4) & 0x0F0F0F0F) * 0x01010101) >> 24;
+        }
+        function colorCount(bits) { return popcount(bits & COLOR_MASK); }
+        function permCount(bits) { return popcount((bits >> PERM_BITS) & 0xFF); }
+
+        // --- Polyomino math ---
+        function parseSig(sig) {
+            return sig.split('|').map(s => { const p = s.split(','); return [+p[0], +p[1]]; });
+        }
+        function normalizeCells(cells) {
+            const minR = Math.min(...cells.map(c => c[0]));
+            const minC = Math.min(...cells.map(c => c[1]));
+            return cells.map(([r, c]) => [r - minR, c - minC]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        }
+        function cellsToSig(cells) {
+            return normalizeCells(cells).map(([r, c]) => `${r},${c}`).join('|');
+        }
+        function rotate90(cells) {
+            return cells.map(([r, c]) => [c, -r]);
+        }
+        function reflectH(cells) {
+            return cells.map(([r, c]) => [r, -c]);
+        }
+
+        // Canonical = lex-smallest of all 8 D4 transforms
+        function getCanonicalSignature(cells) {
+            const sigs = [];
+            let cur = cells;
+            for (let i = 0; i < 4; i++) {
+                sigs.push(cellsToSig(cur));
+                sigs.push(cellsToSig(reflectH(cur)));
+                cur = rotate90(cur);
+            }
+            sigs.sort();
+            return sigs[0];
+        }
+
+        // Which D4 transforms map these cells to themselves? Returns bitmask.
+        function computePermBits(cells) {
+            const targetSig = cellsToSig(cells);
+            let mask = 0;
+            const xforms = [
+                c => c.map(([r,c]) => [ r,  c]),
+                c => c.map(([r,c]) => [ c, -r]),
+                c => c.map(([r,c]) => [-r, -c]),
+                c => c.map(([r,c]) => [-c,  r]),
+                c => c.map(([r,c]) => [ r, -c]),
+                c => c.map(([r,c]) => [ c,  r]),
+                c => c.map(([r,c]) => [-r,  c]),
+                c => c.map(([r,c]) => [-c, -r]),
+            ];
+            for (let i = 0; i < 8; i++) {
+                if (cellsToSig(xforms[i](cells)) === targetSig) {
+                    mask |= (1 << i);
+                }
+            }
+            return mask;
+        }
+
+        // Get the full permutation mask for a family (always 0xFF but computed for correctness)
+        function getFamilyPermMask(cells) {
+            let mask = 0;
+            let cur = cells;
+            for (let i = 0; i < 4; i++) {
+                mask |= computePermBits(normalizeCells(cur));
+                mask |= computePermBits(normalizeCells(reflectH(cur)));
+                cur = rotate90(cur);
+            }
+            return mask;
+        }
+
+        // Get cells from match objects (the game's {r, c} format)
+        function getShapeCells(matches) {
+            if (!matches.length) return [];
+            const rows = matches.map(m => m.r);
+            const cols = matches.map(m => m.c);
+            const minR = Math.min(...rows);
+            const minC = Math.min(...cols);
+            return matches
+                .map(m => [m.r - minR, m.c - minC])
+                .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        }
+
+        // --- Migration v3 → v4 ---
+        function migrateV3toV4(v3) {
+            const v4 = {};
+            for (const [fixedSig, data] of Object.entries(v3)) {
+                const cells = parseSig(fixedSig);
+                const canonical = getCanonicalSignature(cells);
+                const permBits = computePermBits(cells);
+                if (!v4[canonical]) v4[canonical] = { n: 0, b: 0 };
+                v4[canonical].n += data.count;
+                for (let c = 0; c < data.colors.length; c++) {
+                    if (data.colors[c]) v4[canonical].b = setColor(v4[canonical].b, c);
+                }
+                v4[canonical].b = setPermutations(v4[canonical].b, permBits);
+            }
+            return v4;
+        }
+
+        // --- Load collection (v4, with v3 migration) ---
+        function loadCollection() {
+            const v4raw = localStorage.getItem('starblast_collection_v4');
+            if (v4raw) return JSON.parse(v4raw);
+            const v3raw = localStorage.getItem('starblast_collection_v3');
+            if (v3raw) {
+                const v4 = migrateV3toV4(JSON.parse(v3raw));
+                localStorage.setItem('starblast_collection_v4', JSON.stringify(v4));
+                console.log(`Migrated ${Object.keys(JSON.parse(v3raw)).length} v3 entries → ${Object.keys(v4).length} v4 families`);
+                return v4;
+            }
+            return {};
+        }
+
+        let collection = loadCollection();
         let stats = [0, 0, 0, 0, 0]; 
         let sessionShapes = {};
         let newDiscoveries = [];
         let sessionCompletions = [];
+        let sessionPermCompletions = [];
 
         // ==================== TOGGLE FUNCTIONS ====================
         function toggleMute() {
@@ -1073,6 +1251,7 @@
         }
 
         function getShapeSignature(matches) {
+            // Legacy compat — returns fixed sig string
             if (!matches.length) return "";
             const rows = matches.map(m => m.r);
             const cols = matches.map(m => m.c);
@@ -1084,38 +1263,58 @@
                 .join('|');
         }
 
-        function trackShape(sig, colorIndex) {
-            const isFirstEverDiscovery = !collection[sig];
-            const isNewThisSession = !sessionShapes[sig];
-            
+        function trackShape(matches, colorIndex) {
+            const cells = getShapeCells(matches);
+            if (!cells.length) return;
+            const canonical = getCanonicalSignature(cells);
+            const permBits = computePermBits(cells);
+
+            // --- Session tracking ---
+            const isNewThisSession = !sessionShapes[canonical];
             if (isNewThisSession) {
-                sessionShapes[sig] = { count: 0, colors: new Array(COLORS.length).fill(false) };
+                sessionShapes[canonical] = { n: 0, b: 0 };
             }
-            sessionShapes[sig].count++;
-            sessionShapes[sig].colors[colorIndex] = true;
-            
+            const prevSessionBits = sessionShapes[canonical].b;
+            sessionShapes[canonical].n++;
+            sessionShapes[canonical].b = setColor(sessionShapes[canonical].b, colorIndex);
+            sessionShapes[canonical].b = setPermutations(sessionShapes[canonical].b, permBits);
+            const newSessionBits = sessionShapes[canonical].b;
+
+            // --- All-time tracking ---
+            const isFirstEverDiscovery = !collection[canonical];
             if (isFirstEverDiscovery) {
-                newDiscoveries.push(sig);
+                collection[canonical] = { n: 0, b: 0 };
+            }
+            const prevBits = collection[canonical].b;
+            collection[canonical].n++;
+            collection[canonical].b = setColor(collection[canonical].b, colorIndex);
+            collection[canonical].b = setPermutations(collection[canonical].b, permBits);
+            const newBits = collection[canonical].b;
+
+            // --- Announcements ---
+            if (isFirstEverDiscovery) {
+                newDiscoveries.push(canonical);
                 announce("New Shape!", "✨");
                 sound.sfxDiscovery();
             }
-            
-            const wasRainbow = sessionShapes[sig].colors.filter(c => c).length === COLORS.length - 1;
-            const isNowRainbow = sessionShapes[sig].colors.every(c => c);
-            if (isNowRainbow && wasRainbow) {
+
+            // Rainbow check (per-session): was <5 colors, now all 5?
+            if (!hasAllColors(prevSessionBits) && hasAllColors(newSessionBits)) {
                 announce("Rainbow Bonus!", "🌈");
                 sound.sfxRainbow();
                 energy = Math.min(MAX_ENERGY, energy + 5);
-                sessionCompletions.push(sig);
+                sessionCompletions.push(canonical);
                 updateUI();
             }
-            
-            if (!collection[sig]) {
-                collection[sig] = { count: 0, colors: new Array(COLORS.length).fill(false) };
+
+            // Permutation check (all-time): was incomplete, now all 8 bits set?
+            if (!hasAllPermutations(prevBits) && hasAllPermutations(newBits)) {
+                announce("All Permutations!", "🔄");
+                sound.sfxPermComplete();
+                sessionPermCompletions.push(canonical);
             }
-            collection[sig].count++;
-            collection[sig].colors[colorIndex] = true;
-            localStorage.setItem('starblast_collection_v3', JSON.stringify(collection));
+
+            localStorage.setItem('starblast_collection_v4', JSON.stringify(collection));
         }
 
         async function handleInteraction(r, c) {
@@ -1154,7 +1353,7 @@
                 if (matches.length >= 2) {
                     isProcessing = true; 
                     energy--; 
-                    trackShape(getShapeSignature(matches), colorIndex);
+                    trackShape(matches, colorIndex);
                     if (matches.length >= 6) { 
                         energy = Math.min(MAX_ENERGY, energy + 1); 
                         sound.sfxBonus(); 
@@ -1308,33 +1507,52 @@
                 `<rect x="${c*blockSize}" y="${r*blockSize}" width="${blockSize-2}" height="${blockSize-2}" fill="${color}" rx="3"/>`
             ).join('');
             
-            let pipsHtml = data.colors.map((hasColor, i) => 
-                hasColor ? `<span class="color-pip" style="color: ${COLORS[i]}; background: ${COLORS[i]}"></span>` : ''
-            ).join('');
+            // Color pips — show all 5 slots, filled or empty
+            const bits = data.b;
+            let pipsHtml = '';
+            for (let i = 0; i < COLORS.length; i++) {
+                const found = (bits >> (COLOR_BITS + i)) & 1;
+                if (found) {
+                    pipsHtml += `<span class="color-pip" style="color: ${COLORS[i]}; background: ${COLORS[i]}"></span>`;
+                } else {
+                    pipsHtml += `<span class="color-pip empty"></span>`;
+                }
+            }
+
+            // Permutation pips — 8 slots (4 rotations | 4 reflections)
+            let permHtml = '';
+            for (let i = 0; i < 8; i++) {
+                if (i === 4) permHtml += '<span class="perm-divider"></span>';
+                const found = (bits >> (PERM_BITS + i)) & 1;
+                permHtml += `<span class="perm-pip ${found ? 'found' : 'empty'}"></span>`;
+            }
             
             const newClass = isNew ? 'new-discovery' : '';
             
             return `<div class="shape-card ${newClass}">
                 <svg width="${svgSize}" height="${svgSize}" viewBox="0 0 ${svgSize} ${svgSize}">${blocksSvg}</svg>
                 <div class="color-pips">${pipsHtml}</div>
-                <div class="shape-count">×${data.count}</div>
+                <div class="perm-pips">${permHtml}</div>
+                <div class="shape-count">×${data.n}</div>
             </div>`;
         }
 
         function getCollectionStats() {
             const entries = Object.entries(collection);
-            const totalShapes = entries.length;
-            const completeSets = entries.filter(([sig, data]) => data.colors.every(c => c)).length;
-            return { totalShapes, completeSets };
+            const totalFamilies = entries.length;
+            const rainbows = entries.filter(([, d]) => hasAllColors(d.b)).length;
+            const permsComplete = entries.filter(([, d]) => hasAllPermutations(d.b)).length;
+            return { totalFamilies, rainbows, permsComplete };
         }
 
         function renderCollection() {
-            const { totalShapes, completeSets } = getCollectionStats();
-            document.getElementById('stat-total-shapes').innerText = totalShapes;
-            document.getElementById('stat-complete-sets').innerText = completeSets;
+            const { totalFamilies, rainbows, permsComplete } = getCollectionStats();
+            document.getElementById('stat-total-shapes').innerText = totalFamilies;
+            document.getElementById('stat-complete-sets').innerText = rainbows;
+            document.getElementById('stat-complete-perms').innerText = permsComplete;
             
             collThisGallery.innerHTML = '';
-            const sessionEntries = Object.entries(sessionShapes).sort((a,b) => b[1].count - a[1].count);
+            const sessionEntries = Object.entries(sessionShapes).sort((a,b) => b[1].n - a[1].n);
             if (!sessionEntries.length) {
                 collThisGallery.innerHTML = '<p class="empty-state">No shapes collected yet!</p>';
             } else {
@@ -1345,7 +1563,7 @@
             }
 
             collAllGallery.innerHTML = '';
-            const allEntries = Object.entries(collection).sort((a,b) => b[1].count - a[1].count);
+            const allEntries = Object.entries(collection).sort((a,b) => b[1].n - a[1].n);
             if (!allEntries.length) {
                 collAllGallery.innerHTML = '<p class="empty-state">Your collection is empty!</p>';
             } else {
@@ -1358,6 +1576,7 @@
         function renderDebrief() {
             document.getElementById('stat-session-new').innerText = newDiscoveries.length;
             document.getElementById('stat-session-complete').innerText = sessionCompletions.length;
+            document.getElementById('stat-session-perms').innerText = sessionPermCompletions.length;
             
             histogramContainer.innerHTML = '';
             const maxVal = Math.max(...stats) || 1;
@@ -1377,7 +1596,7 @@
                 const aNew = newDiscoveries.includes(a[0]) ? 1 : 0;
                 const bNew = newDiscoveries.includes(b[0]) ? 1 : 0;
                 if (bNew !== aNew) return bNew - aNew;
-                return b[1].count - a[1].count;
+                return b[1].n - a[1].n;
             });
             
             if (!sessionEntries.length) {
@@ -1418,6 +1637,7 @@
             sessionShapes = {};
             newDiscoveries = [];
             sessionCompletions = [];
+            sessionPermCompletions = [];
             powers = { bomb: 2, shuffle: 2, beam: 2 }; 
             isPaused = false;
             particles.length = 0; // Clear any remaining particles
