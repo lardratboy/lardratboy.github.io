@@ -649,6 +649,7 @@
                 </div>
 
                 <button onclick="closeCollection()" class="play-btn">Back to Game</button>
+                <button onclick="copyDebugJSON()" class="play-btn" style="background: linear-gradient(135deg, #6366f1, #4338ca); box-shadow: 0 4px 0 #312e81, 0 6px 20px rgba(99,102,241,0.4); margin-top: 8px; font-size: clamp(10px, 2.5vmin, 12px);">📋 Copy Stats JSON</button>
             </div>
 
             <!-- Game Over Overlay -->
@@ -982,9 +983,10 @@
             return sigs[0];
         }
 
-        // Which D4 transforms map these cells to themselves? Returns bitmask.
+        // Which D4 transforms of the CANONICAL form produce this found orientation?
         function computePermBits(cells) {
-            const targetSig = cellsToSig(cells);
+            const canonCells = parseSig(getCanonicalSignature(cells));
+            const foundSig = cellsToSig(cells);
             let mask = 0;
             const xforms = [
                 c => c.map(([r,c]) => [ r,  c]),
@@ -997,7 +999,7 @@
                 c => c.map(([r,c]) => [-c, -r]),
             ];
             for (let i = 0; i < 8; i++) {
-                if (cellsToSig(xforms[i](cells)) === targetSig) {
+                if (cellsToSig(xforms[i](canonCells)) === foundSig) {
                     mask |= (1 << i);
                 }
             }
@@ -1046,17 +1048,41 @@
         }
 
         // --- Load collection (v4, with v3 migration) ---
+        // Always re-derive from v3 if it exists (v3 is source of truth)
         function loadCollection() {
-            const v4raw = localStorage.getItem('starblast_collection_v4');
-            if (v4raw) return JSON.parse(v4raw);
             const v3raw = localStorage.getItem('starblast_collection_v3');
             if (v3raw) {
-                const v4 = migrateV3toV4(JSON.parse(v3raw));
+                const v3data = JSON.parse(v3raw);
+                const v4 = migrateV3toV4(v3data);
+                // Merge any v4-only entries (shapes found after migration)
+                const v4raw = localStorage.getItem('starblast_collection_v4');
+                if (v4raw) {
+                    const existing = JSON.parse(v4raw);
+                    for (const [sig, data] of Object.entries(existing)) {
+                        if (!v4[sig]) {
+                            v4[sig] = data; // keep v4-only entries
+                        }
+                    }
+                }
                 localStorage.setItem('starblast_collection_v4', JSON.stringify(v4));
-                console.log(`Migrated ${Object.keys(JSON.parse(v3raw)).length} v3 entries → ${Object.keys(v4).length} v4 families`);
+                console.log(`Derived ${Object.keys(v4).length} v4 families from ${Object.keys(v3data).length} v3 entries`);
                 return v4;
             }
+            const v4raw = localStorage.getItem('starblast_collection_v4');
+            if (v4raw) return JSON.parse(v4raw);
             return {};
+        }
+
+        // Keep v3 in sync so we can always re-derive correct v4
+        function writeV3(cells, colorIndex) {
+            const fixedSig = cellsToSig(cells);
+            let v3 = JSON.parse(localStorage.getItem('starblast_collection_v3') || '{}');
+            if (!v3[fixedSig]) {
+                v3[fixedSig] = { count: 0, colors: new Array(COLORS.length).fill(false) };
+            }
+            v3[fixedSig].count++;
+            v3[fixedSig].colors[colorIndex] = true;
+            localStorage.setItem('starblast_collection_v3', JSON.stringify(v3));
         }
 
         let collection = loadCollection();
@@ -1315,6 +1341,7 @@
             }
 
             localStorage.setItem('starblast_collection_v4', JSON.stringify(collection));
+            writeV3(cells, colorIndex);
         }
 
         async function handleInteraction(r, c) {
@@ -1543,6 +1570,103 @@
             const rainbows = entries.filter(([, d]) => hasAllColors(d.b)).length;
             const permsComplete = entries.filter(([, d]) => hasAllPermutations(d.b)).length;
             return { totalFamilies, rainbows, permsComplete };
+        }
+
+        function copyDebugJSON() {
+            const entries = Object.entries(collection);
+            const debug = {
+                version: 'v4',
+                totalFamilies: entries.length,
+                totalFinds: entries.reduce((s, [,d]) => s + d.n, 0),
+                rainbows: entries.filter(([,d]) => hasAllColors(d.b)).length,
+                permsComplete: entries.filter(([,d]) => hasAllPermutations(d.b)).length,
+                totalColorBits: entries.reduce((s, [,d]) => s + colorCount(d.b), 0),
+                totalPermBits: entries.reduce((s, [,d]) => s + permCount(d.b), 0),
+                families: entries
+                    .sort((a,b) => b[1].n - a[1].n)
+                    .map(([sig, d]) => {
+                        const cells = parseSig(sig);
+                        const recanon = getCanonicalSignature(cells);
+                        const famMask = computePermBits(cells);
+                        return {
+                            sig,
+                            n: d.n,
+                            b: d.b,
+                            colors: colorCount(d.b) + '/5',
+                            perms: permCount(d.b) + '/8',
+                            colorBits: (d.b & COLOR_MASK).toString(2).padStart(5, '0'),
+                            permBits: ((d.b >> PERM_BITS) & 0xFF).toString(2).padStart(8, '0'),
+                            selfPermMask: famMask.toString(2).padStart(8, '0'),
+                            isCanonical: recanon === sig,
+                            recanon: recanon !== sig ? recanon : undefined,
+                            cellCount: cells.length
+                        };
+                    })
+            };
+
+            // Validation: check for non-canonical keys
+            const nonCanonical = debug.families.filter(f => !f.isCanonical);
+            if (nonCanonical.length > 0) {
+                debug.WARNINGS = [`${nonCanonical.length} entries have non-canonical keys!`];
+                console.warn('Non-canonical keys found:', nonCanonical);
+            }
+
+            // Validation: check for families that should merge
+            const canonMap = {};
+            debug.families.forEach(f => {
+                const canon = f.recanon || f.sig;
+                if (!canonMap[canon]) canonMap[canon] = [];
+                canonMap[canon].push(f.sig);
+            });
+            const dupes = Object.entries(canonMap).filter(([,v]) => v.length > 1);
+            if (dupes.length > 0) {
+                debug.DUPLICATE_FAMILIES = dupes.map(([canon, sigs]) => ({ canon, sigs }));
+                console.warn('Duplicate families that should merge:', dupes);
+            }
+
+            navigator.clipboard.writeText(JSON.stringify(debug, null, 2))
+                .then(() => announce("Copied to clipboard!", "📋"))
+                .catch(() => {
+                    console.log(JSON.stringify(debug, null, 2));
+                    announce("Logged to console!", "📋");
+                });
+        }
+
+        function validateCollection() {
+            let issues = 0;
+            for (const [sig, data] of Object.entries(collection)) {
+                const cells = parseSig(sig);
+                const canon = getCanonicalSignature(cells);
+                if (canon !== sig) {
+                    console.warn(`Non-canonical key: "${sig}" should be "${canon}"`);
+                    issues++;
+                }
+            }
+            if (issues === 0) {
+                console.log(`Collection OK: ${Object.keys(collection).length} families, all canonical`);
+            } else {
+                console.warn(`Collection has ${issues} non-canonical keys — run repairCollection() to fix`);
+            }
+            return issues;
+        }
+
+        function repairCollection() {
+            const repaired = {};
+            for (const [sig, data] of Object.entries(collection)) {
+                const cells = parseSig(sig);
+                const canon = getCanonicalSignature(cells);
+                if (!repaired[canon]) {
+                    repaired[canon] = { n: 0, b: 0 };
+                }
+                repaired[canon].n += data.n;
+                repaired[canon].b = (repaired[canon].b | data.b) >>> 0;
+            }
+            const oldCount = Object.keys(collection).length;
+            const newCount = Object.keys(repaired).length;
+            collection = repaired;
+            localStorage.setItem('starblast_collection_v4', JSON.stringify(collection));
+            console.log(`Repaired: ${oldCount} → ${newCount} families (merged ${oldCount - newCount} duplicates)`);
+            return newCount;
         }
 
         function renderCollection() {
