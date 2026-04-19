@@ -336,6 +336,10 @@
             color: #4ecdc4;
             border-color: rgba(78, 205, 196, 0.5);
         }
+        .sort-btn {
+            font-size: clamp(8px, 1.8vmin, 10px) !important;
+            padding: clamp(4px, 1vmin, 5px) clamp(6px, 2vmin, 10px) !important;
+        }
 
         /* Debrief Content */
         .debrief-content {
@@ -637,6 +641,13 @@
                 <div class="tab-container">
                     <button id="tab-coll-this" onclick="showCollectionTab('this')" class="tab-btn active">This Game</button>
                     <button id="tab-coll-all" onclick="showCollectionTab('all')" class="tab-btn">All Time</button>
+                </div>
+
+                <div id="sort-bar" class="tab-container" style="gap: 3px;">
+                    <span style="font-size: clamp(8px,1.8vmin,10px); color: rgba(255,255,255,0.4); align-self: center; margin-right: 4px;">Sort:</span>
+                    <button onclick="setCollectionSort('count')" class="tab-btn sort-btn active" data-sort="count">Most Found</button>
+                    <button onclick="setCollectionSort('discovered')" class="tab-btn sort-btn" data-sort="discovered">Discovered</button>
+                    <button onclick="setCollectionSort('completion')" class="tab-btn sort-btn" data-sort="completion">Completion</button>
                 </div>
 
                 <div class="debrief-content">
@@ -1033,11 +1044,14 @@
         // --- Migration v3 → v4 ---
         function migrateV3toV4(v3) {
             const v4 = {};
+            let familyIndex = 0;
             for (const [fixedSig, data] of Object.entries(v3)) {
                 const cells = parseSig(fixedSig);
                 const canonical = getCanonicalSignature(cells);
                 const permBits = computePermBits(cells);
-                if (!v4[canonical]) v4[canonical] = { n: 0, b: 0 };
+                if (!v4[canonical]) {
+                    v4[canonical] = { n: 0, b: 0, d: familyIndex++ };
+                }
                 v4[canonical].n += data.count;
                 for (let c = 0; c < data.colors.length; c++) {
                     if (data.colors[c]) v4[canonical].b = setColor(v4[canonical].b, c);
@@ -1091,6 +1105,7 @@
         let newDiscoveries = [];
         let sessionCompletions = [];
         let sessionPermCompletions = [];
+        let collectionSortMode = 'count';
 
         // ==================== TOGGLE FUNCTIONS ====================
         function toggleMute() {
@@ -1309,7 +1324,7 @@
             // --- All-time tracking ---
             const isFirstEverDiscovery = !collection[canonical];
             if (isFirstEverDiscovery) {
-                collection[canonical] = { n: 0, b: 0 };
+                collection[canonical] = { n: 0, b: 0, d: Object.keys(collection).length };
             }
             const prevBits = collection[canonical].b;
             collection[canonical].n++;
@@ -1521,6 +1536,21 @@
             });
         }
 
+        function setCollectionSort(mode) {
+            collectionSortMode = mode;
+            document.querySelectorAll('.sort-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.sort === mode);
+            });
+            renderCollection();
+        }
+
+        function collectionSorter(a, b) {
+            const [, da] = a, [, db] = b;
+            if (collectionSortMode === 'discovered') return (da.d ?? 0) - (db.d ?? 0);
+            if (collectionSortMode === 'completion') return popcount(db.b) - popcount(da.b);
+            return db.n - da.n; // 'count' default
+        }
+
         function createShapeCard(sig, data, isNew = false) {
             const coords = sig.split('|').map(s => s.split(',').map(Number));
             const maxR = Math.max(...coords.map(c => c[0])) + 1;
@@ -1599,7 +1629,8 @@
                             selfPermMask: famMask.toString(2).padStart(8, '0'),
                             isCanonical: recanon === sig,
                             recanon: recanon !== sig ? recanon : undefined,
-                            cellCount: cells.length
+                            cellCount: cells.length,
+                            discoveryOrder: d.d
                         };
                     })
             };
@@ -1656,11 +1687,15 @@
                 const cells = parseSig(sig);
                 const canon = getCanonicalSignature(cells);
                 if (!repaired[canon]) {
-                    repaired[canon] = { n: 0, b: 0 };
+                    repaired[canon] = { n: 0, b: 0, d: data.d ?? Infinity };
                 }
                 repaired[canon].n += data.n;
                 repaired[canon].b = (repaired[canon].b | data.b) >>> 0;
+                if ((data.d ?? Infinity) < repaired[canon].d) repaired[canon].d = data.d;
             }
+            // Normalize d values to be contiguous
+            const sorted = Object.entries(repaired).sort((a,b) => (a[1].d ?? 0) - (b[1].d ?? 0));
+            sorted.forEach(([sig, data], i) => data.d = i);
             const oldCount = Object.keys(collection).length;
             const newCount = Object.keys(repaired).length;
             collection = repaired;
@@ -1687,7 +1722,7 @@
             }
 
             collAllGallery.innerHTML = '';
-            const allEntries = Object.entries(collection).sort((a,b) => b[1].n - a[1].n);
+            const allEntries = Object.entries(collection).sort(collectionSorter);
             if (!allEntries.length) {
                 collAllGallery.innerHTML = '<p class="empty-state">Your collection is empty!</p>';
             } else {
