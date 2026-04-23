@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shape Constellation | v5.3</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;600&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000000; color: #c8cad0; font-family: 'IBM Plex Mono', monospace; overflow: hidden; width: 100vw; height: 100vh; }
+  #canvas-container { position: fixed; inset: 0; z-index: 0; }
+
+  #panel { position: fixed; top: 16px; left: 16px; z-index: 100; width: 260px; background: rgba(5, 5, 15, 0.95); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.15); border-radius: 16px; padding: 16px; font-size: 11px; box-shadow: 0 12px 40px rgba(0,0,0,0.8); transition: opacity 0.4s; }
+  .hidden-ui { opacity: 0 !important; pointer-events: none !important; }
+  
+  .stat-row { display: flex; justify-content: space-between; margin-bottom: 6px; }
+  .val { color: #6ec6ff; font-weight: bold; }
+  .section-label { font-family: 'Space Grotesk'; font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: rgba(255,255,255,0.3); margin: 12px 0 6px 0; }
+  
+  .btn { width: 100%; padding: 10px; border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; background: rgba(255,255,255,0.08); color: #fff; cursor: pointer; font-size: 10px; transition: 0.2s; font-family: inherit; outline: none; }
+  .btn:hover { background: rgba(255,255,255,0.2); border-color: #fff; }
+  select.btn { appearance: none; background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e"); background-repeat: no-repeat; background-position: right 10px center; background-size: 12px; padding-right: 30px; }
+  
+  .btn-export { border-color: #7bed9f; color: #7bed9f; font-weight: bold; margin-top: 10px; background: rgba(123, 237, 159, 0.1); }
+
+  #tooltip { position: fixed; z-index: 200; pointer-events: none; opacity: 0; background: rgba(0, 0, 0, 0.95); border: 1px solid #6ec6ff; border-radius: 12px; padding: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); pointer-events: none; }
+  #tooltip.visible { opacity: 1; transition: opacity 0.2s; }
+  
+  #intro { position: fixed; inset: 0; z-index: 500; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #000; transition: opacity 0.6s ease; }
+  #intro.hidden { opacity: 0; pointer-events: none; }
+  
+  #stats-bar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; gap: 20px; padding: 10px 24px; background: rgba(10, 10, 25, 0.8); border: 1px solid rgba(255,255,255,0.1); border-radius: 25px; font-size: 11px; transition: opacity 0.4s; }
+</style>
+</head>
+<body>
+
+<div id="canvas-container"></div>
+
+<div id="panel" class="hidden-ui">
+  <div style="font-family:'Space Grotesk'; font-weight:600; color:#fff; font-size:15px; margin-bottom:12px; letter-spacing:1px">CONSTELLATION v5.3</div>
+  <div class="stat-row"><span>Discoveries</span><span class="val" id="st-shapes">0</span></div>
+  <div class="stat-row"><span>Status</span><span class="val" id="st-sim">Active</span></div>
+  
+  <div class="section-label">Color Palette</div>
+  <select class="btn" id="color-mode-select" onchange="setColorMode(this.value)">
+    <option value="size">Complexity (By Size)</option>
+    <option value="spectrum">Rainbow Progress</option>
+    <option value="spatial">Spatial RGB (3D Map)</option>
+  </select>
+
+  <div class="section-label">Tools</div>
+  <button class="btn" onclick="resetCamera()">Fit Scene</button>
+  <button class="btn btn-export" id="export-btn" onclick="exportBakedGLB()">Export Baked .glb</button>
+  <button class="btn" style="margin-top:20px; border-color: rgba(255,100,100,0.3); color: #ff8888" onclick="returnToIntro()">Load Different File</button>
+</div>
+
+<div id="tooltip">
+  <div id="tooltip-glyph" style="display:flex; justify-content:center; margin-bottom:8px"></div>
+  <div id="tooltip-info" style="font-size:11px; text-align:center; color:#fff; line-height:1.4"></div>
+</div>
+
+<div id="stats-bar" class="hidden-ui">
+  <span style="color:rgba(255,255,255,0.5)">Shapes: <b style="color:#fff" id="sb-shapes">0</b></span>
+  <span style="color:rgba(255,255,255,0.5)">Rainbows: <b style="color:#7bed9f" id="sb-rainbows">0</b></span>
+</div>
+
+<div id="intro">
+  <h1 style="font-family:'Space Grotesk'; color:#fff; font-weight:300; letter-spacing:12px; margin-bottom:40px">CONSTELLATION</h1>
+  <button class="btn" style="width:260px; height:60px; font-size:13px; background:#6ec6ff22; border-color: #6ec6ff; color: #fff" onclick="document.getElementById('file-input').click()">UPLOAD COLLECTION JSON</button>
+  <p id="load-status" style="margin-top:20px; font-size:11px; color:#6ec6ff"></p>
+  <input type="file" id="file-input" accept=".json" style="display:none">
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+
+<script>
+const popcount = v => { v = v - ((v >> 1) & 0x55555555); v = (v & 0x33333333) + ((v >> 2) & 0x33333333); return ((v + (v >> 4) & 0x0F0F0F0F) * 0x01010101) >> 24; };
+
+let scene, camera, renderer, controls, cubeInstances, rayPoints, constellation, sim;
+let constellationReady = false, colorMode = 'size';
+
+function init() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x000000);
+  camera = new THREE.PerspectiveCamera(40, window.innerWidth/window.innerHeight, 1, 15000);
+  camera.position.set(0, 300, 800);
+  
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  document.getElementById('canvas-container').appendChild(renderer.domElement);
+  
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.autoRotate = true;
+  controls.autoRotateSpeed = 0.3;
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+  sun.position.set(100, 200, 150);
+  scene.add(sun);
+  
+  window.addEventListener('dblclick', () => {
+    if (!constellationReady) return;
+    controls.autoRotate = !controls.autoRotate;
+  });
+
+  animate();
+}
+
+function hardReset() {
+  constellationReady = false;
+  
+  // Clear the file input value so selecting the SAME file triggers onchange again
+  const fileInput = document.getElementById('file-input');
+  if (fileInput) fileInput.value = "";
+
+  if (cubeInstances) {
+    scene.remove(cubeInstances);
+    if (cubeInstances.geometry) cubeInstances.geometry.dispose();
+    if (cubeInstances.material) cubeInstances.material.dispose();
+    cubeInstances = null;
+  }
+  if (rayPoints) {
+    scene.remove(rayPoints);
+    if (rayPoints.geometry) rayPoints.geometry.dispose();
+    if (rayPoints.material) rayPoints.material.dispose();
+    rayPoints = null;
+  }
+  
+  TWEEN.removeAll();
+  if (sim) sim.running = false;
+  sim = null;
+  constellation = null;
+}
+
+function returnToIntro() {
+  hardReset();
+  document.getElementById('intro').classList.remove('hidden');
+  document.getElementById('panel').classList.add('hidden-ui');
+  document.getElementById('stats-bar').classList.add('hidden-ui');
+  document.getElementById('load-status').innerText = "WAITING FOR NEW FILE...";
+}
+
+function buildGraph(data) {
+  const nodes = Object.entries(data).map(([sig, d]) => {
+    const cells = sig.split('|').map(x => x.split(',').map(Number));
+    const minR = Math.min(...cells.map(p=>p[0])), minC = Math.min(...cells.map(p=>p[1]));
+    const norm = cells.map(p=>[p[0]-minR, p[1]-minC]).sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+    
+    return {
+      id: sig, cells: norm, count: d.n, bits: d.b, size: norm.length,
+      x: (Math.random()-0.5)*1000, y: (norm.length - 5) * 120, z: (Math.random()-0.5)*1000,
+      vx: 0, vy: 0, vz: 0, color: new THREE.Color()
+    };
+  });
+  return { nodes };
+}
+
+function buildScene() {
+  const nodes = constellation.nodes;
+  const totalCubes = nodes.reduce((s,n)=>s+n.size, 0);
+  const mat = new THREE.MeshPhongMaterial({ shininess: 80, specular: 0x444444 });
+  
+  cubeInstances = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), mat, totalCubes);
+  cubeInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(totalCubes * 3), 3);
+  updateNodeColors();
+  scene.add(cubeInstances);
+
+  const rGeo = new THREE.BufferGeometry();
+  rGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(nodes.length*3), 3));
+  rayPoints = new THREE.Points(rGeo, new THREE.PointsMaterial({ size: 20, transparent: true, opacity: 0 }));
+  scene.add(rayPoints);
+}
+
+function updateNodeColors() {
+  if (!cubeInstances || !constellation) return;
+  const nodes = constellation.nodes;
+  const colorAttr = cubeInstances.instanceColor;
+  
+  let sb = null;
+  if (colorMode === 'spatial') {
+    sb = {
+      minX: Math.min(...nodes.map(n => n.x)), maxX: Math.max(...nodes.map(n => n.x)),
+      minY: Math.min(...nodes.map(n => n.y)), maxY: Math.max(...nodes.map(n => n.y)),
+      minZ: Math.min(...nodes.map(n => n.z)), maxZ: Math.max(...nodes.map(n => n.z)),
+    };
+  }
+
+  let idx = 0;
+  nodes.forEach(n => {
+    let c = n.color;
+    if (colorMode === 'size') {
+      const pal = [null,'#ffd93d','#ffb347','#ff8a65','#ff6b6b','#e879a8','#c792ea','#9fa8da','#5f9ee9','#4dd0e1','#7bed9f'];
+      c.set(pal[Math.min(n.size, 10)] || '#ffffff');
+    } else if (colorMode === 'spectrum') {
+      c.set(popcount(n.bits&0x1F)===5 ? '#00ffcc' : '#334455');
+    } else if (colorMode === 'spatial') {
+      c.setRGB(
+        (n.x - sb.minX) / (sb.maxX - sb.minX || 1),
+        (n.y - sb.minY) / (sb.maxY - sb.minY || 1),
+        (n.z - sb.minZ) / (sb.maxZ - sb.minZ || 1)
+      );
+    }
+    for(let i=0; i<n.size; i++) colorAttr.setXYZ(idx + i, c.r, c.g, c.b);
+    idx += n.size;
+  });
+  colorAttr.needsUpdate = true;
+}
+
+const _m = new THREE.Matrix4(), _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3();
+function updateFrame(time) {
+  if (!constellationReady || !sim) return;
+
+  const { nodes, alpha } = sim;
+  if (sim.running) {
+    for(let i=0; i<nodes.length; i++) {
+      const a = nodes[i];
+      for(let j=i+1; j<nodes.length; j++){
+        const b = nodes[j];
+        let dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+        let d2 = dx*dx + dy*dy + dz*dz || 1;
+        if (d2 < 5000) { 
+          let f = -12.0 * alpha;
+          a.vx += (dx/d2)*f; a.vy += (dy/d2)*f; a.vz += (dz/d2)*f;
+          b.vx -= (dx/d2)*f; b.vy -= (dy/d2)*f; b.vz -= (dz/d2)*f;
+        }
+      }
+      a.vx *= 0.94; a.vy *= 0.94; a.vz *= 0.94;
+      a.x += a.vx; a.y += a.vy; a.z += a.vz;
+    }
+    sim.alpha *= 0.994;
+    if (sim.alpha < 0.001) { sim.running = false; document.getElementById('st-sim').innerText = "Static"; }
+    if (colorMode === 'spatial') updateNodeColors();
+  }
+
+  let cIdx = 0; const scale = 6.5; 
+  nodes.forEach(n => {
+    _q.setFromAxisAngle(new THREE.Vector3(0,1,0), time*0.3 + (n.size * 0.1));
+    n.cells.forEach(cell => {
+      _p.set((cell[1]-1.2)*scale, 0, (cell[0]-1.2)*scale).applyQuaternion(_q).add(new THREE.Vector3(n.x, n.y, n.z));
+      _s.set(scale*0.96, scale*0.4, scale*0.96);
+      _m.compose(_p, _q, _s);
+      cubeInstances.setMatrixAt(cIdx++, _m);
+    });
+  });
+  cubeInstances.instanceMatrix.needsUpdate = true;
+  
+  const gp = rayPoints.geometry.attributes.position.array;
+  nodes.forEach((n,i)=>{ gp[i*3]=n.x; gp[i*3+1]=n.y; gp[i*3+2]=n.z; });
+  rayPoints.geometry.attributes.position.needsUpdate = true;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  TWEEN.update();
+  updateFrame(performance.now()*0.001);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+async function loadData(data) {
+  hardReset();
+  document.getElementById('load-status').innerText = "PROCESSING DATA...";
+  await new Promise(r => setTimeout(r, 200));
+  
+  constellation = buildGraph(data);
+  sim = { alpha: 1.0, nodes: constellation.nodes, running: true };
+  buildScene();
+  
+  document.getElementById('st-shapes').innerText = constellation.nodes.length;
+  document.getElementById('st-sim').innerText = "Simulating";
+  document.getElementById('sb-shapes').innerText = constellation.nodes.length;
+  document.getElementById('sb-rainbows').innerText = constellation.nodes.filter(n=>popcount(n.bits&0x1F)===5).length;
+  
+  constellationReady = true;
+  document.getElementById('intro').classList.add('hidden');
+  document.getElementById('panel').classList.remove('hidden-ui');
+  document.getElementById('stats-bar').classList.remove('hidden-ui');
+  resetCamera();
+}
+
+function resetCamera() {
+  if(!constellationReady) return;
+  const nodes = constellation.nodes;
+  const avgY = nodes.reduce((s,n)=>s+n.y,0)/nodes.length;
+  new TWEEN.Tween(camera.position).to({x:0, y:avgY + 500, z:1500}, 1500).easing(TWEEN.Easing.Quadratic.Out).start();
+  new TWEEN.Tween(controls.target).to({x:0, y:avgY, z:0}, 1500).easing(TWEEN.Easing.Quadratic.Out).start();
+}
+
+function setColorMode(m) {
+  colorMode = m;
+  if(constellationReady) updateNodeColors();
+}
+
+function exportBakedGLB() {
+  const btn = document.getElementById('export-btn');
+  btn.innerText = "BAKING SCENE...";
+  const bakeScene = new THREE.Scene();
+  const geometry = new THREE.BoxGeometry(1, 1, 1);
+  const matrix = new THREE.Matrix4();
+  const color = new THREE.Color();
+
+  for (let i = 0; i < cubeInstances.count; i++) {
+    cubeInstances.getMatrixAt(i, matrix);
+    cubeInstances.getColorAt(i, color);
+    const m = new THREE.Mesh(geometry, new THREE.MeshPhongMaterial({ color: color.clone() }));
+    m.applyMatrix4(matrix);
+    bakeScene.add(m);
+  }
+
+  new THREE.GLTFExporter().parse(bakeScene, (res) => {
+    const blob = new Blob([res], { type: 'application/octet-stream' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `constellation_bake_${Date.now()}.glb`;
+    a.click();
+    btn.innerText = "✓ EXPORTED";
+    setTimeout(() => btn.innerText = "Export Baked .glb", 2000);
+  }, { binary: true });
+}
+
+window.addEventListener('mousemove', (e) => {
+  if(!constellationReady || !rayPoints) return;
+  const ndc = new THREE.Vector2((e.clientX/window.innerWidth)*2-1, -(e.clientY/window.innerHeight)*2+1);
+  const ray = new THREE.Raycaster(); ray.params.Points.threshold = 25.0;
+  ray.setFromCamera(ndc, camera);
+  const hits = ray.intersectObject(rayPoints);
+  const div = document.getElementById('tooltip');
+  if (hits.length > 0) {
+    const n = constellation.nodes[hits[0].index];
+    const pos = new THREE.Vector3(n.x, n.y, n.z).project(camera);
+    div.style.left = ((pos.x*0.5+0.5)*window.innerWidth + 20)+'px';
+    div.style.top = ((-pos.y*0.5+0.5)*window.innerHeight - 60)+'px';
+    div.classList.add('visible');
+    document.getElementById('tooltip-glyph').innerHTML = `<svg width="50" height="50" viewBox="0 0 5 5">${n.cells.map(c=>`<rect x="${c[1]}" y="${c[0]}" width="0.8" height="0.8" fill="#6ec6ff"/>`)}</svg>`;
+    document.getElementById('tooltip-info').innerHTML = `<b>${n.size}-Cell Family</b><br>Found ${n.count} times`;
+  } else { div.classList.remove('visible'); }
+});
+
+init();
+document.getElementById('file-input').onchange = (e) => {
+  if (e.target.files.length > 0) {
+    const reader = new FileReader();
+    reader.onload = (ev) => loadData(JSON.parse(ev.target.result));
+    reader.readAsText(e.target.files[0]);
+  }
+};
+</script>
+</body>
+</html>
