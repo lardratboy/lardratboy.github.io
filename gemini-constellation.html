@@ -72,6 +72,7 @@
   <div class="section-label">Color Palette</div>
   <select class="btn" id="color-mode-select" onchange="setColorMode(this.value)">
     <option value="spatial" selected>Spatial RGB (3D Map)</option>
+    <option value="gradient">Shape Gradient (Local)</option>
     <option value="size">Complexity (By Size)</option>
     <option value="spectrum">Rainbow Progress</option>
   </select>
@@ -207,6 +208,31 @@ function buildScene() {
   scene.add(rayPoints);
 }
 
+// ── Gradient ramp for per-shape local coloring ──
+const GRADIENT_STOPS = [
+  { t: 0.00, color: new THREE.Color(0.98, 0.35, 0.56) },  // hot rose
+  { t: 0.22, color: new THREE.Color(1.00, 0.62, 0.26) },  // warm amber
+  { t: 0.44, color: new THREE.Color(0.95, 0.85, 0.20) },  // gold
+  { t: 0.58, color: new THREE.Color(0.20, 0.82, 0.65) },  // seafoam
+  { t: 0.75, color: new THREE.Color(0.28, 0.58, 0.96) },  // sky blue
+  { t: 1.00, color: new THREE.Color(0.60, 0.30, 0.92) },  // violet
+];
+const _gradOut = new THREE.Color();
+
+function sampleGradient(t) {
+  t = Math.max(0, Math.min(1, t));
+  for (let i = 0; i < GRADIENT_STOPS.length - 1; i++) {
+    const a = GRADIENT_STOPS[i], b = GRADIENT_STOPS[i + 1];
+    if (t <= b.t) {
+      const f = (t - a.t) / (b.t - a.t);
+      _gradOut.lerpColors(a.color, b.color, f);
+      return _gradOut;
+    }
+  }
+  _gradOut.copy(GRADIENT_STOPS[GRADIENT_STOPS.length - 1].color);
+  return _gradOut;
+}
+
 function updateNodeColors() {
   if (!cubeInstances || !constellation) return;
   const nodes = constellation.nodes;
@@ -220,21 +246,40 @@ function updateNodeColors() {
 
   let idx = 0;
   nodes.forEach(n => {
-    let c = n.color;
-    if (colorMode === 'size') {
-      const pal = [null,'#ffd93d','#ffb347','#ff8a65','#ff6b6b','#e879a8','#c792ea','#9fa8da','#5f9ee9','#4dd0e1','#7bed9f'];
-      c.set(pal[Math.min(n.size, 10)] || '#ffffff');
-    } else if (colorMode === 'spectrum') {
-      c.set(popcount(n.bits&0x1F)===5 ? '#00ffcc' : '#334455');
-    } else if (colorMode === 'spatial') {
-      c.setRGB(
-        (n.x - sb.minX) / (sb.maxX - sb.minX || 1),
-        (n.y - sb.minY) / (sb.maxY - sb.minY || 1),
-        (n.z - sb.minZ) / (sb.maxZ - sb.minZ || 1)
-      );
+    if (colorMode === 'gradient') {
+      // Per-cell color: normalize each cell within the shape's local AABB
+      const maxR = Math.max(...n.cells.map(c => c[0]));
+      const maxC = Math.max(...n.cells.map(c => c[1]));
+
+      n.cells.forEach((cell) => {
+        // Normalize to [0,1] within shape; 0.5 when axis is degenerate
+        const u = maxC > 0 ? cell[1] / maxC : 0.5;
+        const v = maxR > 0 ? cell[0] / maxR : 0.5;
+        // Diagonal sweep: corner-to-corner gradient
+        const t = (u + v) / 2;
+
+        const gc = sampleGradient(t);
+        colorAttr.setXYZ(idx, gc.r, gc.g, gc.b);
+        idx++;
+      });
+    } else {
+      // All other modes: one color per node, applied to all its cells
+      let c = n.color;
+      if (colorMode === 'size') {
+        const pal = [null,'#ffd93d','#ffb347','#ff8a65','#ff6b6b','#e879a8','#c792ea','#9fa8da','#5f9ee9','#4dd0e1','#7bed9f'];
+        c.set(pal[Math.min(n.size, 10)] || '#ffffff');
+      } else if (colorMode === 'spectrum') {
+        c.set(popcount(n.bits&0x1F)===5 ? '#00ffcc' : '#334455');
+      } else if (colorMode === 'spatial') {
+        c.setRGB(
+          (n.x - sb.minX) / (sb.maxX - sb.minX || 1),
+          (n.y - sb.minY) / (sb.maxY - sb.minY || 1),
+          (n.z - sb.minZ) / (sb.maxZ - sb.minZ || 1)
+        );
+      }
+      for(let i=0; i<n.size; i++) colorAttr.setXYZ(idx + i, c.r, c.g, c.b);
+      idx += n.size;
     }
-    for(let i=0; i<n.size; i++) colorAttr.setXYZ(idx + i, c.r, c.g, c.b);
-    idx += n.size;
   });
   colorAttr.needsUpdate = true;
 }
