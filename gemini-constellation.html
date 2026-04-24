@@ -73,6 +73,7 @@
   <select class="btn" id="color-mode-select" onchange="setColorMode(this.value)">
     <option value="spatial" selected>Spatial RGB (3D Map)</option>
     <option value="gradient">Shape Gradient (Local)</option>
+    <option value="vertex_spatial">Vertex Spatial (Local)</option>
     <option value="size">Complexity (By Size)</option>
     <option value="spectrum">Rainbow Progress</option>
   </select>
@@ -114,6 +115,7 @@ const popcount = v => { v = v - ((v >> 1) & 0x55555555); v = (v & 0x33333333) + 
 
 let scene, camera, renderer, controls, cubeInstances, rayPoints, constellation, sim;
 let constellationReady = false, colorMode = 'spatial', projectionMode = 'force';
+let defaultMaterial = null, vertexSpatialMaterial = null;
 
 const BASE_CUBE_SCALE = 6.5;
 
@@ -152,9 +154,10 @@ function hardReset() {
   if (cubeInstances) {
     scene.remove(cubeInstances);
     cubeInstances.geometry.dispose();
-    cubeInstances.material.dispose();
     cubeInstances = null;
   }
+  if (defaultMaterial) { defaultMaterial.dispose(); defaultMaterial = null; }
+  if (vertexSpatialMaterial) { vertexSpatialMaterial.dispose(); vertexSpatialMaterial = null; }
   if (rayPoints) {
     scene.remove(rayPoints);
     rayPoints.geometry.dispose();
@@ -195,10 +198,127 @@ function buildGraph(data) {
 function buildScene() {
   const nodes = constellation.nodes;
   const totalCubes = nodes.reduce((s,n)=>s+n.size, 0);
-  const mat = new THREE.MeshPhongMaterial({ shininess: 80, specular: 0x444444 });
-  
-  cubeInstances = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), mat, totalCubes);
+
+  // ── Default Phong material ──
+  defaultMaterial = new THREE.MeshPhongMaterial({ shininess: 80, specular: 0x444444 });
+
+  const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+  cubeInstances = new THREE.InstancedMesh(boxGeo, defaultMaterial, totalCubes);
   cubeInstances.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(totalCubes * 3), 3);
+
+  // ── Per-instance attributes for vertex spatial mode ──
+  // Cell center in unit (scale-independent) space + shape AABB
+  const cellUnitArr = new Float32Array(totalCubes * 3);
+  const aabbMinArr  = new Float32Array(totalCubes * 3);
+  const aabbMaxArr  = new Float32Array(totalCubes * 3);
+  const HALF_W = 0.96 * 0.5;   // half cube width in unit space
+  const HALF_H = 0.4  * 0.5;   // half cube height
+  const CENTER_OFFSET = 1.2;   // matches updateFrame's (cell-1.2)
+
+  let ai = 0;
+  nodes.forEach(n => {
+    // Compute this shape's AABB in unit space across all its cells + vertex extents
+    let sMinX = Infinity, sMaxX = -Infinity;
+    let sMinZ = Infinity, sMaxZ = -Infinity;
+    const cellCenters = n.cells.map(cell => ({
+      x: cell[1] - CENTER_OFFSET,
+      z: cell[0] - CENTER_OFFSET
+    }));
+    cellCenters.forEach(cc => {
+      if (cc.x - HALF_W < sMinX) sMinX = cc.x - HALF_W;
+      if (cc.x + HALF_W > sMaxX) sMaxX = cc.x + HALF_W;
+      if (cc.z - HALF_W < sMinZ) sMinZ = cc.z - HALF_W;
+      if (cc.z + HALF_W > sMaxZ) sMaxZ = cc.z + HALF_W;
+    });
+    const aMin = [sMinX, -HALF_H, sMinZ];
+    const aMax = [sMaxX,  HALF_H, sMaxZ];
+
+    cellCenters.forEach(cc => {
+      cellUnitArr[ai*3]   = cc.x;
+      cellUnitArr[ai*3+1] = 0;
+      cellUnitArr[ai*3+2] = cc.z;
+      aabbMinArr[ai*3]    = aMin[0]; aabbMinArr[ai*3+1] = aMin[1]; aabbMinArr[ai*3+2] = aMin[2];
+      aabbMaxArr[ai*3]    = aMax[0]; aabbMaxArr[ai*3+1] = aMax[1]; aabbMaxArr[ai*3+2] = aMax[2];
+      ai++;
+    });
+  });
+
+  boxGeo.setAttribute('aCellUnit', new THREE.InstancedBufferAttribute(cellUnitArr, 3));
+  boxGeo.setAttribute('aAABBMin',  new THREE.InstancedBufferAttribute(aabbMinArr,  3));
+  boxGeo.setAttribute('aAABBMax',  new THREE.InstancedBufferAttribute(aabbMaxArr,  3));
+
+  // ── Vertex Spatial ShaderMaterial ──
+  vertexSpatialMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+      lightDir:    { value: new THREE.Vector3(100, 400, 150).normalize() },
+      ambientStr:  { value: 0.35 },
+      specColor:   { value: new THREE.Color(0x888888) },
+      shininess:   { value: 64.0 },
+    },
+    vertexShader: [
+      'attribute vec3 aCellUnit;',
+      'attribute vec3 aAABBMin;',
+      'attribute vec3 aAABBMax;',
+      '',
+      'varying vec3 vLocalColor;',
+      'varying vec3 vWorldNormal;',
+      'varying vec3 vViewDir;',
+      '',
+      'void main() {',
+      '  // Vertex position in shape-local unit space (scale-independent)',
+      '  vec3 localPos = aCellUnit + position * vec3(0.96, 0.4, 0.96);',
+      '  vec3 range = max(aAABBMax - aAABBMin, vec3(0.001));',
+      '  vLocalColor = clamp((localPos - aAABBMin) / range, 0.0, 1.0);',
+      '',
+      '  // Boost: saturate the raw RGB so it reads as vivid, not washed-out',
+      '  // Slight power curve lifts midtones while preserving 0 and 1',
+      '  vLocalColor = pow(vLocalColor, vec3(0.85));',
+      '',
+      '  // Standard instanced transform',
+      '  vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);',
+      '  vec4 mvPos = viewMatrix * worldPos;',
+      '',
+      '  // Normal: box faces are axis-aligned so simple transform is correct',
+      '  vWorldNormal = normalize(mat3(modelMatrix) * mat3(instanceMatrix) * normal);',
+      '  vViewDir = normalize(cameraPosition - worldPos.xyz);',
+      '',
+      '  gl_Position = projectionMatrix * mvPos;',
+      '}',
+    ].join('\n'),
+    fragmentShader: [
+      'uniform vec3  lightDir;',
+      'uniform float ambientStr;',
+      'uniform vec3  specColor;',
+      'uniform float shininess;',
+      '',
+      'varying vec3 vLocalColor;',
+      'varying vec3 vWorldNormal;',
+      'varying vec3 vViewDir;',
+      '',
+      'void main() {',
+      '  vec3 N = normalize(vWorldNormal);',
+      '  vec3 L = normalize(lightDir);',
+      '  vec3 V = normalize(vViewDir);',
+      '  vec3 H = normalize(L + V);',
+      '',
+      '  float diff = max(dot(N, L), 0.0);',
+      '  float spec = pow(max(dot(N, H), 0.0), shininess);',
+      '',
+      '  vec3 ambient  = vLocalColor * ambientStr;',
+      '  vec3 diffuse  = vLocalColor * diff;',
+      '  vec3 specular = specColor * spec;',
+      '',
+      '  vec3 color = ambient + diffuse + specular;',
+      '',
+      '  // Reinhard tone-map + gamma',
+      '  color = color / (color + vec3(1.0));',
+      '  color = pow(color, vec3(1.0 / 2.2));',
+      '',
+      '  gl_FragColor = vec4(color, 1.0);',
+      '}',
+    ].join('\n'),
+  });
+
   updateNodeColors();
   scene.add(cubeInstances);
 
@@ -235,6 +355,7 @@ function sampleGradient(t) {
 
 function updateNodeColors() {
   if (!cubeInstances || !constellation) return;
+  if (colorMode === 'vertex_spatial') return; // shader handles colors
   const nodes = constellation.nodes;
   const colorAttr = cubeInstances.instanceColor;
   
@@ -380,6 +501,8 @@ async function loadData(data) {
   document.getElementById('sb-rainbows').innerText = constellation.nodes.filter(n=>popcount(n.bits&0x1F)===5).length;
   
   constellationReady = true;
+  colorMode = 'spatial';
+  document.getElementById('color-mode-select').value = 'spatial';
   projectionMode = 'force';
   document.getElementById('projection-select').value = 'force';
   document.getElementById('intro').classList.add('hidden');
@@ -414,8 +537,20 @@ function resetCamera() {
 }
 
 function setColorMode(m) {
+  const wasVertexSpatial = colorMode === 'vertex_spatial';
   colorMode = m;
-  if (constellationReady) updateNodeColors();
+  if (!constellationReady || !cubeInstances) return;
+
+  if (m === 'vertex_spatial') {
+    // Swap to custom ShaderMaterial — colors come from the vertex shader
+    cubeInstances.material = vertexSpatialMaterial;
+  } else {
+    if (wasVertexSpatial) {
+      // Swap back to Phong + instanceColor
+      cubeInstances.material = defaultMaterial;
+    }
+    updateNodeColors();
+  }
 }
 
 // ── Projection System ──
