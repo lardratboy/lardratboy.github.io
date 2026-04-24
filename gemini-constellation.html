@@ -61,6 +61,14 @@
   <button class="btn btn-anim" onclick="triggerDiscoveryPulse()">Discovery Pulse Ripple</button>
   <button class="btn btn-anim" onclick="pulseVolume()">Popularity Pulse (N)</button>
 
+  <div class="section-label">Projection</div>
+  <select class="btn" id="projection-select" onchange="setProjection(this.value)">
+    <option value="force" selected>Force Simulation</option>
+    <option value="fibonacci">Fibonacci Sphere (Discovery)</option>
+    <option value="lattice2d">2D Lattice (By Size)</option>
+    <option value="lattice3d">3D Lattice (By Count)</option>
+  </select>
+
   <div class="section-label">Color Palette</div>
   <select class="btn" id="color-mode-select" onchange="setColorMode(this.value)">
     <option value="spatial" selected>Spatial RGB (3D Map)</option>
@@ -104,7 +112,7 @@
 const popcount = v => { v = v - ((v >> 1) & 0x55555555); v = (v & 0x33333333) + ((v >> 2) & 0x33333333); return ((v + (v >> 4) & 0x0F0F0F0F) * 0x01010101) >> 24; };
 
 let scene, camera, renderer, controls, cubeInstances, rayPoints, constellation, sim;
-let constellationReady = false, colorMode = 'spatial';
+let constellationReady = false, colorMode = 'spatial', projectionMode = 'force';
 
 const BASE_CUBE_SCALE = 6.5;
 
@@ -265,8 +273,9 @@ const _m = new THREE.Matrix4(), _p = new THREE.Vector3(), _q = new THREE.Quatern
 function updateFrame(time) {
   if (!constellationReady || !sim) return;
 
-  const { nodes, alpha } = sim;
-  if (sim.running) {
+  const { nodes } = sim;
+  if (sim.running && projectionMode === 'force') {
+    const alpha = sim.alpha;
     for(let i=0; i<nodes.length; i++) {
       const a = nodes[i];
       for(let j=i+1; j<nodes.length; j++){
@@ -326,6 +335,8 @@ async function loadData(data) {
   document.getElementById('sb-rainbows').innerText = constellation.nodes.filter(n=>popcount(n.bits&0x1F)===5).length;
   
   constellationReady = true;
+  projectionMode = 'force';
+  document.getElementById('projection-select').value = 'force';
   document.getElementById('intro').classList.add('hidden');
   document.getElementById('panel').classList.remove('hidden-ui');
   document.getElementById('stats-bar').classList.remove('hidden-ui');
@@ -335,16 +346,153 @@ async function loadData(data) {
 }
 
 function resetCamera() {
-  if(!constellationReady) return;
+  if (!constellationReady) return;
   const nodes = constellation.nodes;
-  const avgY = nodes.reduce((s,n)=>s+n.y,0)/nodes.length;
-  new TWEEN.Tween(camera.position).to({x:0, y:avgY + 500, z:1500}, 2000).easing(TWEEN.Easing.Quadratic.Out).start();
-  new TWEEN.Tween(controls.target).to({x:0, y:avgY, z:0}, 2000).easing(TWEEN.Easing.Quadratic.Out).start();
+
+  // Compute bounding box of current node positions
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const n of nodes) {
+    if (n.x < minX) minX = n.x; if (n.x > maxX) maxX = n.x;
+    if (n.y < minY) minY = n.y; if (n.y > maxY) maxY = n.y;
+    if (n.z < minZ) minZ = n.z; if (n.z > maxZ) maxZ = n.z;
+  }
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+  const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 100);
+
+  if (projectionMode === 'lattice2d') {
+    // Top-down-ish angled view for 2D lattice
+    new TWEEN.Tween(camera.position).to({ x: cx, y: cy + span * 0.2, z: cz + span * 1.1 }, 2000).easing(TWEEN.Easing.Quadratic.Out).start();
+  } else {
+    new TWEEN.Tween(camera.position).to({ x: cx, y: cy + span * 0.4, z: cz + span * 1.2 }, 2000).easing(TWEEN.Easing.Quadratic.Out).start();
+  }
+  new TWEEN.Tween(controls.target).to({ x: cx, y: cy, z: cz }, 2000).easing(TWEEN.Easing.Quadratic.Out).start();
 }
 
 function setColorMode(m) {
   colorMode = m;
-  if(constellationReady) updateNodeColors();
+  if (constellationReady) updateNodeColors();
+}
+
+// ── Projection System ──
+
+function computeProjectionTargets(mode) {
+  const nodes = constellation.nodes;
+  const N = nodes.length;
+  const targets = new Map();
+  const SPACING = BASE_CUBE_SCALE * 5;
+
+  if (mode === 'fibonacci') {
+    // Fibonacci sphere, ordered by discovery ID
+    const sorted = [...nodes].sort((a, b) => a.d - b.d);
+    const radius = Math.max(150, Math.sqrt(N) * SPACING * 0.8);
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    sorted.forEach((n, i) => {
+      const y = 1 - (2 * i + 1) / N;
+      const r = Math.sqrt(1 - y * y);
+      const theta = goldenAngle * i;
+      targets.set(n, {
+        x: Math.cos(theta) * r * radius,
+        y: y * radius,
+        z: Math.sin(theta) * r * radius
+      });
+    });
+
+  } else if (mode === 'lattice2d') {
+    // 2D tiered lattice grouped by cell count (size)
+    const bySize = {};
+    nodes.forEach(n => {
+      if (!bySize[n.size]) bySize[n.size] = [];
+      bySize[n.size].push(n);
+    });
+    const sizes = Object.keys(bySize).map(Number).sort((a, b) => a - b);
+    const tierSpacing = SPACING * 5;
+    const totalHeight = (sizes.length - 1) * tierSpacing;
+
+    sizes.forEach((sz, tierIdx) => {
+      const group = bySize[sz];
+      // Sort within tier by count descending for a nice layout
+      group.sort((a, b) => b.count - a.count);
+      const cols = Math.ceil(Math.sqrt(group.length * 2)); // wider than tall
+      const y = (tierIdx * tierSpacing) - totalHeight / 2;
+
+      group.forEach((n, i) => {
+        const row = Math.floor(i / cols);
+        const col = i % cols;
+        // Center each row
+        const rowCount = Math.min(cols, group.length - row * cols);
+        const xOff = (col - (rowCount - 1) / 2) * SPACING;
+        const zOff = (row - Math.floor(group.length / cols) / 2) * SPACING;
+        targets.set(n, { x: xOff, y: y, z: zOff });
+      });
+    });
+
+  } else if (mode === 'lattice3d') {
+    // 3D lattice sorted by count (n)
+    const sorted = [...nodes].sort((a, b) => a.count - b.count);
+    const perSide = Math.ceil(Math.cbrt(N));
+    sorted.forEach((n, i) => {
+      const ix = i % perSide;
+      const iy = Math.floor(i / perSide) % perSide;
+      const iz = Math.floor(i / (perSide * perSide));
+      targets.set(n, {
+        x: (ix - (perSide - 1) / 2) * SPACING,
+        y: (iy - (perSide - 1) / 2) * SPACING,
+        z: (iz - (perSide - 1) / 2) * SPACING
+      });
+    });
+  }
+
+  return targets;
+}
+
+function setProjection(mode) {
+  if (!constellationReady) return;
+  projectionMode = mode;
+  document.getElementById('projection-select').value = mode;
+
+  // Kill any ongoing position tweens
+  constellation.nodes.forEach(n => {
+    if (n._posTween) { n._posTween.stop(); n._posTween = null; }
+  });
+
+  if (mode === 'force') {
+    // Restart force sim from current positions
+    sim.alpha = 1.0;
+    sim.running = true;
+    constellation.nodes.forEach(n => { n.vx = 0; n.vy = 0; n.vz = 0; });
+    // Nudge Y back toward size-based layering
+    constellation.nodes.forEach(n => {
+      n.vy = ((n.size - 5) * 120 - n.y) * 0.01;
+    });
+    resetCamera();
+    return;
+  }
+
+  // Stop force sim
+  sim.running = false;
+
+  const targets = computeProjectionTargets(mode);
+
+  constellation.nodes.forEach(n => {
+    const t = targets.get(n);
+    if (!t) return;
+    n.vx = 0; n.vy = 0; n.vz = 0;
+    n._posTween = new TWEEN.Tween(n)
+      .to({ x: t.x, y: t.y, z: t.z }, 1800)
+      .easing(TWEEN.Easing.Quadratic.InOut)
+      .start();
+  });
+
+  // Single color-update tween during transition (instead of per-node)
+  if (colorMode === 'spatial') {
+    const _dummy = { t: 0 };
+    new TWEEN.Tween(_dummy).to({ t: 1 }, 1800)
+      .onUpdate(() => updateNodeColors())
+      .start();
+  }
+
+  // Fit camera after transition settles
+  setTimeout(() => resetCamera(), 400);
 }
 
 function exportBakedGLB() {
