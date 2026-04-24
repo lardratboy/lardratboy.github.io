@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>BOXED IN — Powered by Unboxed</title>
+    <title>BOXED IN - Instanced & Pooled</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Exo+2:wght@300;600&display=swap');
 
@@ -745,29 +745,18 @@
 <div class="controls">Select a cube, then click a neighbor to swap. Match N+ to clear! | Please leave feedback</div>
 
 <script>
-// ████████████████████████████████████████████████
-// █                                              █
-// █          UNBOXED ENGINE — CORE               █
-// █                                              █
-// ████████████████████████████████████████████████
-
 // ============================================
-// SOUND ENGINE (Bank Pattern)
+// SOUND MANAGER
 // ============================================
-// Primitives: playTone, playSweep, playChord
-// Games register named sounds via .register()
-// and trigger them via .play()
-// ============================================
-class SoundEngine {
+class RetroSoundManager {
     constructor() {
         this.audioContext = null;
         this.masterGain = null;
         this.enabled = true;
-        this._bank = {};
-        this._initAudio();
+        this.initAudio();
     }
     
-    _initAudio() {
+    initAudio() {
         try {
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
             this.masterGain = this.audioContext.createGain();
@@ -785,8 +774,6 @@ class SoundEngine {
     
     setEnabled(v) { this.enabled = v; }
     isEnabled() { return this.enabled; }
-    
-    // --- Primitives (engine-level, always available) ---
     
     playTone(freq, dur, wave = 'square', vol = 0.1) {
         if (!this.enabled || !this.audioContext) return;
@@ -832,495 +819,253 @@ class SoundEngine {
         freqs.forEach((f, i) => setTimeout(() => this.playTone(f, dur, wave, vol), i * 50));
     }
     
-    // --- Sound Bank (game-level, registered at init) ---
-    
-    register(name, fn) {
-        this._bank[name] = fn;
+    click() { this.playTone(150, 0.1, 'sine', 0.12); this.playTone(300, 0.1, 'square', 0.06); }
+    swap() { this.playTone(440, 0.1, 'sine', 0.08); setTimeout(() => this.playTone(554, 0.1, 'sine', 0.08), 50); }
+    match() { this.playChord([523, 659, 784], 0.3, 'triangle', 0.07); }
+    explode(delay = 0, idx = 0) {
+        const scale = [220, 247, 277, 311, 349, 392, 440, 494];
+        setTimeout(() => this.playTone(scale[Math.min(idx, 7)], 0.4, 'triangle', 0.08), delay);
     }
-    
-    registerAll(soundDefs) {
-        for (const [name, fn] of Object.entries(soundDefs)) {
-            this._bank[name] = fn;
-        }
+    combo(level) {
+        const base = 440 + level * 100;
+        this.playTone(base, 0.15, 'square', 0.1);
+        setTimeout(() => this.playTone(base * 1.25, 0.15, 'square', 0.1), 80);
+        setTimeout(() => this.playTone(base * 1.5, 0.2, 'square', 0.12), 160);
     }
-    
-    play(name, ...args) {
-        const fn = this._bank[name];
-        if (fn) fn(this, ...args);
-        else console.warn(`SoundEngine: unknown sound "${name}"`);
+    lineClear() {
+        this.playSweep(200, 800, 0.3, 'square', 0.12);
+        setTimeout(() => this.playChord([523, 784, 1047, 1319], 0.4, 'triangle', 0.08), 150);
     }
-}
-
-const soundEngine = new SoundEngine();
-
-// ============================================
-// STORAGE ADAPTER
-// ============================================
-// Abstract interface for persistence.
-// Swap LocalStorageAdapter for a cloud adapter
-// later without changing any game/engine code.
-// ============================================
-class StorageAdapter {
-    getItem(key) { throw new Error('StorageAdapter.getItem not implemented'); }
-    setItem(key, value) { throw new Error('StorageAdapter.setItem not implemented'); }
-    removeItem(key) { throw new Error('StorageAdapter.removeItem not implemented'); }
-    keys() { throw new Error('StorageAdapter.keys not implemented'); }
-}
-
-class LocalStorageAdapter extends StorageAdapter {
-    getItem(key) {
-        try { return localStorage.getItem(key); }
-        catch (e) { console.warn('Storage read failed:', e); return null; }
+    boxedIn() {
+        [880, 784, 659, 587].forEach((f, i) => setTimeout(() => this.playTone(f, 0.08, 'square', 0.08), i * 80));
+        setTimeout(() => this.playTone(1047, 0.2, 'square', 0.15), 340);
     }
-    setItem(key, value) {
-        try { localStorage.setItem(key, value); }
-        catch (e) { console.warn('Storage write failed:', e); }
+    smartMove() {
+        this.playChord([262, 330, 392, 523], 0.8, 'triangle', 0.07); // C major chord
     }
-    removeItem(key) {
-        try { localStorage.removeItem(key); }
-        catch (e) { console.warn('Storage remove failed:', e); }
+    invalidSwap() {
+        this.playTone(150, 0.15, 'sawtooth', 0.12);
+        setTimeout(() => this.playTone(120, 0.15, 'sawtooth', 0.1), 100);
     }
-    keys() {
-        try {
-            const result = [];
-            for (let i = 0; i < localStorage.length; i++) result.push(localStorage.key(i));
-            return result;
-        } catch (e) { console.warn('Storage keys failed:', e); return []; }
+    goalDiscovered() {
+        [659, 784, 988].forEach((f, i) => setTimeout(() => this.playTone(f, 0.15, 'sine', 0.1), i * 100));
+        setTimeout(() => this.playTone(1319, 0.3, 'triangle', 0.12), 300);
     }
 }
 
-// Global storage instance — swap this one line for cloud persistence
-const storage = new LocalStorageAdapter();
+const soundManager = new RetroSoundManager();
 
 // ============================================
-// SETTINGS MANAGER
+// LOGICAL DATA STRUCTURES
 // ============================================
-// Generic key-value settings with defaults merge.
-// Games pass their own storageKey and defaults.
-// ============================================
-class SettingsManager {
-    constructor(storageKey, defaults) {
-        this.storageKey = storageKey;
-        this._defaults = defaults;
-        this.data = this._load();
-    }
-    
-    _load() {
-        try {
-            const saved = storage.getItem(this.storageKey);
-            if (saved) return { ...this._defaults, ...JSON.parse(saved) };
-        } catch (e) { console.warn('Failed to load settings:', e); }
-        return { ...this._defaults };
-    }
-    
-    _save() {
-        try { storage.setItem(this.storageKey, JSON.stringify(this.data)); }
-        catch (e) { console.warn('Failed to save settings:', e); }
-    }
-    
-    get(key) { return this.data[key]; }
-    
-    set(key, value) {
-        this.data[key] = value;
-        this._save();
-    }
-    
-    reset() {
-        this.data = { ...this._defaults };
-        this._save();
+
+// Logical Cube Class - Pure data, no meshes
+class LogicalCube {
+    constructor(gridX, gridY, gridZ, plane, colorKey, targetPos) {
+        this.gridX = gridX;
+        this.gridY = gridY;
+        this.gridZ = gridZ;
+        this.plane = plane;
+        this.colorKey = colorKey;
+        
+        // Transform state
+        this.position = targetPos.clone();
+        this.targetPos = targetPos.clone();
+        this.rotationY = 0;
+        this.scale = 1.0;
+        this.isSelected = false;
+        this.isDying = false;
     }
 }
 
-// ████████████████████████████████████████████████
-// █                                              █
-// █          UNBOXED ENGINE — SERVICES           █
-// █                                              █
-// ████████████████████████████████████████████████
-
 // ============================================
-// UI MANAGER
+// GOALS MANAGER
 // ============================================
-// Reusable UI utilities: button setup, overlay
-// open/close, toast notifications, floating
-// bonus text, and confirm dialogs.
-// ============================================
-class UIManager {
+class GoalsManager {
     constructor() {
-        this._toastQueue = [];
-        this._isShowingToast = false;
+        this.storageKey = 'boxedIn_goals';
+        this.shapes = {
+            'line-3':   { name: 'Line (3)',   icon: '➖', description: '3 cubes in a row' },
+            'line-4':   { name: 'Line (4)',   icon: '➕', description: '4 cubes in a row' },
+            'line-5':   { name: 'Line (5)',   icon: '📏', description: '5 cubes in a row' },
+            'l-shape':  { name: 'L-Shape',    icon: '🔲', description: 'L-shaped match' },
+            't-shape':  { name: 'T-Shape',    icon: '🔳', description: 'T-shaped match' },
+            'square':   { name: 'Square',     icon: '⬜', description: '2×2 block' },
+            'j-shape':  { name: 'J-Shape',    icon: '🔷', description: 'J-shaped match' },
+            's-shape':  { name: 'S-Shape',    icon: '🔶', description: 'S-shaped match' },
+            'plus':     { name: 'Plus',       icon: '✚', description: 'Plus-shaped match' },
+            'c-shape':  { name: 'c-Shape',    icon: '🇨', description: 'Small C (5 cubes)' },
+            'C-shape':  { name: 'C-Shape',    icon: '©', description: 'Big C (7 cubes)' },
+            'u-shape':  { name: 'u-Shape',    icon: '🧲', description: 'Small U (5 cubes)' },
+            'U-shape':  { name: 'U-Shape',    icon: '🏆', description: 'Big U (7 cubes)' },
+            'bridge':   { name: 'Bridge',     icon: '🌉', description: 'Match spans 2 faces' },
+            'trifecta': { name: 'Trifecta',   icon: '👑', description: 'Match spans all 3 faces' },
+            'blob':     { name: 'Blob',       icon: '🫠', description: 'Large irregular (6+)' },
+        };
+        this.patterns = {
+            'line-3':  [[0,0], [1,0], [2,0]],
+            'line-4':  [[0,0], [1,0], [2,0], [3,0]],
+            'line-5':  [[0,0], [1,0], [2,0], [3,0], [4,0]],
+            'l-shape': [[0,0], [1,0], [2,0], [2,1]],
+            'j-shape': [[0,0], [1,0], [2,0], [0,1]],
+            't-shape': [[0,0], [1,0], [2,0], [1,1]],
+            'square':  [[0,0], [1,0], [0,1], [1,1]],
+            's-shape': [[1,0], [2,0], [0,1], [1,1]],
+            'plus':    [[1,0], [0,1], [1,1], [2,1], [1,2]],
+            'c-shape': [[0,0], [1,0], [0,1], [0,2], [1,2]],
+            'C-shape': [[0,0], [1,0], [2,0], [0,1], [0,2], [1,2], [2,2]],
+            'u-shape': [[0,0], [2,0], [0,1], [1,1], [2,1]],
+            'U-shape': [[0,0], [2,0], [0,1], [2,1], [0,2], [1,2], [2,2]],
+        };
+        this.data = this.load();
+        this.toastQueue = [];
+        this.isShowingToast = false;
     }
-
-    // --- Button Setup ---
-    // Handles both click and touchend, prevents ghost clicks
-    setupButton(id, handler) {
-        const btn = document.getElementById(id);
-        if (!btn) return null;
-        btn.addEventListener('click', e => { e.stopPropagation(); handler(e); });
-        btn.addEventListener('touchend', e => { e.preventDefault(); e.stopPropagation(); handler(e); });
-        return btn;
-    }
-
-    // --- Overlay System ---
-    // Works with any element that uses the .visible class pattern
-    openOverlay(id) {
-        const el = document.getElementById(id);
-        if (!el) return;
-        el.style.display = 'flex';
-        el.offsetHeight; // force reflow for transition
-        el.classList.add('visible');
-    }
-
-    closeOverlay(id) {
-        const el = document.getElementById(id);
-        if (!el) return;
-        el.classList.remove('visible');
-        setTimeout(() => el.style.display = 'none', 300);
-    }
-
-    toggleOverlay(id, opts = {}) {
-        const el = document.getElementById(id);
-        if (!el) return false;
-        const isOpen = el.classList.contains('visible');
-        if (isOpen) {
-            this.closeOverlay(id);
-            if (opts.onClose) opts.onClose();
-        } else {
-            this.openOverlay(id);
-            if (opts.onOpen) opts.onOpen();
-        }
-        return !isOpen; // returns new state: true = now open
-    }
-
-    // Make clicking the overlay backdrop close it
-    backdropClose(id, opts = {}) {
-        const el = document.getElementById(id);
-        if (!el) return;
-        el.addEventListener('click', e => {
-            if (e.target === el) {
-                this.closeOverlay(id);
-                if (opts.onClose) opts.onClose();
-            }
-        });
-    }
-
-    // --- Toast Notifications ---
-    toast(icon, message, opts = {}) {
-        const {
-            elementId = 'goal-toast',
-            duration = 2500,
-        } = opts;
-        this._toastQueue.push({ icon, message, elementId, duration });
-        if (!this._isShowingToast) this._showNextToast();
-    }
-
-    _showNextToast() {
-        if (!this._toastQueue.length) { this._isShowingToast = false; return; }
-        this._isShowingToast = true;
-        const { icon, message, elementId, duration } = this._toastQueue.shift();
-        const el = document.getElementById(elementId);
-        if (!el) { this._isShowingToast = false; return; }
-
-        const iconEl = el.querySelector('.toast-icon');
-        const textEl = el.querySelector('.toast-text');
-        if (iconEl) iconEl.textContent = icon;
-        if (textEl) textEl.innerHTML = message;
-        el.classList.add('visible');
-
-        setTimeout(() => {
-            el.classList.remove('visible');
-            setTimeout(() => this._showNextToast(), 300);
-        }, duration);
-    }
-
-    // --- Floating Bonus Text ---
-    floatingText(text, cssClass = '', opts = {}) {
-        const {
-            containerId = 'bonus-container',
-            duration = 1500,
-        } = opts;
-        const container = document.getElementById(containerId);
-        if (!container) return;
-        const el = document.createElement('div');
-        el.className = `bonus-message ${cssClass}`;
-        el.textContent = text;
-        container.appendChild(el);
-        setTimeout(() => el.remove(), duration);
-    }
-
-    // --- Confirm Dialog ---
-    // Shows a confirmation overlay. Returns a Promise.
-    confirm(overlayId, confirmBtnId, cancelBtnId) {
-        return new Promise((resolve) => {
-            this.openOverlay(overlayId);
-            const onConfirm = () => {
-                cleanup();
-                this.closeOverlay(overlayId);
-                resolve(true);
-            };
-            const onCancel = () => {
-                cleanup();
-                this.closeOverlay(overlayId);
-                resolve(false);
-            };
-            const confirmBtn = document.getElementById(confirmBtnId);
-            const cancelBtn = document.getElementById(cancelBtnId);
-            const cleanup = () => {
-                if (confirmBtn) confirmBtn.removeEventListener('click', onConfirm);
-                if (cancelBtn) cancelBtn.removeEventListener('click', onCancel);
-            };
-            if (confirmBtn) confirmBtn.addEventListener('click', onConfirm);
-            if (cancelBtn) cancelBtn.addEventListener('click', onCancel);
-        });
-    }
-}
-
-const ui = new UIManager();
-
-// ============================================
-// INPUT MANAGER
-// ============================================
-// Unified click/touch handling with tap-vs-drag
-// detection. Resumes audio context on first
-// interaction. Games register an onTap callback.
-// ============================================
-class InputManager {
-    constructor(rendererDomElement, opts = {}) {
-        this.domElement = rendererDomElement;
-        this.tapThreshold = opts.tapThreshold || 15; // max px movement to count as tap
-        this.ghostClickDelay = opts.ghostClickDelay || 500; // ms to suppress ghost clicks
-        this.excludeSelectors = opts.excludeSelectors || []; // overlay selectors to ignore touches on
-
-        this._tapCallbacks = [];
-        this._hoverCallbacks = [];
-        this._lastTouchTime = 0;
-        this._touchStartPos = null;
-        this.hasUserInteracted = false;
-
-        this._bindEvents();
-    }
-
-    onTap(fn) { this._tapCallbacks.push(fn); }
-    onHover(fn) { this._hoverCallbacks.push(fn); }
-
-    _fireHover(clientX, clientY) {
-        for (const fn of this._hoverCallbacks) fn(clientX, clientY);
-    }
-
-    _fireTap(clientX, clientY) {
-        if (!this.hasUserInteracted) {
-            this.hasUserInteracted = true;
-            soundEngine.resume();
-        }
-        for (const fn of this._tapCallbacks) fn(clientX, clientY);
-    }
-
-    _bindEvents() {
-        // Click handler (suppressed after touch to prevent ghost clicks)
-        window.addEventListener('click', e => {
-            if (Date.now() - this._lastTouchTime < this.ghostClickDelay) return;
-            this._fireTap(e.clientX, e.clientY);
-        });
-
-        // Touch start
-        this.domElement.addEventListener('touchstart', e => {
-            // Skip if touching an excluded overlay
-            for (const sel of this.excludeSelectors) {
-                if (e.target.closest(sel)) return;
-            }
-            e.preventDefault();
-            this._lastTouchTime = Date.now();
-            this._touchStartPos = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-        }, { passive: false });
-
-        // Touch end — only fires tap if finger didn't move
-        this.domElement.addEventListener('touchend', e => {
-            if (!this._touchStartPos) return;
-            e.preventDefault();
-            this._lastTouchTime = Date.now();
-            const t = e.changedTouches[0];
-            const dx = t.clientX - this._touchStartPos.x;
-            const dy = t.clientY - this._touchStartPos.y;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist <= this.tapThreshold) this._fireTap(t.clientX, t.clientY);
-            this._touchStartPos = null;
-        }, { passive: false });
-
-        // Hover / pointer move
-        window.addEventListener('mousemove', e => {
-            this._fireHover(e.clientX, e.clientY);
-        });
-        this.domElement.addEventListener('touchmove', e => {
-            if (e.touches.length > 0) {
-                const t = e.touches[0];
-                this._fireHover(t.clientX, t.clientY);
-            }
-        }, { passive: true });
-    }
-}
-
-// ============================================
-// COLOR PALETTE
-// ============================================
-// Config-driven color management with
-// persistence. Games define their palette
-// entries at construction time.
-// ============================================
-class ColorPalette {
-    constructor(storageKey, entries) {
-        this.storageKey = storageKey;
-        this.entries = entries; // [{ key, default, label }, ...]
-        this.keys = entries.map(e => e.key);
-        this._defaults = {};
-        for (const e of entries) this._defaults[e.key] = e.default;
-        this.data = this._load();
-    }
-
-    _load() {
-        try {
-            const saved = storage.getItem(this.storageKey);
-            if (saved) {
-                const parsed = JSON.parse(saved);
-                return { colors: { ...this._defaults, ...(parsed.colors || parsed) } };
-            }
-        } catch (e) { console.warn('ColorPalette load failed:', e); }
-        return { colors: { ...this._defaults } };
-    }
-
-    save() { storage.setItem(this.storageKey, JSON.stringify(this.data)); }
-    reset() { this.data = { colors: { ...this._defaults } }; this.save(); }
-    getColor(key) { return this.data.colors[key]; }
-    setColor(key, val) { this.data.colors[key] = val; }
-    getColorMap() { return { ...this.data.colors }; }
-    getLabel(key) { return (this.entries.find(e => e.key === key) || {}).label || key; }
-
-    // Utility converters
-    hexToInt(hex) { return parseInt(hex.replace('#', ''), 16); }
-    intToHex(int) { return '#' + int.toString(16).padStart(6, '0'); }
-}
-
-// ============================================
-// ACHIEVEMENT MANAGER
-// ============================================
-// Generic achievement registry + tracker.
-// Games define achievements and stats at
-// construction time, then call record() and
-// incrementStat() during gameplay.
-// ============================================
-class AchievementManager {
-    constructor(storageKey, achievements, statDefs = {}) {
-        this.storageKey = storageKey;
-        // achievements: [{ key, name, icon, description }, ...]
-        this._defs = {};
-        for (const a of achievements) this._defs[a.key] = a;
-        this._statDefaults = statDefs; // { statKey: defaultValue, ... }
-        this.data = this._load();
-    }
-
-    _getDefaultData() {
-        const achievements = {};
-        for (const key of Object.keys(this._defs)) {
-            achievements[key] = { count: 0, firstDate: null };
-        }
+    
+    getDefaultData() {
+        const shapes = {};
+        for (const key of Object.keys(this.shapes)) shapes[key] = { count: 0, firstDate: null };
         return {
-            achievements,
-            stats: { ...this._statDefaults },
+            shapes,
+            stats: { totalCubesCleared: 0, totalMatches: 0, maxCombo: 0, boxedInBonuses: 0, smartMoves: 0, lineClears: 0 },
             firstPlayed: new Date().toISOString(),
             lastPlayed: new Date().toISOString()
         };
     }
-
-    _load() {
+    
+    load() {
         try {
-            const saved = storage.getItem(this.storageKey);
+            const saved = localStorage.getItem(this.storageKey);
             if (saved) {
                 const data = JSON.parse(saved);
-                const defaults = this._getDefaultData();
-                // Merge in any new achievements added since last save
-                for (const key of Object.keys(defaults.achievements)) {
-                    if (!data.achievements) data.achievements = {};
-                    if (!data.achievements[key]) data.achievements[key] = defaults.achievements[key];
+                const defaults = this.getDefaultData();
+                for (const key of Object.keys(defaults.shapes)) {
+                    if (!data.shapes[key]) data.shapes[key] = defaults.shapes[key];
                 }
-                // Handle legacy data shape (shapes → achievements)
-                if (data.shapes && !data.achievements) {
-                    data.achievements = data.shapes;
-                    delete data.shapes;
-                }
-                // Merge stats
-                if (!data.stats) data.stats = {};
                 for (const key of Object.keys(defaults.stats)) {
                     if (data.stats[key] === undefined) data.stats[key] = defaults.stats[key];
                 }
                 return data;
             }
-        } catch (e) { console.warn('AchievementManager load failed:', e); }
-        return this._getDefaultData();
+        } catch (e) { console.warn('Failed to load goals:', e); }
+        return this.getDefaultData();
     }
-
+    
     save() {
         try {
             this.data.lastPlayed = new Date().toISOString();
-            storage.setItem(this.storageKey, JSON.stringify(this.data));
-        } catch (e) { console.warn('AchievementManager save failed:', e); }
+            localStorage.setItem(this.storageKey, JSON.stringify(this.data));
+        } catch (e) { console.warn('Failed to save goals:', e); }
     }
-
-    reset() { this.data = this._getDefaultData(); this.save(); }
-
-    // --- Recording ---
-
-    record(key) {
-        const entry = this.data.achievements[key];
-        if (!entry) { console.warn(`Achievement "${key}" not registered`); return { wasNew: false }; }
-        const wasNew = entry.count === 0;
-        entry.count++;
-        if (!entry.firstDate) entry.firstDate = new Date().toISOString();
+    
+    reset() { this.data = this.getDefaultData(); this.save(); }
+    
+    getLocal2D(cube) {
+        const p = cube.plane;
+        if (p === 'floor') return [cube.gridX, cube.gridZ];
+        if (p === 'left') return [cube.gridZ, cube.gridY];
+        return [cube.gridX, cube.gridY];
+    }
+    
+    normalizeCoords(coords) {
+        const minX = Math.min(...coords.map(c => c[0]));
+        const minY = Math.min(...coords.map(c => c[1]));
+        return coords.map(([x, y]) => [x - minX, y - minY]);
+    }
+    
+    rotatePattern(coords) { return coords.map(([x, y]) => [-y, x]); }
+    
+    coordSetsEqual(s1, s2) {
+        if (s1.size !== s2.size) return false;
+        for (const item of s1) if (!s2.has(item)) return false;
+        return true;
+    }
+    
+    classifyShape(cubes) {
+        const planes = new Set(cubes.map(c => c.plane));
+        if (planes.size > 1) return planes.size === 3 ? 'trifecta' : 'bridge';
+        
+        const coords = cubes.map(c => this.getLocal2D(c));
+        const normalized = this.normalizeCoords(coords);
+        const coordSet = new Set(normalized.map(([x, y]) => `${x},${y}`));
+        
+        for (const [name, pattern] of Object.entries(this.patterns)) {
+            let rotated = [...pattern];
+            for (let r = 0; r < 4; r++) {
+                const normPattern = this.normalizeCoords(rotated);
+                const patternSet = new Set(normPattern.map(([x, y]) => `${x},${y}`));
+                if (this.coordSetsEqual(coordSet, patternSet)) return name;
+                rotated = this.rotatePattern(rotated);
+            }
+        }
+        return cubes.length >= 6 ? 'blob' : null;
+    }
+    
+    recordMatch(cubes) {
+        const shape = this.classifyShape(cubes);
+        if (!shape) return;
+        
+        const wasNew = this.data.shapes[shape].count === 0;
+        this.data.shapes[shape].count++;
+        if (!this.data.shapes[shape].firstDate) this.data.shapes[shape].firstDate = new Date().toISOString();
+        this.data.stats.totalMatches++;
+        this.data.stats.totalCubesCleared += cubes.length;
         this.save();
-        return { wasNew, count: entry.count };
+        
+        if (wasNew) this.queueToast(shape);
+        console.log(`📊 Shape: ${shape} (${this.data.shapes[shape].count})`);
     }
-
-    incrementStat(key, amount = 1) {
-        if (this.data.stats[key] === undefined) this.data.stats[key] = 0;
-        this.data.stats[key] += amount;
-        this.save();
+    
+    recordBoxedIn() { this.data.stats.boxedInBonuses++; this.save(); }
+    recordSmartMove() { this.data.stats.smartMoves++; this.save(); }
+    recordLineClears(count) { this.data.stats.lineClears += count; this.save(); }
+    updateMaxCombo(combo) { if (combo > this.data.stats.maxCombo) { this.data.stats.maxCombo = combo; this.save(); } }
+    
+    queueToast(key) {
+        this.toastQueue.push(key);
+        if (!this.isShowingToast) this.showNextToast();
     }
-
-    maxStat(key, value) {
-        if (this.data.stats[key] === undefined) this.data.stats[key] = 0;
-        if (value > this.data.stats[key]) { this.data.stats[key] = value; this.save(); }
+    
+    showNextToast() {
+        if (!this.toastQueue.length) { this.isShowingToast = false; return; }
+        this.isShowingToast = true;
+        const key = this.toastQueue.shift();
+        const shape = this.shapes[key];
+        
+        const toast = document.getElementById('goal-toast');
+        toast.querySelector('.toast-icon').textContent = shape.icon;
+        toast.querySelector('.toast-text').innerHTML = `<strong>New!</strong> ${shape.name} discovered`;
+        soundManager.goalDiscovered();
+        toast.classList.add('visible');
+        
+        setTimeout(() => {
+            toast.classList.remove('visible');
+            setTimeout(() => this.showNextToast(), 300);
+        }, 2500);
     }
-
-    // --- Accessors ---
-
-    getCount(key) { return this.data.achievements[key]?.count || 0; }
-    getStat(key) { return this.data.stats[key]; }
-    getStats() { return { ...this.data.stats }; }
-
-    getDef(key) { return this._defs[key]; }
-
-    getSorted(sortBy = 'count') {
-        const list = Object.entries(this.data.achievements).map(([key, data]) => ({
-            key, ...this._defs[key], count: data.count, firstDate: data.firstDate
+    
+    getSortedGoals(sortBy = 'count') {
+        const goals = Object.entries(this.data.shapes).map(([key, data]) => ({
+            key, ...this.shapes[key], count: data.count, firstDate: data.firstDate
         }));
-        if (sortBy === 'count') list.sort((a, b) => b.count - a.count);
-        else if (sortBy === 'date') list.sort((a, b) => {
+        
+        if (sortBy === 'count') goals.sort((a, b) => b.count - a.count);
+        else if (sortBy === 'date') goals.sort((a, b) => {
             if (!a.firstDate && !b.firstDate) return 0;
             if (!a.firstDate) return 1;
             if (!b.firstDate) return -1;
             return new Date(b.firstDate) - new Date(a.firstDate);
         });
-        else if (sortBy === 'name') list.sort((a, b) => a.name.localeCompare(b.name));
-        return list;
+        else if (sortBy === 'name') goals.sort((a, b) => a.name.localeCompare(b.name));
+        return goals;
     }
-
-    // --- Generic Panel Rendering ---
-
-    renderPanel(listElId, statsElId, opts = {}) {
-        const { sortBy = 'count', statLabels = {} } = opts;
-        const listEl = document.getElementById(listElId);
-        const statsEl = document.getElementById(statsElId);
-        if (!listEl) return;
-
-        const goals = this.getSorted(sortBy);
-        listEl.innerHTML = goals.map(g => {
+    
+    renderPanel(sortBy = 'count') {
+        const list = document.getElementById('goals-list');
+        const stats = document.getElementById('goals-stats');
+        const goals = this.getSortedGoals(sortBy);
+        
+        list.innerHTML = goals.map(g => {
             const discovered = g.count > 0;
             const dateStr = g.firstDate ? new Date(g.firstDate).toLocaleDateString() : 'Not yet';
             return `<div class="goal-item">
@@ -1332,119 +1077,23 @@ class AchievementManager {
                 <span class="goal-count ${g.count === 0 ? 'zero' : ''}">${g.count}</span>
             </div>`;
         }).join('');
-
-        if (statsEl) {
-            const s = this.data.stats;
-            statsEl.innerHTML = Object.entries(s).map(([key, val]) => {
-                const label = statLabels[key] || key;
-                const display = typeof val === 'number' ? val.toLocaleString() : val;
-                return `<div class="stat-item">${label}: <span>${display}</span></div>`;
-            }).join('');
-        }
+        
+        const s = this.data.stats;
+        stats.innerHTML = `
+            <div class="stat-item">Cubes Cleared: <span>${s.totalCubesCleared.toLocaleString()}</span></div>
+            <div class="stat-item">Total Matches: <span>${s.totalMatches.toLocaleString()}</span></div>
+            <div class="stat-item">Best Combo: <span>${s.maxCombo}×</span></div>
+            <div class="stat-item">BOXED IN: <span>${s.boxedInBonuses}</span></div>
+            <div class="stat-item">Smart Moves: <span>${s.smartMoves || 0}</span></div>
+            <div class="stat-item">Line Clears: <span>${s.lineClears || 0}</span></div>
+        `;
     }
 }
 
-// ============================================
-// STATE MANAGER
-// ============================================
-// Manages game states (menu, playing, paused,
-// game over). States are stacked — push/pop
-// for overlays (pause), switch for transitions.
-// Routes update/render/input to active state.
-// ============================================
-class GameState {
-    // Override these in subclasses
-    enter(engine) {}    // called when state becomes active
-    exit(engine) {}     // called when state is deactivated
-    update(delta) {}    // called each frame
-    render(delta) {}    // called each frame after update
-    onTap(x, y) {}      // called on input tap
-    onHover(x, y) {}    // called on pointer move
-    onResize() {}       // called on window resize
-}
-
-class StateManager {
-    constructor() {
-        this._stack = [];
-        this._engine = null; // set during wire()
-    }
-
-    // Connect to SceneManager and InputManager
-    wire(sceneManager, inputManager) {
-        this._engine = { sceneManager, inputManager };
-
-        sceneManager.onUpdate((delta) => {
-            const state = this.current();
-            if (state) state.update(delta);
-        });
-
-        sceneManager.onRender((delta) => {
-            const state = this.current();
-            if (state) state.render(delta);
-        });
-
-        sceneManager.onResize(() => {
-            const state = this.current();
-            if (state) state.onResize();
-        });
-
-        inputManager.onTap((x, y) => {
-            const state = this.current();
-            if (state) state.onTap(x, y);
-        });
-
-        inputManager.onHover((x, y) => {
-            const state = this.current();
-            if (state) state.onHover(x, y);
-        });
-    }
-
-    current() {
-        return this._stack.length > 0 ? this._stack[this._stack.length - 1] : null;
-    }
-
-    // Replace entire stack with a single state
-    switch(state) {
-        // Exit all current states
-        while (this._stack.length > 0) {
-            this._stack.pop().exit(this._engine);
-        }
-        this._stack.push(state);
-        state.enter(this._engine);
-    }
-
-    // Push a state on top (e.g., pause over play)
-    push(state) {
-        const prev = this.current();
-        if (prev && prev.pause) prev.pause(this._engine);
-        this._stack.push(state);
-        state.enter(this._engine);
-    }
-
-    // Pop the top state, return to previous
-    pop() {
-        if (this._stack.length === 0) return;
-        const removed = this._stack.pop();
-        removed.exit(this._engine);
-        const next = this.current();
-        if (next && next.resume) next.resume(this._engine);
-        return removed;
-    }
-
-    // Check if a specific state type is active
-    isActive(StateClass) {
-        return this.current() instanceof StateClass;
-    }
-}
-
-const stateManager = new StateManager();
+const goalsManager = new GoalsManager();
 
 // ============================================
-// UNBOXED ENGINE — PARTICLE POOL
-// ============================================
-// SoA particle system with object pooling.
-// Zero game knowledge — just positions,
-// velocities, colors, lifetimes.
+// PARTICLE POOL (Object Pooling)
 // ============================================
 class ParticlePool {
     constructor(scene, maxParticles = 800) {
@@ -1481,19 +1130,24 @@ class ParticlePool {
         this.points.frustumCulled = false;
         scene.add(this.points);
         
-        this.nextFree = 0;
+        // Initialize pool indices
+        this.nextFree = 0; // Simple ring buffer approach for spawning
     }
     
     spawn(pos, colorHex) {
         const color = new THREE.Color(colorHex);
+        
+        // Find a free slot (simple ring buffer overwrite if full)
         const idx = this.nextFree;
         this.nextFree = (this.nextFree + 1) % this.maxParticles;
         
+        // If this slot was inactive, add it to active list
         if (this.lifes[idx] <= 0) {
             this.activeIndices[this.activeCount] = idx;
             this.activeCount++;
         }
         
+        // Reset particle data
         this.positions[idx * 3] = pos.x;
         this.positions[idx * 3 + 1] = pos.y;
         this.positions[idx * 3 + 2] = pos.z;
@@ -1510,7 +1164,9 @@ class ParticlePool {
     }
     
     explode(pos, colorHex) {
-        for (let i = 0; i < 12; i++) this.spawn(pos, colorHex);
+        for (let i = 0; i < 12; i++) {
+            this.spawn(pos, colorHex);
+        }
     }
     
     update() {
@@ -1521,17 +1177,25 @@ class ParticlePool {
         this.points.visible = true;
         
         let newActiveCount = 0;
+        
+        // Iterate only through active particles
         for (let i = 0; i < this.activeCount; i++) {
             const idx = this.activeIndices[i];
+            
             if (this.lifes[idx] > 0) {
+                // Update physics
                 this.positions[idx * 3] += this.velocities[idx * 3];
                 this.positions[idx * 3 + 1] += this.velocities[idx * 3 + 1];
                 this.positions[idx * 3 + 2] += this.velocities[idx * 3 + 2];
-                this.velocities[idx * 3 + 1] -= 0.003;
+                this.velocities[idx * 3 + 1] -= 0.003; // Gravity
+                
                 this.lifes[idx] -= 0.025;
+                
+                // Keep in active list
                 this.activeIndices[newActiveCount] = idx;
                 newActiveCount++;
             } else {
+                // Move far away to hide
                 this.positions[idx * 3] = 9999;
             }
         }
@@ -1543,644 +1207,170 @@ class ParticlePool {
 }
 
 // ============================================
-// UNBOXED ENGINE — CAMERA SOLVER
+// THREE.JS SETUP
 // ============================================
-// Binary-search fitter: given a bounding box,
-// finds the camera distance that makes it fill
-// the viewport within safe insets.
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(16, 16, 16);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
 // ============================================
-class CameraSolver {
-    static fitToBox(camera, boundsMin, boundsMax, opts = {}) {
-        const {
-            direction = new THREE.Vector3(1, 1, 1).normalize(),
-            screenBorder = 10,
-            topPadding = null,  // pixels, or null for auto (12% of height, max 100px)
-            minDist = 5,
-            maxDist = 50,
-            iterations = 20,
-            overshoot = 1.01
-        } = opts;
+// LIGHTING SETUP WITH SHADOWS
+// ============================================
 
-        const sw = window.innerWidth, sh = window.innerHeight;
-        const target = new THREE.Vector3().addVectors(boundsMin, boundsMax).multiplyScalar(0.5);
+// Reduced ambient light to make shadows more visible
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(ambientLight);
 
-        camera.aspect = sw / sh;
-        camera.updateProjectionMatrix();
+// Main directional light (from camera direction - top-right-front)
+const mainLight = new THREE.DirectionalLight(0xffffff, 0.7);
+mainLight.position.set(15, 20, 15);
+mainLight.castShadow = true;
+mainLight.shadow.mapSize.width = 2048;
+mainLight.shadow.mapSize.height = 2048;
+mainLight.shadow.camera.near = 1;
+mainLight.shadow.camera.far = 50;
+mainLight.shadow.camera.left = -15;
+mainLight.shadow.camera.right = 15;
+mainLight.shadow.camera.top = 15;
+mainLight.shadow.camera.bottom = -15;
+mainLight.shadow.bias = -0.001;
+mainLight.shadow.radius = 2;
+scene.add(mainLight);
 
-        const safeLeft = screenBorder;
-        const safeRight = sw - screenBorder;
-        const topPad = topPadding !== null ? topPadding : Math.min(100, sh * 0.12);
-        const safeTop = screenBorder + topPad;
-        const safeBottom = sh - screenBorder;
+// Fill light from opposite side (softer)
+const fillLight = new THREE.DirectionalLight(0x4488ff, 0.3);
+fillLight.position.set(-10, 5, -10);
+scene.add(fillLight);
 
-        const corners = [];
-        for (let xi = 0; xi <= 1; xi++)
-            for (let yi = 0; yi <= 1; yi++)
-                for (let zi = 0; zi <= 1; zi++)
-                    corners.push(new THREE.Vector3(
-                        xi ? boundsMax.x : boundsMin.x,
-                        yi ? boundsMax.y : boundsMin.y,
-                        zi ? boundsMax.z : boundsMin.z
-                    ));
+// Rim light from below for depth
+const rimLight = new THREE.DirectionalLight(0xff88ff, 0.15);
+rimLight.position.set(0, -10, 0);
+scene.add(rimLight);
 
-        let lo = minDist, hi = maxDist, distance;
-        for (let i = 0; i < iterations; i++) {
-            distance = (lo + hi) / 2;
-            camera.position.copy(direction).multiplyScalar(distance).add(target);
-            camera.lookAt(target);
-            camera.updateMatrixWorld();
-            camera.updateProjectionMatrix();
+// ============================================
 
-            let sMinX = Infinity, sMaxX = -Infinity, sMinY = Infinity, sMaxY = -Infinity;
-            corners.forEach(c => {
-                const p = c.clone().project(camera);
-                const sx = (p.x + 1) / 2 * sw, sy = (-p.y + 1) / 2 * sh;
-                sMinX = Math.min(sMinX, sx); sMaxX = Math.max(sMaxX, sx);
-                sMinY = Math.min(sMinY, sy); sMaxY = Math.max(sMaxY, sy);
-            });
-
-            if (sMinX >= safeLeft && sMaxX <= safeRight && sMinY >= safeTop && sMaxY <= safeBottom) hi = distance;
-            else lo = distance;
-        }
-
-        distance = hi * overshoot;
-        camera.position.copy(direction).multiplyScalar(distance).add(target);
-        camera.lookAt(target);
-        camera.updateMatrixWorld();
-
-        return { distance, target, direction };
-    }
+// Starfield Generator
+function createStarTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 32; canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+    grad.addColorStop(0.2, 'rgba(255, 255, 255, 0.8)');
+    grad.addColorStop(0.5, 'rgba(255, 255, 255, 0.2)');
+    grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 32, 32);
+    return new THREE.CanvasTexture(canvas);
 }
 
-// ============================================
-// UNBOXED ENGINE — SCENE MANAGER
-// ============================================
-// Wraps THREE.js boilerplate: scene, renderer,
-// camera, lighting, starfield, particles, and
-// the animation loop with hook system.
-// ============================================
-class SceneManager {
-    constructor(config = {}) {
-        const {
-            fov = 45,
-            near = 0.1,
-            far = 200,
-            antialias = true,
-            shadows = true,
-            shadowMapSize = 2048,
-            maxPixelRatio = 2,
-            lighting = {},
-            starfield = true,
-            particles = true,
-            maxParticles = 800,
-        } = config;
-
-        // Core THREE objects
-        this.scene = new THREE.Scene();
-        this.camera = new THREE.PerspectiveCamera(fov, window.innerWidth / window.innerHeight, near, far);
-        this.camera.position.set(16, 16, 16);
-        this.camera.lookAt(0, 0, 0);
-
-        this.renderer = new THREE.WebGLRenderer({ antialias, alpha: true });
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxPixelRatio));
-        if (shadows) {
-            this.renderer.shadowMap.enabled = true;
-            this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+function createEnhancedStarfield() {
+    const group = new THREE.Group();
+    const texture = createStarTexture();
+    const layers = [
+        { count: 1200, baseSize: 1.0, sizeVar: 1.5, speed: 0.00015, radius: 55, color: 0xffffff },
+        { count: 600, baseSize: 2.0, sizeVar: 2.5, speed: 0.0003, radius: 45, color: 0x88ccff },
+        { count: 150, baseSize: 3.5, sizeVar: 4.0, speed: 0.0005, radius: 35, color: 0xffddaa }
+    ];
+    const vertexShader = `
+        attribute float size; attribute vec3 customColor; varying vec3 vColor;
+        void main() { vColor = customColor; vec4 mvPosition = modelViewMatrix * vec4(position, 1.0); gl_PointSize = size * (300.0 / -mvPosition.z); gl_Position = projectionMatrix * mvPosition; }
+    `;
+    const fragmentShader = `
+        uniform sampler2D uTexture; varying vec3 vColor;
+        void main() { vec4 texColor = texture2D(uTexture, gl_PointCoord); gl_FragColor = vec4(vColor, 1.0) * texColor; gl_FragColor.rgb *= gl_FragColor.a; }
+    `;
+    layers.forEach(layer => {
+        const geo = new THREE.BufferGeometry();
+        const positions = [], colors = [], sizes = [];
+        for (let i = 0; i < layer.count; i++) {
+            const r = layer.radius + Math.random() * 25, theta = Math.random() * Math.PI * 2, phi = Math.acos(2 * Math.random() - 1);
+            positions.push(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
+            const c = new THREE.Color(layer.color);
+            c.offsetHSL(0, 0, (Math.random() - 0.5) * 0.2);
+            colors.push(c.r, c.g, c.b);
+            sizes.push(layer.baseSize + Math.random() * layer.sizeVar);
         }
-        document.body.appendChild(this.renderer.domElement);
-
-        // Lighting
-        this._setupLighting(lighting, shadowMapSize);
-
-        // Starfield (optional)
-        this.starfield = null;
-        if (starfield) this._setupStarfield(typeof starfield === 'object' ? starfield : {});
-
-        // Particles (optional)
-        this.particles = null;
-        if (particles) this.particles = new ParticlePool(this.scene, maxParticles);
-
-        // Animation hooks
-        this._updateHooks = [];
-        this._renderHooks = [];
-        this._running = false;
-        this._lastTime = 0;
-
-        // Resize
-        window.addEventListener('resize', () => this._onResize());
-    }
-
-    _setupLighting(config, shadowMapSize) {
-        const {
-            ambient = { color: 0xffffff, intensity: 0.4 },
-            main = { color: 0xffffff, intensity: 0.7, position: [15, 20, 15], castShadow: true },
-            fill = { color: 0x4488ff, intensity: 0.3, position: [-10, 5, -10] },
-            rim = { color: 0xff88ff, intensity: 0.15, position: [0, -10, 0] },
-        } = config;
-
-        this.ambientLight = new THREE.AmbientLight(ambient.color, ambient.intensity);
-        this.scene.add(this.ambientLight);
-
-        this.mainLight = new THREE.DirectionalLight(main.color, main.intensity);
-        this.mainLight.position.set(...main.position);
-        if (main.castShadow) {
-            this.mainLight.castShadow = true;
-            this.mainLight.shadow.mapSize.width = shadowMapSize;
-            this.mainLight.shadow.mapSize.height = shadowMapSize;
-            this.mainLight.shadow.camera.near = 1;
-            this.mainLight.shadow.camera.far = 50;
-            this.mainLight.shadow.camera.left = -15;
-            this.mainLight.shadow.camera.right = 15;
-            this.mainLight.shadow.camera.top = 15;
-            this.mainLight.shadow.camera.bottom = -15;
-            this.mainLight.shadow.bias = -0.001;
-            this.mainLight.shadow.radius = 2;
-        }
-        this.scene.add(this.mainLight);
-
-        this.fillLight = new THREE.DirectionalLight(fill.color, fill.intensity);
-        this.fillLight.position.set(...fill.position);
-        this.scene.add(this.fillLight);
-
-        this.rimLight = new THREE.DirectionalLight(rim.color, rim.intensity);
-        this.rimLight.position.set(...rim.position);
-        this.scene.add(this.rimLight);
-    }
-
-    _setupStarfield(config) {
-        const {
-            layers = [
-                { count: 1200, baseSize: 1.0, sizeVar: 1.5, speed: 0.00015, radius: 55, color: 0xffffff },
-                { count: 600, baseSize: 2.0, sizeVar: 2.5, speed: 0.0003, radius: 45, color: 0x88ccff },
-                { count: 150, baseSize: 3.5, sizeVar: 4.0, speed: 0.0005, radius: 35, color: 0xffddaa }
-            ]
-        } = config;
-
-        // Star texture
-        const canvas = document.createElement('canvas');
-        canvas.width = 32; canvas.height = 32;
-        const ctx = canvas.getContext('2d');
-        const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
-        grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
-        grad.addColorStop(0.2, 'rgba(255, 255, 255, 0.8)');
-        grad.addColorStop(0.5, 'rgba(255, 255, 255, 0.2)');
-        grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-        ctx.fillStyle = grad;
-        ctx.fillRect(0, 0, 32, 32);
-        const texture = new THREE.CanvasTexture(canvas);
-
-        const vertexShader = `
-            attribute float size; attribute vec3 customColor; varying vec3 vColor;
-            void main() { vColor = customColor; vec4 mvPosition = modelViewMatrix * vec4(position, 1.0); gl_PointSize = size * (300.0 / -mvPosition.z); gl_Position = projectionMatrix * mvPosition; }
-        `;
-        const fragmentShader = `
-            uniform sampler2D uTexture; varying vec3 vColor;
-            void main() { vec4 texColor = texture2D(uTexture, gl_PointCoord); gl_FragColor = vec4(vColor, 1.0) * texColor; gl_FragColor.rgb *= gl_FragColor.a; }
-        `;
-
-        this.starfield = new THREE.Group();
-        layers.forEach(layer => {
-            const geo = new THREE.BufferGeometry();
-            const positions = [], colors = [], sizes = [];
-            for (let i = 0; i < layer.count; i++) {
-                const r = layer.radius + Math.random() * 25, theta = Math.random() * Math.PI * 2, phi = Math.acos(2 * Math.random() - 1);
-                positions.push(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
-                const c = new THREE.Color(layer.color);
-                c.offsetHSL(0, 0, (Math.random() - 0.5) * 0.2);
-                colors.push(c.r, c.g, c.b);
-                sizes.push(layer.baseSize + Math.random() * layer.sizeVar);
-            }
-            geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-            geo.setAttribute('customColor', new THREE.Float32BufferAttribute(colors, 3));
-            geo.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
-            const mat = new THREE.ShaderMaterial({ uniforms: { uTexture: { value: texture } }, vertexShader, fragmentShader, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
-            const points = new THREE.Points(geo, mat);
-            points.userData = { speed: layer.speed };
-            this.starfield.add(points);
-        });
-        this.scene.add(this.starfield);
-    }
-
-    // --- Hook system ---
-
-    onUpdate(fn) { this._updateHooks.push(fn); }
-    onRender(fn) { this._renderHooks.push(fn); }
-
-    // --- Animation loop ---
-
-    start() {
-        if (this._running) return;
-        this._running = true;
-        this._lastTime = performance.now();
-        this._tick();
-    }
-
-    _tick() {
-        if (!this._running) return;
-        requestAnimationFrame(() => this._tick());
-
-        const now = performance.now();
-        const delta = (now - this._lastTime) / 1000; // seconds
-        this._lastTime = now;
-
-        // Game update hooks
-        for (const fn of this._updateHooks) fn(delta);
-
-        // Engine updates: particles + starfield
-        if (this.particles) this.particles.update();
-        if (this.starfield) {
-            this.starfield.children.forEach(l => {
-                l.rotation.y += (l.userData.speed || 0.0003);
-                l.rotation.x += (l.userData.speed || 0) * 0.3;
-            });
-        }
-
-        // Post-update hooks (game rendering like instanced mesh updates)
-        for (const fn of this._renderHooks) fn(delta);
-
-        // Final render
-        this.renderer.render(this.scene, this.camera);
-    }
-
-    stop() { this._running = false; }
-
-    _onResize() {
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.camera.aspect = window.innerWidth / window.innerHeight;
-        this.camera.updateProjectionMatrix();
-        // Fire resize hooks if any game needs them
-        if (this._resizeHook) this._resizeHook();
-    }
-
-    onResize(fn) { this._resizeHook = fn; }
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute('customColor', new THREE.Float32BufferAttribute(colors, 3));
+        geo.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+        const mat = new THREE.ShaderMaterial({ uniforms: { uTexture: { value: texture } }, vertexShader, fragmentShader, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geo, mat);
+        points.userData = { speed: layer.speed };
+        group.add(points);
+    });
+    return group;
 }
 
-// ============================================
-// UNBOXED ENGINE — LOOP MANAGER
-// ============================================
-// Lightweight animation loop for games that
-// manage their own THREE.js. Provides the same
-// hook interface as SceneManager so StateManager
-// wiring works identically.
-// ============================================
-class LoopManager {
-    constructor() {
-        this._updateHooks = [];
-        this._renderHooks = [];
-        this._resizeHook = null;
-        this._running = false;
-        this._lastTime = 0;
-        window.addEventListener('resize', () => this._onResize());
-    }
-    onUpdate(fn) { this._updateHooks.push(fn); }
-    onRender(fn) { this._renderHooks.push(fn); }
-    onResize(fn) { this._resizeHook = fn; }
-    start() {
-        if (this._running) return;
-        this._running = true;
-        this._lastTime = performance.now();
-        this._tick();
-    }
-    stop() { this._running = false; }
-    _tick() {
-        if (!this._running) return;
-        requestAnimationFrame(() => this._tick());
-        const now = performance.now();
-        const delta = (now - this._lastTime) / 1000;
-        this._lastTime = now;
-        for (const fn of this._updateHooks) fn(delta);
-        for (const fn of this._renderHooks) fn(delta);
-    }
-    _onResize() {
-        if (this._resizeHook) this._resizeHook();
-    }
-}
+const starfield = createEnhancedStarfield();
+scene.add(starfield);
+
+const particles = new ParticlePool(scene);
 
 // ============================================
-// UNBOXED BOOTSTRAP
+// CAMERA FIT
 // ============================================
-// The main entry point. Games call Unboxed.run()
-// with a config object. The bootstrap creates
-// the scene, input, wires the state manager,
-// then calls the game's init function.
-// ============================================
-const Unboxed = {
-    // Expose framework classes for game-side subclassing
-    GameState,
-    SoundEngine,
-    SettingsManager,
-    UIManager,
-    InputManager,
-    ColorPalette,
-    AchievementManager,
-    StateManager,
-    ParticlePool,
-    CameraSolver,
-    SceneManager,
-    LoopManager,
+const SCREEN_BORDER = 10;
+const cameraDirection = new THREE.Vector3(1, 1, 1).normalize();
 
-    // Framework singletons (created before run)
-    soundEngine,
-    storage,
-    ui,
-    stateManager,
-
-    // Filled by run()
-    sceneManager: null,
-    inputManager: null,
-
-    // Convenience accessors (filled by run)
-    scene: null,
-    camera: null,
-    renderer: null,
-    particles: null,
-    starfield: null,
-
-    run(config = {}) {
-        const {
-            // Scene config — pass false to skip SceneManager entirely
-            scene: sceneConfig = {},
-            // Input config
-            input: inputConfig = {},
-            // Sound registrations
-            sounds = {},
-            // Raw loop callback for self-rendering games (used when scene: false)
-            loop = null,
-            // Game init callback — receives the engine object
-            init = () => {},
-        } = config;
-
-        // Register game sounds
-        if (Object.keys(sounds).length > 0) {
-            soundEngine.registerAll(sounds);
-        }
-
-        if (sceneConfig === false) {
-            // Bare loop mode — game manages its own THREE.js rendering
-            this.sceneManager = new LoopManager();
-            if (loop) {
-                this.sceneManager.onUpdate(loop);
-            }
-            // Input: use specified domElement or fall back to document.body
-            const inputDom = inputConfig.domElement || document.body;
-            this.inputManager = new InputManager(inputDom, inputConfig);
-        } else {
-            // Full scene mode — framework manages THREE.js
-            this.sceneManager = new SceneManager(sceneConfig);
-            this.scene = this.sceneManager.scene;
-            this.camera = this.sceneManager.camera;
-            this.renderer = this.sceneManager.renderer;
-            this.particles = this.sceneManager.particles;
-            this.starfield = this.sceneManager.starfield;
-            this.inputManager = new InputManager(this.renderer.domElement, inputConfig);
-        }
-
-        // Wire state routing
-        this.stateManager.wire(this.sceneManager, this.inputManager);
-
-        // Let the game initialize
-        init(this);
-
-        // Game calls Unboxed.start() when ready
-    },
-
-    start() {
-        if (this.sceneManager) this.sceneManager.start();
-    }
-};
-
-// ████████████████████████████████████████████████
-// █                                              █
-// █          GAME: BOXED IN                      █
-// █                                              █
-// ████████████████████████████████████████████████
-
-// ============================================
-// BOXED IN — BOOT VIA Unboxed.run()
-// ============================================
-Unboxed.run({
-    scene: {
-        starfield: true,
-        particles: true,
-        maxParticles: 800,
-    },
-    input: {
-        excludeSelectors: ['#settings-overlay', '#goals-overlay', '#colors-overlay', '#reset-confirm']
-    },
-    sounds: {
-        click: (e) => { e.playTone(150, 0.1, 'sine', 0.12); e.playTone(300, 0.1, 'square', 0.06); },
-        swap: (e) => { e.playTone(440, 0.1, 'sine', 0.08); setTimeout(() => e.playTone(554, 0.1, 'sine', 0.08), 50); },
-        match: (e) => { e.playChord([523, 659, 784], 0.3, 'triangle', 0.07); },
-        explode: (e, delay = 0, idx = 0) => {
-            const scale = [220, 247, 277, 311, 349, 392, 440, 494];
-            setTimeout(() => e.playTone(scale[Math.min(idx, 7)], 0.4, 'triangle', 0.08), delay);
-        },
-        combo: (e, level) => {
-            const base = 440 + level * 100;
-            e.playTone(base, 0.15, 'square', 0.1);
-            setTimeout(() => e.playTone(base * 1.25, 0.15, 'square', 0.1), 80);
-            setTimeout(() => e.playTone(base * 1.5, 0.2, 'square', 0.12), 160);
-        },
-        lineClear: (e) => {
-            e.playSweep(200, 800, 0.3, 'square', 0.12);
-            setTimeout(() => e.playChord([523, 784, 1047, 1319], 0.4, 'triangle', 0.08), 150);
-        },
-        boxedIn: (e) => {
-            [880, 784, 659, 587].forEach((f, i) => setTimeout(() => e.playTone(f, 0.08, 'square', 0.08), i * 80));
-            setTimeout(() => e.playTone(1047, 0.2, 'square', 0.15), 340);
-        },
-        smartMove: (e) => { e.playChord([262, 330, 392, 523], 0.8, 'triangle', 0.07); },
-        invalidSwap: (e) => {
-            e.playTone(150, 0.15, 'sawtooth', 0.12);
-            setTimeout(() => e.playTone(120, 0.15, 'sawtooth', 0.1), 100);
-        },
-        goalDiscovered: (e) => {
-            [659, 784, 988].forEach((f, i) => setTimeout(() => e.playTone(f, 0.15, 'sine', 0.1), i * 100));
-            setTimeout(() => e.playTone(1319, 0.3, 'triangle', 0.12), 300);
-        },
-    },
-});
-
-// Backward-compat globals from Unboxed engine
-const scene = Unboxed.scene;
-const camera = Unboxed.camera;
-const renderer = Unboxed.renderer;
-const starfield = Unboxed.starfield;
-const particles = Unboxed.particles;
-const sceneManager = Unboxed.sceneManager;
-const inputManager = Unboxed.inputManager;
-
-// Sound shim — maps game-specific names through soundEngine
-const soundManager = {
-    resume: () => soundEngine.resume(),
-    setEnabled: (v) => soundEngine.setEnabled(v),
-    isEnabled: () => soundEngine.isEnabled(),
-    click: () => soundEngine.play('click'),
-    swap: () => soundEngine.play('swap'),
-    match: () => soundEngine.play('match'),
-    explode: (delay, idx) => soundEngine.play('explode', delay, idx),
-    combo: (level) => soundEngine.play('combo', level),
-    lineClear: () => soundEngine.play('lineClear'),
-    boxedIn: () => soundEngine.play('boxedIn'),
-    smartMove: () => soundEngine.play('smartMove'),
-    invalidSwap: () => soundEngine.play('invalidSwap'),
-    goalDiscovered: () => soundEngine.play('goalDiscovered'),
-};
-
-// ============================================
-// BOXED IN — LOGICAL DATA STRUCTURES
-// ============================================
-
-class LogicalCube {
-    constructor(gridX, gridY, gridZ, plane, colorKey, targetPos) {
-        this.gridX = gridX;
-        this.gridY = gridY;
-        this.gridZ = gridZ;
-        this.plane = plane;
-        this.colorKey = colorKey;
-        this.position = targetPos.clone();
-        this.targetPos = targetPos.clone();
-        this.rotationY = 0;
-        this.scale = 1.0;
-        this.isSelected = false;
-        this.isDying = false;
-    }
-}
-
-// ============================================
-// BOXED IN — GOALS MANAGER
-// (Game-specific classification + generic AchievementManager)
-// ============================================
-class GoalsManager {
-    constructor() {
-        const achievements = [
-            { key: 'line-3',   name: 'Line (3)',   icon: '➖', description: '3 cubes in a row' },
-            { key: 'line-4',   name: 'Line (4)',   icon: '➕', description: '4 cubes in a row' },
-            { key: 'line-5',   name: 'Line (5)',   icon: '📏', description: '5 cubes in a row' },
-            { key: 'l-shape',  name: 'L-Shape',    icon: '🔲', description: 'L-shaped match' },
-            { key: 't-shape',  name: 'T-Shape',    icon: '🔳', description: 'T-shaped match' },
-            { key: 'square',   name: 'Square',     icon: '⬜', description: '2×2 block' },
-            { key: 'j-shape',  name: 'J-Shape',    icon: '🔷', description: 'J-shaped match' },
-            { key: 's-shape',  name: 'S-Shape',    icon: '🔶', description: 'S-shaped match' },
-            { key: 'plus',     name: 'Plus',       icon: '✚', description: 'Plus-shaped match' },
-            { key: 'c-shape',  name: 'c-Shape',    icon: '🇨', description: 'Small C (5 cubes)' },
-            { key: 'C-shape',  name: 'C-Shape',    icon: '©', description: 'Big C (7 cubes)' },
-            { key: 'u-shape',  name: 'u-Shape',    icon: '🧲', description: 'Small U (5 cubes)' },
-            { key: 'U-shape',  name: 'U-Shape',    icon: '🏆', description: 'Big U (7 cubes)' },
-            { key: 'bridge',   name: 'Bridge',     icon: '🌉', description: 'Match spans 2 faces' },
-            { key: 'trifecta', name: 'Trifecta',   icon: '👑', description: 'Match spans all 3 faces' },
-            { key: 'blob',     name: 'Blob',       icon: '🫠', description: 'Large irregular (6+)' },
-        ];
-        const stats = {
-            totalCubesCleared: 0, totalMatches: 0, maxCombo: 0,
-            boxedInBonuses: 0, smartMoves: 0, lineClears: 0
-        };
-        this.statLabels = {
-            totalCubesCleared: 'Cubes Cleared', totalMatches: 'Total Matches',
-            maxCombo: 'Best Combo', boxedInBonuses: 'BOXED IN',
-            smartMoves: 'Smart Moves', lineClears: 'Line Clears'
-        };
-        this.tracker = new AchievementManager('boxedIn_goals', achievements, stats);
-        this.patterns = {
-            'line-3':  [[0,0], [1,0], [2,0]],
-            'line-4':  [[0,0], [1,0], [2,0], [3,0]],
-            'line-5':  [[0,0], [1,0], [2,0], [3,0], [4,0]],
-            'l-shape': [[0,0], [1,0], [2,0], [2,1]],
-            'j-shape': [[0,0], [1,0], [2,0], [0,1]],
-            't-shape': [[0,0], [1,0], [2,0], [1,1]],
-            'square':  [[0,0], [1,0], [0,1], [1,1]],
-            's-shape': [[1,0], [2,0], [0,1], [1,1]],
-            'plus':    [[1,0], [0,1], [1,1], [2,1], [1,2]],
-            'c-shape': [[0,0], [1,0], [0,1], [0,2], [1,2]],
-            'C-shape': [[0,0], [1,0], [2,0], [0,1], [0,2], [1,2], [2,2]],
-            'u-shape': [[0,0], [2,0], [0,1], [1,1], [2,1]],
-            'U-shape': [[0,0], [2,0], [0,1], [2,1], [0,2], [1,2], [2,2]],
-        };
-    }
-
-    getLocal2D(cube) {
-        const p = cube.plane;
-        if (p === 'floor') return [cube.gridX, cube.gridZ];
-        if (p === 'left') return [cube.gridZ, cube.gridY];
-        return [cube.gridX, cube.gridY];
-    }
-    normalizeCoords(coords) {
-        const minX = Math.min(...coords.map(c => c[0]));
-        const minY = Math.min(...coords.map(c => c[1]));
-        return coords.map(([x, y]) => [x - minX, y - minY]);
-    }
-    rotatePattern(coords) { return coords.map(([x, y]) => [-y, x]); }
-    coordSetsEqual(s1, s2) {
-        if (s1.size !== s2.size) return false;
-        for (const item of s1) if (!s2.has(item)) return false;
-        return true;
-    }
-    classifyShape(cubes) {
-        const planes = new Set(cubes.map(c => c.plane));
-        if (planes.size > 1) return planes.size === 3 ? 'trifecta' : 'bridge';
-        const coords = cubes.map(c => this.getLocal2D(c));
-        const normalized = this.normalizeCoords(coords);
-        const coordSet = new Set(normalized.map(([x, y]) => `${x},${y}`));
-        for (const [name, pattern] of Object.entries(this.patterns)) {
-            let rotated = [...pattern];
-            for (let r = 0; r < 4; r++) {
-                const normPattern = this.normalizeCoords(rotated);
-                const patternSet = new Set(normPattern.map(([x, y]) => `${x},${y}`));
-                if (this.coordSetsEqual(coordSet, patternSet)) return name;
-                rotated = this.rotatePattern(rotated);
-            }
-        }
-        return cubes.length >= 6 ? 'blob' : null;
-    }
-    recordMatch(cubes) {
-        const shape = this.classifyShape(cubes);
-        if (!shape) return;
-        const { wasNew, count } = this.tracker.record(shape);
-        this.tracker.incrementStat('totalMatches');
-        this.tracker.incrementStat('totalCubesCleared', cubes.length);
-        if (wasNew) {
-            const def = this.tracker.getDef(shape);
-            soundManager.goalDiscovered();
-            ui.toast(def.icon, `<strong>New!</strong> ${def.name} discovered`);
-        }
-        console.log(`📊 Shape: ${shape} (${count})`);
-    }
-    recordBoxedIn() { this.tracker.incrementStat('boxedInBonuses'); }
-    recordSmartMove() { this.tracker.incrementStat('smartMoves'); }
-    recordLineClears(count) { this.tracker.incrementStat('lineClears', count); }
-    updateMaxCombo(combo) { this.tracker.maxStat('maxCombo', combo); }
-    reset() { this.tracker.reset(); }
-    renderPanel(sortBy = 'count') {
-        this.tracker.renderPanel('goals-list', 'goals-stats', {
-            sortBy, statLabels: this.statLabels
-        });
-    }
-}
-
-const goalsManager = new GoalsManager();
-
-// ============================================
-// BOXED IN — CAMERA SETUP (uses CameraSolver)
-// ============================================
 function getBoardBounds() {
     const min = -0.6, max = 5 * 1.1 + 0.5;
     return { min: new THREE.Vector3(min, min, min), max: new THREE.Vector3(max, max, max) };
 }
 
+const boardBounds = getBoardBounds();
+const cameraTarget = new THREE.Vector3().addVectors(boardBounds.min, boardBounds.max).multiplyScalar(0.5);
+
 function fitCameraToBoard() {
     const bounds = getBoardBounds();
-    CameraSolver.fitToBox(camera, bounds.min, bounds.max, {
-        direction: new THREE.Vector3(1, 1, 1).normalize(),
-        screenBorder: 10,
-    });
+    const sw = window.innerWidth, sh = window.innerHeight;
+    camera.aspect = sw / sh;
+    camera.updateProjectionMatrix();
+    const safeLeft = SCREEN_BORDER, safeRight = sw - SCREEN_BORDER;
+    const topPad = Math.min(100, sh * 0.12), safeTop = SCREEN_BORDER + topPad, safeBottom = sh - SCREEN_BORDER;
+    
+    // Corners of bounding box
+    const corners = [
+        new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.min.z), new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.max.z),
+        new THREE.Vector3(bounds.min.x, bounds.max.y, bounds.min.z), new THREE.Vector3(bounds.min.x, bounds.max.y, bounds.max.z),
+        new THREE.Vector3(bounds.max.x, bounds.min.y, bounds.min.z), new THREE.Vector3(bounds.max.x, bounds.min.y, bounds.max.z),
+        new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.min.z), new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.max.z),
+    ];
+    
+    let minDist = 5, maxDist = 50, distance;
+    for (let i = 0; i < 20; i++) {
+        distance = (minDist + maxDist) / 2;
+        camera.position.copy(cameraDirection).multiplyScalar(distance).add(cameraTarget);
+        camera.lookAt(cameraTarget);
+        camera.updateMatrixWorld();
+        camera.updateProjectionMatrix();
+        let sMinX = Infinity, sMaxX = -Infinity, sMinY = Infinity, sMaxY = -Infinity;
+        corners.forEach(c => {
+            const p = c.clone().project(camera);
+            const sx = (p.x + 1) / 2 * sw, sy = (-p.y + 1) / 2 * sh;
+            sMinX = Math.min(sMinX, sx); sMaxX = Math.max(sMaxX, sx); sMinY = Math.min(sMinY, sy); sMaxY = Math.max(sMaxY, sy);
+        });
+        if (sMinX >= safeLeft && sMaxX <= safeRight && sMinY >= safeTop && sMaxY <= safeBottom) maxDist = distance;
+        else minDist = distance;
+    }
+    distance = maxDist * 1.01;
+    camera.position.copy(cameraDirection).multiplyScalar(distance).add(cameraTarget);
+    camera.lookAt(cameraTarget);
+    camera.updateMatrixWorld();
 }
 
-// Camera fit handled by PlayState.onResize
 setTimeout(fitCameraToBoard, 0);
 
 // ============================================
-// BOXED IN — GAME DATA & RENDERER
+// GAME DATA & RENDERER
 // ============================================
 let logicalCubes = []; // Stores LogicalCube objects
 let leftWallRows = [[], [], [], [], []];
@@ -2189,37 +1379,101 @@ let floorStrips = [[], [], [], [], []];
 
 const gridSize = 5, spacing = 1.1, offset = 0.5;
 
-// Colors (uses framework ColorPalette)
-const colorManager = new ColorPalette('boxedIn_colors', [
-    { key: 'red',     default: 0xff0000, label: 'A' },
-    { key: 'green',   default: 0x33cc00, label: 'B' },
-    { key: 'blue',    default: 0x0000ff, label: 'C' },
-    { key: 'yellow',  default: 0xfffd00, label: 'D' },
-    { key: 'magenta', default: 0xac00dc, label: 'E' },
-    { key: 'orange',  default: 0xeaaa04, label: 'F' },
-    { key: 'gray',    default: 0xaaaaaa, label: 'G' },
-    { key: 'cyan',    default: 0x00ddff, label: 'H' },
-]);
+// Color Manager
+const defaultColorMap = {
+    'red': 0xff0000, 'green': 0x33cc00, 'blue': 0x0000ff,
+    'yellow': 0xfffd00, 'magenta': 0xac00dc,
+    'cyan': 0x00ddff, 'gray': 0xaaaaaa, 'orange': 0xeaaa04
+};
+
+class ColorManager {
+    constructor() {
+        this.storageKey = 'boxedIn_colors';
+        this.colorNames = ['red', 'green', 'blue', 'yellow', 'magenta', 'orange', 'gray', 'cyan'];
+        this.data = this.load();
+    }
+    
+    getDefaultData() {
+        const colors = {};
+        for (const key of this.colorNames) colors[key] = defaultColorMap[key];
+        return { colors };
+    }
+    
+    load() {
+        try {
+            const saved = localStorage.getItem(this.storageKey);
+            if (saved) return { ...this.getDefaultData(), ...JSON.parse(saved) };
+        } catch (e) {}
+        return this.getDefaultData();
+    }
+    
+    save() { localStorage.setItem(this.storageKey, JSON.stringify(this.data)); }
+    reset() { this.data = this.getDefaultData(); this.save(); }
+    getColor(key) { return this.data.colors[key]; }
+    setColor(key, hex) { this.data.colors[key] = hex; }
+    getColorMap() { return { ...this.data.colors }; }
+    hexToInt(hex) { return parseInt(hex.replace('#', ''), 16); }
+    intToHex(int) { return '#' + int.toString(16).padStart(6, '0'); }
+}
+
+const colorManager = new ColorManager();
 const colorMap = colorManager.getColorMap();
-const allColorKeys = colorManager.keys;
+const allColorKeys = Object.keys(colorMap);
 
 // ============================================
-// BOXED IN — SETTINGS (uses framework SettingsManager)
+// SETTINGS MANAGER - Persists game preferences
 // ============================================
-const settingsManager = new SettingsManager('boxedIn_settings', {
-    soundEnabled: true,
-    usingNumbers: false,
-    swapMode: 'neumann',
-    minMatchSize: 3,
-    colorCount: 6,
-    flairEnabled: false
-});
+class SettingsManager {
+    constructor() {
+        this.storageKey = 'boxedIn_settings';
+        this.data = this.load();
+    }
+    
+    getDefaultData() {
+        return {
+            soundEnabled: true,
+            usingNumbers: false,
+            swapMode: 'neumann',
+            minMatchSize: 3,
+            colorCount: 6,
+            flairEnabled: false
+        };
+    }
+    
+    load() {
+        try {
+            const saved = localStorage.getItem(this.storageKey);
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                // Merge with defaults to handle any new settings
+                return { ...this.getDefaultData(), ...parsed };
+            }
+        } catch (e) { console.warn('Failed to load settings:', e); }
+        return this.getDefaultData();
+    }
+    
+    save() {
+        try {
+            localStorage.setItem(this.storageKey, JSON.stringify(this.data));
+        } catch (e) { console.warn('Failed to save settings:', e); }
+    }
+    
+    get(key) { return this.data[key]; }
+    
+    set(key, value) {
+        this.data[key] = value;
+        this.save();
+    }
+}
+
+const settingsManager = new SettingsManager();
 
 // Initialize from saved settings
 let colorCount = settingsManager.get('colorCount');
 let activeColorKeys = allColorKeys.slice(0, colorCount);
 
 const colorNumbers = { red: '1', green: '2', blue: '3', yellow: '4', magenta: '5', orange: '6', gray: '7', cyan: '8' };
+const colorLetters = { red: 'A', green: 'B', blue: 'C', yellow: 'D', magenta: 'E', orange: 'F', gray: 'G', cyan: 'H' };
 
 // Texture Generation
 function createColorTexture(colorKey, hexColor, useNumbers = false) {
@@ -2231,7 +1485,7 @@ function createColorTexture(colorKey, hexColor, useNumbers = false) {
     ctx.strokeStyle = 'rgba(255,255,255,0.25)';
     ctx.lineWidth = 18;
     ctx.strokeRect(2, 2, 124, 124);
-    const sym = useNumbers ? colorNumbers[colorKey] : colorManager.getLabel(colorKey);
+    const sym = useNumbers ? colorNumbers[colorKey] : colorLetters[colorKey];
     ctx.font = 'bold 80px Orbitron, Arial';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.strokeStyle = '#000'; ctx.lineWidth = 6;
@@ -2347,7 +1601,7 @@ class InstancedCubeRenderer {
 const cubeRenderer = new InstancedCubeRenderer(scene);
 
 // ============================================
-// BOXED IN — GAME LOGIC
+// GAME LOGIC
 // ============================================
 let usingNumbers = settingsManager.get('usingNumbers');
 let swapMode = settingsManager.get('swapMode');
@@ -2735,25 +1989,33 @@ function animateScore(targetScore) {
 }
 
 function showBonus(text, type = '') {
-    ui.floatingText(text, type);
+    const el = document.createElement('div');
+    el.className = `bonus-message ${type}`;
+    el.textContent = text;
+    document.getElementById('bonus-container').appendChild(el);
+    setTimeout(() => el.remove(), 1500);
 }
 
 // Input Handling
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
-function handleGameTap(clientX, clientY) {
+function handleInput(clientX, clientY) {
     if (isProcessing) return;
     hasUserInteracted = true;
+    soundManager.resume();
     
     mouse.x = (clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
     
+    // Raycast against InstancedMeshes
     const intersects = raycaster.intersectObjects(cubeRenderer.getInteractableMeshes());
     
     if (intersects.length > 0) {
+        // Get the LogicalCube from the instance mapping
         const clickedCube = cubeRenderer.getCubeFromIntersect(intersects[0]);
+        
         if (clickedCube) {
             if (selectedCube && selectedCube !== clickedCube) {
                 trySwap(selectedCube, clickedCube);
@@ -2768,20 +2030,47 @@ function handleGameTap(clientX, clientY) {
     }
 }
 
-// UI Setup — uses framework UIManager
+// Tap/Click logic
+let lastTouchTime = 0, touchStartPos = null;
+window.addEventListener('click', e => {
+    if (Date.now() - lastTouchTime < 500) return;
+    handleInput(e.clientX, e.clientY);
+});
+renderer.domElement.addEventListener('touchstart', e => {
+    if (e.target.closest('#settings-overlay') || e.target.closest('#goals-overlay')) return;
+    e.preventDefault();
+    lastTouchTime = Date.now();
+    touchStartPos = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+}, { passive: false });
+renderer.domElement.addEventListener('touchend', e => {
+    if (!touchStartPos) return;
+    e.preventDefault();
+    lastTouchTime = Date.now();
+    const t = e.changedTouches[0];
+    const dist = Math.sqrt(Math.pow(t.clientX - touchStartPos.x, 2) + Math.pow(t.clientY - touchStartPos.y, 2));
+    if (dist <= 15) handleInput(t.clientX, t.clientY);
+    touchStartPos = null;
+}, { passive: false });
+
+// UI Setup
+function setupButton(id, handler) {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.addEventListener('click', e => { e.stopPropagation(); handler(e); });
+    btn.addEventListener('touchend', e => { e.preventDefault(); e.stopPropagation(); handler(e); });
+}
 
 // Panel Toggles
 const toggleSettings = () => {
-    const isOpen = ui.toggleOverlay('settings-overlay');
-    document.getElementById('menu-button').classList.toggle('open', isOpen);
+    const el = document.getElementById('settings-overlay');
+    if (el.classList.contains('visible')) { el.classList.remove('visible'); setTimeout(() => el.style.display='none',300); document.getElementById('menu-button').classList.remove('open'); }
+    else { el.style.display='flex'; el.offsetHeight; el.classList.add('visible'); document.getElementById('menu-button').classList.add('open'); }
     soundManager.click();
 };
-ui.setupButton('menu-button', toggleSettings);
-ui.backdropClose('settings-overlay', {
-    onClose: () => document.getElementById('menu-button').classList.remove('open')
-});
+setupButton('menu-button', toggleSettings);
+document.getElementById('settings-overlay').onclick = e => { if (e.target.id === 'settings-overlay') toggleSettings(); };
 
-ui.setupButton('toggle-symbols', () => {
+setupButton('toggle-symbols', () => {
     usingNumbers = !usingNumbers;
     settingsManager.set('usingNumbers', usingNumbers);
     document.getElementById('toggle-symbols').textContent = usingNumbers ? 'Numbers' : 'Letters';
@@ -2789,7 +2078,7 @@ ui.setupButton('toggle-symbols', () => {
     soundManager.click();
 });
 
-ui.setupButton('toggle-swap-mode', () => {
+setupButton('toggle-swap-mode', () => {
     if (swapMode === 'neumann') swapMode = 'moore'; else if (swapMode === 'moore') swapMode = 'free'; else swapMode = 'neumann';
     settingsManager.set('swapMode', swapMode);
     const btn = document.getElementById('toggle-swap-mode');
@@ -2800,7 +2089,7 @@ ui.setupButton('toggle-swap-mode', () => {
     soundManager.click();
 });
 
-ui.setupButton('toggle-match-mode', () => {
+setupButton('toggle-match-mode', () => {
     minMatchSize = minMatchSize === 3 ? 4 : minMatchSize === 4 ? 5 : 3;
     settingsManager.set('minMatchSize', minMatchSize);
     const btn = document.getElementById('toggle-match-mode');
@@ -2811,7 +2100,7 @@ ui.setupButton('toggle-match-mode', () => {
     soundManager.click();
 });
 
-ui.setupButton('toggle-colors', () => {
+setupButton('toggle-colors', () => {
     colorCount = colorCount === 5 ? 6 : colorCount === 6 ? 7 : colorCount === 7 ? 8 : 5;
     settingsManager.set('colorCount', colorCount);
     activeColorKeys = allColorKeys.slice(0, colorCount);
@@ -2821,7 +2110,7 @@ ui.setupButton('toggle-colors', () => {
     soundManager.click();
 });
 
-ui.setupButton('toggle-flair', () => {
+setupButton('toggle-flair', () => {
     flairSettings.enabled = !flairSettings.enabled;
     settingsManager.set('flairEnabled', flairSettings.enabled);
     const btn = document.getElementById('toggle-flair');
@@ -2830,7 +2119,7 @@ ui.setupButton('toggle-flair', () => {
     soundManager.click();
 });
 
-ui.setupButton('toggle-sound', () => {
+setupButton('toggle-sound', () => {
     const enabled = !soundManager.isEnabled();
     soundManager.setEnabled(enabled);
     settingsManager.set('soundEnabled', enabled);
@@ -2841,7 +2130,7 @@ ui.setupButton('toggle-sound', () => {
 });
 
 // ============================================
-// BOXED IN — INITIALIZE UI FROM SAVED SETTINGS
+// INITIALIZE UI FROM SAVED SETTINGS
 // ============================================
 (function initializeUIFromSettings() {
     // Symbols button
@@ -2876,91 +2165,90 @@ ui.setupButton('toggle-sound', () => {
     soundBtn.classList.toggle('muted', !soundEnabled);
 })();
 
-// ============================================
-// BOXED IN — PLAY STATE (uses framework StateManager)
-// ============================================
+// Animation Loop
 let globalRotationPhase = 0;
 const ROTATION_SPEED = 0.12;
 
-class BoxedInPlayState extends GameState {
-    enter() {
-        fitCameraToBoard();
-    }
-
-    update(delta) {
-        globalRotationPhase += ROTATION_SPEED;
-        if (globalRotationPhase > Math.PI * 2) globalRotationPhase -= Math.PI * 2;
-        
-        logicalCubes.forEach(cube => {
-            if (cube.isDying) {
-                cube.scale = Math.max(0, cube.scale - 0.08);
-            } else {
-                cube.position.lerp(cube.targetPos, 0.12);
-                
-                if (flairSettings.enabled && flairSettings.spinningCubes) {
-                    const dist = cube.position.distanceTo(cube.targetPos);
-                    if (dist > 0.05) {
-                        cube.rotationY = globalRotationPhase;
-                    } else {
-                        let r = cube.rotationY;
-                        while (r > Math.PI) r -= Math.PI*2; while (r < -Math.PI) r += Math.PI*2;
-                        cube.rotationY = r * 0.85;
-                    }
+function animate() {
+    requestAnimationFrame(animate);
+    
+    globalRotationPhase += ROTATION_SPEED;
+    if (globalRotationPhase > Math.PI * 2) globalRotationPhase -= Math.PI * 2;
+    
+    // Update Logical Cubes
+    logicalCubes.forEach(cube => {
+        if (cube.isDying) {
+            cube.scale = Math.max(0, cube.scale - 0.08); // Shrink effect
+        } else {
+            // Position Lerp
+            cube.position.lerp(cube.targetPos, 0.12);
+            
+            // Flair Rotation logic
+            if (flairSettings.enabled && flairSettings.spinningCubes) {
+                const dist = cube.position.distanceTo(cube.targetPos);
+                if (dist > 0.05) {
+                    cube.rotationY = globalRotationPhase;
                 } else {
-                    cube.rotationY *= 0.85;
+                    // Snap back to 0
+                    let r = cube.rotationY;
+                    while (r > Math.PI) r -= Math.PI*2; while (r < -Math.PI) r += Math.PI*2;
+                    cube.rotationY = r * 0.85;
                 }
+            } else {
+                cube.rotationY *= 0.85;
             }
-        });
-    }
+        }
+    });
 
-    render() {
-        cubeRenderer.render(logicalCubes);
-    }
-
-    onTap(x, y) {
-        handleGameTap(x, y);
-    }
-
-    onResize() {
-        fitCameraToBoard();
-    }
+    // Render Instanced Meshes
+    cubeRenderer.render(logicalCubes);
+    
+    // Particles & Starfield
+    particles.update();
+    starfield.children.forEach(l => { l.rotation.y += (l.userData.speed || 0.0003); l.rotation.x += (l.userData.speed||0)*0.3; });
+    
+    renderer.render(scene, camera);
 }
 
-// Goals Panel & Color Panel logic
-ui.setupButton('settings-goals-btn', () => { goalsManager.renderPanel(); ui.openOverlay('goals-overlay'); });
-ui.setupButton('goals-close', () => ui.closeOverlay('goals-overlay'));
-ui.setupButton('settings-colors-btn', () => { populateColorsPanel(); ui.openOverlay('colors-overlay'); });
-ui.setupButton('colors-close', () => ui.closeOverlay('colors-overlay'));
+window.addEventListener('resize', () => { renderer.setSize(window.innerWidth, window.innerHeight); fitCameraToBoard(); });
+
+// Goals Panel & Color Panel logic (Simplified for brevity but functional)
+setupButton('settings-goals-btn', () => { goalsManager.renderPanel(); document.getElementById('goals-overlay').classList.add('visible'); document.getElementById('goals-overlay').style.display='flex'; });
+document.getElementById('goals-close').onclick = () => document.getElementById('goals-overlay').classList.remove('visible');
+setupButton('settings-colors-btn', () => { /* Fill color logic here if needed, keeping simple for instancing focus */ document.getElementById('colors-overlay').classList.add('visible'); document.getElementById('colors-overlay').style.display='flex'; populateColorsPanel(); });
+document.getElementById('colors-close').onclick = () => document.getElementById('colors-overlay').classList.remove('visible');
 
 // Populate colors logic
 function populateColorsPanel() {
     const list = document.getElementById('colors-list');
     list.innerHTML = '';
-    colorManager.keys.forEach(key => {
+    colorManager.colorNames.forEach(key => {
         const hex = colorManager.intToHex(colorManager.getColor(key));
         const item = document.createElement('div');
         item.className = 'color-item';
-        item.innerHTML = `<span class="color-label" style="color:${hex}">${colorManager.getLabel(key)}</span><input type="color" value="${hex}" data-key="${key}">`;
+        item.innerHTML = `<span class="color-label" style="color:${hex}">${colorLetters[key]}</span><input type="color" value="${hex}" data-key="${key}">`;
         item.querySelector('input').onchange = (e) => { colorManager.setColor(key, colorManager.hexToInt(e.target.value)); };
         list.appendChild(item);
     });
 }
-document.getElementById('colors-apply').onclick = () => { colorManager.save(); cubeRenderer.updateTextures(usingNumbers); ui.closeOverlay('colors-overlay'); };
+document.getElementById('colors-apply').onclick = () => { colorManager.save(); cubeRenderer.updateTextures(usingNumbers); document.getElementById('colors-overlay').classList.remove('visible'); };
 document.getElementById('colors-reset').onclick = () => { colorManager.reset(); cubeRenderer.updateTextures(usingNumbers); populateColorsPanel(); };
 
-// Reset Progress — uses UIManager confirm
-document.getElementById('reset-btn').onclick = async () => {
-    const confirmed = await ui.confirm('reset-confirm', 'reset-confirm-btn', 'reset-cancel');
-    if (confirmed) {
-        goalsManager.reset();
-        goalsManager.renderPanel();
-        soundManager.click();
-    }
+// Reset Progress confirmation dialog handlers
+document.getElementById('reset-btn').onclick = () => {
+    document.getElementById('reset-confirm').classList.add('visible');
+};
+document.getElementById('reset-cancel').onclick = () => {
+    document.getElementById('reset-confirm').classList.remove('visible');
+};
+document.getElementById('reset-confirm-btn').onclick = () => {
+    goalsManager.reset();
+    goalsManager.renderPanel();
+    document.getElementById('reset-confirm').classList.remove('visible');
+    soundManager.click();
 };
 
-// Boot the game
-stateManager.switch(new BoxedInPlayState());
-Unboxed.start();
+animate();
 setTimeout(() => { if (!isProcessing) processMatches(); }, 800);
 
 </script>
