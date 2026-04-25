@@ -976,72 +976,20 @@
                 .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
         }
 
-        // --- Migration v3 → v4 ---
-        function migrateV3toV4(v3) {
-            const v4 = {};
-            let familyIndex = 0;
-            for (const [fixedSig, data] of Object.entries(v3)) {
-                const cells = parseSig(fixedSig);
-                const canonical = getCanonicalSignature(cells);
-                const permBits = computePermBits(cells);
-                if (!v4[canonical]) {
-                    v4[canonical] = { n: 0, b: 0, d: familyIndex++ };
-                }
-                v4[canonical].n += data.count;
-                for (let c = 0; c < data.colors.length; c++) {
-                    if (data.colors[c]) v4[canonical].b = setColor(v4[canonical].b, c);
-                }
-                v4[canonical].b = setPermutations(v4[canonical].b, permBits);
-            }
-            return v4;
-        }
-
-        // --- Load collection (v4, with v3 migration) ---
-        // Always re-derive from v3 if it exists (v3 is source of truth)
+        // --- Load collection (v4 only) ---
         function loadCollection() {
-            const v3raw = localStorage.getItem('starblast_collection_v3');
-            if (v3raw) {
-                const v3data = JSON.parse(v3raw);
-                const v4 = migrateV3toV4(v3data);
-                // Merge any v4-only entries (shapes found after migration)
-                const v4raw = localStorage.getItem('starblast_collection_v4');
-                if (v4raw) {
-                    const existing = JSON.parse(v4raw);
-                    for (const [sig, data] of Object.entries(existing)) {
-                        if (!v4[sig]) {
-                            v4[sig] = data; // keep v4-only entries
-                        }
-                    }
-                }
-                localStorage.setItem('starblast_collection_v4', JSON.stringify(v4));
-                console.log(`Derived ${Object.keys(v4).length} v4 families from ${Object.keys(v3data).length} v3 entries`);
-                return v4;
-            }
-            const v4raw = localStorage.getItem('starblast_collection_v4');
-            if (v4raw) return JSON.parse(v4raw);
+            const raw = localStorage.getItem('starblast_collection_v4');
+            if (raw) return JSON.parse(raw);
             return {};
         }
 
-        // Keep v3 in sync so we can always re-derive correct v4
-        // Cache v3 in memory to avoid reading/parsing localStorage on every tap
-        let v3Cache = JSON.parse(localStorage.getItem('starblast_collection_v3') || '{}');
         let savePending = false;
         let saveTimer = null;
 
-        function writeV3(cells, colorIndex) {
-            const fixedSig = cellsToSig(cells);
-            if (!v3Cache[fixedSig]) {
-                v3Cache[fixedSig] = { count: 0, colors: new Array(COLORS.length).fill(false) };
-            }
-            v3Cache[fixedSig].count++;
-            v3Cache[fixedSig].colors[colorIndex] = true;
-            scheduleSave();
-        }
-
         function scheduleSave() {
             savePending = true;
-            if (saveTimer) return; // already scheduled
-            saveTimer = setTimeout(flushSave, 2000); // batch writes every 2s
+            if (saveTimer) return;
+            saveTimer = setTimeout(flushSave, 2000);
         }
 
         function flushSave() {
@@ -1049,7 +997,6 @@
             if (!savePending) return;
             savePending = false;
             localStorage.setItem('starblast_collection_v4', JSON.stringify(collection));
-            localStorage.setItem('starblast_collection_v3', JSON.stringify(v3Cache));
         }
 
         // Ensure save on page unload
@@ -1279,18 +1226,6 @@
             return matches;
         }
 
-        function getShapeSignature(matches) {
-            // Legacy compat — returns fixed sig string
-            if (!matches.length) return "";
-            const rows = matches.map(m => m.r);
-            const cols = matches.map(m => m.c);
-            const minR = Math.min(...rows);
-            const minC = Math.min(...cols);
-            return matches
-                .map(m => `${m.r - minR},${m.c - minC}`)
-                .sort()
-                .join('|');
-        }
 
         function trackShape(matches, colorIndex) {
             const cells = getShapeCells(matches);
@@ -1344,7 +1279,6 @@
             }
 
             scheduleSave();
-            writeV3(cells, colorIndex);
         }
 
         async function handleInteraction(r, c) {
