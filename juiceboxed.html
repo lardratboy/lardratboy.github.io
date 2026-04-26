@@ -1,0 +1,2310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>BOXED IN - Instanced & Pooled (Juiced!)</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Exo+2:wght@300;600&display=swap');
+
+        * { box-sizing: border-box; }
+        
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #000; 
+            font-family: 'Exo 2', sans-serif;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        /* --- UI OVERLAY --- */
+        #ui-layer {
+            position: absolute;
+            top: 15px;
+            width: 100%;
+            text-align: center;
+            color: #fff;
+            pointer-events: none;
+            z-index: 10;
+        }
+        
+        h1 { 
+            margin: 0; 
+            font-family: 'Orbitron', sans-serif;
+            font-weight: 900;
+            font-size: clamp(2rem, 6vw, 3.5rem); 
+            letter-spacing: 4px;
+            background: linear-gradient(180deg, #fff 0%, #a0d0ff 40%, #ff00de 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            filter: drop-shadow(0 0 20px rgba(255, 0, 222, 0.6));
+            text-transform: uppercase;
+        }
+
+        #score { 
+            font-family: 'Orbitron', sans-serif;
+            font-size: clamp(1rem, 3vw, 1.5rem); 
+            margin-top: 4px; 
+            color: #ffd700;
+            text-shadow: 0 0 10px #ffd700; 
+        }
+
+        #combo-display {
+            font-family: 'Orbitron', sans-serif;
+            font-size: clamp(0.9rem, 2.5vw, 1.3rem);
+            margin-top: 5px;
+            color: #ff6b6b;
+            min-height: 1.5rem;
+            transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            font-weight: bold;
+            text-shadow: 0 0 15px #ff0066;
+        }
+        #combo-display.active { transform: scale(1.15); }
+        
+        @keyframes uiShake {
+            0%, 100% { transform: scale(1.15) translate(0, 0) rotate(0deg); }
+            25% { transform: scale(1.15) translate(-2px, 2px) rotate(-2deg); }
+            50% { transform: scale(1.15) translate(2px, -2px) rotate(2deg); }
+            75% { transform: scale(1.15) translate(-2px, -2px) rotate(1deg); }
+        }
+        #combo-display.active.shaking {
+            animation: uiShake 0.2s infinite;
+        }
+
+        .controls {
+            position: absolute;
+            bottom: 15px;
+            width: 100%;
+            text-align: center;
+            color: rgba(255,255,255,0.4);
+            font-size: clamp(0.65rem, 1.8vw, 0.85rem);
+            pointer-events: none;
+            padding: 0 10px;
+        }
+        @media (max-width: 600px) { .controls { display: none; } }
+
+        /* --- MENU BUTTON --- */
+        #menu-button {
+            position: absolute;
+            top: 15px;
+            right: 12px;
+            width: 48px;
+            height: 48px;
+            background: rgba(10, 10, 25, 0.8);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 10px;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 5px;
+            padding: 12px;
+            transition: all 0.2s ease;
+            z-index: 20;
+        }
+        #menu-button:hover {
+            background: rgba(30, 30, 60, 0.9);
+            border-color: #00d4ff;
+            box-shadow: 0 0 15px rgba(0, 212, 255, 0.3);
+        }
+        #menu-button span {
+            display: block;
+            width: 22px;
+            height: 2px;
+            background: #00d4ff;
+            border-radius: 2px;
+            transition: all 0.3s ease;
+        }
+        #menu-button.open span:nth-child(1) {
+            transform: rotate(45deg) translate(5px, 5px);
+        }
+        #menu-button.open span:nth-child(2) {
+            opacity: 0;
+        }
+        #menu-button.open span:nth-child(3) {
+            transform: rotate(-45deg) translate(5px, -5px);
+        }
+
+        /* --- SETTINGS OVERLAY --- */
+        #settings-overlay {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            z-index: 15;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        }
+        #settings-overlay.visible { opacity: 1; pointer-events: auto; }
+
+        #settings-panel {
+            width: min(90vw, 360px);
+            background: linear-gradient(135deg, #0d0d1a 0%, #080812 100%);
+            border: 1px solid #00d4ff;
+            border-radius: 16px;
+            box-shadow: 0 0 40px rgba(0, 212, 255, 0.2), inset 0 0 30px rgba(0,0,0,0.5);
+            padding: 0;
+            overflow: hidden;
+        }
+
+        #settings-header {
+            padding: 18px 20px;
+            border-bottom: 1px solid rgba(0, 212, 255, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #settings-header h2 {
+            margin: 0;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.1rem;
+            color: #00d4ff;
+            text-shadow: 0 0 10px #00d4ff;
+            letter-spacing: 2px;
+        }
+
+        #settings-content {
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            max-height: calc(80vh - 60px);
+            overflow-y: auto;
+        }
+
+        .settings-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .settings-row:last-child { border-bottom: none; }
+
+        .settings-label {
+            font-family: 'Exo 2', sans-serif;
+            font-size: 0.9rem;
+            color: #aaa;
+            flex-shrink: 0;
+        }
+
+        .settings-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 155px;
+            justify-content: flex-end;
+        }
+
+        .settings-button {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #fff;
+            padding: 10px 12px;
+            font-family: 'Exo 2', sans-serif;
+            font-weight: 600;
+            font-size: 0.85rem;
+            border-radius: 8px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: all 0.2s ease;
+            width: 100%;
+            text-align: center;
+        }
+        
+        .settings-controls .settings-button { flex: 1; }
+        .settings-button:hover { background: rgba(255, 255, 255, 0.1); border-color: #fff; }
+        .settings-button:active { transform: scale(0.97); }
+
+        .settings-button[data-setting="symbols"] { border-color: #00d4ff; color: #00d4ff; }
+        .settings-button[data-setting="swap"] { border-color: #ff6b6b; color: #ff6b6b; }
+        .settings-button[data-setting="swap"].moore-mode { border-color: #ff9f00; color: #ff9f00; }
+        .settings-button[data-setting="swap"].free-mode { border-color: #00ff88; color: #00ff88; }
+        .settings-button[data-setting="sound"] { border-color: #ff66cc; color: #ff66cc; }
+        .settings-button[data-setting="sound"].muted { border-color: #555; color: #555; }
+        .settings-button[data-setting="match"] { border-color: #88dd00; color: #88dd00; }
+        .settings-button[data-setting="match"].match-4 { border-color: #ffaa00; color: #ffaa00; }
+        .settings-button[data-setting="match"].match-5 { border-color: #ff4444; color: #ff4444; }
+        .settings-button[data-setting="colors"] { border-color: #00ddff; color: #00ddff; }
+        .settings-button[data-setting="flair"] { border-color: #ff66ff; color: #ff66ff; }
+        .settings-button[data-setting="flair"].disabled { border-color: #555; color: #555; }
+
+        #settings-goals-btn {
+            margin-top: 10px;
+            width: 100%;
+            background: rgba(153, 102, 255, 0.1);
+            border: 1px solid #9966ff;
+            color: #bb99ff;
+            padding: 14px;
+            font-size: 1rem;
+        }
+        #settings-goals-btn:hover {
+            background: rgba(153, 102, 255, 0.2);
+            box-shadow: 0 0 15px rgba(153, 102, 255, 0.3);
+        }
+
+        #settings-colors-btn {
+            background: rgba(0, 221, 255, 0.15);
+            border: 1px solid #00aacc;
+            color: #00ddff;
+            padding: 10px 8px;
+            font-size: 0.85rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-family: 'Exo 2', sans-serif;
+            font-weight: 600;
+            transition: all 0.2s;
+            flex-shrink: 0;
+            width: 40px;
+        }
+        #settings-colors-btn:hover {
+            background: rgba(0, 221, 255, 0.3);
+            box-shadow: 0 0 10px rgba(0, 221, 255, 0.3);
+        }
+
+        /* --- FLOATING BONUS TEXT --- */
+        #bonus-container {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            overflow: hidden;
+            z-index: 15;
+        }
+        .bonus-message {
+            position: absolute;
+            left: 50%;
+            font-family: 'Orbitron', sans-serif;
+            font-weight: 900;
+            font-size: clamp(1.5rem, 5vw, 2.5rem);
+            color: #ffd700;
+            text-shadow: 0 0 15px #ffd700, 0 0 30px #ff00de;
+            white-space: nowrap;
+            animation: floatUp 1.5s ease-out forwards;
+            opacity: 0;
+        }
+        .bonus-message.combo { color: #ff3366; text-shadow: 0 0 15px #ff0066, 0 0 30px #ff0000; }
+        .bonus-message.combo-total { color: #00ffff; text-shadow: 0 0 20px #00ffff, 0 0 40px #0088ff; font-size: 2.2rem; }
+        .bonus-message.line-clear { color: #00ff88; text-shadow: 0 0 15px #00ff88, 0 0 30px #00ffcc; }
+        .bonus-message.boxed-in { color: #ff00ff; text-shadow: 0 0 15px #ff00ff, 0 0 30px #cc00ff; }
+        .bonus-message.smart-move { color: #ffdd00; text-shadow: 0 0 15px #ffaa00, 0 0 30px #ff8800; }
+
+        @keyframes floatUp {
+            0% { opacity: 0; top: 55%; transform: translateX(-50%) scale(0.1) rotate(var(--rot, 0deg)); filter: brightness(2.5); }
+            10% { opacity: 1; transform: translateX(-50%) scale(1.4) rotate(var(--rot, 0deg)); filter: brightness(2); }
+            25% { transform: translateX(-50%) scale(1) rotate(var(--rot, 0deg)); filter: brightness(1); }
+            80% { opacity: 1; top: 35%; transform: translateX(-50%) scale(1) rotate(var(--rot, 0deg)); }
+            100% { opacity: 0; top: 20%; transform: translateX(-50%) scale(0.8) rotate(var(--rot, 0deg)); }
+        }
+
+        /* --- GOALS PANEL --- */
+        #goals-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            z-index: 100;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+        }
+        #goals-overlay.visible { opacity: 1; pointer-events: auto; }
+        
+        #goals-panel {
+            width: min(90vw, 420px);
+            max-height: 80vh;
+            background: linear-gradient(135deg, #0d0d1a 0%, #080812 100%);
+            border: 1px solid #9966ff;
+            border-radius: 12px;
+            box-shadow: 0 0 40px rgba(153, 102, 255, 0.25), inset 0 0 30px rgba(0,0,0,0.5);
+            display: flex;
+            flex-direction: column;
+            color: #fff;
+        }
+
+        #goals-header {
+            padding: 18px 20px;
+            border-bottom: 1px solid rgba(153, 102, 255, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #goals-header h2 { 
+            margin: 0; 
+            font-family: 'Orbitron', sans-serif; 
+            font-size: 1.2rem;
+            color: #bb99ff; 
+            text-shadow: 0 0 10px #6644ff;
+            letter-spacing: 2px;
+        }
+        #goals-close {
+            background: none; border: none; color: #666; 
+            font-size: 1.4rem; cursor: pointer; padding: 0;
+            transition: color 0.2s;
+        }
+        #goals-close:hover { color: #ff6666; }
+
+        #goals-sort {
+            padding: 10px 20px;
+            border-bottom: 1px solid rgba(153, 102, 255, 0.15);
+            display: flex;
+            gap: 8px;
+        }
+        .sort-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid #333;
+            color: #777;
+            padding: 5px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: all 0.2s;
+            font-family: 'Exo 2', sans-serif;
+        }
+        .sort-btn:hover { background: rgba(153, 102, 255, 0.15); border-color: #9966ff; }
+        .sort-btn.active { background: rgba(153, 102, 255, 0.25); border-color: #9966ff; color: #bb99ff; }
+
+        #goals-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px 20px;
+        }
+        .goal-item {
+            display: flex; align-items: center; gap: 12px;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+        }
+        .goal-item:last-child { border-bottom: none; }
+        .goal-icon { font-size: 1.4rem; width: 36px; text-align: center; }
+        .goal-info { flex: 1; }
+        .goal-name { font-weight: bold; color: #fff; font-size: 0.9rem; }
+        .goal-name.undiscovered { color: #555; font-style: italic; }
+        .goal-detail { color: #666; font-size: 0.7rem; margin-top: 2px; }
+        .goal-count { 
+            font-family: 'Orbitron', sans-serif; 
+            color: #00ff88; 
+            font-size: 1rem;
+            min-width: 40px;
+            text-align: right;
+        }
+        .goal-count.zero { color: #333; }
+
+        #goals-stats {
+            padding: 12px 20px;
+            border-top: 1px solid rgba(153, 102, 255, 0.3);
+            background: rgba(0, 0, 0, 0.3);
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+            font-size: 0.75rem;
+        }
+        .stat-item { color: #777; }
+        .stat-item span { color: #00d4ff; }
+
+        #goals-footer {
+            padding: 12px 20px;
+            border-top: 1px solid rgba(153, 102, 255, 0.15);
+            text-align: center;
+        }
+        #reset-btn {
+            background: rgba(255, 50, 50, 0.1);
+            border: 1px solid #993333;
+            color: #cc6666;
+            padding: 8px 18px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-family: 'Exo 2', sans-serif;
+            transition: all 0.2s;
+        }
+        #reset-btn:hover { background: rgba(255, 50, 50, 0.25); border-color: #ff4444; }
+
+        /* Reset Confirmation */
+        #reset-confirm {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.95);
+            z-index: 200;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            pointer-events: none;
+        }
+        #reset-confirm.visible { display: flex; pointer-events: auto; }
+        #reset-dialog {
+            background: #0d0d1a;
+            border: 2px solid #ff4444;
+            border-radius: 12px;
+            padding: 25px;
+            text-align: center;
+            max-width: 300px;
+        }
+        #reset-dialog h3 { color: #ff6666; margin: 0 0 12px 0; font-family: 'Orbitron', sans-serif; }
+        #reset-dialog p { color: #999; margin: 0 0 20px 0; font-size: 0.85rem; line-height: 1.5; }
+        #reset-dialog .btn-group { display: flex; gap: 12px; justify-content: center; }
+        #reset-cancel, #reset-confirm-btn {
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-family: 'Exo 2', sans-serif;
+            font-size: 0.85rem;
+        }
+        #reset-cancel { background: rgba(255,255,255,0.1); border: 1px solid #555; color: #aaa; }
+        #reset-cancel:hover { background: rgba(255,255,255,0.2); }
+        #reset-confirm-btn { background: rgba(255,50,50,0.2); border: 1px solid #ff4444; color: #ff6666; }
+        #reset-confirm-btn:hover { background: rgba(255,50,50,0.4); }
+
+        /* --- TOAST --- */
+        #goal-toast {
+            position: fixed; bottom: 80px; left: 50%;
+            transform: translateX(-50%) translateY(60px);
+            background: rgba(15, 15, 30, 0.95);
+            border: 1px solid #9966ff;
+            box-shadow: 0 0 25px rgba(153, 102, 255, 0.4);
+            padding: 12px 22px;
+            border-radius: 30px;
+            display: flex; align-items: center; gap: 10px;
+            color: #fff;
+            opacity: 0;
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            pointer-events: none;
+            z-index: 50;
+        }
+        #goal-toast.visible { transform: translateX(-50%) translateY(0); opacity: 1; }
+        #goal-toast .toast-icon { font-size: 1.4rem; }
+        #goal-toast .toast-text { font-size: 0.85rem; }
+
+        /* --- COLOR CUSTOMIZATION PANEL --- */
+        #colors-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            z-index: 100;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+        }
+        #colors-overlay.visible { opacity: 1; pointer-events: auto; }
+        
+        #colors-panel {
+            width: min(90vw, 380px);
+            max-height: 85vh;
+            background: linear-gradient(135deg, #0d0d1a 0%, #080812 100%);
+            border: 1px solid #00ddff;
+            border-radius: 12px;
+            box-shadow: 0 0 40px rgba(0, 221, 255, 0.25), inset 0 0 30px rgba(0,0,0,0.5);
+            display: flex;
+            flex-direction: column;
+            color: #fff;
+        }
+
+        #colors-header {
+            padding: 18px 20px;
+            border-bottom: 1px solid rgba(0, 221, 255, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #colors-header h2 { 
+            margin: 0; 
+            font-family: 'Orbitron', sans-serif; 
+            font-size: 1.1rem;
+            color: #00ddff; 
+            text-shadow: 0 0 10px #0088aa;
+            letter-spacing: 2px;
+        }
+        #colors-close {
+            background: none; border: none; color: #666; 
+            font-size: 1.4rem; cursor: pointer; padding: 0;
+            transition: color 0.2s;
+        }
+        #colors-close:hover { color: #ff6666; }
+
+        #colors-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px 20px;
+        }
+        .color-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .color-item:last-child { border-bottom: none; }
+        
+        .color-label {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.1rem;
+            width: 30px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .color-picker-wrapper {
+            position: relative;
+            width: 44px;
+            height: 44px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 2px solid rgba(255,255,255,0.2);
+            cursor: pointer;
+        }
+        .color-picker-wrapper:hover {
+            border-color: #00ddff;
+            box-shadow: 0 0 10px rgba(0, 221, 255, 0.3);
+        }
+        .color-picker {
+            position: absolute;
+            top: -10px;
+            left: -10px;
+            width: 64px;
+            height: 64px;
+            border: none;
+            cursor: pointer;
+        }
+        .color-hex {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.85rem;
+            color: #888;
+            flex: 1;
+            text-transform: uppercase;
+        }
+        .color-name {
+            font-size: 0.75rem;
+            color: #555;
+            width: 60px;
+            text-align: right;
+        }
+
+        #colors-footer {
+            padding: 15px 20px;
+            border-top: 1px solid rgba(0, 221, 255, 0.15);
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+        #colors-reset {
+            background: rgba(255, 150, 50, 0.1);
+            border: 1px solid #cc8833;
+            color: #ffaa55;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-family: 'Exo 2', sans-serif;
+            transition: all 0.2s;
+        }
+        #colors-reset:hover { background: rgba(255, 150, 50, 0.25); border-color: #ffaa55; }
+        #colors-apply {
+            background: rgba(0, 221, 255, 0.1);
+            border: 1px solid #00aacc;
+            color: #00ddff;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-family: 'Exo 2', sans-serif;
+            transition: all 0.2s;
+        }
+        #colors-apply:hover { background: rgba(0, 221, 255, 0.25); border-color: #00ddff; }
+        #goal-toast .toast-text strong { color: #bb99ff; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+<div id="ui-layer">
+    <h1>BOXED IN</h1>
+    <div id="score">Score: 0</div>
+    <div id="combo-display"></div>
+</div>
+
+<!-- Menu Button -->
+<button id="menu-button">
+    <span></span>
+    <span></span>
+    <span></span>
+</button>
+
+<!-- Settings Overlay -->
+<div id="settings-overlay">
+    <div id="settings-panel">
+        <div id="settings-header">
+            <h2>SETTINGS</h2>
+        </div>
+        <div id="settings-content">
+            <div class="settings-row">
+                <span class="settings-label">Display</span>
+                <div class="settings-controls">
+                    <button class="settings-button" data-setting="symbols" id="toggle-symbols">Numbers</button>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-label">Swap Mode</span>
+                <div class="settings-controls">
+                    <button class="settings-button" data-setting="swap" id="toggle-swap-mode">4-Neighbor</button>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-label">Match Size</span>
+                <div class="settings-controls">
+                    <button class="settings-button" data-setting="match" id="toggle-match-mode">Match 3+</button>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-label">Colors</span>
+                <div class="settings-controls">
+                    <button class="settings-button" data-setting="colors" id="toggle-colors">6 Colors</button>
+                    <button id="settings-colors-btn">...</button>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-label">Sound</span>
+                <div class="settings-controls">
+                    <button class="settings-button" data-setting="sound" id="toggle-sound">🔊 On</button>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-label">Effects</span>
+                <div class="settings-controls">
+                    <button class="settings-button disabled" data-setting="flair" id="toggle-flair">Off</button>
+                </div>
+            </div>
+            <button class="settings-button" id="settings-goals-btn">📖 Collection</button>
+        </div>
+    </div>
+</div>
+
+<div id="bonus-container"></div>
+
+<!-- Goals Panel -->
+<div id="goals-overlay">
+    <div id="goals-panel">
+        <div id="goals-header">
+            <h2>COLLECTION</h2>
+            <button id="goals-close">✕</button>
+        </div>
+        <div id="goals-sort">
+            <button class="sort-btn active" data-sort="count">Count</button>
+            <button class="sort-btn" data-sort="date">Date</button>
+            <button class="sort-btn" data-sort="name">Name</button>
+        </div>
+        <div id="goals-list"></div>
+        <div id="goals-stats"></div>
+        <div id="goals-footer">
+            <button id="reset-btn">Reset Progress...</button>
+        </div>
+    </div>
+</div>
+
+<!-- Reset Confirmation -->
+<div id="reset-confirm">
+    <div id="reset-dialog">
+        <h3>Reset Progress?</h3>
+        <p>This will clear all discovered shapes and statistics.<br><br>This cannot be undone.</p>
+        <div class="btn-group">
+            <button id="reset-cancel">Cancel</button>
+            <button id="reset-confirm-btn">Reset</button>
+        </div>
+    </div>
+</div>
+
+<!-- Color Customization Panel -->
+<div id="colors-overlay">
+    <div id="colors-panel">
+        <div id="colors-header">
+            <h2>CUSTOMIZE COLORS</h2>
+            <button id="colors-close">✕</button>
+        </div>
+        <div id="colors-list"></div>
+        <div id="colors-footer">
+            <button id="colors-reset">Reset Defaults</button>
+            <button id="colors-apply">Apply</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div id="goal-toast">
+    <span class="toast-icon"></span>
+    <span class="toast-text"></span>
+</div>
+
+<div class="controls">Select a cube, then click a neighbor to swap. Match N+ to clear!</div>
+
+<script>
+// ============================================
+// SOUND MANAGER
+// ============================================
+class RetroSoundManager {
+    constructor() {
+        this.audioContext = null;
+        this.masterGain = null;
+        this.enabled = true;
+        this.initAudio();
+    }
+    
+    initAudio() {
+        try {
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            this.masterGain = this.audioContext.createGain();
+            this.masterGain.gain.value = 0.25;
+            this.masterGain.connect(this.audioContext.destination);
+        } catch (e) {
+            console.warn('Web Audio API not supported');
+            this.enabled = false;
+        }
+    }
+    
+    resume() {
+        if (this.audioContext?.state === 'suspended') this.audioContext.resume();
+    }
+    
+    setEnabled(v) { this.enabled = v; }
+    isEnabled() { return this.enabled; }
+    
+    playTone(freq, dur, wave = 'square', vol = 0.1) {
+        if (!this.enabled || !this.audioContext) return;
+        if (this.audioContext.state === 'suspended') return;
+        
+        const osc = this.audioContext.createOscillator();
+        const gain = this.audioContext.createGain();
+        const now = this.audioContext.currentTime;
+        
+        osc.type = wave;
+        osc.frequency.setValueAtTime(freq, now);
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(vol, now + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+        
+        osc.connect(gain);
+        gain.connect(this.masterGain);
+        osc.start();
+        osc.stop(now + dur);
+    }
+    
+    playSweep(startFreq, endFreq, dur, wave = 'sawtooth', vol = 0.12) {
+        if (!this.enabled || !this.audioContext) return;
+        if (this.audioContext.state === 'suspended') return;
+        
+        const osc = this.audioContext.createOscillator();
+        const gain = this.audioContext.createGain();
+        const now = this.audioContext.currentTime;
+        
+        osc.type = wave;
+        osc.frequency.setValueAtTime(startFreq, now);
+        osc.frequency.exponentialRampToValueAtTime(endFreq, now + dur);
+        gain.gain.setValueAtTime(vol, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+        
+        osc.connect(gain);
+        gain.connect(this.masterGain);
+        osc.start();
+        osc.stop(now + dur);
+    }
+    
+    playChord(freqs, dur, wave = 'square', vol = 0.06) {
+        freqs.forEach((f, i) => setTimeout(() => this.playTone(f, dur, wave, vol), i * 50));
+    }
+    
+    click() { this.playTone(150, 0.1, 'sine', 0.12); this.playTone(300, 0.1, 'square', 0.06); }
+    swap() { this.playTone(440, 0.1, 'sine', 0.08); setTimeout(() => this.playTone(554, 0.1, 'sine', 0.08), 50); }
+    match() { this.playChord([523, 659, 784], 0.3, 'triangle', 0.07); }
+    explode(delay = 0, idx = 0) {
+        const scale =[220, 247, 277, 311, 349, 392, 440, 494];
+        setTimeout(() => this.playTone(scale[Math.min(idx, 7)], 0.4, 'triangle', 0.08), delay);
+    }
+    combo(level) {
+        const base = 440 + level * 100;
+        this.playTone(base, 0.15, 'square', 0.1);
+        setTimeout(() => this.playTone(base * 1.25, 0.15, 'square', 0.1), 80);
+        setTimeout(() => this.playTone(base * 1.5, 0.2, 'square', 0.12), 160);
+    }
+    lineClear() {
+        this.playSweep(200, 800, 0.3, 'square', 0.12);
+        setTimeout(() => this.playChord([523, 784, 1047, 1319], 0.4, 'triangle', 0.08), 150);
+    }
+    boxedIn() {[880, 784, 659, 587].forEach((f, i) => setTimeout(() => this.playTone(f, 0.08, 'square', 0.08), i * 80));
+        setTimeout(() => this.playTone(1047, 0.2, 'square', 0.15), 340);
+    }
+    smartMove() {
+        this.playChord([262, 330, 392, 523], 0.8, 'triangle', 0.07); // C major chord
+    }
+    invalidSwap() {
+        this.playTone(150, 0.15, 'sawtooth', 0.12);
+        setTimeout(() => this.playTone(120, 0.15, 'sawtooth', 0.1), 100);
+    }
+    goalDiscovered() {[659, 784, 988].forEach((f, i) => setTimeout(() => this.playTone(f, 0.15, 'sine', 0.1), i * 100));
+        setTimeout(() => this.playTone(1319, 0.3, 'triangle', 0.12), 300);
+    }
+}
+
+const soundManager = new RetroSoundManager();
+
+// ============================================
+// LOGICAL DATA STRUCTURES
+// ============================================
+
+// Logical Cube Class - Pure data, no meshes
+class LogicalCube {
+    constructor(gridX, gridY, gridZ, plane, colorKey, targetPos) {
+        this.gridX = gridX;
+        this.gridY = gridY;
+        this.gridZ = gridZ;
+        this.plane = plane;
+        this.colorKey = colorKey;
+        
+        // Transform state
+        this.position = targetPos.clone();
+        this.targetPos = targetPos.clone();
+        this.rotationY = 0;
+        this.scale = 1.0;
+        this.isSelected = false;
+        this.isDying = false;
+    }
+}
+
+// ============================================
+// GOALS MANAGER
+// ============================================
+class GoalsManager {
+    constructor() {
+        this.storageKey = 'boxedIn_goals';
+        this.shapes = {
+            'line-3':   { name: 'Line (3)',   icon: '➖', description: '3 cubes in a row' },
+            'line-4':   { name: 'Line (4)',   icon: '➕', description: '4 cubes in a row' },
+            'line-5':   { name: 'Line (5)',   icon: '📏', description: '5 cubes in a row' },
+            'l-shape':  { name: 'L-Shape',    icon: '🔲', description: 'L-shaped match' },
+            't-shape':  { name: 'T-Shape',    icon: '🔳', description: 'T-shaped match' },
+            'square':   { name: 'Square',     icon: '⬜', description: '2×2 block' },
+            'j-shape':  { name: 'J-Shape',    icon: '🔷', description: 'J-shaped match' },
+            's-shape':  { name: 'S-Shape',    icon: '🔶', description: 'S-shaped match' },
+            'plus':     { name: 'Plus',       icon: '✚', description: 'Plus-shaped match' },
+            'c-shape':  { name: 'c-Shape',    icon: '🇨', description: 'Small C (5 cubes)' },
+            'C-shape':  { name: 'C-Shape',    icon: '©', description: 'Big C (7 cubes)' },
+            'u-shape':  { name: 'u-Shape',    icon: '🧲', description: 'Small U (5 cubes)' },
+            'U-shape':  { name: 'U-Shape',    icon: '🏆', description: 'Big U (7 cubes)' },
+            'bridge':   { name: 'Bridge',     icon: '🌉', description: 'Match spans 2 faces' },
+            'trifecta': { name: 'Trifecta',   icon: '👑', description: 'Match spans all 3 faces' },
+            'blob':     { name: 'Blob',       icon: '🫠', description: 'Large irregular (6+)' },
+        };
+        this.patterns = {
+            'line-3':  [[0,0], [1,0], [2,0]],
+            'line-4':  [[0,0], [1,0], [2,0], [3,0]],
+            'line-5':  [[0,0], [1,0], [2,0], [3,0],[4,0]],
+            'l-shape': [[0,0], [1,0], [2,0],[2,1]],
+            'j-shape': [[0,0], [1,0],[2,0],[0,1]],
+            't-shape': [[0,0],[1,0],[2,0], [1,1]],
+            'square':  [[0,0],[1,0],[0,1], [1,1]],
+            's-shape': [[1,0], [2,0], [0,1], [1,1]],
+            'plus':    [[1,0],[0,1], [1,1], [2,1], [1,2]],
+            'c-shape': [[0,0], [1,0], [0,1],[0,2], [1,2]],
+            'C-shape': [[0,0], [1,0], [2,0],[0,1], [0,2], [1,2],[2,2]],
+            'u-shape': [[0,0], [2,0], [0,1],[1,1], [2,1]],
+            'U-shape': [[0,0],[2,0], [0,1],[2,1], [0,2], [1,2],[2,2]],
+        };
+        this.data = this.load();
+        this.toastQueue =[];
+        this.isShowingToast = false;
+    }
+    
+    getDefaultData() {
+        const shapes = {};
+        for (const key of Object.keys(this.shapes)) shapes[key] = { count: 0, firstDate: null };
+        return {
+            shapes,
+            stats: { totalCubesCleared: 0, totalMatches: 0, maxCombo: 0, boxedInBonuses: 0, smartMoves: 0, lineClears: 0 },
+            firstPlayed: new Date().toISOString(),
+            lastPlayed: new Date().toISOString()
+        };
+    }
+    
+    load() {
+        try {
+            const saved = localStorage.getItem(this.storageKey);
+            if (saved) {
+                const data = JSON.parse(saved);
+                const defaults = this.getDefaultData();
+                for (const key of Object.keys(defaults.shapes)) {
+                    if (!data.shapes[key]) data.shapes[key] = defaults.shapes[key];
+                }
+                for (const key of Object.keys(defaults.stats)) {
+                    if (data.stats[key] === undefined) data.stats[key] = defaults.stats[key];
+                }
+                return data;
+            }
+        } catch (e) { console.warn('Failed to load goals:', e); }
+        return this.getDefaultData();
+    }
+    
+    save() {
+        try {
+            this.data.lastPlayed = new Date().toISOString();
+            localStorage.setItem(this.storageKey, JSON.stringify(this.data));
+        } catch (e) { console.warn('Failed to save goals:', e); }
+    }
+    
+    reset() { this.data = this.getDefaultData(); this.save(); }
+    
+    getLocal2D(cube) {
+        const p = cube.plane;
+        if (p === 'floor') return[cube.gridX, cube.gridZ];
+        if (p === 'left') return [cube.gridZ, cube.gridY];
+        return[cube.gridX, cube.gridY];
+    }
+    
+    normalizeCoords(coords) {
+        const minX = Math.min(...coords.map(c => c[0]));
+        const minY = Math.min(...coords.map(c => c[1]));
+        return coords.map(([x, y]) =>[x - minX, y - minY]);
+    }
+    
+    rotatePattern(coords) { return coords.map(([x, y]) => [-y, x]); }
+    
+    coordSetsEqual(s1, s2) {
+        if (s1.size !== s2.size) return false;
+        for (const item of s1) if (!s2.has(item)) return false;
+        return true;
+    }
+    
+    classifyShape(cubes) {
+        const planes = new Set(cubes.map(c => c.plane));
+        if (planes.size > 1) return planes.size === 3 ? 'trifecta' : 'bridge';
+        
+        const coords = cubes.map(c => this.getLocal2D(c));
+        const normalized = this.normalizeCoords(coords);
+        const coordSet = new Set(normalized.map(([x, y]) => `${x},${y}`));
+        
+        for (const[name, pattern] of Object.entries(this.patterns)) {
+            let rotated = [...pattern];
+            for (let r = 0; r < 4; r++) {
+                const normPattern = this.normalizeCoords(rotated);
+                const patternSet = new Set(normPattern.map(([x, y]) => `${x},${y}`));
+                if (this.coordSetsEqual(coordSet, patternSet)) return name;
+                rotated = this.rotatePattern(rotated);
+            }
+        }
+        return cubes.length >= 6 ? 'blob' : null;
+    }
+    
+    recordMatch(cubes) {
+        const shape = this.classifyShape(cubes);
+        if (!shape) return;
+        
+        const wasNew = this.data.shapes[shape].count === 0;
+        this.data.shapes[shape].count++;
+        if (!this.data.shapes[shape].firstDate) this.data.shapes[shape].firstDate = new Date().toISOString();
+        this.data.stats.totalMatches++;
+        this.data.stats.totalCubesCleared += cubes.length;
+        this.save();
+        
+        if (wasNew) this.queueToast(shape);
+        console.log(`📊 Shape: ${shape} (${this.data.shapes[shape].count})`);
+    }
+    
+    recordBoxedIn() { this.data.stats.boxedInBonuses++; this.save(); }
+    recordSmartMove() { this.data.stats.smartMoves++; this.save(); }
+    recordLineClears(count) { this.data.stats.lineClears += count; this.save(); }
+    updateMaxCombo(combo) { if (combo > this.data.stats.maxCombo) { this.data.stats.maxCombo = combo; this.save(); } }
+    
+    queueToast(key) {
+        this.toastQueue.push(key);
+        if (!this.isShowingToast) this.showNextToast();
+    }
+    
+    showNextToast() {
+        if (!this.toastQueue.length) { this.isShowingToast = false; return; }
+        this.isShowingToast = true;
+        const key = this.toastQueue.shift();
+        const shape = this.shapes[key];
+        
+        const toast = document.getElementById('goal-toast');
+        toast.querySelector('.toast-icon').textContent = shape.icon;
+        toast.querySelector('.toast-text').innerHTML = `<strong>New!</strong> ${shape.name} discovered`;
+        soundManager.goalDiscovered();
+        toast.classList.add('visible');
+        
+        setTimeout(() => {
+            toast.classList.remove('visible');
+            setTimeout(() => this.showNextToast(), 300);
+        }, 2500);
+    }
+    
+    getSortedGoals(sortBy = 'count') {
+        const goals = Object.entries(this.data.shapes).map(([key, data]) => ({
+            key, ...this.shapes[key], count: data.count, firstDate: data.firstDate
+        }));
+        
+        if (sortBy === 'count') goals.sort((a, b) => b.count - a.count);
+        else if (sortBy === 'date') goals.sort((a, b) => {
+            if (!a.firstDate && !b.firstDate) return 0;
+            if (!a.firstDate) return 1;
+            if (!b.firstDate) return -1;
+            return new Date(b.firstDate) - new Date(a.firstDate);
+        });
+        else if (sortBy === 'name') goals.sort((a, b) => a.name.localeCompare(b.name));
+        return goals;
+    }
+    
+    renderPanel(sortBy = 'count') {
+        const list = document.getElementById('goals-list');
+        const stats = document.getElementById('goals-stats');
+        const goals = this.getSortedGoals(sortBy);
+        
+        list.innerHTML = goals.map(g => {
+            const discovered = g.count > 0;
+            const dateStr = g.firstDate ? new Date(g.firstDate).toLocaleDateString() : 'Not yet';
+            return `<div class="goal-item">
+                <span class="goal-icon">${discovered ? g.icon : '❓'}</span>
+                <div class="goal-info">
+                    <div class="goal-name ${discovered ? '' : 'undiscovered'}">${discovered ? g.name : '???'}</div>
+                    <div class="goal-detail">${discovered ? dateStr : 'Keep matching!'}</div>
+                </div>
+                <span class="goal-count ${g.count === 0 ? 'zero' : ''}">${g.count}</span>
+            </div>`;
+        }).join('');
+        
+        const s = this.data.stats;
+        stats.innerHTML = `
+            <div class="stat-item">Cubes Cleared: <span>${s.totalCubesCleared.toLocaleString()}</span></div>
+            <div class="stat-item">Total Matches: <span>${s.totalMatches.toLocaleString()}</span></div>
+            <div class="stat-item">Best Combo: <span>${s.maxCombo}×</span></div>
+            <div class="stat-item">BOXED IN: <span>${s.boxedInBonuses}</span></div>
+            <div class="stat-item">Smart Moves: <span>${s.smartMoves || 0}</span></div>
+            <div class="stat-item">Line Clears: <span>${s.lineClears || 0}</span></div>
+        `;
+    }
+}
+
+const goalsManager = new GoalsManager();
+
+// ============================================
+// PARTICLE POOL (Object Pooling with Shader Physics)
+// ============================================
+class ParticlePool {
+    constructor(scene, maxParticles = 1500) {
+        this.maxParticles = maxParticles;
+        this.scene = scene;
+        this.activeCount = 0;
+        
+        this.positions = new Float32Array(maxParticles * 3);
+        this.velocities = new Float32Array(maxParticles * 3);
+        this.colors = new Float32Array(maxParticles * 3);
+        this.sizes = new Float32Array(maxParticles);
+        this.lifes = new Float32Array(maxParticles);
+        
+        this.activeIndices = new Int16Array(maxParticles);
+        this.activeCount = 0;
+        
+        this.geometry = new THREE.BufferGeometry();
+        this.geometry.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
+        this.geometry.setAttribute('color', new THREE.BufferAttribute(this.colors, 3));
+        this.geometry.setAttribute('size', new THREE.BufferAttribute(this.sizes, 1));
+        this.geometry.setAttribute('life', new THREE.BufferAttribute(this.lifes, 1));
+        
+        const vertexShader = `
+            attribute float size;
+            attribute vec3 color;
+            attribute float life;
+            varying vec3 vColor;
+            varying float vLife;
+            void main() {
+                vColor = color;
+                vLife = life;
+                vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                gl_PointSize = size * (300.0 / -mvPosition.z) * max(life, 0.0);
+                gl_Position = projectionMatrix * mvPosition;
+            }
+        `;
+        const fragmentShader = `
+            varying vec3 vColor;
+            varying float vLife;
+            void main() {
+                vec2 xy = gl_PointCoord.xy - vec2(0.5);
+                float ll = length(xy);
+                if(ll > 0.5) discard;
+                
+                float alpha = smoothstep(0.0, 0.4, vLife);
+                vec3 finalColor = mix(vec3(1.0), vColor, smoothstep(0.7, 1.0, 1.0 - vLife) + ll * 2.0);
+                
+                gl_FragColor = vec4(finalColor, alpha);
+            }
+        `;
+        
+        this.material = new THREE.ShaderMaterial({
+            vertexShader, fragmentShader,
+            transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+        });
+        
+        this.points = new THREE.Points(this.geometry, this.material);
+        this.points.frustumCulled = false;
+        scene.add(this.points);
+        this.nextFree = 0;
+    }
+    
+    spawn(pos, colorHex) {
+        const color = new THREE.Color(colorHex);
+        const idx = this.nextFree;
+        this.nextFree = (this.nextFree + 1) % this.maxParticles;
+        
+        if (this.lifes[idx] <= 0) {
+            this.activeIndices[this.activeCount] = idx;
+            this.activeCount++;
+        }
+        
+        this.positions[idx * 3] = pos.x; this.positions[idx * 3 + 1] = pos.y; this.positions[idx * 3 + 2] = pos.z;
+        
+        this.velocities[idx * 3] = (Math.random() - 0.5) * 0.7;
+        this.velocities[idx * 3 + 1] = (Math.random() - 0.5) * 0.7;
+        this.velocities[idx * 3 + 2] = (Math.random() - 0.5) * 0.7;
+        
+        this.colors[idx * 3] = color.r; this.colors[idx * 3 + 1] = color.g; this.colors[idx * 3 + 2] = color.b;
+        
+        this.sizes[idx] = Math.random() * 0.5 + 0.3;
+        this.lifes[idx] = 1.0;
+    }
+    
+    explode(pos, colorHex) {
+        for (let i = 0; i < 30; i++) this.spawn(pos, colorHex);
+    }
+    
+    update() {
+        if (this.activeCount === 0) { this.points.visible = false; return; }
+        this.points.visible = true;
+        
+        let newActiveCount = 0;
+        for (let i = 0; i < this.activeCount; i++) {
+            const idx = this.activeIndices[i];
+            if (this.lifes[idx] > 0) {
+                this.positions[idx * 3] += this.velocities[idx * 3];
+                this.positions[idx * 3 + 1] += this.velocities[idx * 3 + 1];
+                this.positions[idx * 3 + 2] += this.velocities[idx * 3 + 2];
+                
+                this.velocities[idx * 3] *= 0.88;
+                this.velocities[idx * 3 + 1] *= 0.88;
+                this.velocities[idx * 3 + 2] *= 0.88;
+                this.velocities[idx * 3 + 1] -= 0.004;
+                
+                this.lifes[idx] -= 0.02;
+                this.activeIndices[newActiveCount] = idx;
+                newActiveCount++;
+            } else {
+                this.positions[idx * 3] = 9999;
+            }
+        }
+        
+        this.activeCount = newActiveCount;
+        this.geometry.attributes.position.needsUpdate = true;
+        this.geometry.attributes.life.needsUpdate = true;
+    }
+}
+
+// ============================================
+// THREE.JS SETUP
+// ============================================
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(16, 16, 16);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+// ============================================
+// LIGHTING SETUP WITH SHADOWS
+// ============================================
+
+// Reduced ambient light to make shadows more visible
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(ambientLight);
+
+// Main directional light (from camera direction - top-right-front)
+const mainLight = new THREE.DirectionalLight(0xffffff, 0.7);
+mainLight.position.set(15, 20, 15);
+mainLight.castShadow = true;
+mainLight.shadow.mapSize.width = 2048;
+mainLight.shadow.mapSize.height = 2048;
+mainLight.shadow.camera.near = 1;
+mainLight.shadow.camera.far = 50;
+mainLight.shadow.camera.left = -15;
+mainLight.shadow.camera.right = 15;
+mainLight.shadow.camera.top = 15;
+mainLight.shadow.camera.bottom = -15;
+mainLight.shadow.bias = -0.001;
+mainLight.shadow.radius = 2;
+scene.add(mainLight);
+
+// Fill light from opposite side (softer)
+const fillLight = new THREE.DirectionalLight(0x4488ff, 0.3);
+fillLight.position.set(-10, 5, -10);
+scene.add(fillLight);
+
+// Rim light from below for depth
+const rimLight = new THREE.DirectionalLight(0xff88ff, 0.15);
+rimLight.position.set(0, -10, 0);
+scene.add(rimLight);
+
+// ============================================
+
+// Starfield Generator
+function createStarTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 32; canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+    grad.addColorStop(0.2, 'rgba(255, 255, 255, 0.8)');
+    grad.addColorStop(0.5, 'rgba(255, 255, 255, 0.2)');
+    grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 32, 32);
+    return new THREE.CanvasTexture(canvas);
+}
+
+function createEnhancedStarfield() {
+    const group = new THREE.Group();
+    const texture = createStarTexture();
+    const layers =[
+        { count: 1200, baseSize: 1.0, sizeVar: 1.5, speed: 0.00015, radius: 55, color: 0xffffff },
+        { count: 600, baseSize: 2.0, sizeVar: 2.5, speed: 0.0003, radius: 45, color: 0x88ccff },
+        { count: 150, baseSize: 3.5, sizeVar: 4.0, speed: 0.0005, radius: 35, color: 0xffddaa }
+    ];
+    const vertexShader = `
+        attribute float size; attribute vec3 customColor; varying vec3 vColor;
+        void main() { vColor = customColor; vec4 mvPosition = modelViewMatrix * vec4(position, 1.0); gl_PointSize = size * (300.0 / -mvPosition.z); gl_Position = projectionMatrix * mvPosition; }
+    `;
+    const fragmentShader = `
+        uniform sampler2D uTexture; varying vec3 vColor;
+        void main() { vec4 texColor = texture2D(uTexture, gl_PointCoord); gl_FragColor = vec4(vColor, 1.0) * texColor; gl_FragColor.rgb *= gl_FragColor.a; }
+    `;
+    layers.forEach(layer => {
+        const geo = new THREE.BufferGeometry();
+        const positions = [], colors = [], sizes =[];
+        for (let i = 0; i < layer.count; i++) {
+            const r = layer.radius + Math.random() * 25, theta = Math.random() * Math.PI * 2, phi = Math.acos(2 * Math.random() - 1);
+            positions.push(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
+            const c = new THREE.Color(layer.color);
+            c.offsetHSL(0, 0, (Math.random() - 0.5) * 0.2);
+            colors.push(c.r, c.g, c.b);
+            sizes.push(layer.baseSize + Math.random() * layer.sizeVar);
+        }
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute('customColor', new THREE.Float32BufferAttribute(colors, 3));
+        geo.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+        const mat = new THREE.ShaderMaterial({ uniforms: { uTexture: { value: texture } }, vertexShader, fragmentShader, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geo, mat);
+        points.userData = { speed: layer.speed };
+        group.add(points);
+    });
+    return group;
+}
+
+const starfield = createEnhancedStarfield();
+scene.add(starfield);
+
+const particles = new ParticlePool(scene);
+
+// ============================================
+// CAMERA FIT & SHAKE GLOBALS
+// ============================================
+const SCREEN_BORDER = 10;
+const cameraDirection = new THREE.Vector3(1, 1, 1).normalize();
+
+let cameraBasePosition = new THREE.Vector3();
+let screenShake = 0;
+
+function addScreenShake(amount) {
+    screenShake = Math.min(screenShake + amount, 1.5);
+}
+
+function getBoardBounds() {
+    const min = -0.6, max = 5 * 1.1 + 0.5;
+    return { min: new THREE.Vector3(min, min, min), max: new THREE.Vector3(max, max, max) };
+}
+
+const boardBounds = getBoardBounds();
+const cameraTarget = new THREE.Vector3().addVectors(boardBounds.min, boardBounds.max).multiplyScalar(0.5);
+
+function fitCameraToBoard() {
+    const bounds = getBoardBounds();
+    const sw = window.innerWidth, sh = window.innerHeight;
+    camera.aspect = sw / sh;
+    camera.updateProjectionMatrix();
+    const safeLeft = SCREEN_BORDER, safeRight = sw - SCREEN_BORDER;
+    const topPad = Math.min(100, sh * 0.12), safeTop = SCREEN_BORDER + topPad, safeBottom = sh - SCREEN_BORDER;
+    
+    // Corners of bounding box
+    const corners =[
+        new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.min.z), new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.max.z),
+        new THREE.Vector3(bounds.min.x, bounds.max.y, bounds.min.z), new THREE.Vector3(bounds.min.x, bounds.max.y, bounds.max.z),
+        new THREE.Vector3(bounds.max.x, bounds.min.y, bounds.min.z), new THREE.Vector3(bounds.max.x, bounds.min.y, bounds.max.z),
+        new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.min.z), new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.max.z),
+    ];
+    
+    let minDist = 5, maxDist = 50, distance;
+    for (let i = 0; i < 20; i++) {
+        distance = (minDist + maxDist) / 2;
+        camera.position.copy(cameraDirection).multiplyScalar(distance).add(cameraTarget);
+        camera.lookAt(cameraTarget);
+        camera.updateMatrixWorld();
+        camera.updateProjectionMatrix();
+        let sMinX = Infinity, sMaxX = -Infinity, sMinY = Infinity, sMaxY = -Infinity;
+        corners.forEach(c => {
+            const p = c.clone().project(camera);
+            const sx = (p.x + 1) / 2 * sw, sy = (-p.y + 1) / 2 * sh;
+            sMinX = Math.min(sMinX, sx); sMaxX = Math.max(sMaxX, sx); sMinY = Math.min(sMinY, sy); sMaxY = Math.max(sMaxY, sy);
+        });
+        if (sMinX >= safeLeft && sMaxX <= safeRight && sMinY >= safeTop && sMaxY <= safeBottom) maxDist = distance;
+        else minDist = distance;
+    }
+    distance = maxDist * 1.01;
+    camera.position.copy(cameraDirection).multiplyScalar(distance).add(cameraTarget);
+    camera.lookAt(cameraTarget);
+    camera.updateMatrixWorld();
+    
+    cameraBasePosition.copy(camera.position); // Store for shake effect
+}
+
+setTimeout(fitCameraToBoard, 0);
+
+// ============================================
+// GAME DATA & RENDERER
+// ============================================
+let logicalCubes =[]; // Stores LogicalCube objects
+let leftWallRows = [[], [], [], [], []];
+let rightWallRows = [[], [], [], [],[]];
+let floorStrips = [[], [], [], [],[]];
+
+const gridSize = 5, spacing = 1.1, offset = 0.5;
+
+// Color Manager
+const defaultColorMap = {
+    'red': 0xff0000, 'green': 0x33cc00, 'blue': 0x0000ff,
+    'yellow': 0xfffd00, 'magenta': 0xac00dc,
+    'cyan': 0x00ddff, 'gray': 0xaaaaaa, 'orange': 0xeaaa04
+};
+
+class ColorManager {
+    constructor() {
+        this.storageKey = 'boxedIn_colors';
+        this.colorNames =['red', 'green', 'blue', 'yellow', 'magenta', 'orange', 'gray', 'cyan'];
+        this.data = this.load();
+    }
+    
+    getDefaultData() {
+        const colors = {};
+        for (const key of this.colorNames) colors[key] = defaultColorMap[key];
+        return { colors };
+    }
+    
+    load() {
+        try {
+            const saved = localStorage.getItem(this.storageKey);
+            if (saved) return { ...this.getDefaultData(), ...JSON.parse(saved) };
+        } catch (e) {}
+        return this.getDefaultData();
+    }
+    
+    save() { localStorage.setItem(this.storageKey, JSON.stringify(this.data)); }
+    reset() { this.data = this.getDefaultData(); this.save(); }
+    getColor(key) { return this.data.colors[key]; }
+    setColor(key, hex) { this.data.colors[key] = hex; }
+    getColorMap() { return { ...this.data.colors }; }
+    hexToInt(hex) { return parseInt(hex.replace('#', ''), 16); }
+    intToHex(int) { return '#' + int.toString(16).padStart(6, '0'); }
+}
+
+const colorManager = new ColorManager();
+const colorMap = colorManager.getColorMap();
+const allColorKeys = Object.keys(colorMap);
+
+// ============================================
+// SETTINGS MANAGER - Persists game preferences
+// ============================================
+class SettingsManager {
+    constructor() {
+        this.storageKey = 'boxedIn_settings';
+        this.data = this.load();
+    }
+    
+    getDefaultData() {
+        return {
+            soundEnabled: true,
+            usingNumbers: false,
+            swapMode: 'neumann',
+            minMatchSize: 3,
+            colorCount: 6,
+            flairEnabled: false
+        };
+    }
+    
+    load() {
+        try {
+            const saved = localStorage.getItem(this.storageKey);
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                // Merge with defaults to handle any new settings
+                return { ...this.getDefaultData(), ...parsed };
+            }
+        } catch (e) { console.warn('Failed to load settings:', e); }
+        return this.getDefaultData();
+    }
+    
+    save() {
+        try {
+            localStorage.setItem(this.storageKey, JSON.stringify(this.data));
+        } catch (e) { console.warn('Failed to save settings:', e); }
+    }
+    
+    get(key) { return this.data[key]; }
+    
+    set(key, value) {
+        this.data[key] = value;
+        this.save();
+    }
+}
+
+const settingsManager = new SettingsManager();
+
+// Initialize from saved settings
+let colorCount = settingsManager.get('colorCount');
+let activeColorKeys = allColorKeys.slice(0, colorCount);
+
+const colorNumbers = { red: '1', green: '2', blue: '3', yellow: '4', magenta: '5', orange: '6', gray: '7', cyan: '8' };
+const colorLetters = { red: 'A', green: 'B', blue: 'C', yellow: 'D', magenta: 'E', orange: 'F', gray: 'G', cyan: 'H' };
+
+// Texture Generation
+function createColorTexture(colorKey, hexColor, useNumbers = false) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128; canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#' + hexColor.toString(16).padStart(6, '0');
+    ctx.fillRect(0, 0, 128, 128);
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 18;
+    ctx.strokeRect(2, 2, 124, 124);
+    const sym = useNumbers ? colorNumbers[colorKey] : colorLetters[colorKey];
+    ctx.font = 'bold 80px Orbitron, Arial';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 6;
+    ctx.strokeText(sym, 64, 66);
+    ctx.fillStyle = '#fff'; ctx.fillText(sym, 64, 66);
+    return new THREE.CanvasTexture(canvas);
+}
+
+// Instanced Renderer
+class InstancedCubeRenderer {
+    constructor(scene) {
+        this.scene = scene;
+        this.meshes = {}; // Map<colorKey, InstancedMesh>
+        this.geometry = new THREE.BoxGeometry(1, 1, 1);
+        this.dummy = new THREE.Object3D();
+        this.maxInstances = 150; // Safety buffer
+        this.instanceLookup = {}; // Map<colorKey, Map<instanceId, LogicalCube>>
+        
+        // Selection Cursor (Single mesh)
+        const edges = new THREE.EdgesGeometry(this.geometry);
+        this.cursor = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 2, transparent: true, opacity: 0.8 }));
+        this.cursor.visible = false;
+        
+        // Add a glow mesh inside cursor
+        const glowGeo = new THREE.BoxGeometry(1.05, 1.05, 1.05);
+        const glowMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.2, depthWrite: false });
+        this.cursorGlow = new THREE.Mesh(glowGeo, glowMat);
+        this.cursor.add(this.cursorGlow);
+        
+        this.scene.add(this.cursor);
+        this.updateTextures(false);
+    }
+
+    updateTextures(useNumbers) {
+        // Clear existing meshes
+        Object.values(this.meshes).forEach(mesh => this.scene.remove(mesh));
+        this.meshes = {};
+
+        // Create new meshes for current active colors
+        activeColorKeys.forEach(key => {
+            const tex = createColorTexture(key, colorManager.getColor(key), useNumbers);
+            const mat = new THREE.MeshPhongMaterial({ map: tex, shininess: 100 });
+            const mesh = new THREE.InstancedMesh(this.geometry, mat, this.maxInstances);
+            mesh.userData = { colorKey: key }; // Identifier for raycasting
+            mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            this.scene.add(mesh);
+            this.meshes[key] = mesh;
+        });
+    }
+
+    render(logicalCubes) {
+        // Reset counts
+        Object.values(this.meshes).forEach(mesh => mesh.count = 0);
+        this.instanceLookup = {}; // Reset lookup map
+        
+        activeColorKeys.forEach(k => this.instanceLookup[k] = {});
+
+        logicalCubes.forEach(cube => {
+            if (cube.isDying && cube.scale <= 0.05) return; // Skip invisible
+
+            const mesh = this.meshes[cube.colorKey];
+            if (!mesh) return; // Should not happen unless color removed mid-game
+
+            const idx = mesh.count;
+            
+            this.dummy.position.copy(cube.position);
+            this.dummy.rotation.set(0, cube.rotationY, 0);
+            this.dummy.scale.setScalar(cube.scale);
+            this.dummy.updateMatrix();
+
+            mesh.setMatrixAt(idx, this.dummy.matrix);
+            
+            // Map visual instance back to logical cube for raycasting
+            this.instanceLookup[cube.colorKey][idx] = cube;
+
+            mesh.count++;
+        });
+
+        Object.values(this.meshes).forEach(mesh => {
+            mesh.instanceMatrix.needsUpdate = true;
+        });
+        
+        // Update cursor
+        const selected = logicalCubes.find(c => c.isSelected);
+        if (selected) {
+            this.cursor.visible = true;
+            this.cursor.position.copy(selected.position);
+            // Pulse effect
+            const pulse = 0.4 + 0.3 * Math.sin(performance.now() * 0.008);
+            this.cursorGlow.material.opacity = pulse;
+            this.cursor.scale.setScalar(1.15); // Match logic
+        } else {
+            this.cursor.visible = false;
+        }
+    }
+    
+    getCubeFromIntersect(intersect) {
+        const colorKey = intersect.object.userData.colorKey;
+        const instanceId = intersect.instanceId;
+        if (this.instanceLookup[colorKey]) {
+            return this.instanceLookup[colorKey][instanceId];
+        }
+        return null;
+    }
+    
+    getInteractableMeshes() {
+        return Object.values(this.meshes);
+    }
+}
+
+const cubeRenderer = new InstancedCubeRenderer(scene);
+
+// ============================================
+// GAME LOGIC
+// ============================================
+let usingNumbers = settingsManager.get('usingNumbers');
+let swapMode = settingsManager.get('swapMode');
+let minMatchSize = settingsManager.get('minMatchSize');
+let score = 0;
+let displayedScore = 0;
+let scoreAnimationId = null;
+let comboLevel = 0;
+let comboRunningTotal = 0;
+let isProcessing = false;
+let hasUserInteracted = false;
+let selectedCube = null; // Reference to LogicalCube
+
+const flairSettings = { enabled: settingsManager.get('flairEnabled'), spinningCubes: true };
+
+// Apply saved sound setting
+soundManager.setEnabled(settingsManager.get('soundEnabled'));
+
+// Update textures to match saved symbol setting
+cubeRenderer.updateTextures(usingNumbers);
+
+// Utility Functions
+function wouldCreateMatch(plane, gridX, gridY, gridZ, colorKey) {
+    const active = logicalCubes.filter(c => !c.isDying);
+    let neighbors = 0;
+    const required = minMatchSize - 1;
+    for (const c of active) {
+        if (c.colorKey !== colorKey) continue;
+        if (isAdjacentToPosition(c, plane, gridX, gridY, gridZ)) {
+            neighbors++;
+            if (neighbors >= required) return true;
+        }
+    }
+    return false;
+}
+
+function isAdjacentToPosition(cube, plane, gx, gy, gz) {
+    const cp = cube.plane;
+    const cx = cube.gridX, cy = cube.gridY, cz = cube.gridZ;
+    if (cp === plane) {
+        if (plane === 'left') return Math.abs(cy - gy) + Math.abs(cz - gz) === 1 && cx === gx;
+        if (plane === 'right') return Math.abs(cx - gx) + Math.abs(cy - gy) === 1 && cz === gz;
+        return Math.abs(cx - gx) + Math.abs(cz - gz) === 1 && cy === gy;
+    }
+    // Cross-face
+    if ((cp === 'left' && plane === 'floor') || (cp === 'floor' && plane === 'left')) {
+        const [ly, lz] = cp === 'left' ? [cy, cz] :[gy, gz];
+        const [fx, fz] = cp === 'floor' ? [cx, cz] : [gx, gz];
+        return ly === 0 && fx === 0 && lz === fz;
+    }
+    if ((cp === 'right' && plane === 'floor') || (cp === 'floor' && plane === 'right')) {
+        const[ry, rx] = cp === 'right' ?[cy, cx] : [gy, gx];
+        const [fx, fz] = cp === 'floor' ? [cx, cz] : [gx, gz];
+        return ry === 0 && fz === 0 && rx === fx;
+    }
+    if ((cp === 'left' && plane === 'right') || (cp === 'right' && plane === 'left')) {
+        const [lz, ly] = cp === 'left' ? [cz, cy] :[gz, gy];
+        const[rx, ry] = cp === 'right' ? [cx, cy] : [gx, gy];
+        return lz === 0 && rx === 0 && ly === ry;
+    }
+    return false;
+}
+
+function pickSmartColor(plane, gx, gy, gz) {
+    const shuffled = [...activeColorKeys].sort(() => Math.random() - 0.5);
+    if (Math.random() < 0.75) {
+        for (const c of shuffled) if (!wouldCreateMatch(plane, gx, gy, gz, c)) return c;
+    }
+    return shuffled[0];
+}
+
+function createCube(x, y, z, plane, indexKey = null, finalGridPos = null) {
+    const colorKey = finalGridPos 
+        ? pickSmartColor(plane, finalGridPos.gridX, finalGridPos.gridY, finalGridPos.gridZ)
+        : activeColorKeys[Math.floor(Math.random() * activeColorKeys.length)];
+    
+    const target = new THREE.Vector3(x, y, z);
+    const gridX = Math.round((x - offset) / spacing);
+    const gridY = Math.round((y - offset) / spacing);
+    const gridZ = Math.round((z - offset) / spacing);
+    
+    const cube = new LogicalCube(gridX, gridY, gridZ, plane, colorKey, target);
+    
+    logicalCubes.push(cube);
+    if (indexKey !== null) {
+        if (plane === 'left') leftWallRows[indexKey].push(cube);
+        else if (plane === 'right') rightWallRows[indexKey].push(cube);
+        else if (plane === 'floor') floorStrips[indexKey].push(cube);
+    }
+    return cube;
+}
+
+function initBoard() {
+    logicalCubes =[];
+    leftWallRows = [[],[],[],[],[]]; rightWallRows = [[],[],[],[],[]]; floorStrips = [[],[],[],[],[]];
+    for (let y = 0; y < gridSize; y++) for (let z = 0; z < gridSize; z++) createCube(-0.6, y * spacing + offset, z * spacing + offset, 'left', y);
+    for (let y = 0; y < gridSize; y++) for (let x = 0; x < gridSize; x++) createCube(x * spacing + offset, y * spacing + offset, -0.6, 'right', y);
+    for (let x = 0; x < gridSize; x++) for (let z = 0; z < gridSize; z++) createCube(x * spacing + offset, -0.6, z * spacing + offset, 'floor', x);
+}
+
+initBoard();
+
+// Selection & Swapping
+function selectCubeLogic(cube) {
+    if (selectedCube) {
+        selectedCube.isSelected = false;
+        selectedCube.scale = 1.0;
+    }
+    selectedCube = cube;
+    if (cube) {
+        cube.isSelected = true;
+        cube.scale = 1.15; // Animation handled by renderer reading this value
+        soundManager.click();
+    }
+}
+
+function canSwapVonNeumann(c1, c2) {
+    const p1 = c1.plane, p2 = c2.plane;
+    // Same plane
+    if (p1 === p2) {
+        if (p1 === 'left') { const dy = Math.abs(c1.gridY - c2.gridY), dz = Math.abs(c1.gridZ - c2.gridZ); return (dy === 1 && dz === 0) || (dy === 0 && dz === 1); }
+        if (p1 === 'right') { const dx = Math.abs(c1.gridX - c2.gridX), dy = Math.abs(c1.gridY - c2.gridY); return (dx === 1 && dy === 0) || (dx === 0 && dy === 1); }
+        const dx = Math.abs(c1.gridX - c2.gridX), dz = Math.abs(c1.gridZ - c2.gridZ); return (dx === 1 && dz === 0) || (dx === 0 && dz === 1);
+    }
+    // Cross-face
+    if ((p1 === 'left' && p2 === 'floor') || (p1 === 'floor' && p2 === 'left')) { const L = p1 === 'left' ? c1 : c2, F = p1 === 'floor' ? c1 : c2; return L.gridY === 0 && F.gridX === 0 && L.gridZ === F.gridZ; }
+    if ((p1 === 'right' && p2 === 'floor') || (p1 === 'floor' && p2 === 'right')) { const R = p1 === 'right' ? c1 : c2, F = p1 === 'floor' ? c1 : c2; return R.gridY === 0 && F.gridZ === 0 && R.gridX === F.gridX; }
+    if ((p1 === 'left' && p2 === 'right') || (p1 === 'right' && p2 === 'left')) { const L = p1 === 'left' ? c1 : c2, R = p1 === 'right' ? c1 : c2; return L.gridZ === 0 && R.gridX === 0 && L.gridY === R.gridY; }
+    return false;
+}
+
+function canSwapMoore(c1, c2) {
+    const p1 = c1.plane, p2 = c2.plane;
+    if (p1 === p2) {
+        if (p1 === 'left') return Math.abs(c1.gridY - c2.gridY) <= 1 && Math.abs(c1.gridZ - c2.gridZ) <= 1;
+        if (p1 === 'right') return Math.abs(c1.gridX - c2.gridX) <= 1 && Math.abs(c1.gridY - c2.gridY) <= 1;
+        return Math.abs(c1.gridX - c2.gridX) <= 1 && Math.abs(c1.gridZ - c2.gridZ) <= 1;
+    }
+    if ((p1 === 'left' && p2 === 'floor') || (p1 === 'floor' && p2 === 'left')) { const L = p1 === 'left' ? c1 : c2, F = p1 === 'floor' ? c1 : c2; return L.gridY === 0 && F.gridX === 0 && Math.abs(L.gridZ - F.gridZ) <= 1; }
+    if ((p1 === 'right' && p2 === 'floor') || (p1 === 'floor' && p2 === 'right')) { const R = p1 === 'right' ? c1 : c2, F = p1 === 'floor' ? c1 : c2; return R.gridY === 0 && F.gridZ === 0 && Math.abs(R.gridX - F.gridX) <= 1; }
+    if ((p1 === 'left' && p2 === 'right') || (p1 === 'right' && p2 === 'left')) { const L = p1 === 'left' ? c1 : c2, R = p1 === 'right' ? c1 : c2; return L.gridZ === 0 && R.gridX === 0 && Math.abs(L.gridY - R.gridY) <= 1; }
+    return false;
+}
+
+let lastSwappedCubes = { cube1: null, cube2: null };
+
+function trySwap(c1, c2) {
+    const canSwap = swapMode === 'free' ? true : swapMode === 'moore' ? canSwapMoore(c1, c2) : canSwapVonNeumann(c1, c2);
+    if (!canSwap) {
+        soundManager.invalidSwap();
+        selectCubeLogic(null);
+        return;
+    }
+    
+    isProcessing = true;
+    soundManager.swap();
+    comboLevel = 0; comboRunningTotal = 0;
+    document.getElementById('combo-display').textContent = '';
+    document.getElementById('combo-display').classList.remove('active', 'shaking');
+    
+    const tempTarget = c1.targetPos.clone();
+    c1.targetPos.copy(c2.targetPos);
+    c2.targetPos.copy(tempTarget);
+    
+    // Swap logical props
+    const props =['gridX', 'gridY', 'gridZ', 'plane'];
+    props.forEach(k => { const tmp = c1[k]; c1[k] = c2[k]; c2[k] = tmp; });
+    
+    updateRowArrays();
+    lastSwappedCubes = { cube1: c1, cube2: c2 };
+    selectCubeLogic(null);
+    setTimeout(() => processMatches(), 300);
+}
+
+function updateRowArrays() {
+    leftWallRows = [[], [], [], [], []];
+    rightWallRows = [[], [], [], [],[]];
+    floorStrips = [[], [], [], [],[]];
+    
+    logicalCubes.filter(c => !c.isDying).forEach(c => {
+        if (c.plane === 'left') leftWallRows[c.gridY].push(c);
+        else if (c.plane === 'right') rightWallRows[c.gridY].push(c);
+        else floorStrips[c.gridX].push(c);
+    });
+}
+
+function areNeighbors(c1, c2) {
+    return canSwapVonNeumann(c1, c2); // Neighbors for matching are always Von Neumann
+}
+
+function findMatches() {
+    const active = logicalCubes.filter(c => !c.isDying);
+    const visited = new Set();
+    const groups =[];
+    
+    active.forEach(start => {
+        if (visited.has(start)) return;
+        const group = [start];
+        const queue =[start];
+        visited.add(start);
+        
+        while (queue.length) {
+            const curr = queue.shift();
+            active.forEach(n => {
+                if (!visited.has(n) && n.colorKey === curr.colorKey && areNeighbors(curr, n)) {
+                    visited.add(n); group.push(n); queue.push(n);
+                }
+            });
+        }
+        if (group.length >= minMatchSize) groups.push(group);
+    });
+    return groups;
+}
+
+function detectLineClears() {
+    let lineClears = 0;
+    const dying = logicalCubes.filter(c => c.isDying);
+    if (dying.length < gridSize) return 0;
+    
+    const checkLine = (plane, fixedKey, fixedVal, varKey) => {
+        const inLine = dying.filter(c => c.plane === plane && c[fixedKey] === fixedVal);
+        if (inLine.length < gridSize) return false;
+        const positions = new Set(inLine.map(c => c[varKey]));
+        for (let i = 0; i < gridSize; i++) if (!positions.has(i)) return false;
+        return true;
+    };
+    
+    for (let y = 0; y < gridSize; y++) { if (checkLine('left', 'gridY', y, 'gridZ')) lineClears++; }
+    for (let z = 0; z < gridSize; z++) { if (checkLine('left', 'gridZ', z, 'gridY')) lineClears++; }
+    for (let y = 0; y < gridSize; y++) { if (checkLine('right', 'gridY', y, 'gridX')) lineClears++; }
+    for (let x = 0; x < gridSize; x++) { if (checkLine('right', 'gridX', x, 'gridY')) lineClears++; }
+    for (let x = 0; x < gridSize; x++) { if (checkLine('floor', 'gridX', x, 'gridZ')) lineClears++; }
+    for (let z = 0; z < gridSize; z++) { if (checkLine('floor', 'gridZ', z, 'gridX')) lineClears++; }
+    return lineClears;
+}
+
+function processMatches() {
+    const matches = findMatches();
+    if (matches.length === 0) {
+        isProcessing = false;
+        if (hasUserInteracted) goalsManager.updateMaxCombo(comboLevel);
+        if (comboRunningTotal > 0) {
+            score += comboRunningTotal; animateScore(score);
+            if (comboLevel > 1) showBonus(`+${comboRunningTotal}`, 'combo-total');
+            comboRunningTotal = 0;
+        }
+        setTimeout(() => { document.getElementById('combo-display').textContent = ''; document.getElementById('combo-display').classList.remove('active', 'shaking'); }, 500);
+        return;
+    }
+    
+    comboLevel++;
+    let cubesCleared = 0;
+    matches.forEach(group => cubesCleared += group.length);
+    const roundScore = cubesCleared * comboLevel;
+    comboRunningTotal += roundScore;
+    
+    const el = document.getElementById('combo-display');
+    if (comboLevel > 1) {
+        el.textContent = `COMBO ×${comboLevel} → ${comboRunningTotal}`; 
+        el.classList.add('active');
+        if (comboLevel >= 4) el.classList.add('shaking'); // Start shaking on high combos
+        if (hasUserInteracted) soundManager.combo(comboLevel);
+        showBonus(`COMBO ×${comboLevel}!`, 'combo');
+        if (comboLevel >= 3) addScreenShake(0.15 * comboLevel); // Shake screen on big combos
+    } else {
+        el.textContent = `+${comboRunningTotal}`;
+        el.classList.remove('shaking'); // Ensure shaking stops
+        if (hasUserInteracted) soundManager.match();
+    }
+    
+    let cornerCleared = false;
+    let allPlanes = new Set();
+    
+    matches.forEach((group, gi) => {
+        if (hasUserInteracted) goalsManager.recordMatch(group);
+        group.forEach((c, ci) => {
+            if (!c.isDying) {
+                c.isDying = true;
+                c.deathPhase = 0; // Initialize phase for multi-part death animation
+                particles.explode(c.position, colorMap[c.colorKey]);
+                if (hasUserInteracted) soundManager.explode(ci * 30, gi);
+                allPlanes.add(c.plane);
+                if (c.gridX === 0 && c.gridY === 0 && c.gridZ === 0) cornerCleared = true;
+            }
+        });
+    });
+    
+    if (allPlanes.size === 3 || cornerCleared) {
+        const bonus = cornerCleared ? 500 : 250;
+        score += bonus; animateScore(score);
+        if (hasUserInteracted) { goalsManager.recordBoxedIn(); soundManager.boxedIn(); }
+        showBonus(`BOXED IN! +${bonus}`, 'boxed-in');
+        addScreenShake(0.6); // NEW: Heavy shake
+    }
+    
+    if (comboLevel === 1 && lastSwappedCubes.cube1 && lastSwappedCubes.cube2) {
+        if (lastSwappedCubes.cube1.isDying && lastSwappedCubes.cube2.isDying && hasUserInteracted) {
+            score += 10; animateScore(score);
+            goalsManager.recordSmartMove(); soundManager.smartMove();
+            showBonus('SMART MOVE! +10', 'smart-move');
+        }
+        lastSwappedCubes = { cube1: null, cube2: null };
+    }
+    
+    const lineClears = detectLineClears();
+    if (lineClears > 0 && hasUserInteracted) {
+        const lineBonus = lineClears * 200;
+        score += lineBonus; animateScore(score);
+        goalsManager.recordLineClears(lineClears); soundManager.lineClear();
+        showBonus(lineClears > 1 ? `${lineClears}x LINE CLEAR! +${lineBonus}` : `LINE CLEAR! +${lineBonus}`, 'line-clear');
+        addScreenShake(0.5); // NEW: Medium-heavy shake
+    }
+    
+    // Increased delay from 250ms to 450ms to allow the new squash/stretch death animation to play
+    setTimeout(() => {
+        // Remove dead cubes from array
+        logicalCubes = logicalCubes.filter(c => !c.isDying);
+        updateRowArrays();
+        applyGravity();
+        setTimeout(() => processMatches(), 350);
+    }, 450); 
+}
+
+function applyGravity() {
+    // Left Wall
+    leftWallRows.forEach((row, y) => {
+        const sorted = row.sort((a, b) => a.gridZ - b.gridZ);
+        let nextZ = 0;
+        sorted.forEach(c => {
+            if (c.gridZ !== nextZ) { c.gridZ = nextZ; c.targetPos.z = nextZ * spacing + offset; }
+            nextZ++;
+        });
+        while (sorted.length < gridSize) {
+            const newZ = sorted.length;
+            // Pass null for indexKey to avoid double-push (sorted === leftWallRows[y])
+            const c = createCube(-0.6, y * spacing + offset, (gridSize + 2) * spacing + offset, 'left', null, { gridX: 0, gridY: y, gridZ: newZ });
+            c.gridZ = newZ; c.targetPos.z = newZ * spacing + offset;
+            sorted.push(c);
+        }
+    });
+    // Right Wall
+    rightWallRows.forEach((row, y) => {
+        const sorted = row.sort((a, b) => a.gridX - b.gridX);
+        let nextX = 0;
+        sorted.forEach(c => {
+            if (c.gridX !== nextX) { c.gridX = nextX; c.targetPos.x = nextX * spacing + offset; }
+            nextX++;
+        });
+        while (sorted.length < gridSize) {
+            const newX = sorted.length;
+            // Pass null for indexKey to avoid double-push (sorted === rightWallRows[y])
+            const c = createCube((gridSize + 2) * spacing + offset, y * spacing + offset, -0.6, 'right', null, { gridX: newX, gridY: y, gridZ: 0 });
+            c.gridX = newX; c.targetPos.x = newX * spacing + offset;
+            sorted.push(c);
+        }
+    });
+    // Floor
+    floorStrips.forEach((strip, x) => {
+        const sorted = strip.sort((a, b) => a.gridZ - b.gridZ);
+        let nextZ = 0;
+        sorted.forEach(c => {
+            if (c.gridZ !== nextZ) { c.gridZ = nextZ; c.targetPos.z = nextZ * spacing + offset; }
+            nextZ++;
+        });
+        while (sorted.length < gridSize) {
+            const newZ = sorted.length;
+            // Pass null for indexKey to avoid double-push (sorted === floorStrips[x])
+            const c = createCube(x * spacing + offset, -0.6, (gridSize + 2) * spacing + offset, 'floor', null, { gridX: x, gridY: 0, gridZ: newZ });
+            c.gridZ = newZ; c.targetPos.z = newZ * spacing + offset;
+            sorted.push(c);
+        }
+    });
+    updateRowArrays();
+}
+
+function animateScore(targetScore) {
+    if (scoreAnimationId) cancelAnimationFrame(scoreAnimationId);
+    const startScore = displayedScore;
+    const startTime = performance.now();
+    const duration = 1500;
+    const scoreEl = document.getElementById('score');
+    
+    function update(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        displayedScore = Math.round(startScore + (targetScore - startScore) * eased);
+        scoreEl.textContent = `Score: ${displayedScore}`;
+        if (progress < 1) scoreAnimationId = requestAnimationFrame(update);
+        else { displayedScore = targetScore; scoreEl.textContent = `Score: ${targetScore}`; scoreAnimationId = null; }
+    }
+    scoreAnimationId = requestAnimationFrame(update);
+}
+
+function showBonus(text, type = '') {
+    const el = document.createElement('div');
+    el.className = `bonus-message ${type}`;
+    el.textContent = text;
+    // Apply random rotation for juice
+    const rot = (Math.random() - 0.5) * 16;
+    el.style.setProperty('--rot', `${rot}deg`);
+    
+    document.getElementById('bonus-container').appendChild(el);
+    setTimeout(() => el.remove(), 1500);
+}
+
+// Input Handling
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+function handleInput(clientX, clientY) {
+    if (isProcessing) return;
+    hasUserInteracted = true;
+    soundManager.resume();
+    
+    mouse.x = (clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    
+    // Raycast against InstancedMeshes
+    const intersects = raycaster.intersectObjects(cubeRenderer.getInteractableMeshes());
+    
+    if (intersects.length > 0) {
+        // Get the LogicalCube from the instance mapping
+        const clickedCube = cubeRenderer.getCubeFromIntersect(intersects[0]);
+        
+        if (clickedCube) {
+            if (selectedCube && selectedCube !== clickedCube) {
+                trySwap(selectedCube, clickedCube);
+            } else if (selectedCube === clickedCube) {
+                selectCubeLogic(null);
+            } else {
+                selectCubeLogic(clickedCube);
+            }
+        }
+    } else {
+        selectCubeLogic(null);
+    }
+}
+
+// Tap/Click logic
+let lastTouchTime = 0, touchStartPos = null;
+window.addEventListener('click', e => {
+    if (Date.now() - lastTouchTime < 500) return;
+    handleInput(e.clientX, e.clientY);
+});
+renderer.domElement.addEventListener('touchstart', e => {
+    if (e.target.closest('#settings-overlay') || e.target.closest('#goals-overlay')) return;
+    e.preventDefault();
+    lastTouchTime = Date.now();
+    touchStartPos = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+}, { passive: false });
+renderer.domElement.addEventListener('touchend', e => {
+    if (!touchStartPos) return;
+    e.preventDefault();
+    lastTouchTime = Date.now();
+    const t = e.changedTouches[0];
+    const dist = Math.sqrt(Math.pow(t.clientX - touchStartPos.x, 2) + Math.pow(t.clientY - touchStartPos.y, 2));
+    if (dist <= 15) handleInput(t.clientX, t.clientY);
+    touchStartPos = null;
+}, { passive: false });
+
+// UI Setup
+function setupButton(id, handler) {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.addEventListener('click', e => { e.stopPropagation(); handler(e); });
+    btn.addEventListener('touchend', e => { e.preventDefault(); e.stopPropagation(); handler(e); });
+}
+
+// Panel Toggles
+const toggleSettings = () => {
+    const el = document.getElementById('settings-overlay');
+    if (el.classList.contains('visible')) { el.classList.remove('visible'); setTimeout(() => el.style.display='none',300); document.getElementById('menu-button').classList.remove('open'); }
+    else { el.style.display='flex'; el.offsetHeight; el.classList.add('visible'); document.getElementById('menu-button').classList.add('open'); }
+    soundManager.click();
+};
+setupButton('menu-button', toggleSettings);
+document.getElementById('settings-overlay').onclick = e => { if (e.target.id === 'settings-overlay') toggleSettings(); };
+
+setupButton('toggle-symbols', () => {
+    usingNumbers = !usingNumbers;
+    settingsManager.set('usingNumbers', usingNumbers);
+    document.getElementById('toggle-symbols').textContent = usingNumbers ? 'Numbers' : 'Letters';
+    cubeRenderer.updateTextures(usingNumbers);
+    soundManager.click();
+});
+
+setupButton('toggle-swap-mode', () => {
+    if (swapMode === 'neumann') swapMode = 'moore'; else if (swapMode === 'moore') swapMode = 'free'; else swapMode = 'neumann';
+    settingsManager.set('swapMode', swapMode);
+    const btn = document.getElementById('toggle-swap-mode');
+    btn.className = 'settings-button';
+    if (swapMode === 'free') { btn.textContent = 'Free'; btn.classList.add('free-mode'); }
+    else if (swapMode === 'moore') { btn.textContent = '8-Neighbor'; btn.classList.add('moore-mode'); }
+    else { btn.textContent = '4-Neighbor'; }
+    soundManager.click();
+});
+
+setupButton('toggle-match-mode', () => {
+    minMatchSize = minMatchSize === 3 ? 4 : minMatchSize === 4 ? 5 : 3;
+    settingsManager.set('minMatchSize', minMatchSize);
+    const btn = document.getElementById('toggle-match-mode');
+    btn.textContent = `Match ${minMatchSize}+`;
+    btn.classList.remove('match-4', 'match-5');
+    if (minMatchSize === 4) btn.classList.add('match-4');
+    if (minMatchSize === 5) btn.classList.add('match-5');
+    soundManager.click();
+});
+
+setupButton('toggle-colors', () => {
+    colorCount = colorCount === 5 ? 6 : colorCount === 6 ? 7 : colorCount === 7 ? 8 : 5;
+    settingsManager.set('colorCount', colorCount);
+    activeColorKeys = allColorKeys.slice(0, colorCount);
+    document.getElementById('toggle-colors').textContent = `${colorCount} Colors`;
+    cubeRenderer.updateTextures(usingNumbers);
+    initBoard(); // Reset board on color change
+    soundManager.click();
+});
+
+setupButton('toggle-flair', () => {
+    flairSettings.enabled = !flairSettings.enabled;
+    settingsManager.set('flairEnabled', flairSettings.enabled);
+    const btn = document.getElementById('toggle-flair');
+    btn.textContent = flairSettings.enabled ? '✨ On' : 'Off';
+    btn.classList.toggle('disabled', !flairSettings.enabled);
+    soundManager.click();
+});
+
+setupButton('toggle-sound', () => {
+    const enabled = !soundManager.isEnabled();
+    soundManager.setEnabled(enabled);
+    settingsManager.set('soundEnabled', enabled);
+    const btn = document.getElementById('toggle-sound');
+    btn.textContent = enabled ? '🔊 On' : '🔇 Off';
+    btn.classList.toggle('muted', !enabled);
+    if (enabled) soundManager.click();
+});
+
+// ============================================
+// INITIALIZE UI FROM SAVED SETTINGS
+// ============================================
+(function initializeUIFromSettings() {
+    // Symbols button
+    document.getElementById('toggle-symbols').textContent = usingNumbers ? 'Numbers' : 'Letters';
+    
+    // Swap mode button
+    const swapBtn = document.getElementById('toggle-swap-mode');
+    swapBtn.className = 'settings-button';
+    if (swapMode === 'free') { swapBtn.textContent = 'Free'; swapBtn.classList.add('free-mode'); }
+    else if (swapMode === 'moore') { swapBtn.textContent = '8-Neighbor'; swapBtn.classList.add('moore-mode'); }
+    else { swapBtn.textContent = '4-Neighbor'; }
+    
+    // Match mode button
+    const matchBtn = document.getElementById('toggle-match-mode');
+    matchBtn.textContent = `Match ${minMatchSize}+`;
+    matchBtn.classList.remove('match-4', 'match-5');
+    if (minMatchSize === 4) matchBtn.classList.add('match-4');
+    if (minMatchSize === 5) matchBtn.classList.add('match-5');
+    
+    // Color count button
+    document.getElementById('toggle-colors').textContent = `${colorCount} Colors`;
+    
+    // Flair button
+    const flairBtn = document.getElementById('toggle-flair');
+    flairBtn.textContent = flairSettings.enabled ? '✨ On' : 'Off';
+    flairBtn.classList.toggle('disabled', !flairSettings.enabled);
+    
+    // Sound button
+    const soundBtn = document.getElementById('toggle-sound');
+    const soundEnabled = soundManager.isEnabled();
+    soundBtn.textContent = soundEnabled ? '🔊 On' : '🔇 Off';
+    soundBtn.classList.toggle('muted', !soundEnabled);
+})();
+
+// Animation Loop
+let globalRotationPhase = 0;
+const ROTATION_SPEED = 0.12;
+
+function animate() {
+    requestAnimationFrame(animate);
+    
+    globalRotationPhase += ROTATION_SPEED;
+    if (globalRotationPhase > Math.PI * 2) globalRotationPhase -= Math.PI * 2;
+    
+    // Handle Camera Shake
+    camera.position.copy(cameraBasePosition);
+    if (screenShake > 0) {
+        camera.position.x += (Math.random() - 0.5) * screenShake;
+        camera.position.y += (Math.random() - 0.5) * screenShake;
+        screenShake *= 0.85; // Damping
+        if (screenShake < 0.01) screenShake = 0;
+    }
+
+    // Update Logical Cubes
+    logicalCubes.forEach(cube => {
+        if (cube.isDying) {
+            if (cube.deathPhase === undefined) cube.deathPhase = 0;
+
+            // Squeeze, bulge, and pop effect
+            if (cube.deathPhase === 0) {
+                cube.scale -= 0.06; // 1. Shrink a bit
+                if (cube.scale <= 0.6) cube.deathPhase = 1;
+            } else if (cube.deathPhase === 1) {
+                cube.scale += 0.12; // 2. Expand
+                if (cube.scale >= 1.35) cube.deathPhase = 2;
+            } else {
+                cube.scale = Math.max(0, cube.scale - 0.12); // 3. Shrink away quickly
+            }
+        } else {
+            // Position Lerp
+            cube.position.lerp(cube.targetPos, 0.12);
+            
+            // Flair Rotation logic
+            if (flairSettings.enabled && flairSettings.spinningCubes) {
+                const dist = cube.position.distanceTo(cube.targetPos);
+                if (dist > 0.05) {
+                    cube.rotationY = globalRotationPhase;
+                } else {
+                    // Snap back to 0
+                    let r = cube.rotationY;
+                    while (r > Math.PI) r -= Math.PI*2; while (r < -Math.PI) r += Math.PI*2;
+                    cube.rotationY = r * 0.85;
+                }
+            } else {
+                cube.rotationY *= 0.85;
+            }
+        }
+    });
+
+    // Render Instanced Meshes
+    cubeRenderer.render(logicalCubes);
+    
+    // Particles & Starfield
+    particles.update();
+    starfield.children.forEach(l => { l.rotation.y += (l.userData.speed || 0.0003); l.rotation.x += (l.userData.speed||0)*0.3; });
+    
+    renderer.render(scene, camera);
+}
+
+window.addEventListener('resize', () => { renderer.setSize(window.innerWidth, window.innerHeight); fitCameraToBoard(); });
+
+// Goals Panel & Color Panel logic
+setupButton('settings-goals-btn', () => { goalsManager.renderPanel(); document.getElementById('goals-overlay').classList.add('visible'); document.getElementById('goals-overlay').style.display='flex'; });
+document.getElementById('goals-close').onclick = () => document.getElementById('goals-overlay').classList.remove('visible');
+setupButton('settings-colors-btn', () => { document.getElementById('colors-overlay').classList.add('visible'); document.getElementById('colors-overlay').style.display='flex'; populateColorsPanel(); });
+document.getElementById('colors-close').onclick = () => document.getElementById('colors-overlay').classList.remove('visible');
+
+// Populate colors logic
+function populateColorsPanel() {
+    const list = document.getElementById('colors-list');
+    list.innerHTML = '';
+    colorManager.colorNames.forEach(key => {
+        const hex = colorManager.intToHex(colorManager.getColor(key));
+        const item = document.createElement('div');
+        item.className = 'color-item';
+        item.innerHTML = `<span class="color-label" style="color:${hex}">${colorLetters[key]}</span><input type="color" value="${hex}" data-key="${key}">`;
+        item.querySelector('input').onchange = (e) => { colorManager.setColor(key, colorManager.hexToInt(e.target.value)); };
+        list.appendChild(item);
+    });
+}
+document.getElementById('colors-apply').onclick = () => { colorManager.save(); cubeRenderer.updateTextures(usingNumbers); document.getElementById('colors-overlay').classList.remove('visible'); };
+document.getElementById('colors-reset').onclick = () => { colorManager.reset(); cubeRenderer.updateTextures(usingNumbers); populateColorsPanel(); };
+
+// Reset Progress confirmation dialog handlers
+document.getElementById('reset-btn').onclick = () => {
+    document.getElementById('reset-confirm').classList.add('visible');
+};
+document.getElementById('reset-cancel').onclick = () => {
+    document.getElementById('reset-confirm').classList.remove('visible');
+};
+document.getElementById('reset-confirm-btn').onclick = () => {
+    goalsManager.reset();
+    goalsManager.renderPanel();
+    document.getElementById('reset-confirm').classList.remove('visible');
+    soundManager.click();
+};
+
+animate();
+setTimeout(() => { if (!isProcessing) processMatches(); }, 800);
+
+</script>
+</body>
+</html>
