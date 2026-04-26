@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Shape Constellation | v5.5 Discovery Pulse</title>
+<title>Shape Constellation | v6.0 Polyatlas</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;600&display=swap');
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -61,7 +61,7 @@
 <div id="canvas-container"></div>
 
 <div id="panel" class="hidden-ui">
-  <div style="font-family:'Space Grotesk'; font-weight:600; color:#fff; font-size:15px; margin-bottom:12px; letter-spacing:1px">CONSTELLATION v5.5</div>
+  <div style="font-family:'Space Grotesk'; font-weight:600; color:#fff; font-size:15px; margin-bottom:12px; letter-spacing:1px">CONSTELLATION v6.0</div>
   <div class="stat-row"><span>Unique Shapes</span><span class="val" id="st-shapes">0</span></div>
   
   <div class="section-label">Sequential Discovery</div>
@@ -74,7 +74,18 @@
     <option value="fibonacci">Fibonacci Sphere (Discovery)</option>
     <option value="lattice2d">2D Lattice (By Size)</option>
     <option value="lattice3d">3D Lattice (By Count)</option>
+    <option value="packed_count">Packed Mosaic (By Count)</option>
+    <option value="packed_rarity">Packed Mosaic (Rare = Big)</option>
+    <option value="packed_size">Packed Mosaic (By Complexity)</option>
+    <option value="packed_lattice">Packed Tiers (Size × Count)</option>
+    <option value="spiral">Spiral (Count)</option>
+    <option value="spiral_discovery">Spiral (Discovery)</option>
   </select>
+  <div id="uniform-toggle" style="display:none; margin-top:6px;">
+    <label style="font-size:10px; color:rgba(255,255,255,0.6); cursor:pointer; display:flex; align-items:center; gap:6px;">
+      <input type="checkbox" id="uniform-size" onchange="toggleUniformSize(this.checked)" style="accent-color:#6ec6ff;"> Uniform Size
+    </label>
+  </div>
 
   <div class="section-label">Color Palette</div>
   <select class="btn" id="color-mode-select" onchange="setColorMode(this.value)">
@@ -90,6 +101,11 @@
     <label>Slab</label>
     <input type="range" id="height-slider" min="0" max="100" value="0" oninput="setCubeHeight(this.value)">
     <label>Cube</label>
+  </div>
+  <div class="slider-row">
+    <label>Still</label>
+    <input type="range" id="spin-slider" min="0" max="100" value="100" oninput="setSpinSpeed(this.value)">
+    <label>Spin</label>
   </div>
 
   <div class="section-label">Tools</div>
@@ -127,10 +143,84 @@
 <script>
 const popcount = v => { v = v - ((v >> 1) & 0x55555555); v = (v & 0x33333333) + ((v >> 2) & 0x33333333); return ((v + (v >> 4) & 0x0F0F0F0F) * 0x01010101) >> 24; };
 
+// ── Rectangle Packer (polyatlas) ──
+class PackRect {
+  constructor(l, t, r, b) { this.left = l; this.top = t; this.right = r; this.bottom = b; }
+  width()  { return this.right - this.left; }
+  height() { return this.bottom - this.top; }
+}
+
+class PackPage {
+  constructor(w, h) {
+    this.width = w; this.height = h;
+    this.free = [new PackRect(0, 0, w, h)];
+    this.placed = [];
+  }
+
+  static *clip(a, b) {
+    let top = a.top, bottom = a.bottom;
+    if (a.top < b.top)       { top = b.top;    yield new PackRect(a.left, a.top, a.right, b.top); }
+    if (a.bottom > b.bottom) { bottom = b.bottom; yield new PackRect(a.left, b.bottom, a.right, a.bottom); }
+    if (a.left < b.left)  yield new PackRect(a.left, top, b.left, bottom);
+    if (a.right > b.right) yield new PackRect(b.right, top, a.right, bottom);
+  }
+
+  insert(w, h) {
+    // Best-area-fit: find the free rect that wastes the least space
+    let bestScore = Infinity, bestIdx = -1;
+    for (let i = 0; i < this.free.length; i++) {
+      const f = this.free[i];
+      if (f.width() >= w && f.height() >= h) {
+        const waste = f.width() * f.height() - w * h;
+        if (waste < bestScore) { bestScore = waste; bestIdx = i; }
+      }
+    }
+    if (bestIdx === -1) return null;
+
+    const fr = this.free[bestIdx];
+    const rect = new PackRect(fr.left, fr.top, fr.left + w, fr.top + h);
+    this.placed.push(rect);
+    this.free.splice(bestIdx, 1);
+    for (const cr of PackPage.clip(fr, rect)) this.free.push(cr);
+    this.free.sort((a, b) => a.height() * a.width() - b.height() * b.width());
+    return rect;
+  }
+
+  insertRotatable(w, h) {
+    // Try both orientations, take the better fit
+    let bestScore = Infinity, bestIdx = -1, bestW = w, bestH = h;
+    for (let i = 0; i < this.free.length; i++) {
+      const f = this.free[i];
+      // Original orientation
+      if (f.width() >= w && f.height() >= h) {
+        const waste = f.width() * f.height() - w * h;
+        if (waste < bestScore) { bestScore = waste; bestIdx = i; bestW = w; bestH = h; }
+      }
+      // Rotated orientation (only if different aspect)
+      if (w !== h && f.width() >= h && f.height() >= w) {
+        const waste = f.width() * f.height() - w * h;
+        if (waste < bestScore) { bestScore = waste; bestIdx = i; bestW = h; bestH = w; }
+      }
+    }
+    if (bestIdx === -1) return null;
+
+    const fr = this.free[bestIdx];
+    const rect = new PackRect(fr.left, fr.top, fr.left + bestW, fr.top + bestH);
+    rect.rotated = (bestW !== w);
+    this.placed.push(rect);
+    this.free.splice(bestIdx, 1);
+    for (const cr of PackPage.clip(fr, rect)) this.free.push(cr);
+    this.free.sort((a, b) => a.height() * a.width() - b.height() * b.width());
+    return rect;
+  }
+}
+
 let scene, camera, renderer, controls, cubeInstances, rayPoints, constellation, sim;
 let constellationReady = false, colorMode = 'spatial', projectionMode = 'force';
 let defaultMaterial = null, vertexSpatialMaterial = null;
 let cubeHeight = 0.4;  // Y scale: 0.4 (slab) to 0.96 (cube)
+let spinSpeed = 0.3;   // Inner polyomino rotation speed: 0 → 0.3
+let uniformSize = false; // When true, all shapes render at same scale in packed/spiral modes
 
 const BASE_CUBE_SCALE = 6.5;
 
@@ -486,7 +576,7 @@ function updateFrame(time) {
 
   let cIdx = 0; 
   nodes.forEach(n => {
-    _q.setFromAxisAngle(new THREE.Vector3(0,1,0), time*0.3 + (n.size * 0.1));
+    _q.setFromAxisAngle(new THREE.Vector3(0,1,0), time*spinSpeed + (n.size * 0.1));
     n.cells.forEach(cell => {
       _p.set((cell[1]-1.2)*n.scale, 0, (cell[0]-1.2)*n.scale).applyQuaternion(_q).add(new THREE.Vector3(n.x, n.y, n.z));
       _s.set(n.scale*0.96, n.scale*cubeHeight, n.scale*0.96);
@@ -529,6 +619,11 @@ async function loadData(data) {
   document.getElementById('projection-select').value = 'force';
   cubeHeight = 0.4;
   document.getElementById('height-slider').value = 0;
+  spinSpeed = 0.3;
+  document.getElementById('spin-slider').value = 100;
+  uniformSize = false;
+  document.getElementById('uniform-size').checked = false;
+  document.getElementById('uniform-toggle').style.display = 'none';
   document.getElementById('intro').classList.add('hidden');
   document.getElementById('panel').classList.remove('hidden-ui');
   document.getElementById('stats-bar').classList.remove('hidden-ui');
@@ -551,9 +646,12 @@ function resetCamera() {
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
   const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 100);
 
-  if (projectionMode === 'lattice2d') {
-    // Top-down-ish angled view for 2D lattice
+  if (projectionMode === 'lattice2d' || projectionMode === 'packed_lattice') {
+    // Top-down-ish angled view for tiered layouts
     new TWEEN.Tween(camera.position).to({ x: cx, y: cy + span * 0.2, z: cz + span * 1.1 }, 2000).easing(TWEEN.Easing.Quadratic.Out).start();
+  } else if (projectionMode.startsWith('packed_') || projectionMode.startsWith('spiral')) {
+    // Near-top-down for flat packed mosaic
+    new TWEEN.Tween(camera.position).to({ x: cx, y: cy + span * 0.95, z: cz + span * 0.3 }, 2000).easing(TWEEN.Easing.Quadratic.Out).start();
   } else {
     new TWEEN.Tween(camera.position).to({ x: cx, y: cy + span * 0.4, z: cz + span * 1.2 }, 2000).easing(TWEEN.Easing.Quadratic.Out).start();
   }
@@ -583,6 +681,18 @@ function setCubeHeight(pct) {
   // Update vertex spatial shader uniform
   if (vertexSpatialMaterial) {
     vertexSpatialMaterial.uniforms.uCubeHeight.value = cubeHeight;
+  }
+}
+
+function setSpinSpeed(pct) {
+  spinSpeed = (pct / 100) * 0.3;
+}
+
+function toggleUniformSize(checked) {
+  uniformSize = checked;
+  // Re-run the current projection with the new setting
+  if (constellationReady && (projectionMode.startsWith('packed_') || projectionMode.startsWith('spiral'))) {
+    setProjection(projectionMode);
   }
 }
 
@@ -653,6 +763,263 @@ function computeProjectionTargets(mode) {
         z: (iz - (perSide - 1) / 2) * SPACING
       });
     });
+
+  } else if (mode === 'packed_lattice') {
+    // ── Packed Tiers: group by size, rect-pack each tier by count, stack vertically ──
+    const MIN_CELL_PX = SPACING * 0.8;
+    const MAX_CELL_PX = SPACING * 3.0;
+    const PAD = SPACING * 0.4;
+    const TIER_GAP = SPACING * 8;
+    const UNIFORM_PX = SPACING * 1.5;
+
+    const bySize = {};
+    nodes.forEach(n => {
+      if (!bySize[n.size]) bySize[n.size] = [];
+      bySize[n.size].push(n);
+    });
+    const sizes = Object.keys(bySize).map(Number).sort((a, b) => a - b);
+
+    // Pack each tier independently, scaled by count within that tier
+    const tierResults = []; // { size, packed[], width, height }
+
+    for (const sz of sizes) {
+      const group = bySize[sz];
+      const maxN = Math.max(...group.map(n => n.count));
+      const minN = Math.min(...group.map(n => n.count));
+
+      const entries = group.map(n => {
+        let cellPx;
+        if (uniformSize) {
+          cellPx = UNIFORM_PX;
+        } else {
+          const t = minN === maxN ? 0.5 : Math.sqrt((n.count - minN) / (maxN - minN));
+          cellPx = MIN_CELL_PX + t * (MAX_CELL_PX - MIN_CELL_PX);
+        }
+        const maxR = Math.max(...n.cells.map(c => c[0])) + 1;
+        const maxC = Math.max(...n.cells.map(c => c[1])) + 1;
+        return {
+          node: n, cellPx,
+          bw: maxC * cellPx + PAD,
+          bh: maxR * cellPx + PAD
+        };
+      });
+      entries.sort((a, b) => (b.bw * b.bh) - (a.bw * a.bh));
+
+      const totalArea = entries.reduce((s, e) => s + e.bw * e.bh, 0);
+      let packed = [], scaleFactor = 1.5;
+      while (scaleFactor <= 5.0) {
+        // Use a wide aspect ratio for each tier (landscape strip)
+        const w = Math.ceil(Math.sqrt(totalArea * scaleFactor) * 1.8);
+        const h = Math.ceil(Math.sqrt(totalArea * scaleFactor) / 1.2);
+        const page = new PackPage(w, h);
+        packed = [];
+        let allFit = true;
+        for (const e of entries) {
+          const rect = page.insertRotatable(e.bw, e.bh);
+          if (rect) { packed.push({ ...e, rect }); }
+          else { allFit = false; break; }
+        }
+        if (allFit) break;
+        scaleFactor += 0.3;
+      }
+
+      // Compute this tier's bounding box
+      let tMinX = Infinity, tMaxX = -Infinity, tMinZ = Infinity, tMaxZ = -Infinity;
+      for (const p of packed) {
+        if (p.rect.left < tMinX) tMinX = p.rect.left;
+        if (p.rect.right > tMaxX) tMaxX = p.rect.right;
+        if (p.rect.top < tMinZ) tMinZ = p.rect.top;
+        if (p.rect.bottom > tMaxZ) tMaxZ = p.rect.bottom;
+      }
+      tierResults.push({
+        size: sz, packed,
+        width: tMaxX - tMinX, height: tMaxZ - tMinZ,
+        cx: (tMinX + tMaxX) / 2, cz: (tMinZ + tMaxZ) / 2
+      });
+    }
+
+    // Stack tiers vertically, centered on X
+    const totalH = tierResults.reduce((s, t) => s + t.height, 0) + (tierResults.length - 1) * TIER_GAP;
+    let yOff = -totalH / 2;
+
+    for (const tier of tierResults) {
+      for (const p of tier.packed) {
+        const x = (p.rect.left + p.rect.right) / 2 - tier.cx;
+        const z = (p.rect.top + p.rect.bottom) / 2 - tier.cz;
+        targets.set(p.node, { x, y: yOff + tier.height / 2, z, _scale: p.cellPx });
+      }
+      yOff += tier.height + TIER_GAP;
+    }
+
+  } else if (mode.startsWith('spiral')) {
+    // ── Archimedean spiral: center outward ──
+    const UNIFORM_PX = SPACING * 1.5;
+    const MIN_CELL_PX = SPACING * 0.6;
+    const MAX_CELL_PX = SPACING * 3.5;
+    const PAD = SPACING * 0.5;
+
+    // Weight by count (used when not uniform)
+    const maxN = Math.max(...nodes.map(n => n.count));
+    const minN = Math.min(...nodes.map(n => n.count));
+
+    const entries = nodes.map(n => {
+      let cellPx;
+      if (uniformSize) {
+        cellPx = UNIFORM_PX;
+      } else {
+        const t = minN === maxN ? 0.5 : Math.sqrt((n.count - minN) / (maxN - minN));
+        cellPx = MIN_CELL_PX + t * (MAX_CELL_PX - MIN_CELL_PX);
+      }
+      const maxR = Math.max(...n.cells.map(c => c[0])) + 1;
+      const maxC = Math.max(...n.cells.map(c => c[1])) + 1;
+      return {
+        node: n, cellPx,
+        bw: maxC * cellPx + PAD,
+        bh: maxR * cellPx + PAD
+      };
+    });
+
+    // Sort order determines placement priority (center = first)
+    if (mode === 'spiral_discovery') {
+      entries.sort((a, b) => a.node.d - b.node.d);
+    } else {
+      // spiral (count): largest visual area first
+      entries.sort((a, b) => (b.bw * b.bh) - (a.bw * a.bh));
+    }
+
+    // Place along spiral, testing for overlaps with all previously placed rects
+    const placed = []; // { cx, cz, hw, hh }
+
+    function overlaps(cx, cz, hw, hh) {
+      for (const p of placed) {
+        if (Math.abs(cx - p.cx) < hw + p.hw && Math.abs(cz - p.cz) < hh + p.hh) return true;
+      }
+      return false;
+    }
+
+    const spiralB = SPACING * 0.15; // spiral tightness
+    const dTheta = 0.15;
+
+    for (const e of entries) {
+      const hw = e.bw / 2, hh = e.bh / 2;
+
+      if (placed.length === 0) {
+        placed.push({ cx: 0, cz: 0, hw, hh });
+        targets.set(e.node, { x: 0, y: 0, z: 0, _scale: e.cellPx });
+        continue;
+      }
+
+      // Walk the spiral until a non-overlapping spot is found
+      let theta = 0, found = false;
+      for (let step = 0; step < 8000; step++) {
+        theta += dTheta;
+        const r = spiralB * theta;
+        const cx = Math.cos(theta) * r;
+        const cz = Math.sin(theta) * r;
+
+        if (!overlaps(cx, cz, hw, hh)) {
+          placed.push({ cx, cz, hw, hh });
+          targets.set(e.node, { x: cx, y: 0, z: cz, _scale: e.cellPx });
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        const r = spiralB * 8000 * dTheta + placed.length * SPACING;
+        targets.set(e.node, { x: r, y: 0, z: 0, _scale: e.cellPx });
+      }
+    }
+
+  } else if (mode.startsWith('packed_')) {
+    // ── Polyatlas: word-cloud-style rect packing ──
+    // Compute weight for each node based on variant
+    const MIN_CELL_PX = SPACING * 0.6;
+    const MAX_CELL_PX = SPACING * 3.5;
+    const PAD = SPACING * 0.4;
+
+    // Compute per-node weight (0-1 normalized)
+    let weightFn;
+    if (mode === 'packed_count') {
+      // Most-found shapes are biggest
+      const maxN = Math.max(...nodes.map(n => n.count));
+      const minN = Math.min(...nodes.map(n => n.count));
+      weightFn = n => minN === maxN ? 0.5 : (n.count - minN) / (maxN - minN);
+    } else if (mode === 'packed_rarity') {
+      // Rarest shapes (lowest count) are biggest — inverse
+      const maxN = Math.max(...nodes.map(n => n.count));
+      const minN = Math.min(...nodes.map(n => n.count));
+      weightFn = n => minN === maxN ? 0.5 : 1 - (n.count - minN) / (maxN - minN);
+    } else {
+      // packed_size: bigger polyominoes (more cells) are biggest
+      const maxS = Math.max(...nodes.map(n => n.size));
+      const minS = Math.min(...nodes.map(n => n.size));
+      weightFn = n => minS === maxS ? 0.5 : (n.size - minS) / (maxS - minS);
+    }
+
+    // Build packing entries: scale by sqrt(weight) for visual balance
+    const UNIFORM_PX = SPACING * 1.5;
+    const entries = nodes.map(n => {
+      let cellPx;
+      if (uniformSize) {
+        cellPx = UNIFORM_PX;
+      } else {
+        const t = Math.sqrt(weightFn(n));
+        cellPx = MIN_CELL_PX + t * (MAX_CELL_PX - MIN_CELL_PX);
+      }
+      const maxR = Math.max(...n.cells.map(c => c[0])) + 1;
+      const maxC = Math.max(...n.cells.map(c => c[1])) + 1;
+      return {
+        node: n, cellPx,
+        bw: maxC * cellPx + PAD,
+        bh: maxR * cellPx + PAD,
+        maxR, maxC
+      };
+    });
+
+    // Sort by bounding area descending (largest first — word cloud convention)
+    entries.sort((a, b) => (b.bw * b.bh) - (a.bw * a.bh));
+
+    // Pack with growing page until everything fits
+    const totalArea = entries.reduce((s, e) => s + e.bw * e.bh, 0);
+    let packed = [];
+    let scaleFactor = 1.5;
+    
+    while (scaleFactor <= 4.0) {
+      const pageEdge = Math.ceil(Math.sqrt(totalArea * scaleFactor));
+      const page = new PackPage(pageEdge, pageEdge);
+      packed = [];
+      let allFit = true;
+      for (const e of entries) {
+        const rect = page.insertRotatable(e.bw, e.bh);
+        if (rect) {
+          packed.push({ ...e, rect });
+        } else {
+          allFit = false;
+          break;
+        }
+      }
+      if (allFit) break;
+      scaleFactor += 0.3; // grow and retry
+    }
+
+    // Center the result: compute bounding box of all placed rects
+    let pMinX = Infinity, pMaxX = -Infinity, pMinZ = Infinity, pMaxZ = -Infinity;
+    for (const p of packed) {
+      if (p.rect.left < pMinX) pMinX = p.rect.left;
+      if (p.rect.right > pMaxX) pMaxX = p.rect.right;
+      if (p.rect.top < pMinZ) pMinZ = p.rect.top;
+      if (p.rect.bottom > pMaxZ) pMaxZ = p.rect.bottom;
+    }
+    const pcx = (pMinX + pMaxX) / 2;
+    const pcz = (pMinZ + pMaxZ) / 2;
+
+    // Map packed 2D positions to 3D XZ plane, centered at origin
+    for (const p of packed) {
+      const cx = (p.rect.left + p.rect.right) / 2 - pcx;
+      const cz = (p.rect.top + p.rect.bottom) / 2 - pcz;
+      targets.set(p.node, { x: cx, y: 0, z: cz, _scale: p.cellPx });
+    }
   }
 
   return targets;
@@ -663,16 +1030,26 @@ function setProjection(mode) {
   projectionMode = mode;
   document.getElementById('projection-select').value = mode;
 
+  // Show uniform-size toggle only for packed/spiral modes
+  const showUniform = mode.startsWith('packed_') || mode.startsWith('spiral');
+  document.getElementById('uniform-toggle').style.display = showUniform ? 'block' : 'none';
+
   // Kill any ongoing position tweens
   constellation.nodes.forEach(n => {
     if (n._posTween) { n._posTween.stop(); n._posTween = null; }
+    if (n._scaleTween) { n._scaleTween.stop(); n._scaleTween = null; }
   });
 
   if (mode === 'force') {
     // Restart force sim from current positions
     sim.alpha = 1.0;
     sim.running = true;
-    constellation.nodes.forEach(n => { n.vx = 0; n.vy = 0; n.vz = 0; });
+    constellation.nodes.forEach(n => {
+      n.vx = 0; n.vy = 0; n.vz = 0;
+      // Restore uniform scale
+      n._scaleTween = new TWEEN.Tween(n).to({ scale: BASE_CUBE_SCALE }, 1200)
+        .easing(TWEEN.Easing.Quadratic.InOut).start();
+    });
     // Nudge Y back toward size-based layering
     constellation.nodes.forEach(n => {
       n.vy = ((n.size - 5) * 120 - n.y) * 0.01;
@@ -694,6 +1071,10 @@ function setProjection(mode) {
       .to({ x: t.x, y: t.y, z: t.z }, 1800)
       .easing(TWEEN.Easing.Quadratic.InOut)
       .start();
+    // Tween scale: packed modes set per-node scale, others restore uniform
+    const targetScale = t._scale || BASE_CUBE_SCALE;
+    n._scaleTween = new TWEEN.Tween(n).to({ scale: targetScale }, 1800)
+      .easing(TWEEN.Easing.Quadratic.InOut).start();
   });
 
   // Single color-update tween during transition (instead of per-node)
