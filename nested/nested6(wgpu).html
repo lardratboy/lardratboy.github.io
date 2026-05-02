@@ -255,9 +255,8 @@
             <div class="group-label">Density Curve</div>
             <select id="selDensCurve" onchange="state.densityCurve=parseInt(this.value)">
                 <option value="0" selected>Log</option>
-                <option value="1">Quadratic</option>
-                <option value="2">Sigmoid</option>
-                <option value="3">Step</option>
+                <option value="1">Sigmoid</option>
+                <option value="2">Step</option>
             </select>
         </div>
         <div>
@@ -273,6 +272,11 @@
         <input type="range" id="sDensThresh" min="0" max="12" step="0.1" value="6.9">
     </div>
     <div style="font-size:9px;color:#446;margin-bottom:8px;text-align:right;">Log scale: 10^<span id="vDensThreshExp">6.9</span> ≈ <span id="vDensThreshVal">~8M</span></div>
+    <div class="ctrl">
+        <label>Gamma <span class="val" id="vDensGamma">0.50</span></label>
+        <input type="range" id="sDensGamma" min="0.1" max="3.0" step="0.01" value="0.50">
+    </div>
+    <div style="font-size:9px;color:#446;margin-bottom:8px;text-align:right;">&lt;1 reveals structure · &gt;1 isolates peaks</div>
     <button style="width:100%;padding:6px;font-size:9px;background:#0a0a1a;border:1px solid #114;color:#558;cursor:pointer;border-radius:4px;font-family:inherit;" onclick="resetAccumulation()">Reset Accumulation</button>
         </div>
     </details>
@@ -594,6 +598,7 @@ struct RParams {
     pulsePhase: f32, selectionActive: f32,
     densityStrength: f32, densityCurve: f32,
     maxCount: f32, densityThreshold: f32,
+    densityGamma: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
@@ -716,14 +721,10 @@ fn vs(
         let dcurve = u32(R.densityCurve + 0.5);
         switch (dcurve) {
             case 1u {
-                let d = log2(f32(rawCount) + 1.0) / log2(R.maxCount + 1.0);
-                density = d * d;
-            }
-            case 2u {
                 let x = f32(rawCount) / max(R.densityThreshold, 1.0);
                 density = x / (1.0 + x);
             }
-            case 3u {
+            case 2u {
                 density = select(0.0, 1.0, f32(rawCount) > R.densityThreshold);
             }
             default {
@@ -731,7 +732,9 @@ fn vs(
             }
         }
         density = clamp(density, 0.0, 1.0);
-        size = size * mix(1.0, 0.5 + 1.5 * density, R.densityStrength);
+        // Gamma reshape: <1 spreads low end (reveals structure), >1 concentrates peaks
+        density = pow(density, R.densityGamma);
+        size = size * mix(1.0, 0.05 + 2.45 * density, R.densityStrength);
     }
 
     // Selection pulse: read per-particle flag from selection buffer
@@ -747,7 +750,7 @@ fn vs(
 
     // Brightness: dim periphery, bright center + density
     let proxBright = mix(1.0, 0.4 + 1.2 * prox, R.proximityStrength);
-    let densBright = mix(1.0, 0.4 + 1.2 * density, R.densityStrength);
+    let densBright = mix(1.0, 0.05 + 1.55 * density, R.densityStrength);
     let selBright = mix(1.0, 1.0 + pulse * 0.8, sel);
 
     // Palette remapping (palette 0 = pass-through = current behavior)
@@ -877,6 +880,7 @@ struct RParams {
     pulsePhase: f32, selectionActive: f32,
     densityStrength: f32, densityCurve: f32,
     maxCount: f32, densityThreshold: f32,
+    densityGamma: f32,
 };
 @group(0) @binding(0) var<uniform> R: RParams;
 @group(0) @binding(1) var<storage, read> _selection: array<u32>;
@@ -924,6 +928,7 @@ struct RParams {
     pulsePhase: f32, selectionActive: f32,
     densityStrength: f32, densityCurve: f32,
     maxCount: f32, densityThreshold: f32,
+    densityGamma: f32,
 };
 
 struct SelectRect {
@@ -1070,7 +1075,8 @@ let state = {
     palette: 0,
     selectionActive: false,
     densityStrength: 0,
-    densityCurve: 0,      // 0=log, 1=quadratic, 2=sigmoid, 3=step
+    densityCurve: 0,      // 0=log, 1=sigmoid, 2=step
+    densityGamma: 0.5,    // <1 spreads low end, >1 concentrates peaks
     densityMode: 0,       // 0=reset per dispatch, 1=cumulative
     densityThreshold: 7943282,  // 10^6.9
     // Image support: keep both decoded pixels and original file
@@ -1784,6 +1790,7 @@ function render() {
     ruData[63]=state.densityCurve;
     ruData[64]=maxCountValue;
     ruData[65]=state.densityThreshold;
+    ruData[66]=state.densityGamma;
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
@@ -2241,6 +2248,7 @@ document.getElementById('sDensThresh').oninput=e=>{
     const v=Math.pow(10,exp);
     document.getElementById('vDensThreshVal').innerText=v>=1e6?'~'+(v/1e6).toFixed(1)+'M':v>=1e3?'~'+(v/1e3).toFixed(1)+'K':Math.round(v);
 };
+document.getElementById('sDensGamma').oninput=e=>{state.densityGamma=parseFloat(e.target.value);document.getElementById('vDensGamma').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;scheduleCompute();};
 document.getElementById('sZoom').oninput=e=>{state.tierShift=parseInt(e.target.value);document.getElementById('vZoom').innerText=e.target.value;scheduleCompute();};
 // Slab handlers
