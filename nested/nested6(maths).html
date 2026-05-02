@@ -211,6 +211,13 @@
                     <option value="dini">Dini Surface</option>
                     <option value="klein">Klein Bottle</option>
                 </optgroup>
+                <optgroup label="Volume Fractals">
+                    <option value="mandelbulb">Mandelbulb</option>
+                </optgroup>
+                <optgroup label="Harmonics &amp; Waves">
+                    <option value="spherical_harm">Spherical Harmonics</option>
+                    <option value="lissajous">Lissajous 3D</option>
+                </optgroup>
                 <optgroup label="✎ Custom Expression">
                     <option value="custom_curve">✎ Curve f(t) → [x,y,z]</option>
                     <option value="custom_surface">✎ Surface f(u,v) → [x,y,z]</option>
@@ -2005,6 +2012,22 @@ const MATH_GENERATORS = {
         },
         uRange: [0, 2*Math.PI], vRange: [0, 2*Math.PI],
     },
+
+    // ---- Volume Fractals ----
+    mandelbulb: {
+        name: 'Mandelbulb', type: 'mandelbulb',
+        power: 8, maxIter: 24, bailout: 2,
+    },
+
+    // ---- Harmonics & Waves ----
+    spherical_harm: {
+        name: 'Spherical Harmonics', type: 'spherical_harm',
+        l: 3, m: 2,
+    },
+    lissajous: {
+        name: 'Lissajous 3D', type: 'lissajous',
+        a: 3, b: 4, c: 5, dx: 0, dy: Math.PI/4, dz: Math.PI/2,
+    },
 };
 
 function generateMath() {
@@ -2042,6 +2065,12 @@ function generateMath() {
         rawPts = gen.generate(N);
     } else if (gen.type === 'surface') {
         rawPts = generateSurface(gen, N);
+    } else if (gen.type === 'mandelbulb') {
+        rawPts = generateMandelbulb(gen, N);
+    } else if (gen.type === 'spherical_harm') {
+        rawPts = generateSphericalHarmonics(gen, N);
+    } else if (gen.type === 'lissajous') {
+        rawPts = generateLissajous(gen, N);
     }
 
     // Actual point count (surfaces round up to sqrtN²)
@@ -2151,6 +2180,118 @@ function generateSurface(gen, N) {
             const idx = (iu * sqrtN + iv) * 3;
             pts[idx] = x; pts[idx+1] = y; pts[idx+2] = z;
         }
+    }
+    return pts;
+}
+
+function generateMandelbulb(gen, N) {
+    const n = gen.power;
+    const maxIter = gen.maxIter;
+    const bail = gen.bailout;
+    const pts = [];
+    const maxAttempts = N * 60; // ~5-15% acceptance for power 8
+    let attempts = 0;
+
+    while (pts.length < N * 3 && attempts < maxAttempts) {
+        // Sample in bounding cube
+        const cx = (Math.random() - 0.5) * 3.0;
+        const cy = (Math.random() - 0.5) * 3.0;
+        const cz = (Math.random() - 0.5) * 3.0;
+
+        let x = 0, y = 0, z = 0;
+        let escaped = false;
+        attempts++;
+
+        for (let iter = 0; iter < maxIter; iter++) {
+            const r = Math.sqrt(x*x + y*y + z*z);
+            if (r > bail) { escaped = true; break; }
+
+            const theta = Math.atan2(Math.sqrt(x*x + y*y), z);
+            const phi = Math.atan2(y, x);
+            const rn = Math.pow(r, n);
+
+            x = rn * Math.sin(theta * n) * Math.cos(phi * n) + cx;
+            y = rn * Math.sin(theta * n) * Math.sin(phi * n) + cy;
+            z = rn * Math.cos(theta * n) + cz;
+        }
+
+        if (!escaped) {
+            pts.push(cx, cy, cz);
+        }
+    }
+
+    const actual = Math.floor(pts.length / 3);
+    console.log(`Mandelbulb: ${actual.toLocaleString()} pts accepted from ${attempts.toLocaleString()} samples (${(100*actual/attempts).toFixed(1)}% hit rate)`);
+    return new Float64Array(pts.slice(0, actual * 3));
+}
+
+// Associated Legendre polynomial P_l^m(x), m >= 0
+function assocLegendre(l, m, x) {
+    let pmm = 1.0;
+    if (m > 0) {
+        const somx2 = Math.sqrt(Math.max(0, (1 - x) * (1 + x)));
+        let fact = 1.0;
+        for (let i = 1; i <= m; i++) {
+            pmm *= -fact * somx2;
+            fact += 2.0;
+        }
+    }
+    if (l === m) return pmm;
+    let pmmp1 = x * (2 * m + 1) * pmm;
+    if (l === m + 1) return pmmp1;
+    let pll = 0;
+    for (let ll = m + 2; ll <= l; ll++) {
+        pll = (x * (2 * ll - 1) * pmmp1 - (ll + m - 1) * pmm) / (ll - m);
+        pmm = pmmp1;
+        pmmp1 = pll;
+    }
+    return pll;
+}
+
+function sphericalHarmonic(l, m, theta, phi) {
+    const am = Math.abs(m);
+    // Normalization factor
+    let num = (2 * l + 1);
+    let den = 1;
+    for (let i = l - am + 1; i <= l + am; i++) den *= i;
+    const norm = Math.sqrt(num / (4 * Math.PI * den));
+    const plm = assocLegendre(l, am, Math.cos(theta));
+    if (m > 0) return norm * plm * Math.cos(m * phi) * Math.SQRT2;
+    if (m < 0) return norm * plm * Math.sin(am * phi) * Math.SQRT2;
+    return norm * plm;
+}
+
+function generateSphericalHarmonics(gen, N) {
+    const l = gen.l, m = gen.m;
+    const pts = new Float64Array(N * 3);
+
+    for (let i = 0; i < N; i++) {
+        // Uniform random direction on sphere
+        const theta = Math.acos(1 - 2 * Math.random());
+        const phi = 2 * Math.PI * Math.random();
+
+        const ylm = sphericalHarmonic(l, m, theta, phi);
+        // Radius = |Y_l^m|, with jitter for volume
+        const r = Math.abs(ylm) * (0.85 + 0.3 * Math.random());
+
+        const st = Math.sin(theta);
+        pts[i*3]   = r * st * Math.cos(phi);
+        pts[i*3+1] = r * st * Math.sin(phi);
+        pts[i*3+2] = r * Math.cos(theta);
+    }
+    return pts;
+}
+
+function generateLissajous(gen, N) {
+    const pts = new Float64Array(N * 3);
+    // Total time: enough periods to fill the figure
+    const tMax = 2 * Math.PI * 200;
+
+    for (let i = 0; i < N; i++) {
+        const t = (i / N) * tMax;
+        pts[i*3]   = Math.sin(gen.a * t + gen.dx);
+        pts[i*3+1] = Math.sin(gen.b * t + gen.dy);
+        pts[i*3+2] = Math.sin(gen.c * t + gen.dz);
     }
     return pts;
 }
