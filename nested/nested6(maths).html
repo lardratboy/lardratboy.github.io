@@ -191,7 +191,7 @@
     <div class="select-row">
         <div style="flex:2">
             <div class="group-label">Source</div>
-            <select id="selMathGen">
+            <select id="selMathGen" onchange="onMathGenChange()">
                 <optgroup label="Strange Attractors">
                     <option value="lorenz" selected>Lorenz</option>
                     <option value="thomas">Thomas</option>
@@ -211,8 +211,17 @@
                     <option value="dini">Dini Surface</option>
                     <option value="klein">Klein Bottle</option>
                 </optgroup>
+                <optgroup label="✎ Custom Expression">
+                    <option value="custom_curve">✎ Curve f(t) → [x,y,z]</option>
+                    <option value="custom_surface">✎ Surface f(u,v) → [x,y,z]</option>
+                    <option value="custom_ode">✎ ODE f(x,y,z) → [dx,dy,dz]</option>
+                </optgroup>
             </select>
         </div>
+    </div>
+    <div id="customExprPanel" style="display:none;margin-bottom:6px;">
+        <textarea id="txtCustomExpr" style="width:100%;height:60px;background:#0a0a1a;border:1px solid #224;color:#adf;font-family:'Courier New',monospace;font-size:10px;padding:6px;border-radius:4px;resize:vertical;box-sizing:border-box;" spellcheck="false" placeholder="[sin(t), cos(t), t*0.1]"></textarea>
+        <div style="font-size:8px;color:#446;margin-top:2px;line-height:1.4;">sin cos tan exp log sqrt abs pow PI E available · no Math. prefix needed</div>
     </div>
     <div class="ctrl">
         <label>Samples <span class="val" id="vMathN">500K</span></label>
@@ -314,6 +323,9 @@
         <input type="range" id="sDensGamma" min="0.1" max="3.0" step="0.01" value="0.50">
     </div>
     <div style="font-size:9px;color:#446;margin-bottom:8px;text-align:right;">&lt;1 reveals structure · &gt;1 isolates peaks</div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+        <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbDensInvert" onchange="state.densityInvert=this.checked" style="accent-color:#0ff;"> Invert (anomaly mode)</label>
+    </div>
     <button style="width:100%;padding:6px;font-size:9px;background:#0a0a1a;border:1px solid #114;color:#558;cursor:pointer;border-radius:4px;font-family:inherit;" onclick="resetAccumulation()">Reset Accumulation</button>
         </div>
     </details>
@@ -636,6 +648,7 @@ struct RParams {
     densityStrength: f32, densityCurve: f32,
     maxCount: f32, densityThreshold: f32,
     densityGamma: f32,
+    densityInvert: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
@@ -771,6 +784,8 @@ fn vs(
         density = clamp(density, 0.0, 1.0);
         // Gamma reshape: <1 spreads low end (reveals structure), >1 concentrates peaks
         density = pow(density, R.densityGamma);
+        // Invert: makes rare cells prominent, common cells ghostly
+        if (R.densityInvert > 0.5) { density = 1.0 - density; }
         size = size * mix(1.0, 0.05 + 2.45 * density, R.densityStrength);
     }
 
@@ -918,6 +933,7 @@ struct RParams {
     densityStrength: f32, densityCurve: f32,
     maxCount: f32, densityThreshold: f32,
     densityGamma: f32,
+    densityInvert: f32,
 };
 @group(0) @binding(0) var<uniform> R: RParams;
 @group(0) @binding(1) var<storage, read> _selection: array<u32>;
@@ -966,6 +982,7 @@ struct RParams {
     densityStrength: f32, densityCurve: f32,
     maxCount: f32, densityThreshold: f32,
     densityGamma: f32,
+    densityInvert: f32,
 };
 
 struct SelectRect {
@@ -1114,6 +1131,7 @@ let state = {
     densityStrength: 0,
     densityCurve: 0,      // 0=log, 1=sigmoid, 2=step
     densityGamma: 0.5,    // <1 spreads low end, >1 concentrates peaks
+    densityInvert: false, // flip: rare=prominent, common=ghostly
     densityMode: 0,       // 0=reset per dispatch, 1=cumulative
     densityThreshold: 7943282,  // 10^6.9
     // Image support: keep both decoded pixels and original file
@@ -1828,6 +1846,7 @@ function render() {
     ruData[64]=maxCountValue;
     ruData[65]=state.densityThreshold;
     ruData[66]=state.densityGamma;
+    ruData[67]=state.densityInvert ? 1.0 : 0.0;
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
@@ -1991,17 +2010,31 @@ const MATH_GENERATORS = {
 function generateMath() {
     const genKey = document.getElementById('selMathGen').value;
     const gen = MATH_GENERATORS[genKey];
-    if (!gen) { console.log('Unknown generator:', genKey); return; }
 
     const exp = parseFloat(document.getElementById('sMathN').value);
     const N = Math.round(Math.pow(2, exp));
 
-    console.log(`Generating ${N.toLocaleString()} samples from ${gen.name}...`);
+    let genName;
+    if (genKey.startsWith('custom_')) {
+        genName = 'Custom ' + genKey.split('_')[1].charAt(0).toUpperCase() + genKey.split('_')[1].slice(1);
+    } else if (gen) {
+        genName = gen.name;
+    } else {
+        console.log('Unknown generator:', genKey); return;
+    }
+
+    console.log(`Generating ${N.toLocaleString()} samples from ${genName}...`);
     const t0 = performance.now();
 
     let rawPts; // Float64Array of N*3
 
-    if (gen.type === 'ode') {
+    if (genKey === 'custom_curve') {
+        rawPts = generateCustomCurve(N);
+    } else if (genKey === 'custom_surface') {
+        rawPts = generateCustomSurface(N);
+    } else if (genKey === 'custom_ode') {
+        rawPts = generateCustomODE(N);
+    } else if (gen.type === 'ode') {
         rawPts = generateODE(gen, N);
     } else if (gen.type === 'ifs') {
         rawPts = generateIFS(gen, N);
@@ -2011,10 +2044,13 @@ function generateMath() {
         rawPts = generateSurface(gen, N);
     }
 
+    // Actual point count (surfaces round up to sqrtN²)
+    const actualN = rawPts.length / 3;
+
     // Two-pass normalization: find bounds, then map to uint32
     let minX=Infinity,minY=Infinity,minZ=Infinity;
     let maxX=-Infinity,maxY=-Infinity,maxZ=-Infinity;
-    for (let i=0; i<N; i++) {
+    for (let i=0; i<actualN; i++) {
         const x=rawPts[i*3], y=rawPts[i*3+1], z=rawPts[i*3+2];
         if (x<minX) minX=x; if (x>maxX) maxX=x;
         if (y<minY) minY=y; if (y>maxY) maxY=y;
@@ -2025,10 +2061,10 @@ function generateMath() {
     minX-=mx; maxX+=mx; minY-=my; maxY+=my; minZ-=mz; maxZ+=mz;
     const rangeX=maxX-minX||1, rangeY=maxY-minY||1, rangeZ=maxZ-minZ||1;
 
-    const buf = new ArrayBuffer(N * 12);
+    const buf = new ArrayBuffer(actualN * 12);
     const v = new DataView(buf);
     const S = 4294967295;
-    for (let i=0; i<N; i++) {
+    for (let i=0; i<actualN; i++) {
         const nx = Math.max(0, Math.min(1, (rawPts[i*3]-minX)/rangeX));
         const ny = Math.max(0, Math.min(1, (rawPts[i*3+1]-minY)/rangeY));
         const nz = Math.max(0, Math.min(1, (rawPts[i*3+2]-minZ)/rangeZ));
@@ -2039,10 +2075,10 @@ function generateMath() {
     }
 
     const elapsed = (performance.now() - t0).toFixed(0);
-    console.log(`${gen.name}: ${N.toLocaleString()} pts in ${elapsed}ms, bounds [${minX.toFixed(2)}..${maxX.toFixed(2)}, ${minY.toFixed(2)}..${maxY.toFixed(2)}, ${minZ.toFixed(2)}..${maxZ.toFixed(2)}]`);
+    console.log(`${genName}: ${actualN.toLocaleString()} pts in ${elapsed}ms, bounds [${minX.toFixed(2)}..${maxX.toFixed(2)}, ${minY.toFixed(2)}..${maxY.toFixed(2)}, ${minZ.toFixed(2)}..${maxZ.toFixed(2)}]`);
 
     state.file = null;
-    state.fileName = `MATH: ${gen.name.toUpperCase()}`;
+    state.fileName = `MATH: ${genName.toUpperCase()}`;
     state.format = 'uint32';
     document.getElementById('selFormat').value = 'uint32';
     state.fileSize = buf.byteLength;
@@ -2128,6 +2164,106 @@ document.getElementById('sMathN').oninput = e => {
     document.getElementById('vMathN').innerText = fmt;
     document.getElementById('vMathCount').innerText = n.toLocaleString();
 };
+
+const CUSTOM_DEFAULTS = {
+    custom_curve:   '[sin(t)*2, cos(t)*2, sin(t*3)*0.5]',
+    custom_surface: '[(2+cos(v))*cos(u), (2+cos(v))*sin(u), sin(v)]',
+    custom_ode:     '[10*(y-x), x*(28-z)-y, x*y-8/3*z]',
+};
+
+const _customEdits = {};
+function onMathGenChange() {
+    const val = document.getElementById('selMathGen').value;
+    const panel = document.getElementById('customExprPanel');
+    const ta = document.getElementById('txtCustomExpr');
+    // Save current edit before switching
+    if (ta.dataset.currentType) _customEdits[ta.dataset.currentType] = ta.value;
+    if (val.startsWith('custom_')) {
+        panel.style.display = 'block';
+        ta.placeholder = CUSTOM_DEFAULTS[val];
+        ta.value = _customEdits[val] || CUSTOM_DEFAULTS[val];
+        ta.dataset.currentType = val;
+    } else {
+        panel.style.display = 'none';
+    }
+}
+
+function compileCustomExpr(src, params) {
+    // Sugar: make math functions available without Math. prefix
+    const sugar = `const {sin,cos,tan,asin,acos,atan,atan2,exp,log,log2,log10,sqrt,abs,pow,floor,ceil,round,min,max,sign,PI,E}=Math;\n`;
+    // Wrap bare expression in return if needed
+    let body = src.trim();
+    if (!body.startsWith('return') && !body.includes(';')) {
+        body = 'return ' + body + ';';
+    }
+    try {
+        return new Function(...params, sugar + body);
+    } catch(e) {
+        console.log('Expression compile error:', e.message);
+        return null;
+    }
+}
+
+function generateCustomCurve(N) {
+    const src = document.getElementById('txtCustomExpr').value || CUSTOM_DEFAULTS.custom_curve;
+    const fn = compileCustomExpr(src, ['t']);
+    if (!fn) return new Float64Array(N*3);
+    const pts = new Float64Array(N*3);
+    for (let i=0; i<N; i++) {
+        const t = (i / (N-1)) * 4 * Math.PI * 10; // 0..40π
+        try {
+            const [x,y,z] = fn(t);
+            pts[i*3]=x; pts[i*3+1]=y; pts[i*3+2]=z;
+        } catch(e) { /* skip bad points */ }
+    }
+    return pts;
+}
+
+function generateCustomSurface(N) {
+    const src = document.getElementById('txtCustomExpr').value || CUSTOM_DEFAULTS.custom_surface;
+    const fn = compileCustomExpr(src, ['u','v']);
+    if (!fn) return new Float64Array(N*3);
+    const sqrtN = Math.ceil(Math.sqrt(N));
+    const actual = sqrtN * sqrtN;
+    const pts = new Float64Array(actual*3);
+    for (let iu=0; iu<sqrtN; iu++) {
+        for (let iv=0; iv<sqrtN; iv++) {
+            const u = (iu/(sqrtN-1)) * 2 * Math.PI;
+            const v = (iv/(sqrtN-1)) * 2 * Math.PI;
+            try {
+                const [x,y,z] = fn(u,v);
+                const idx = (iu*sqrtN+iv)*3;
+                pts[idx]=x; pts[idx+1]=y; pts[idx+2]=z;
+            } catch(e) { /* skip */ }
+        }
+    }
+    return pts;
+}
+
+function generateCustomODE(N) {
+    const src = document.getElementById('txtCustomExpr').value || CUSTOM_DEFAULTS.custom_ode;
+    const fn = compileCustomExpr(src, ['x','y','z']);
+    if (!fn) return new Float64Array(N*3);
+    const pts = new Float64Array(N*3);
+    let x=0.1, y=0, z=0;
+    const dt = 0.005;
+    // Skip transient
+    for (let i=0; i<500; i++) {
+        try {
+            const [dx,dy,dz] = fn(x,y,z);
+            x+=dx*dt; y+=dy*dt; z+=dz*dt;
+        } catch(e) { break; }
+    }
+    for (let i=0; i<N; i++) {
+        try {
+            const [dx,dy,dz] = fn(x,y,z);
+            x+=dx*dt; y+=dy*dt; z+=dz*dt;
+            if (!isFinite(x)||!isFinite(y)||!isFinite(z)) { x=0.1; y=0; z=0; }
+            pts[i*3]=x; pts[i*3+1]=y; pts[i*3+2]=z;
+        } catch(e) { x=0.1; y=0; z=0; }
+    }
+    return pts;
+}
 
 // =============================================================================
 //  SELECTION (GPU compute — rectangle test in NDC)
