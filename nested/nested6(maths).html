@@ -333,6 +333,24 @@
     <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
         <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbDensInvert" onchange="state.densityInvert=this.checked" style="accent-color:#0ff;"> Invert (anomaly mode)</label>
     </div>
+    <div style="border-top:1px solid #1a1a3a;padding-top:8px;margin-top:4px;">
+    <div class="select-row" style="margin-bottom:6px;">
+        <div style="flex:2">
+            <div class="group-label">Spatial Axis</div>
+            <select id="selDensAxis" onchange="state.densityAxis=parseInt(this.value)">
+                <option value="0" selected>None</option>
+                <option value="1">X axis</option>
+                <option value="2">Y axis</option>
+                <option value="3">Z axis</option>
+            </select>
+        </div>
+    </div>
+    <div class="ctrl">
+        <label>Axis Strength <span class="val" id="vDensAxisStr">0.00</span></label>
+        <input type="range" id="sDensAxisStr" min="0" max="1" step="0.01" value="0">
+    </div>
+    <div style="font-size:9px;color:#446;margin-bottom:8px;text-align:right;">morphs position: 0 = normal · 1 = density terrain</div>
+    </div>
     <button style="width:100%;padding:6px;font-size:9px;background:#0a0a1a;border:1px solid #114;color:#558;cursor:pointer;border-radius:4px;font-family:inherit;" onclick="resetAccumulation()">Reset Accumulation</button>
         </div>
     </details>
@@ -656,6 +674,8 @@ struct RParams {
     maxCount: f32, densityThreshold: f32,
     densityGamma: f32,
     densityInvert: f32,
+    densityAxis: f32,
+    densityAxisStrength: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
@@ -769,7 +789,7 @@ fn vs(
 
     // ---- Stage 4: Density (volume) ----
     var density = 0.0;
-    if (R.densityStrength > 0.0 && R.maxCount > 0.0) {
+    if ((R.densityStrength > 0.0 || R.densityAxisStrength > 0.0) && R.maxCount > 0.0) {
         let mesoX = u32(p0.x) * 16u + u32(p1.x);
         let mesoY = u32(p0.y) * 16u + u32(p1.y);
         let mesoZ = u32(p0.z) * 16u + u32(p1.z);
@@ -793,6 +813,19 @@ fn vs(
         density = pow(density, R.densityGamma);
         // Invert: makes rare cells prominent, common cells ghostly
         if (R.densityInvert > 0.5) { density = 1.0 - density; }
+
+        // Density as spatial axis: morph one world coordinate toward density value
+        if (R.densityAxisStrength > 0.0) {
+            let dPos = (density - 0.5) * 8.0; // map [0,1] to [-4,4]
+            let da = u32(R.densityAxis + 0.5);
+            switch (da) {
+                case 1u { world.x = mix(world.x, dPos, R.densityAxisStrength); }
+                case 2u { world.y = mix(world.y, dPos, R.densityAxisStrength); }
+                case 3u { world.z = mix(world.z, dPos, R.densityAxisStrength); }
+                default {}
+            }
+        }
+
         size = size * mix(1.0, 0.05 + 2.45 * density, R.densityStrength);
     }
 
@@ -941,6 +974,8 @@ struct RParams {
     maxCount: f32, densityThreshold: f32,
     densityGamma: f32,
     densityInvert: f32,
+    densityAxis: f32,
+    densityAxisStrength: f32,
 };
 @group(0) @binding(0) var<uniform> R: RParams;
 @group(0) @binding(1) var<storage, read> _selection: array<u32>;
@@ -990,6 +1025,8 @@ struct RParams {
     maxCount: f32, densityThreshold: f32,
     densityGamma: f32,
     densityInvert: f32,
+    densityAxis: f32,
+    densityAxisStrength: f32,
 };
 
 struct SelectRect {
@@ -1139,6 +1176,8 @@ let state = {
     densityCurve: 0,      // 0=log, 1=sigmoid, 2=step
     densityGamma: 0.5,    // <1 spreads low end, >1 concentrates peaks
     densityInvert: false, // flip: rare=prominent, common=ghostly
+    densityAxis: 0,       // 0=none, 1=X, 2=Y, 3=Z
+    densityAxisStrength: 0, // blend 0..1 for smooth morph
     densityMode: 0,       // 0=reset per dispatch, 1=cumulative
     densityThreshold: 7943282,  // 10^6.9
     // Image support: keep both decoded pixels and original file
@@ -1854,6 +1893,8 @@ function render() {
     ruData[65]=state.densityThreshold;
     ruData[66]=state.densityGamma;
     ruData[67]=state.densityInvert ? 1.0 : 0.0;
+    ruData[68]=state.densityAxis;
+    ruData[69]=state.densityAxisStrength;
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
@@ -2792,6 +2833,7 @@ document.getElementById('sDensThresh').oninput=e=>{
     document.getElementById('vDensThreshVal').innerText=v>=1e6?'~'+(v/1e6).toFixed(1)+'M':v>=1e3?'~'+(v/1e3).toFixed(1)+'K':Math.round(v);
 };
 document.getElementById('sDensGamma').oninput=e=>{state.densityGamma=parseFloat(e.target.value);document.getElementById('vDensGamma').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sDensAxisStr').oninput=e=>{state.densityAxisStrength=parseFloat(e.target.value);document.getElementById('vDensAxisStr').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;scheduleCompute();};
 document.getElementById('sZoom').oninput=e=>{state.tierShift=parseInt(e.target.value);document.getElementById('vZoom').innerText=e.target.value;scheduleCompute();};
 // Slab handlers
