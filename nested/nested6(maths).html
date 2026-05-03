@@ -147,6 +147,7 @@
                 <option value="0" selected>3D Spatial</option>
                 <option value="1">Tiled 2D</option>
                 <option value="2">Atlas 3D</option>
+                <option value="3">Terrain</option>
             </select>
         </div>
         <div>
@@ -333,7 +334,7 @@
     <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
         <label style="font-size:10px;color:#888;cursor:pointer;"><input type="checkbox" id="cbDensInvert" onchange="state.densityInvert=this.checked" style="accent-color:#0ff;"> Invert (anomaly mode)</label>
     </div>
-    <div style="border-top:1px solid #1a1a3a;padding-top:8px;margin-top:4px;">
+    <div id="densAxisControls" style="border-top:1px solid #1a1a3a;padding-top:8px;margin-top:4px;">
     <div class="select-row" style="margin-bottom:6px;">
         <div style="flex:2">
             <div class="group-label">Spatial Axis</div>
@@ -350,6 +351,13 @@
         <input type="range" id="sDensAxisStr" min="0" max="1" step="0.01" value="0">
     </div>
     <div style="font-size:9px;color:#446;margin-bottom:8px;text-align:right;">morphs position: 0 = normal · 1 = density terrain</div>
+    </div>
+    <div id="terrainControls" style="display:none;border-top:1px solid #1a1a3a;padding-top:8px;margin-top:4px;">
+    <div class="ctrl">
+        <label>Terrain Height <span class="val" id="vTerrainH">4.00</span></label>
+        <input type="range" id="sTerrainH" min="0.5" max="20" step="0.1" value="4.0">
+    </div>
+    <div style="font-size:9px;color:#446;margin-bottom:8px;text-align:right;">density Z exaggeration · low = flat · high = peaks</div>
     </div>
     <button style="width:100%;padding:6px;font-size:9px;background:#0a0a1a;border:1px solid #114;color:#558;cursor:pointer;border-radius:4px;font-family:inherit;" onclick="resetAccumulation()">Reset Accumulation</button>
         </div>
@@ -676,6 +684,7 @@ struct RParams {
     densityInvert: f32,
     densityAxis: f32,
     densityAxisStrength: f32,
+    terrainHeight: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
@@ -730,7 +739,7 @@ fn vs(
             (py - R.tiledCenterY) * R.tiledScale,
             0.0
         );
-    } else {
+    } else if (R.mode < 2.5) {
         // Atlas 3D: macro tiled flat + meso/micro 3D with sub-rotation
         let ZCOLS = 4u;
         let D = 16.0;
@@ -768,6 +777,42 @@ fn vs(
             (py - R.tiledCenterY) * R.tiledScale,
             pz * R.tiledScale
         );
+    } else {
+        // Terrain: Tiled 2D ground plane + density as Z elevation
+        let ZCOLS = 4u;
+        let D = 16.0;
+
+        // Identical to Tiled 2D for X/Y:
+        let iz0=u32(p0.z); let iz1=u32(p1.z); let iz2=u32(p2.z);
+        let fx0 = f32(iz0 % ZCOLS) * D + p0.x;
+        let fy0 = f32(iz0 / ZCOLS) * D + p0.y;
+        let fx1 = f32(iz1 % ZCOLS) * D + p1.x;
+        let fy1 = f32(iz1 / ZCOLS) * D + p1.y;
+        let fx2 = f32(iz2 % ZCOLS) * D + p2.x;
+        let fy2 = f32(iz2 / ZCOLS) * D + p2.y;
+
+        let px = fx0*R.stepX0 + fx1*R.stepX1 + fx2*R.stepX2;
+        let py = fy0*R.stepY0 + fy1*R.stepY1 + fy2*R.stepY2;
+
+        // Density as Z — computed here, before Stage 4
+        var terrainZ = 0.0;
+        if (R.maxCount > 0.0) {
+            let mesoX = u32(p0.x) * 16u + u32(p1.x);
+            let mesoY = u32(p0.y) * 16u + u32(p1.y);
+            let mesoZ = u32(p0.z) * 16u + u32(p1.z);
+            let mKey = (mesoX << 16u) | (mesoY << 8u) | mesoZ;
+            let rawCount = countTable[mKey];
+            var tDens = log2(f32(rawCount) + 1.0) / log2(R.maxCount + 1.0);
+            tDens = pow(clamp(tDens, 0.0, 1.0), R.densityGamma);
+            if (R.densityInvert > 0.5) { tDens = 1.0 - tDens; }
+            terrainZ = tDens * R.terrainHeight;
+        }
+
+        world = vec3(
+            (px - R.tiledCenterX) * R.tiledScale,
+            (py - R.tiledCenterY) * R.tiledScale,
+            terrainZ
+        );
     }
 
     // Center-proximity sizing with selectable gravity target and falloff curve
@@ -789,7 +834,7 @@ fn vs(
 
     // ---- Stage 4: Density (volume) ----
     var density = 0.0;
-    if ((R.densityStrength > 0.0 || R.densityAxisStrength > 0.0) && R.maxCount > 0.0) {
+    if ((R.densityStrength > 0.0 || R.densityAxisStrength > 0.0 || R.mode > 2.5) && R.maxCount > 0.0) {
         let mesoX = u32(p0.x) * 16u + u32(p1.x);
         let mesoY = u32(p0.y) * 16u + u32(p1.y);
         let mesoZ = u32(p0.z) * 16u + u32(p1.z);
@@ -815,7 +860,8 @@ fn vs(
         if (R.densityInvert > 0.5) { density = 1.0 - density; }
 
         // Density as spatial axis: morph one world coordinate toward density value
-        if (R.densityAxisStrength > 0.0) {
+        // Skip in terrain mode — terrain Z IS the density axis
+        if (R.densityAxisStrength > 0.0 && R.mode < 2.5) {
             let dPos = (density - 0.5) * 8.0; // map [0,1] to [-4,4]
             let da = u32(R.densityAxis + 0.5);
             switch (da) {
@@ -976,6 +1022,7 @@ struct RParams {
     densityInvert: f32,
     densityAxis: f32,
     densityAxisStrength: f32,
+    terrainHeight: f32,
 };
 @group(0) @binding(0) var<uniform> R: RParams;
 @group(0) @binding(1) var<storage, read> _selection: array<u32>;
@@ -1027,6 +1074,7 @@ struct RParams {
     densityInvert: f32,
     densityAxis: f32,
     densityAxisStrength: f32,
+    terrainHeight: f32,
 };
 
 struct SelectRect {
@@ -1041,6 +1089,7 @@ struct SelectRect {
 @group(0) @binding(1) var<storage, read_write> selBuf: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> R: RParams;
 @group(0) @binding(3) var<uniform> SR: SelectRect;
+@group(0) @binding(4) var<storage, read> countTable: array<u32>;
 
 @compute @workgroup_size(256)
 fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -1067,7 +1116,7 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
         let px = fx0*R.stepX0 + fx1*R.stepX1 + fx2*R.stepX2;
         let py = fy0*R.stepY0 + fy1*R.stepY1 + fy2*R.stepY2;
         world = vec3((px - R.tiledCenterX)*R.tiledScale, (py - R.tiledCenterY)*R.tiledScale, 0.0);
-    } else {
+    } else if (R.mode < 2.5) {
         let ZCOLS = 4u; let D = 16.0;
         let iz0 = u32(p0.z);
         let flatX = f32(iz0 % ZCOLS)*D + p0.x;
@@ -1088,6 +1137,28 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
         let py = flatY*R.stepY0 + (local.y+0.5)*cubeSize;
         let pz = (local.z+0.5)*cubeSize*R.depthScale;
         world = vec3((px - R.tiledCenterX)*R.tiledScale, (py - R.tiledCenterY)*R.tiledScale, pz*R.tiledScale);
+    } else {
+        // Terrain: Tiled 2D + density Z
+        let ZCOLS = 4u; let D = 16.0;
+        let iz0=u32(p0.z); let iz1=u32(p1.z); let iz2=u32(p2.z);
+        let fx0 = f32(iz0 % ZCOLS)*D + p0.x; let fy0 = f32(iz0 / ZCOLS)*D + p0.y;
+        let fx1 = f32(iz1 % ZCOLS)*D + p1.x; let fy1 = f32(iz1 / ZCOLS)*D + p1.y;
+        let fx2 = f32(iz2 % ZCOLS)*D + p2.x; let fy2 = f32(iz2 / ZCOLS)*D + p2.y;
+        let px = fx0*R.stepX0 + fx1*R.stepX1 + fx2*R.stepX2;
+        let py = fy0*R.stepY0 + fy1*R.stepY1 + fy2*R.stepY2;
+        var terrainZ = 0.0;
+        if (R.maxCount > 0.0) {
+            let mesoX = u32(p0.x) * 16u + u32(p1.x);
+            let mesoY = u32(p0.y) * 16u + u32(p1.y);
+            let mesoZ = u32(p0.z) * 16u + u32(p1.z);
+            let mKey = (mesoX << 16u) | (mesoY << 8u) | mesoZ;
+            let rawCount = countTable[mKey];
+            var tDens = log2(f32(rawCount) + 1.0) / log2(R.maxCount + 1.0);
+            tDens = pow(clamp(tDens, 0.0, 1.0), R.densityGamma);
+            if (R.densityInvert > 0.5) { tDens = 1.0 - tDens; }
+            terrainZ = tDens * R.terrainHeight;
+        }
+        world = vec3((px - R.tiledCenterX)*R.tiledScale, (py - R.tiledCenterY)*R.tiledScale, terrainZ);
     }
 
     // SDF clip filter: skip particles that would be clipped in render
@@ -1150,7 +1221,7 @@ let state = {
     format: 'uint32', isLE: true, shift: 23, tierShift: 20,
     gaps: [0.25, 0.1, 0.05], inflate: 0.5,
     file: null, fileSize: 0, buffer: null, fileName: "Internal",
-    mode: 0, // 0 = 3D, 1 = Tiled 2D, 2 = Atlas 3D
+    mode: 0, // 0 = 3D, 1 = Tiled 2D, 2 = Atlas 3D, 3 = Terrain
     proximity: 0,
     pointScale: 1.0,
     gravityTarget: 0,
@@ -1178,6 +1249,7 @@ let state = {
     densityInvert: false, // flip: rare=prominent, common=ghostly
     densityAxis: 0,       // 0=none, 1=X, 2=Y, 3=Z
     densityAxisStrength: 0, // blend 0..1 for smooth morph
+    terrainHeight: 4.0,    // terrain mode Z exaggeration
     densityMode: 0,       // 0=reset per dispatch, 1=cumulative
     densityThreshold: 7943282,  // 10^6.9
     // Image support: keep both decoded pixels and original file
@@ -1505,6 +1577,7 @@ function mkPipelines() {
         {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
         {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
         {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
+        {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
     ]});
     selectPipeline = device.createComputePipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[selectBGL]}),
@@ -1895,6 +1968,7 @@ function render() {
     ruData[67]=state.densityInvert ? 1.0 : 0.0;
     ruData[68]=state.densityAxis;
     ruData[69]=state.densityAxisStrength;
+    ruData[70]=state.terrainHeight;
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
@@ -2487,6 +2561,7 @@ async function runSelectionPass(rectMin, rectMax, selMode) {
         { binding: 1, resource: { buffer: selectionBuf } },
         { binding: 2, resource: { buffer: renderUniformBuf } },
         { binding: 3, resource: { buffer: selectUniformBuf } },
+        { binding: 4, resource: { buffer: countTableBuf } },
     ]});
 
     // Dispatch
@@ -2685,7 +2760,21 @@ function setFormat(f){
     }
 }
 function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=le?'le':'be';runCompute();}
-function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);state.subRotX=0;state.subRotY=0;}
+function setMode(m){
+    state.mode=m;
+    document.getElementById('selMode').value=String(m);
+    state.subRotX=0; state.subRotY=0;
+    // Show/hide terrain vs density-axis controls
+    document.getElementById('densAxisControls').style.display = m === 3 ? 'none' : '';
+    document.getElementById('terrainControls').style.display = m === 3 ? '' : 'none';
+    // Camera preset for terrain mode
+    if (m === 3) {
+        camTheta = Math.PI * 0.25;
+        camPhi = Math.PI * 0.30;
+        camRadius = 12;
+        camTarget[0] = 0; camTarget[1] = 0; camTarget[2] = 0;
+    }
+}
 function handleFile(files){
     if(!files[0])return;
     const f = files[0];
@@ -2834,6 +2923,7 @@ document.getElementById('sDensThresh').oninput=e=>{
 };
 document.getElementById('sDensGamma').oninput=e=>{state.densityGamma=parseFloat(e.target.value);document.getElementById('vDensGamma').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sDensAxisStr').oninput=e=>{state.densityAxisStrength=parseFloat(e.target.value);document.getElementById('vDensAxisStr').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sTerrainH').oninput=e=>{state.terrainHeight=parseFloat(e.target.value);document.getElementById('vTerrainH').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sShift').oninput=e=>{state.shift=parseInt(e.target.value);document.getElementById('vShift').innerText=e.target.value;scheduleCompute();};
 document.getElementById('sZoom').oninput=e=>{state.tierShift=parseInt(e.target.value);document.getElementById('vZoom').innerText=e.target.value;scheduleCompute();};
 // Slab handlers
