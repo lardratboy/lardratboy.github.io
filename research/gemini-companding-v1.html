@@ -80,7 +80,7 @@
 
 <div id="dropZone"><h1 style="color:#0ff">INJECT BYTESTREAM</h1><p style="color:#558;font-size:12px;margin-top:8px;">Drop files, images, or paste URLs</p></div>
 <div id="selRect" style="position:fixed;border:1px dashed #0ff;background:rgba(0,255,255,0.06);pointer-events:none;display:none;z-index:5;box-shadow:0 0 12px rgba(0,255,255,0.15);"></div>
-<div style="position:fixed;bottom:12px;left:16px;z-index:10;font-size:9px;color:#446;pointer-events:none;line-height:1.6;letter-spacing:0.3px;">Shift + Left Drag = Select &nbsp;·&nbsp; + Ctrl = Add &nbsp;·&nbsp; + Alt = Subtract</div>
+<div style="position:fixed;bottom:12px;left:16px;z-index:10;font-size:9px;color:#446;pointer-events:none;line-height:1.6;letter-spacing:0.3px;">Shift + Left Drag = Select &nbsp;·&nbsp; + Ctrl = Add &nbsp;·&nbsp; + Alt = Subtract &nbsp;·&nbsp; <b>+</b>/<b>−</b> = Density &nbsp;·&nbsp; Ctrl+Z = Undo</div>
 
 <div id="panelL" class="panel">
     <h1>Unified Strata</h1>
@@ -291,6 +291,24 @@
         <input type="range" id="sDensGamma" min="0.1" max="3.0" step="0.01" value="0.50">
     </div>
     <button style="width:100%;padding:6px;font-size:9px;background:#0a0a1a;border:1px solid #114;color:#558;cursor:pointer;border-radius:4px;font-family:inherit;" onclick="resetAccumulation()">Reset Accumulation</button>
+        </div>
+    </details>
+
+    <details>
+        <summary>Density Annotation</summary>
+        <div class="section-body">
+    <div class="ctrl">
+        <label>Edit Amount <span class="val" id="vDensEditAmt">100</span></label>
+        <input type="range" id="sDensEditAmt" min="1" max="10000" step="1" value="100">
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:6px;">
+        <button style="padding:7px;font-size:9px;background:#0a1a0a;border:1px solid #141;color:#5a5;cursor:pointer;border-radius:4px;font-family:inherit;font-weight:bold;" onclick="applyDensityEdit(0, getDensityEditAmount())">+ Add</button>
+        <button style="padding:7px;font-size:9px;background:#1a0a0a;border:1px solid #411;color:#a55;cursor:pointer;border-radius:4px;font-family:inherit;font-weight:bold;" onclick="applyDensityEdit(1, getDensityEditAmount())">− Subtract</button>
+        <button style="padding:7px;font-size:9px;background:#0a0a1a;border:1px solid #114;color:#55a;cursor:pointer;border-radius:4px;font-family:inherit;" onclick="applyDensityEdit(2, getDensityEditAmount())">= Set</button>
+        <button style="padding:7px;font-size:9px;background:#0a0a1a;border:1px solid #311;color:#855;cursor:pointer;border-radius:4px;font-family:inherit;" onclick="applyDensityEdit(3, 0)">⌀ Clear</button>
+    </div>
+    <button style="width:100%;padding:6px;font-size:9px;background:#0a0a1a;border:1px solid #333;color:#888;cursor:pointer;border-radius:4px;font-family:inherit;" onclick="undoDensityEdit()">Undo (Ctrl+Z)</button>
+    <div id="densityEditStatus" style="font-size:9px;color:#664;margin-top:6px;text-align:right;min-height:1.2em;">Select a region, then apply</div>
         </div>
     </details>
 
@@ -630,6 +648,66 @@ fn bakeMain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let count = countTable[mesoKey];
 
     points[b+3u] = bitcast<f32>(count);
+}
+`;
+
+// =============================================================================
+//  WGSL — DENSITY EDIT SHADER (selection-masked countTable modification)
+// =============================================================================
+
+const DENSITY_EDIT_WGSL = `
+struct EditParams {
+    count: u32,
+    mode: u32,
+    value: u32,
+    _pad: u32,
+};
+
+@group(0) @binding(0) var<storage, read> points: array<f32>;
+@group(0) @binding(1) var<storage, read_write> countTable: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform> E: EditParams;
+
+@compute @workgroup_size(256)
+fn densityEditMain(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= E.count) { return; }
+
+    let b = idx * 4u;
+    let raw2 = bitcast<u32>(points[b+2u]);
+    let sel = raw2 >> 24u;
+    if (sel == 0u) { return; }
+
+    let raw0 = bitcast<u32>(points[b]);
+    let raw1 = bitcast<u32>(points[b+1u]);
+    let t0x = (raw0>>16u)&0xFFu; let t1x = (raw1>>16u)&0xFFu;
+    let t0y = (raw0>>8u)&0xFFu;  let t1y = (raw1>>8u)&0xFFu;
+    let t0z = raw0&0xFFu;        let t1z = raw1&0xFFu;
+    let mx = (t0x<<4u)|t1x; let my = (t0y<<4u)|t1y; let mz = (t0z<<4u)|t1z;
+    let mesoKey = (mz<<16u)|(my<<8u)|mx;
+
+    switch (E.mode) {
+        case 0u {
+            atomicAdd(&countTable[mesoKey], E.value);
+        }
+        case 1u {
+            var old = atomicLoad(&countTable[mesoKey]);
+            loop {
+                if (old == 0u) { break; }
+                let sub = min(E.value, old);
+                let desired = old - sub;
+                let result = atomicCompareExchangeWeak(&countTable[mesoKey], old, desired);
+                if (result.exchanged) { break; }
+                old = result.old_value;
+            }
+        }
+        case 2u {
+            atomicStore(&countTable[mesoKey], E.value);
+        }
+        case 3u {
+            atomicStore(&countTable[mesoKey], 0u);
+        }
+        default {}
+    }
 }
 `;
 
@@ -1123,12 +1201,12 @@ function getMVP(asp) {
 // =============================================================================
 
 let device, context, canvasEl, canvasFmt;
-let computePipeline, bakePipeline, renderPipeline, wirePipeline, selectPipeline, clearSelectPipeline, reducePipeline;
+let computePipeline, bakePipeline, renderPipeline, wirePipeline, selectPipeline, clearSelectPipeline, reducePipeline, densityEditPipeline;
 let rawDataBuf, bitTableBuf, outputBuf, indirectBuf, computeUniformBuf, bakeUniformBuf;
-let countTableBuf, maxCountBuf;
+let countTableBuf, maxCountBuf, undoCountTableBuf, densityEditUniformBuf;
 let renderUniformBuf, quadVBuf, quadIBuf, wireVBuf;
 let selectUniformBuf;
-let computeBGL, bakeBGL, renderBGL, selectBGL, reduceBGL;
+let computeBGL, bakeBGL, renderBGL, selectBGL, reduceBGL, densityEditBGL;
 let depthTex, depthView;
 let pointCount = 0;
 
@@ -1220,7 +1298,12 @@ async function initWebGPU() {
     canvasEl.addEventListener('wheel', e=>{ applyCamRadius(camRadius * (1 + e.deltaY * 0.001)); }, {passive:true});
     addEventListener('resize', ()=>{ canvasEl.width=innerWidth; canvasEl.height=innerHeight; mkDepth(); });
 
-    addEventListener('keydown', e => { if (e.key === 'Escape' && state.selectionActive) clearSelection(); });
+    addEventListener('keydown', e => {
+        if (e.key === 'Escape' && state.selectionActive) clearSelection();
+        if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undoDensityEdit(); }
+        if (e.key === '=' || e.key === '+') applyDensityEdit(0, getDensityEditAmount());
+        if (e.key === '-' || e.key === '_') applyDensityEdit(1, getDensityEditAmount());
+    });
 
     return true;
 }
@@ -1320,6 +1403,17 @@ function mkPipelines() {
         layout: device.createPipelineLayout({bindGroupLayouts:[reduceBGL]}),
         compute:{module:reds,entryPoint:'reduceMax'}
     });
+
+    const des = device.createShaderModule({code: DENSITY_EDIT_WGSL});
+    densityEditBGL = device.createBindGroupLayout({ entries:[
+        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
+        {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
+    ]});
+    densityEditPipeline = device.createComputePipeline({
+        layout: device.createPipelineLayout({bindGroupLayouts:[densityEditBGL]}),
+        compute:{module:des,entryPoint:'densityEditMain'}
+    });
 }
 
 function mkStaticBufs() {
@@ -1332,10 +1426,12 @@ function mkStaticBufs() {
     renderUniformBuf = device.createBuffer({size:256,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     wireVBuf = device.createBuffer({size:4096,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
     bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-    countTableBuf = device.createBuffer({size:COUNT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+    countTableBuf = device.createBuffer({size:COUNT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     maxCountBuf = device.createBuffer({size:4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
 
     selectUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    densityEditUniformBuf = device.createBuffer({size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    undoCountTableBuf = device.createBuffer({size:COUNT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     indirectBuf = device.createBuffer({
         size:20, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC,
     });
@@ -2017,6 +2113,7 @@ document.getElementById('sDensThresh').oninput=e=>{
     const v=Math.pow(10,exp);
     document.getElementById('vDensThreshVal').innerText=v>=1e6?'~'+(v/1e6).toFixed(1)+'M':v>=1e3?'~'+(v/1e3).toFixed(1)+'K':Math.round(v);
 };
+document.getElementById('sDensEditAmt').oninput=e=>{document.getElementById('vDensEditAmt').innerText=e.target.value;};
 document.getElementById('sDensGamma').oninput=e=>{state.densityGamma=parseFloat(e.target.value);document.getElementById('vDensGamma').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sSlabPos').oninput=e=>{state.slabPosition=parseFloat(e.target.value);document.getElementById('vSlabPos').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sSlabThk').oninput=e=>{state.slabThickness=parseFloat(e.target.value);document.getElementById('vSlabThk').innerText=parseFloat(e.target.value).toFixed(2);};
@@ -2057,6 +2154,121 @@ function resetAccumulation() {
     enc.clearBuffer(countTableBuf, 0, COUNT_TABLE_SIZE);
     device.queue.submit([enc.finish()]);
     maxCountValue = 0;
+}
+
+// =============================================================================
+//  DENSITY ANNOTATION SYSTEM
+// =============================================================================
+
+let densityUndoAvailable = false;
+
+function runBakePass() {
+    if (!device || !outputBuf || pointCount === 0) return;
+    device.queue.writeBuffer(bakeUniformBuf, 0, new Uint32Array([pointCount]));
+    const bg = device.createBindGroup({ layout: bakeBGL, entries:[
+        {binding:0, resource:{buffer:outputBuf}},
+        {binding:1, resource:{buffer:countTableBuf}},
+        {binding:2, resource:{buffer:bakeUniformBuf}},
+    ]});
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(bakePipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(pointCount / 256));
+    pass.end();
+    device.queue.submit([enc.finish()]);
+}
+
+async function runMaxCountReduction() {
+    if (!device || !countTableBuf || !maxCountBuf) return;
+    device.queue.writeBuffer(maxCountBuf, 0, new Uint32Array([0]));
+    const bg = device.createBindGroup({ layout: reduceBGL, entries:[
+        {binding:0, resource:{buffer:countTableBuf}},
+        {binding:1, resource:{buffer:maxCountBuf}},
+    ]});
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(reducePipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.min(Math.ceil((1 << 24) / 256), 65535));
+    pass.end();
+
+    const rb = device.createBuffer({size:4, usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    enc.copyBufferToBuffer(maxCountBuf, 0, rb, 0, 4);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    maxCountValue = new Uint32Array(rb.getMappedRange())[0];
+    rb.unmap(); rb.destroy();
+}
+
+function snapshotCountTable() {
+    if (!device || !countTableBuf || !undoCountTableBuf) return;
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(countTableBuf, 0, undoCountTableBuf, 0, COUNT_TABLE_SIZE);
+    device.queue.submit([enc.finish()]);
+    densityUndoAvailable = true;
+}
+
+async function applyDensityEdit(mode, value) {
+    if (!device || !outputBuf || pointCount === 0) return;
+    if (!state.selectionActive) {
+        console.log('No selection active — select a region first (Shift+Drag)');
+        updateDensityEditStatus('Select a region first');
+        return;
+    }
+
+    // Auto-enable density rendering if too low to see results
+    if (state.densityStrength < 0.3) {
+        state.densityStrength = 0.7;
+        document.getElementById('sDens').value = 0.7;
+        document.getElementById('vDens').innerText = '0.70';
+    }
+
+    snapshotCountTable();
+
+    // Dispatch density edit shader
+    device.queue.writeBuffer(densityEditUniformBuf, 0, new Uint32Array([pointCount, mode, value, 0]));
+    const bg = device.createBindGroup({ layout: densityEditBGL, entries:[
+        {binding:0, resource:{buffer:outputBuf}},
+        {binding:1, resource:{buffer:countTableBuf}},
+        {binding:2, resource:{buffer:densityEditUniformBuf}},
+    ]});
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(densityEditPipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(pointCount / 256));
+    pass.end();
+    device.queue.submit([enc.finish()]);
+
+    // Update maxCount and re-bake
+    await runMaxCountReduction();
+    runBakePass();
+
+    updateDensityEditStatus(`${['Added','Subtracted','Set','Cleared'][mode]} density (peak: ${maxCountValue.toLocaleString()})`);
+    console.log(`Density edit: mode=${mode} value=${value} → peak=${maxCountValue}`);
+}
+
+async function undoDensityEdit() {
+    if (!densityUndoAvailable || !device || !countTableBuf || !undoCountTableBuf) return;
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(undoCountTableBuf, 0, countTableBuf, 0, COUNT_TABLE_SIZE);
+    device.queue.submit([enc.finish()]);
+    densityUndoAvailable = false;
+
+    await runMaxCountReduction();
+    runBakePass();
+
+    updateDensityEditStatus('Undo complete');
+}
+
+function updateDensityEditStatus(msg) {
+    const el = document.getElementById('densityEditStatus');
+    if (el) el.textContent = msg;
+}
+
+function getDensityEditAmount() {
+    return parseInt(document.getElementById('sDensEditAmt').value) || 100;
 }
 
 (async()=>{
