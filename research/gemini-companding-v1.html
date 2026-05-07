@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Unified Strata — 8-Bit Companded</title>
+<title>Unified Strata — Step B: 8-Bit Convergence</title>
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #050508; color: #ccc; font-family: 'Consolas', 'SF Mono', monospace; overflow: hidden; }
@@ -84,7 +84,7 @@
 
 <div id="panelL" class="panel">
     <h1>Unified Strata</h1>
-    <div class="sub-h1">WebGPU Compute · 8-Bit Convergence</div>
+    <div class="sub-h1">WebGPU Compute · Step B (8-Bit)</div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
         <button class="file-btn" style="margin-bottom:0;" onclick="document.getElementById('fIn').click()">Open File</button>
@@ -290,7 +290,6 @@
         <label>Gamma <span class="val" id="vDensGamma">0.50</span></label>
         <input type="range" id="sDensGamma" min="0.1" max="3.0" step="0.01" value="0.50">
     </div>
-    <div style="font-size:9px;color:#446;margin-bottom:8px;text-align:right;">&lt;1 reveals structure · &gt;1 isolates peaks</div>
     <button style="width:100%;padding:6px;font-size:9px;background:#0a0a1a;border:1px solid #114;color:#558;cursor:pointer;border-radius:4px;font-family:inherit;" onclick="resetAccumulation()">Reset Accumulation</button>
         </div>
     </details>
@@ -310,8 +309,6 @@
                 <option value="2">Z Axis</option>
                 <option value="3">View-Aligned</option>
             </select>
-        </div>
-        <div style="display:flex;flex-direction:column;justify-content:flex-end;">
         </div>
     </div>
     <div class="ctrl">
@@ -408,7 +405,7 @@
 <script>
 
 // =============================================================================
-//  WGSL — COMPUTE SHADER
+//  WGSL — COMPUTE SHADER (Step B: 2-Tier / 8-Bit)
 // =============================================================================
 
 const COMPUTE_WGSL = `
@@ -560,7 +557,7 @@ fn main(
             }
         }
 
-        // 8-bit convergence: extract exactly the 8 bits specified by Dive (P.shift)
+        // 8-bit convergence: extract exactly the 8 bits specified by Dive
         let mx = (vals[0] >> P.shift) & 0xFFu;
         let my = (vals[1] >> P.shift) & 0xFFu;
         let mz = (vals[2] >> P.shift) & 0xFFu;
@@ -568,7 +565,7 @@ fn main(
         let mesoKey = (mz << 16u) | (my << 8u) | mx;
         atomicAdd(&countTable[mesoKey], 1u);
 
-        // Dedup at exactly meso (8-bit) resolution
+        // Dedup at exactly 8-bit resolution (2MB table instead of 16MB)
         let old = atomicOr(&bitTable[mesoKey>>5u], 1u<<(mesoKey&31u));
         if ((old & (1u<<(mesoKey&31u))) == 0u) {
             isUnique = true;
@@ -577,12 +574,15 @@ fn main(
             // Output packing:
             // packed[0] = Macro tier (t0) -> upper 4 bits
             // packed[1] = Meso tier (t1) -> lower 4 bits
-            // packed[2] = Selection flag (initialized to 0.0)
-            // packed[3] = Color
-            packed[0] = f32((((mx>>4u)&0xFu)<<16u) | (((my>>4u)&0xFu)<<8u) | ((mz>>4u)&0xFu));
-            packed[1] = f32(((mx&0xFu)<<16u) | ((my&0xFu)<<8u) | (mz&0xFu));
-            packed[2] = 0.0;
-            packed[3] = f32((mx<<16u) | (my<<8u) | mz);
+            // packed[2] = Color
+            // packed[3] = Reserved Metadata (For Step C)
+            let t0x = (mx>>4u)&0xFu; let t0y = (my>>4u)&0xFu; let t0z = (mz>>4u)&0xFu;
+            let t1x = mx&0xFu; let t1y = my&0xFu; let t1z = mz&0xFu;
+
+            packed[0] = f32((t0x<<16u) | (t0y<<8u) | t0z);
+            packed[1] = f32((t1x<<16u) | (t1y<<8u) | t1z);
+            packed[2] = f32((mx<<16u) | (my<<8u) | mz);
+            packed[3] = 0.0;
         }
     }
 
@@ -624,7 +624,8 @@ struct RParams {
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
-@group(0) @binding(1) var<storage, read> countTable: array<u32>;
+@group(0) @binding(1) var<storage, read> selection: array<u32>;
+@group(0) @binding(2) var<storage, read> countTable: array<u32>;
 
 struct VSOut {
     @builtin(position) pos: vec4<f32>,
@@ -639,55 +640,32 @@ fn vs(
     @location(0) qOff: vec2<f32>,
     @location(1) pk: vec4<f32>,
 ) -> VSOut {
-    let raw0=u32(pk.x); let raw1=u32(pk.y); let raw3=u32(pk.w);
+    let raw0=u32(pk.x); let raw1=u32(pk.y); let rawColor=u32(pk.z);
 
     let p0=vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
     let p1=vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
-    
-    // pk.z stores our selection float directly!
-    let sel = pk.z; 
-    let col = vec3(f32((raw3>>16u)&0xFFu)/255.0, f32((raw3>>8u)&0xFFu)/255.0, f32(raw3&0xFFu)/255.0);
+    let col = vec3(f32((rawColor>>16u)&0xFFu)/255.0, f32((rawColor>>8u)&0xFFu)/255.0, f32(rawColor&0xFFu)/255.0);
 
     var world: vec3<f32>;
 
     if (R.mode < 0.5) {
-        // 3D isotropic (2-Tier)
         world = (p0*R.s0 + p1*R.s1 - vec3(R.center)) * R.scale;
     } else if (R.mode < 1.5) {
-        // Tiled 2D (2-Tier)
-        let ZCOLS = 4u;
-        let D = 16.0;
-
+        let ZCOLS = 4u; let D = 16.0;
         let iz0=u32(p0.z); let iz1=u32(p1.z);
-        let fx0 = f32(iz0 % ZCOLS) * D + p0.x;
-        let fy0 = f32(iz0 / ZCOLS) * D + p0.y;
-        let fx1 = f32(iz1 % ZCOLS) * D + p1.x;
-        let fy1 = f32(iz1 / ZCOLS) * D + p1.y;
-
+        let fx0 = f32(iz0 % ZCOLS) * D + p0.x; let fy0 = f32(iz0 / ZCOLS) * D + p0.y;
+        let fx1 = f32(iz1 % ZCOLS) * D + p1.x; let fy1 = f32(iz1 / ZCOLS) * D + p1.y;
         let px = fx0*R.stepX0 + fx1*R.stepX1;
         let py = fy0*R.stepY0 + fy1*R.stepY1;
-
-        world = vec3(
-            (px - R.tiledCenterX) * R.tiledScale,
-            (py - R.tiledCenterY) * R.tiledScale,
-            0.0
-        );
+        world = vec3((px - R.tiledCenterX) * R.tiledScale, (py - R.tiledCenterY) * R.tiledScale, 0.0);
     } else {
-        // Atlas 3D (2-Tier)
-        let ZCOLS = 4u;
-        let D = 16.0;
-
+        let ZCOLS = 4u; let D = 16.0;
         let iz0 = u32(p0.z);
         let flatX = f32(iz0 % ZCOLS) * D + p0.x;
         let flatY = f32(iz0 / ZCOLS) * D + p0.y;
 
-        var local = vec3(
-            p1.x / 15.0,
-            p1.y / 15.0,
-            p1.z / 15.0
-        ) - 0.5;
+        var local = vec3(p1.x / 15.0, p1.y / 15.0, p1.z / 15.0) - 0.5;
 
-        // Sub-rotation
         let rx = local.x * R.subRotCosY - local.z * R.subRotSinY;
         let rz = local.x * R.subRotSinY + local.z * R.subRotCosY;
         local = vec3(rx, local.y, rz);
@@ -700,11 +678,7 @@ fn vs(
         let py = flatY * R.stepY0 + (local.y + 0.5) * cubeSize;
         let pz = (local.z + 0.5) * cubeSize * R.depthScale;
 
-        world = vec3(
-            (px - R.tiledCenterX) * R.tiledScale,
-            (py - R.tiledCenterY) * R.tiledScale,
-            pz * R.tiledScale
-        );
+        world = vec3((px - R.tiledCenterX) * R.tiledScale, (py - R.tiledCenterY) * R.tiledScale, pz * R.tiledScale);
     }
 
     let gravCenter = vec3(R.gravTargetX, R.gravTargetY, R.gravTargetZ);
@@ -747,6 +721,9 @@ fn vs(
         size = size * mix(1.0, 0.05 + 2.45 * density, R.densityStrength);
     }
 
+    let selWord = selection[instIdx >> 2u];
+    let selByte = (selWord >> ((instIdx & 3u) * 8u)) & 0xFFu;
+    let sel = f32(min(selByte, 1u));
     let pulse = 0.5 + 0.5 * R.pulsePhase;
     let selScale = mix(1.0, 1.0 + pulse * 0.2, sel);
     size = size * selScale;
@@ -765,8 +742,7 @@ fn vs(
             mapped = vec3(length(p0)/15.0, length(p1)/15.0, 0.0);
         } else {
             let t = clamp(dot(col, vec3(0.35, 0.45, 0.20)), 0.0, 1.0);
-            var c0: vec3<f32>; var c1: vec3<f32>;
-            var c2: vec3<f32>; var c3: vec3<f32>;
+            var c0: vec3<f32>; var c1: vec3<f32>; var c2: vec3<f32>; var c3: vec3<f32>;
             switch (pal) {
                 case 1u { c0=vec3(0.05,0.0,0.08); c1=vec3(0.55,0.08,0.52); c2=vec3(0.93,0.47,0.11); c3=vec3(0.99,0.99,0.60); }
                 case 2u { c0=vec3(0.02,0.02,0.15); c1=vec3(0.0,0.8,0.9); c2=vec3(0.85,0.15,0.85); c3=vec3(1.0,1.0,1.0); }
@@ -891,13 +867,14 @@ struct SelectRect {
     rectMinX: f32, rectMinY: f32,
     rectMaxX: f32, rectMaxY: f32,
     count: u32,
-    selMode: u32,  // 0 = replace, 1 = additive, 2 = subtract
+    selMode: u32,
     _p0: u32, _p1: u32,
 };
 
-@group(0) @binding(0) var<storage, read_write> points: array<f32>;
-@group(0) @binding(1) var<uniform> R: RParams;
-@group(0) @binding(2) var<uniform> SR: SelectRect;
+@group(0) @binding(0) var<storage, read> points: array<f32>;
+@group(0) @binding(1) var<storage, read_write> selBuf: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform> R: RParams;
+@group(0) @binding(3) var<uniform> SR: SelectRect;
 
 @compute @workgroup_size(256)
 fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -961,19 +938,17 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let inside = ndc.x >= SR.rectMinX && ndc.x <= SR.rectMaxX
               && ndc.y >= SR.rectMinY && ndc.y <= SR.rectMaxY;
 
-    var new_sel = points[b+2u];
-    if (SR.selMode == 0u) { new_sel = select(0.0, 1.0, inside); } 
-    else if (SR.selMode == 1u) { if (inside) { new_sel = 1.0; } } 
-    else { if (inside) { new_sel = 0.0; } }
+    let wordIdx = idx >> 2u;
+    let byteShift = (idx & 3u) * 8u;
 
-    points[b+2u] = new_sel;
-}
-
-@compute @workgroup_size(256)
-fn clearSelectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
-    if (idx >= SR.count) { return; }
-    points[idx * 4u + 2u] = 0.0;
+    if (SR.selMode == 0u) {
+        if (inside) { atomicOr(&selBuf[wordIdx], 1u << byteShift); } 
+        else { atomicAnd(&selBuf[wordIdx], ~(0xFFu << byteShift)); }
+    } else if (SR.selMode == 1u) {
+        if (inside) { atomicOr(&selBuf[wordIdx], 1u << byteShift); }
+    } else {
+        if (inside) { atomicAnd(&selBuf[wordIdx], ~(0xFFu << byteShift)); }
+    }
 }
 `;
 
@@ -997,12 +972,12 @@ const FORMAT_ID = {
 
 let state = {
     format: 'uint32', isLE: true, shift: 24,
-    gaps: [0.25, 0.1], inflate: 0.5,
+    gaps:[0.25, 0.1], inflate: 0.5,
     file: null, fileSize: 0, buffer: null, fileName: "Internal",
     mode: 0, proximity: 0, pointScale: 1.0, gravityTarget: 0, falloffCurve: 0,
     depthScale: 1.0, subRotX: 0, subRotY: 0, scrubOffset: 0, scrubWindowMB: 32,
     slabEnabled: false, slabAxis: 1, slabPosition: 0, slabThickness: 2.0, slabSoftEdge: 0.2,
-    aabbEnabled: 0, aabbMin: [-5, -5, -5], aabbMax: [5, 5, 5],
+    aabbEnabled: 0, aabbMin: [-5, -5, -5], aabbMax:[5, 5, 5],
     csgMode: 0, gizmoAlpha: 0.3, palette: 0, selectionActive: false,
     densityStrength: 0, densityCurve: 0, densityGamma: 0.5, densityMode: 0,
     densityThreshold: 7943282, decodedImageBuf: null,
@@ -1115,11 +1090,11 @@ function getMVP(asp) {
 // =============================================================================
 
 let device, context, canvasEl, canvasFmt;
-let computePipeline, renderPipeline, wirePipeline, selectPipeline, clearSelectPipeline, reducePipeline;
+let computePipeline, renderPipeline, wirePipeline, selectPipeline, reducePipeline;
 let rawDataBuf, bitTableBuf, outputBuf, indirectBuf, computeUniformBuf;
 let countTableBuf, maxCountBuf;
 let renderUniformBuf, quadVBuf, quadIBuf, wireVBuf;
-let selectUniformBuf;
+let selectionBuf, selectUniformBuf;
 let computeBGL, renderBGL, selectBGL, reduceBGL;
 let depthTex, depthView;
 let pointCount = 0;
@@ -1245,7 +1220,8 @@ function mkPipelines() {
     const rs = device.createShaderModule({code: RENDER_WGSL});
     renderBGL = device.createBindGroupLayout({ entries:[
         {binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},
-        {binding:1,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'read-only-storage'}},
+        {binding:1,visibility:GPUShaderStage.VERTEX,buffer:{type:'read-only-storage'}},
+        {binding:2,visibility:GPUShaderStage.VERTEX,buffer:{type:'read-only-storage'}},
     ]});
     renderPipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
@@ -1281,17 +1257,14 @@ function mkPipelines() {
 
     const ss = device.createShaderModule({code: SELECT_WGSL});
     selectBGL = device.createBindGroupLayout({ entries:[
-        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
-        {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
+        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
+        {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
         {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
+        {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
     ]});
     selectPipeline = device.createComputePipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[selectBGL]}),
         compute:{module:ss,entryPoint:'selectMain'}
-    });
-    clearSelectPipeline = device.createComputePipeline({
-        layout: device.createPipelineLayout({bindGroupLayouts:[selectBGL]}),
-        compute:{module:ss,entryPoint:'clearSelectMain'}
     });
 
     const reds = device.createShaderModule({code: REDUCE_WGSL});
@@ -1317,6 +1290,10 @@ function mkStaticBufs() {
     countTableBuf = device.createBuffer({size:COUNT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     maxCountBuf = device.createBuffer({size:4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
 
+    const selBufSize = Math.ceil(MAX_OUTPUT_POINTS / 4) * 4;
+    selectionBuf = device.createBuffer({
+        size: selBufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
     selectUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     indirectBuf = device.createBuffer({
         size:20, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC,
@@ -1376,7 +1353,7 @@ async function runCompute() {
     const totalTuples = Math.floor(byteLen / byteStep);
     if (totalTuples === 0) return;
 
-    state.selectionActive = false; // Overwriting buffer naturally clears selection
+    clearSelection(); // Resets selectionBuf when geometry changes
 
     const statsEl = document.getElementById('stats');
     const initEnc = device.createCommandEncoder();
@@ -1485,7 +1462,8 @@ function ensureRenderBindGroup() {
     if (renderBG) return;
     renderBG = device.createBindGroup({ layout:renderBGL, entries:[
         {binding:0,resource:{buffer:renderUniformBuf}},
-        {binding:1,resource:{buffer:countTableBuf}},
+        {binding:1,resource:{buffer:selectionBuf}},
+        {binding:2,resource:{buffer:countTableBuf}},
     ]});
 }
 
@@ -1508,7 +1486,7 @@ function buildWireVerts(sn) {
     function edge(a, b, r, g, bl, al) { v.push(a[0],a[1],a[2], r,g,bl,al, b[0],b[1],b[2], r,g,bl,al); }
 
     if (state.slabEnabled) {
-        const up = (Math.abs(sn[1]) < 0.99) ? [0,1,0] : [1,0,0];
+        const up = (Math.abs(sn[1]) < 0.99) ? [0,1,0] :[1,0,0];
         let t1 = [sn[1]*up[2]-sn[2]*up[1], sn[2]*up[0]-sn[0]*up[2], sn[0]*up[1]-sn[1]*up[0]];
         const len1 = Math.sqrt(t1[0]*t1[0]+t1[1]*t1[1]+t1[2]*t1[2]);
         if (len1 > 0) { t1[0]/=len1; t1[1]/=len1; t1[2]/=len1; }
@@ -1527,11 +1505,11 @@ function buildWireVerts(sn) {
     }
     if (state.aabbEnabled !== 0) {
         const mn=state.aabbMin, mx=state.aabbMax;
-        const c = [
+        const c =[
             [mn[0],mn[1],mn[2]],[mx[0],mn[1],mn[2]],[mn[0],mx[1],mn[2]],[mx[0],mx[1],mn[2]],
             [mn[0],mn[1],mx[2]],[mx[0],mn[1],mx[2]],[mn[0],mx[1],mx[2]],[mx[0],mx[1],mx[2]],
         ];
-        const col = [0,1,0.4,1];
+        const col =[0,1,0.4,1];
         const edges = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
         for (const[a,b] of edges) edge(c[a],c[b], col[0],col[1],col[2],col[3]);
     }
@@ -1651,18 +1629,9 @@ function generateDemo() {
 // =============================================================================
 
 function clearSelection() {
-    if (!device || !outputBuf || pointCount === 0) return;
-    const bg = device.createBindGroup({ layout: selectBGL, entries:[
-        { binding: 0, resource: { buffer: outputBuf } },
-        { binding: 1, resource: { buffer: renderUniformBuf } },
-        { binding: 2, resource: { buffer: selectUniformBuf } },
-    ]});
+    if (!device || !selectionBuf) return;
     const enc = device.createCommandEncoder();
-    const pass = enc.beginComputePass();
-    pass.setPipeline(clearSelectPipeline);
-    pass.setBindGroup(0, bg);
-    pass.dispatchWorkgroups(Math.ceil(pointCount / 256));
-    pass.end();
+    enc.clearBuffer(selectionBuf, 0, Math.ceil(MAX_OUTPUT_POINTS / 4) * 4);
     device.queue.submit([enc.finish()]);
     state.selectionActive = false;
     console.log('Selection cleared');
@@ -1682,8 +1651,9 @@ async function runSelectionPass(rectMin, rectMax, selMode) {
 
     const bg = device.createBindGroup({ layout: selectBGL, entries:[
         { binding: 0, resource: { buffer: outputBuf } },
-        { binding: 1, resource: { buffer: renderUniformBuf } },
-        { binding: 2, resource: { buffer: selectUniformBuf } },
+        { binding: 1, resource: { buffer: selectionBuf } },
+        { binding: 2, resource: { buffer: renderUniformBuf } },
+        { binding: 3, resource: { buffer: selectUniformBuf } },
     ]});
 
     const enc = device.createCommandEncoder();
@@ -1713,15 +1683,28 @@ async function exportPLY() {
     const enc=device.createCommandEncoder();
     enc.copyBufferToBuffer(outputBuf,0,rb,0,readSize);
 
+    let selRB = null;
+    const selBufSize = Math.ceil(MAX_OUTPUT_POINTS / 4) * 4;
+    if (onlySelected && state.selectionActive) {
+        selRB = device.createBuffer({size:selBufSize,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+        enc.copyBufferToBuffer(selectionBuf,0,selRB,0,selBufSize);
+    }
+
     device.queue.submit([enc.finish()]);
     await rb.mapAsync(GPUMapMode.READ);
     const d=new Float32Array(rb.getMappedRange());
     const intV=new Uint32Array(rb.getMappedRange());
 
+    let selFlags = null;
+    if (selRB) {
+        await selRB.mapAsync(GPUMapMode.READ);
+        selFlags = new Uint32Array(selRB.getMappedRange());
+    }
+
     let sn;
     if (state.slabAxis === 3) {
         const sp2=Math.sin(camPhi),cp2=Math.cos(camPhi),st2=Math.sin(camTheta),ct2=Math.cos(camTheta);
-        sn = [sp2*ct2, cp2, sp2*st2];
+        sn =[sp2*ct2, cp2, sp2*st2];
     } else {
         sn = [[1,0,0],[0,1,0],[0,0,1]][state.slabAxis];
     }
@@ -1732,10 +1715,13 @@ async function exportPLY() {
     const vertexBytes = 15;
     const survivors =[];
     for (let i = 0; i < pointCount; i++) {
-        const b = i * 4;
-        const selFloat = d[b+2];
-        if (onlySelected && selFloat < 0.5) continue;
+        if (onlySelected && selFlags) {
+            const word = selFlags[i >> 2];
+            const flag = (word >> ((i & 3) * 8)) & 0xFF;
+            if (!flag) continue;
+        }
 
+        const b = i * 4;
         const raw0=intV[b]|0, raw1=intV[b+1]|0;
         const p0x=(raw0>>16)&0xFF, p0y=(raw0>>8)&0xFF, p0z=raw0&0xFF;
         const p1x=(raw1>>16)&0xFF, p1y=(raw1>>8)&0xFF, p1z=raw1&0xFF;
@@ -1777,7 +1763,7 @@ async function exportPLY() {
     for (let si = 0; si < count; si++) {
         const i = survivors[si];
         const b = i * 4;
-        const raw0=intV[b]|0, raw1=intV[b+1]|0, raw3=intV[b+3]|0;
+        const raw0=intV[b]|0, raw1=intV[b+1]|0, raw2=intV[b+2]|0; // Color is now packed[2]
         const p0x=(raw0>>16)&0xFF, p0y=(raw0>>8)&0xFF, p0z=raw0&0xFF;
         const p1x=(raw1>>16)&0xFF, p1y=(raw1>>8)&0xFF, p1z=raw1&0xFF;
 
@@ -1785,12 +1771,13 @@ async function exportPLY() {
         dv.setFloat32(off,     (p0x*st.s0+p1x*st.s1-st.ctr)*st.scl, true);
         dv.setFloat32(off + 4, (p0y*st.s0+p1y*st.s1-st.ctr)*st.scl, true);
         dv.setFloat32(off + 8, (p0z*st.s0+p1z*st.s1-st.ctr)*st.scl, true);
-        dv.setUint8(off + 12, Math.min(255, ((raw3>>16)&0xFF) + 25));
-        dv.setUint8(off + 13, Math.min(255, ((raw3>>8)&0xFF) + 25));
-        dv.setUint8(off + 14, Math.min(255, (raw3&0xFF) + 25));
+        dv.setUint8(off + 12, Math.min(255, ((raw2>>16)&0xFF) + 25));
+        dv.setUint8(off + 13, Math.min(255, ((raw2>>8)&0xFF) + 25));
+        dv.setUint8(off + 14, Math.min(255, (raw2&0xFF) + 25));
     }
 
     rb.unmap(); rb.destroy();
+    if (selRB) { selRB.unmap(); selRB.destroy(); }
 
     const blob = new Blob([headerBytes, payload], {type: "application/octet-stream"});
     const url = URL.createObjectURL(blob);
