@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Unified Strata — Step B: 8-Bit Convergence</title>
+<title>Unified Strata — Step C: Repacked & Baked</title>
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #050508; color: #ccc; font-family: 'Consolas', 'SF Mono', monospace; overflow: hidden; }
@@ -84,7 +84,7 @@
 
 <div id="panelL" class="panel">
     <h1>Unified Strata</h1>
-    <div class="sub-h1">WebGPU Compute · Step B (8-Bit)</div>
+    <div class="sub-h1">WebGPU Compute · Step C (Baked Output)</div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
         <button class="file-btn" style="margin-bottom:0;" onclick="document.getElementById('fIn').click()">Open File</button>
@@ -405,7 +405,7 @@
 <script>
 
 // =============================================================================
-//  WGSL — COMPUTE SHADER (Step B: 2-Tier / 8-Bit)
+//  WGSL — COMPUTE SHADER (Step C: Repacked & Baked)
 // =============================================================================
 
 const COMPUTE_WGSL = `
@@ -548,7 +548,6 @@ fn main(
             default{}
         }
 
-        // Apply companding if enabled
         if (P.compandCurve != 0u) {
             for(var j=0u; j<3u; j++){
                 let norm = f32(vals[j]) / S;
@@ -557,7 +556,6 @@ fn main(
             }
         }
 
-        // 8-bit convergence: extract exactly the 8 bits specified by Dive
         let mx = (vals[0] >> P.shift) & 0xFFu;
         let my = (vals[1] >> P.shift) & 0xFFu;
         let mz = (vals[2] >> P.shift) & 0xFFu;
@@ -565,24 +563,18 @@ fn main(
         let mesoKey = (mz << 16u) | (my << 8u) | mx;
         atomicAdd(&countTable[mesoKey], 1u);
 
-        // Dedup at exactly 8-bit resolution (2MB table instead of 16MB)
         let old = atomicOr(&bitTable[mesoKey>>5u], 1u<<(mesoKey&31u));
         if ((old & (1u<<(mesoKey&31u))) == 0u) {
             isUnique = true;
             localSlot = atomicAdd(&wg_count, 1u);
             
-            // Output packing:
-            // packed[0] = Macro tier (t0) -> upper 4 bits
-            // packed[1] = Meso tier (t1) -> lower 4 bits
-            // packed[2] = Color
-            // packed[3] = Reserved Metadata (For Step C)
             let t0x = (mx>>4u)&0xFu; let t0y = (my>>4u)&0xFu; let t0z = (mz>>4u)&0xFu;
             let t1x = mx&0xFu; let t1y = my&0xFu; let t1z = mz&0xFu;
 
-            packed[0] = f32((t0x<<16u) | (t0y<<8u) | t0z);
-            packed[1] = f32((t1x<<16u) | (t1y<<8u) | t1z);
-            packed[2] = f32((mx<<16u) | (my<<8u) | mz);
-            packed[3] = 0.0;
+            packed[0] = bitcast<f32>((t0x<<16u) | (t0y<<8u) | t0z);
+            packed[1] = bitcast<f32>((t1x<<16u) | (t1y<<8u) | t1z);
+            packed[2] = bitcast<f32>((mx<<16u) | (my<<8u) | mz); // Color + Selection(0)
+            packed[3] = bitcast<f32>(0u); // Density baked later
         }
     }
 
@@ -599,6 +591,45 @@ fn main(
         output[b+2u]  = packed[2];
         output[b+3u]  = packed[3];
     }
+}
+`;
+
+// =============================================================================
+//  WGSL — BAKE DENSITY SHADER
+// =============================================================================
+
+const BAKE_WGSL = `
+struct BakeParams { count: u32, _pad0: u32, _pad1: u32, _pad2: u32 };
+
+@group(0) @binding(0) var<storage, read_write> points: array<f32>;
+@group(0) @binding(1) var<storage, read> countTable: array<u32>;
+@group(0) @binding(2) var<uniform> B: BakeParams;
+
+@compute @workgroup_size(256)
+fn bakeMain(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= B.count) { return; }
+    
+    let b = idx * 4u;
+    let raw0 = bitcast<u32>(points[b]);
+    let raw1 = bitcast<u32>(points[b+1u]);
+
+    let t0x = (raw0 >> 16u) & 0xFFu;
+    let t0y = (raw0 >> 8u) & 0xFFu;
+    let t0z = raw0 & 0xFFu;
+
+    let t1x = (raw1 >> 16u) & 0xFFu;
+    let t1y = (raw1 >> 8u) & 0xFFu;
+    let t1z = raw1 & 0xFFu;
+
+    let mx = (t0x << 4u) | t1x;
+    let my = (t0y << 4u) | t1y;
+    let mz = (t0z << 4u) | t1z;
+
+    let mesoKey = (mz << 16u) | (my << 8u) | mx;
+    let count = countTable[mesoKey];
+
+    points[b+3u] = bitcast<f32>(count);
 }
 `;
 
@@ -624,8 +655,6 @@ struct RParams {
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
-@group(0) @binding(1) var<storage, read> selection: array<u32>;
-@group(0) @binding(2) var<storage, read> countTable: array<u32>;
 
 struct VSOut {
     @builtin(position) pos: vec4<f32>,
@@ -640,11 +669,16 @@ fn vs(
     @location(0) qOff: vec2<f32>,
     @location(1) pk: vec4<f32>,
 ) -> VSOut {
-    let raw0=u32(pk.x); let raw1=u32(pk.y); let rawColor=u32(pk.z);
+    let raw0 = bitcast<u32>(pk.x); 
+    let raw1 = bitcast<u32>(pk.y); 
+    let raw2 = bitcast<u32>(pk.z); 
+    let rawCount = bitcast<u32>(pk.w); // Density completely baked into float 3!
 
-    let p0=vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
-    let p1=vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
-    let col = vec3(f32((rawColor>>16u)&0xFFu)/255.0, f32((rawColor>>8u)&0xFFu)/255.0, f32(rawColor&0xFFu)/255.0);
+    let p0 = vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
+    let p1 = vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
+    
+    let sel = f32(raw2 >> 24u); 
+    let col = vec3(f32((raw2>>16u)&0xFFu)/255.0, f32((raw2>>8u)&0xFFu)/255.0, f32(raw2&0xFFu)/255.0);
 
     var world: vec3<f32>;
 
@@ -698,11 +732,6 @@ fn vs(
 
     var density = 0.0;
     if (R.densityStrength > 0.0 && R.maxCount > 0.0) {
-        let mesoX = u32(p0.x) * 16u + u32(p1.x);
-        let mesoY = u32(p0.y) * 16u + u32(p1.y);
-        let mesoZ = u32(p0.z) * 16u + u32(p1.z);
-        let mKey = (mesoZ << 16u) | (mesoY << 8u) | mesoX;
-        let rawCount = countTable[mKey];
         let dcurve = u32(R.densityCurve + 0.5);
         switch (dcurve) {
             case 1u {
@@ -721,9 +750,6 @@ fn vs(
         size = size * mix(1.0, 0.05 + 2.45 * density, R.densityStrength);
     }
 
-    let selWord = selection[instIdx >> 2u];
-    let selByte = (selWord >> ((instIdx & 3u) * 8u)) & 0xFFu;
-    let sel = f32(min(selByte, 1u));
     let pulse = 0.5 + 0.5 * R.pulsePhase;
     let selScale = mix(1.0, 1.0 + pulse * 0.2, sel);
     size = size * selScale;
@@ -871,10 +897,9 @@ struct SelectRect {
     _p0: u32, _p1: u32,
 };
 
-@group(0) @binding(0) var<storage, read> points: array<f32>;
-@group(0) @binding(1) var<storage, read_write> selBuf: array<atomic<u32>>;
-@group(0) @binding(2) var<uniform> R: RParams;
-@group(0) @binding(3) var<uniform> SR: SelectRect;
+@group(0) @binding(0) var<storage, read_write> points: array<f32>;
+@group(0) @binding(1) var<uniform> R: RParams;
+@group(0) @binding(2) var<uniform> SR: SelectRect;
 
 @compute @workgroup_size(256)
 fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -882,7 +907,10 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (idx >= SR.count) { return; }
 
     let b = idx * 4u;
-    let raw0 = u32(points[b]); let raw1 = u32(points[b+1u]);
+    let raw0 = bitcast<u32>(points[b]); 
+    let raw1 = bitcast<u32>(points[b+1u]);
+    let raw2 = bitcast<u32>(points[b+2u]);
+
     let p0 = vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
     let p1 = vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
 
@@ -938,17 +966,22 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let inside = ndc.x >= SR.rectMinX && ndc.x <= SR.rectMaxX
               && ndc.y >= SR.rectMinY && ndc.y <= SR.rectMaxY;
 
-    let wordIdx = idx >> 2u;
-    let byteShift = (idx & 3u) * 8u;
+    var new_sel = raw2 >> 24u;
+    if (SR.selMode == 0u) { new_sel = select(0u, 1u, inside); } 
+    else if (SR.selMode == 1u) { if (inside) { new_sel = 1u; } } 
+    else { if (inside) { new_sel = 0u; } }
 
-    if (SR.selMode == 0u) {
-        if (inside) { atomicOr(&selBuf[wordIdx], 1u << byteShift); } 
-        else { atomicAnd(&selBuf[wordIdx], ~(0xFFu << byteShift)); }
-    } else if (SR.selMode == 1u) {
-        if (inside) { atomicOr(&selBuf[wordIdx], 1u << byteShift); }
-    } else {
-        if (inside) { atomicAnd(&selBuf[wordIdx], ~(0xFFu << byteShift)); }
-    }
+    let color_rgb = raw2 & 0xFFFFFFu;
+    points[b+2u] = bitcast<f32>((new_sel << 24u) | color_rgb);
+}
+
+@compute @workgroup_size(256)
+fn clearSelectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= SR.count) { return; }
+    let b = idx * 4u;
+    let raw2 = bitcast<u32>(points[b+2u]);
+    points[b+2u] = bitcast<f32>(raw2 & 0xFFFFFFu);
 }
 `;
 
@@ -977,7 +1010,7 @@ let state = {
     mode: 0, proximity: 0, pointScale: 1.0, gravityTarget: 0, falloffCurve: 0,
     depthScale: 1.0, subRotX: 0, subRotY: 0, scrubOffset: 0, scrubWindowMB: 32,
     slabEnabled: false, slabAxis: 1, slabPosition: 0, slabThickness: 2.0, slabSoftEdge: 0.2,
-    aabbEnabled: 0, aabbMin: [-5, -5, -5], aabbMax:[5, 5, 5],
+    aabbEnabled: 0, aabbMin:[-5, -5, -5], aabbMax:[5, 5, 5],
     csgMode: 0, gizmoAlpha: 0.3, palette: 0, selectionActive: false,
     densityStrength: 0, densityCurve: 0, densityGamma: 0.5, densityMode: 0,
     densityThreshold: 7943282, decodedImageBuf: null,
@@ -996,7 +1029,7 @@ function computeInflation() {
     const g = state.gaps, p = state.inflate;
     const inf0 = 1;
     const inf1 = 1 + g[0] * p;
-    return [inf0, inf1];
+    return[inf0, inf1];
 }
 
 function computeStrides() {
@@ -1090,18 +1123,17 @@ function getMVP(asp) {
 // =============================================================================
 
 let device, context, canvasEl, canvasFmt;
-let computePipeline, renderPipeline, wirePipeline, selectPipeline, reducePipeline;
-let rawDataBuf, bitTableBuf, outputBuf, indirectBuf, computeUniformBuf;
+let computePipeline, bakePipeline, renderPipeline, wirePipeline, selectPipeline, clearSelectPipeline, reducePipeline;
+let rawDataBuf, bitTableBuf, outputBuf, indirectBuf, computeUniformBuf, bakeUniformBuf;
 let countTableBuf, maxCountBuf;
 let renderUniformBuf, quadVBuf, quadIBuf, wireVBuf;
-let selectionBuf, selectUniformBuf;
-let computeBGL, renderBGL, selectBGL, reduceBGL;
+let selectUniformBuf;
+let computeBGL, bakeBGL, renderBGL, selectBGL, reduceBGL;
 let depthTex, depthView;
 let pointCount = 0;
 
-// 8-bit dedup bit table: 2^24 bits = 2 MB
 const BIT_TABLE_SIZE = 2097152;  
-const COUNT_TABLE_SIZE = (1 << 24) * 4; // 64 MB: 16.8M meso cells × u32
+const COUNT_TABLE_SIZE = (1 << 24) * 4;
 let maxCountValue = 0;
 
 async function initWebGPU() {
@@ -1129,7 +1161,7 @@ async function initWebGPU() {
         if (e.button === 0 && e.shiftKey) {
             isSelecting = true;
             selStart =[e.clientX, e.clientY];
-            selEnd = [e.clientX, e.clientY];
+            selEnd =[e.clientX, e.clientY];
             e.preventDefault();
             return;
         }
@@ -1139,7 +1171,7 @@ async function initWebGPU() {
     });
     addEventListener('mousemove', e => {
         if (isSelecting) {
-            selEnd = [e.clientX, e.clientY];
+            selEnd =[e.clientX, e.clientY];
             const r = document.getElementById('selRect');
             r.style.display = 'block';
             r.style.left   = Math.min(selStart[0], selEnd[0]) + 'px';
@@ -1173,7 +1205,7 @@ async function initWebGPU() {
             const toNDC = (sx, sy) =>[(sx / canvasEl.width) * 2 - 1, -((sy / canvasEl.height) * 2 - 1)];
             const a = toNDC(selStart[0], selStart[1]);
             const b = toNDC(selEnd[0], selEnd[1]);
-            const rectMin = [Math.min(a[0], b[0]), Math.min(a[1], b[1])];
+            const rectMin =[Math.min(a[0], b[0]), Math.min(a[1], b[1])];
             const rectMax = [Math.max(a[0], b[0]), Math.max(a[1], b[1])];
             if (Math.abs(selEnd[0]-selStart[0]) > 3 || Math.abs(selEnd[1]-selStart[1]) > 3) {
                 runSelectionPass(rectMin, rectMax, e.altKey ? 2 : (e.ctrlKey || e.metaKey) ? 1 : 0);
@@ -1217,11 +1249,20 @@ function mkPipelines() {
         compute:{module:cs,entryPoint:'main'}
     });
 
+    const bs = device.createShaderModule({code: BAKE_WGSL});
+    bakeBGL = device.createBindGroupLayout({ entries:[
+        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
+        {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
+    ]});
+    bakePipeline = device.createComputePipeline({
+        layout: device.createPipelineLayout({bindGroupLayouts:[bakeBGL]}),
+        compute:{module:bs,entryPoint:'bakeMain'}
+    });
+
     const rs = device.createShaderModule({code: RENDER_WGSL});
     renderBGL = device.createBindGroupLayout({ entries:[
         {binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},
-        {binding:1,visibility:GPUShaderStage.VERTEX,buffer:{type:'read-only-storage'}},
-        {binding:2,visibility:GPUShaderStage.VERTEX,buffer:{type:'read-only-storage'}},
     ]});
     renderPipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
@@ -1257,14 +1298,17 @@ function mkPipelines() {
 
     const ss = device.createShaderModule({code: SELECT_WGSL});
     selectBGL = device.createBindGroupLayout({ entries:[
-        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
-        {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
         {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
-        {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
     ]});
     selectPipeline = device.createComputePipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[selectBGL]}),
         compute:{module:ss,entryPoint:'selectMain'}
+    });
+    clearSelectPipeline = device.createComputePipeline({
+        layout: device.createPipelineLayout({bindGroupLayouts:[selectBGL]}),
+        compute:{module:ss,entryPoint:'clearSelectMain'}
     });
 
     const reds = device.createShaderModule({code: REDUCE_WGSL});
@@ -1284,16 +1328,13 @@ function mkStaticBufs() {
     quadIBuf = device.createBuffer({size:12,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});
     device.queue.writeBuffer(quadIBuf,0,new Uint16Array([0,1,2, 2,1,3]));
     computeUniformBuf = device.createBuffer({size:48,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    bakeUniformBuf = device.createBuffer({size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     renderUniformBuf = device.createBuffer({size:256,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     wireVBuf = device.createBuffer({size:4096,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
     bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     countTableBuf = device.createBuffer({size:COUNT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     maxCountBuf = device.createBuffer({size:4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
 
-    const selBufSize = Math.ceil(MAX_OUTPUT_POINTS / 4) * 4;
-    selectionBuf = device.createBuffer({
-        size: selBufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-    });
     selectUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     indirectBuf = device.createBuffer({
         size:20, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC,
@@ -1353,7 +1394,7 @@ async function runCompute() {
     const totalTuples = Math.floor(byteLen / byteStep);
     if (totalTuples === 0) return;
 
-    clearSelection(); // Resets selectionBuf when geometry changes
+    state.selectionActive = false;
 
     const statsEl = document.getElementById('stats');
     const initEnc = device.createCommandEncoder();
@@ -1398,7 +1439,7 @@ async function runCompute() {
         computeUniformData[4] = byteStep;
         computeUniformData[5] = getWordSize(state.format);
         computeUniformData[6] = state.compandCurve;
-        computeUniformData[7] = 0; // Padding
+        computeUniformData[7] = 0;
         computeUniformDataFloat[8] = state.compandParam;
         device.queue.writeBuffer(computeUniformBuf, 0, computeUniformData);
 
@@ -1440,6 +1481,23 @@ async function runCompute() {
     maxCountValue = rbData[5];
     rb.unmap(); rb.destroy();
 
+    // Bake density counts into the final output vertices
+    if (pointCount > 0) {
+        device.queue.writeBuffer(bakeUniformBuf, 0, new Uint32Array([pointCount]));
+        const bakeBG = device.createBindGroup({ layout: bakeBGL, entries:[
+            {binding:0, resource:{buffer:outputBuf}},
+            {binding:1, resource:{buffer:countTableBuf}},
+            {binding:2, resource:{buffer:bakeUniformBuf}},
+        ]});
+        const bakeEnc = device.createCommandEncoder();
+        const bakePass = bakeEnc.beginComputePass();
+        bakePass.setPipeline(bakePipeline);
+        bakePass.setBindGroup(0, bakeBG);
+        bakePass.dispatchWorkgroups(Math.ceil(pointCount / 256));
+        bakePass.end();
+        device.queue.submit([bakeEnc.finish()]);
+    }
+
     const mbFull = (state.fileSize / (1024 * 1024)).toFixed(1);
     const mbWin = (byteLen / (1024 * 1024)).toFixed(1);
     const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
@@ -1462,8 +1520,6 @@ function ensureRenderBindGroup() {
     if (renderBG) return;
     renderBG = device.createBindGroup({ layout:renderBGL, entries:[
         {binding:0,resource:{buffer:renderUniformBuf}},
-        {binding:1,resource:{buffer:selectionBuf}},
-        {binding:2,resource:{buffer:countTableBuf}},
     ]});
 }
 
@@ -1629,9 +1685,18 @@ function generateDemo() {
 // =============================================================================
 
 function clearSelection() {
-    if (!device || !selectionBuf) return;
+    if (!device || !outputBuf || pointCount === 0) return;
+    const bg = device.createBindGroup({ layout: selectBGL, entries:[
+        { binding: 0, resource: { buffer: outputBuf } },
+        { binding: 1, resource: { buffer: renderUniformBuf } },
+        { binding: 2, resource: { buffer: selectUniformBuf } },
+    ]});
     const enc = device.createCommandEncoder();
-    enc.clearBuffer(selectionBuf, 0, Math.ceil(MAX_OUTPUT_POINTS / 4) * 4);
+    const pass = enc.beginComputePass();
+    pass.setPipeline(clearSelectPipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(pointCount / 256));
+    pass.end();
     device.queue.submit([enc.finish()]);
     state.selectionActive = false;
     console.log('Selection cleared');
@@ -1651,9 +1716,8 @@ async function runSelectionPass(rectMin, rectMax, selMode) {
 
     const bg = device.createBindGroup({ layout: selectBGL, entries:[
         { binding: 0, resource: { buffer: outputBuf } },
-        { binding: 1, resource: { buffer: selectionBuf } },
-        { binding: 2, resource: { buffer: renderUniformBuf } },
-        { binding: 3, resource: { buffer: selectUniformBuf } },
+        { binding: 1, resource: { buffer: renderUniformBuf } },
+        { binding: 2, resource: { buffer: selectUniformBuf } },
     ]});
 
     const enc = device.createCommandEncoder();
@@ -1665,7 +1729,7 @@ async function runSelectionPass(rectMin, rectMax, selMode) {
     device.queue.submit([enc.finish()]);
 
     state.selectionActive = true;
-    console.log(`Selection pass: ${pointCount} particles, rect[${rectMin}] → [${rectMax}], mode=${['replace','add','subtract'][selMode]}`);
+    console.log(`Selection pass: ${pointCount} particles, rect[${rectMin}] →[${rectMax}], mode=${['replace','add','subtract'][selMode]}`);
 }
 
 // =============================================================================
@@ -1683,23 +1747,9 @@ async function exportPLY() {
     const enc=device.createCommandEncoder();
     enc.copyBufferToBuffer(outputBuf,0,rb,0,readSize);
 
-    let selRB = null;
-    const selBufSize = Math.ceil(MAX_OUTPUT_POINTS / 4) * 4;
-    if (onlySelected && state.selectionActive) {
-        selRB = device.createBuffer({size:selBufSize,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-        enc.copyBufferToBuffer(selectionBuf,0,selRB,0,selBufSize);
-    }
-
     device.queue.submit([enc.finish()]);
     await rb.mapAsync(GPUMapMode.READ);
-    const d=new Float32Array(rb.getMappedRange());
     const intV=new Uint32Array(rb.getMappedRange());
-
-    let selFlags = null;
-    if (selRB) {
-        await selRB.mapAsync(GPUMapMode.READ);
-        selFlags = new Uint32Array(selRB.getMappedRange());
-    }
 
     let sn;
     if (state.slabAxis === 3) {
@@ -1715,13 +1765,12 @@ async function exportPLY() {
     const vertexBytes = 15;
     const survivors =[];
     for (let i = 0; i < pointCount; i++) {
-        if (onlySelected && selFlags) {
-            const word = selFlags[i >> 2];
-            const flag = (word >> ((i & 3) * 8)) & 0xFF;
-            if (!flag) continue;
-        }
-
         const b = i * 4;
+        const raw2=intV[b+2]|0;
+        const sel = (raw2 >> 24) & 1;
+
+        if (onlySelected && sel === 0) continue;
+
         const raw0=intV[b]|0, raw1=intV[b+1]|0;
         const p0x=(raw0>>16)&0xFF, p0y=(raw0>>8)&0xFF, p0z=raw0&0xFF;
         const p1x=(raw1>>16)&0xFF, p1y=(raw1>>8)&0xFF, p1z=raw1&0xFF;
@@ -1763,7 +1812,7 @@ async function exportPLY() {
     for (let si = 0; si < count; si++) {
         const i = survivors[si];
         const b = i * 4;
-        const raw0=intV[b]|0, raw1=intV[b+1]|0, raw2=intV[b+2]|0; // Color is now packed[2]
+        const raw0=intV[b]|0, raw1=intV[b+1]|0, raw2=intV[b+2]|0; 
         const p0x=(raw0>>16)&0xFF, p0y=(raw0>>8)&0xFF, p0z=raw0&0xFF;
         const p1x=(raw1>>16)&0xFF, p1y=(raw1>>8)&0xFF, p1z=raw1&0xFF;
 
@@ -1777,7 +1826,6 @@ async function exportPLY() {
     }
 
     rb.unmap(); rb.destroy();
-    if (selRB) { selRB.unmap(); selRB.destroy(); }
 
     const blob = new Blob([headerBytes, payload], {type: "application/octet-stream"});
     const url = URL.createObjectURL(blob);
