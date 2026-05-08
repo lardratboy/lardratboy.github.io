@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Companding Strata + UMAP — Step C: Repacked & Baked</title>
+<title>Companding Strata + UMAP — Step D: Dual Texture Statistics</title>
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #050508; color: #ccc; font-family: 'Consolas', 'SF Mono', monospace; overflow: hidden; }
@@ -111,7 +111,7 @@
 
 <div id="panelL" class="panel">
     <h1>Companding Strata</h1>
-    <div class="sub-h1">WebGPU Compute · Step C (Baked Output)</div>
+    <div class="sub-h1">WebGPU Compute · Step D (Dual Textures)</div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
         <button class="file-btn" style="margin-bottom:0;" onclick="document.getElementById('fIn').click()">Open File</button>
@@ -142,6 +142,7 @@
                     <option value="int8">int8</option>
                     <option value="int16">int16</option>
                     <option value="int32">int32</option>
+                    <option value="nibble4">nibble4 (4D)</option>
                 </optgroup>
                 <optgroup label="Floating Point">
                     <option value="fp4">fp4 (E2M1)</option>
@@ -197,6 +198,8 @@
                 <option value="1">Tiled 2D</option>
                 <option value="2">Atlas 3D</option>
                 <option value="3">UMAP 2D</option>
+                <option value="4">Dual Stats: ab &rarr; cd</option>
+                <option value="5">Dual Stats: cd &rarr; ab</option>
             </select>
         </div>
         <div>
@@ -475,7 +478,7 @@
 <script>
 
 // =============================================================================
-//  WGSL — COMPUTE SHADER (Step C: Repacked & Baked)
+//  WGSL — COMPUTE SHADER (Step D: Dual Stats + Nibble4)
 // =============================================================================
 
 const COMPUTE_WGSL = `
@@ -491,6 +494,7 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> indirect: array<atomic<u32>>;
 @group(0) @binding(4) var<uniform> P: Params;
 @group(0) @binding(5) var<storage, read_write> countTable: array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> dualStats: array<atomic<u32>>;
 
 fn rU8(off: u32) -> u32 { return (raw[off >> 2u] >> ((off & 3u) * 8u)) & 0xFFu; }
 
@@ -615,20 +619,50 @@ fn main(
             case 12u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E4M3(rU8(off+j)));}}
             case 13u{for(var j=0u;j<3u;j++){vals[j]=tanhMap(dFp8E5M2(rU8(off+j)));}}
             case 14u{let b0=rU8(off);let b1=rU8(off+1u);vals[0]=tanhMap(dFp4(b0>>4u));vals[1]=tanhMap(dFp4(b0&0xFu));vals[2]=tanhMap(dFp4(b1>>4u));}
+            case 15u{}
             default{}
         }
 
-        if (P.compandCurve != 0u) {
-            for(var j=0u; j<3u; j++){
-                let norm = f32(vals[j]) / S;
-                let c = compand(norm, P.compandCurve, P.compandParam);
-                vals[j] = u32(clamp(c, 0.0, 1.0) * S);
-            }
-        }
+        var mx: u32; var my: u32; var mz: u32;
+        if (P.format == 15u) {
+            let b0 = rU8(off); let b1 = rU8(off+1u);
+            let na = (b0 >> 4u) & 0xFu; let nb = b0 & 0xFu;
+            let nc = (b1 >> 4u) & 0xFu; let nd = b1 & 0xFu;
+            mx = (na << 4u) | nc;
+            my = (nb << 4u) | nd;
+            mz = 0u;
 
-        let mx = (vals[0] >> P.shift) & 0xFFu;
-        let my = (vals[1] >> P.shift) & 0xFFu;
-        let mz = (vals[2] >> P.shift) & 0xFFu;
+            let ab = (na << 4u) | nb;
+            let cd = (nc << 4u) | nd;
+            
+            // T_ab Statistics
+            atomicAdd(&dualStats[ab * 8u + 0u], 1u);
+            atomicAdd(&dualStats[ab * 8u + 1u], nc);
+            atomicAdd(&dualStats[ab * 8u + 2u], nd);
+            atomicAdd(&dualStats[ab * 8u + 3u], nc * nd);
+            atomicAdd(&dualStats[ab * 8u + 4u], nc * nc);
+            atomicAdd(&dualStats[ab * 8u + 5u], nd * nd);
+
+            // T_cd Statistics
+            let off_cd = 256u + cd;
+            atomicAdd(&dualStats[off_cd * 8u + 0u], 1u);
+            atomicAdd(&dualStats[off_cd * 8u + 1u], na);
+            atomicAdd(&dualStats[off_cd * 8u + 2u], nb);
+            atomicAdd(&dualStats[off_cd * 8u + 3u], na * nb);
+            atomicAdd(&dualStats[off_cd * 8u + 4u], na * na);
+            atomicAdd(&dualStats[off_cd * 8u + 5u], nb * nb);
+        } else {
+            if (P.compandCurve != 0u) {
+                for(var j=0u; j<3u; j++){
+                    let norm = f32(vals[j]) / S;
+                    let c = compand(norm, P.compandCurve, P.compandParam);
+                    vals[j] = u32(clamp(c, 0.0, 1.0) * S);
+                }
+            }
+            mx = (vals[0] >> P.shift) & 0xFFu;
+            my = (vals[1] >> P.shift) & 0xFFu;
+            mz = (vals[2] >> P.shift) & 0xFFu;
+        }
         
         let mesoKey = (mz << 16u) | (my << 8u) | mx;
         atomicAdd(&countTable[mesoKey], 1u);
@@ -643,8 +677,8 @@ fn main(
 
             packed[0] = bitcast<f32>((t0x<<16u) | (t0y<<8u) | t0z);
             packed[1] = bitcast<f32>((t1x<<16u) | (t1y<<8u) | t1z);
-            packed[2] = bitcast<f32>((mx<<16u) | (my<<8u) | mz); // Color + Selection(0)
-            packed[3] = bitcast<f32>(0u); // Density baked later
+            packed[2] = bitcast<f32>((mx<<16u) | (my<<8u) | mz); 
+            packed[3] = bitcast<f32>(0u); 
         }
     }
 
@@ -704,17 +738,11 @@ fn bakeMain(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 // =============================================================================
-//  WGSL — DENSITY EDIT SHADER (selection-masked countTable modification)
+//  WGSL — DENSITY EDIT SHADER
 // =============================================================================
 
 const DENSITY_EDIT_WGSL = `
-struct EditParams {
-    count: u32,
-    mode: u32,
-    value: u32,
-    _pad: u32,
-};
-
+struct EditParams { count: u32, mode: u32, value: u32, _pad: u32, };
 @group(0) @binding(0) var<storage, read> points: array<f32>;
 @group(0) @binding(1) var<storage, read_write> countTable: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> E: EditParams;
@@ -738,9 +766,7 @@ fn densityEditMain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mesoKey = (mz<<16u)|(my<<8u)|mx;
 
     switch (E.mode) {
-        case 0u {
-            atomicAdd(&countTable[mesoKey], E.value);
-        }
+        case 0u { atomicAdd(&countTable[mesoKey], E.value); }
         case 1u {
             var old = atomicLoad(&countTable[mesoKey]);
             loop {
@@ -752,12 +778,8 @@ fn densityEditMain(@builtin(global_invocation_id) gid: vec3<u32>) {
                 old = result.old_value;
             }
         }
-        case 2u {
-            atomicStore(&countTable[mesoKey], E.value);
-        }
-        case 3u {
-            atomicStore(&countTable[mesoKey], 0u);
-        }
+        case 2u { atomicStore(&countTable[mesoKey], E.value); }
+        case 3u { atomicStore(&countTable[mesoKey], 0u); }
         default {}
     }
 }
@@ -782,10 +804,11 @@ struct RParams {
     aabbMaxZ: f32, aabbMode: f32, csgMode: f32, gizmoAlpha: f32,
     palette: f32, pulsePhase: f32, selectionActive: f32, densityStrength: f32,
     densityCurve: f32, maxCount: f32, densityThreshold: f32, densityGamma: f32,
-    umapBlend: f32, _upad0: f32, _upad1: f32, _upad2: f32,
+    umapBlend: f32, isNibble4: f32, _upad1: f32, _upad2: f32,
 };
 
 @group(0) @binding(0) var<uniform> R: RParams;
+@group(0) @binding(1) var<storage, read> dualStats: array<u32>;
 
 struct VSOut {
     @builtin(position) pos: vec4<f32>,
@@ -801,10 +824,96 @@ fn vs(
     @location(1) pk: vec4<f32>,
     @location(2) umapPos: vec2<f32>,
 ) -> VSOut {
+
+    // ---------------------------------------------------------
+    // DUAL STATS PROJECTION (Modes 4 and 5)
+    // ---------------------------------------------------------
+    if (R.mode > 3.5) {
+        let isMode5 = R.mode > 4.5;
+        let baseIdx = select(0u, 256u, isMode5);
+        let texelIdx = instIdx % 256u;
+        let idx = baseIdx * 8u + texelIdx * 8u;
+        
+        let count = f32(dualStats[idx]);
+        if (count < 1.0) {
+            return VSOut(vec4(2.0, 2.0, 2.0, 1.0), vec3(0.0), vec2(0.0), vec3(0.0));
+        }
+
+        let sx = f32(dualStats[idx + 1u]);
+        let sy = f32(dualStats[idx + 2u]);
+        let sxy = f32(dualStats[idx + 3u]);
+        let sx2 = f32(dualStats[idx + 4u]);
+        let sy2 = f32(dualStats[idx + 5u]);
+
+        let meanX = sx / count;
+        let meanY = sy / count;
+        
+        // Compute Covariance
+        let varX = max(0.0, sx2 / count - meanX * meanX);
+        let varY = max(0.0, sy2 / count - meanY * meanY);
+        let covXY = sxy / count - meanX * meanY;
+
+        let gridX = f32(texelIdx >> 4u);
+        let gridY = f32(texelIdx & 0xFu);
+        let worldX = (gridX - 7.5) * R.scale * 4.0; 
+        let worldY = (gridY - 7.5) * R.scale * 4.0;
+        let world = vec3(worldX, worldY, 0.0);
+
+        // Eigen decomposition for shape distortion
+        let trace = varX + varY;
+        let halfTrace = trace * 0.5;
+        let diff = varX - varY;
+        let root = sqrt(diff * diff * 0.25 + covXY * covXY);
+        let eig1 = halfTrace + root;
+        let eig2 = max(0.0, halfTrace - root);
+        
+        var dir1 = vec2(covXY, eig1 - varX);
+        if (length(dir1) < 0.0001) { dir1 = vec2(1.0, 0.0); }
+        else { dir1 = normalize(dir1); }
+        let dir2 = vec2(-dir1.y, dir1.x);
+
+        var size = R.pointSize * mix(0.2, 3.0, clamp(log2(count)/16.0, 0.0, 1.0));
+        let s1 = sqrt(eig1) * 0.4 + 0.1;
+        let s2 = sqrt(eig2) * 0.4 + 0.1;
+        let deformedUV = qOff.x * (dir1 * s1) + qOff.y * (dir2 * s2);
+
+        var clip = R.mvp * vec4(world, 1.0);
+        clip = vec4(clip.xy + deformedUV * size * clip.w / vec2(R.vpW, R.vpH), clip.zw);
+
+        let col = vec3(meanX / 15.0, meanY / 15.0, 1.0 - (meanX+meanY)/30.0);
+        
+        // Apply Palette
+        var mapped = col;
+        let pal = u32(R.palette + 0.5);
+        if (pal > 0u && pal != 7u) {
+            let t = clamp(dot(col, vec3(0.35, 0.45, 0.20)), 0.0, 1.0);
+            var c0: vec3<f32>; var c1: vec3<f32>; var c2: vec3<f32>; var c3: vec3<f32>;
+            switch (pal) {
+                case 1u { c0=vec3(0.05,0.0,0.08); c1=vec3(0.55,0.08,0.52); c2=vec3(0.93,0.47,0.11); c3=vec3(0.99,0.99,0.60); }
+                case 2u { c0=vec3(0.02,0.02,0.15); c1=vec3(0.0,0.8,0.9); c2=vec3(0.85,0.15,0.85); c3=vec3(1.0,1.0,1.0); }
+                case 3u { c0=vec3(0.0,0.1,0.12); c1=vec3(0.1,0.6,0.3); c2=vec3(0.0,0.85,0.75); c3=vec3(0.7,0.95,0.7); }
+                case 4u { c0=vec3(0.05,0.01,0.0); c1=vec3(0.7,0.1,0.0); c2=vec3(0.95,0.55,0.1); c3=vec3(1.0,0.85,0.35); }
+                case 5u { c0=vec3(0.1,0.0,0.2); c1=vec3(0.15,0.2,0.7); c2=vec3(0.0,0.7,0.9); c3=vec3(0.85,0.95,1.0); }
+                case 6u { c0=vec3(0.05,0.05,0.05); c1=vec3(0.35,0.35,0.35); c2=vec3(0.67,0.67,0.67); c3=vec3(1.0,1.0,1.0); }
+                default { c0=col; c1=col; c2=col; c3=col; }
+            }
+            let s = t * 3.0;
+            if (s < 1.0) { mapped = mix(c0, c1, s); }
+            else if (s < 2.0) { mapped = mix(c1, c2, s - 1.0); }
+            else { mapped = mix(c2, c3, s - 2.0); }
+        }
+
+        return VSOut(clip, mapped + 0.1, qOff, world);
+    }
+
+    // ---------------------------------------------------------
+    // STANDARD PROJECTION (Modes 0, 1, 2, 3)
+    // ---------------------------------------------------------
+
     let raw0 = bitcast<u32>(pk.x); 
     let raw1 = bitcast<u32>(pk.y); 
     let raw2 = bitcast<u32>(pk.z); 
-    let rawCount = bitcast<u32>(pk.w); // Density completely baked into float 3!
+    let rawCount = bitcast<u32>(pk.w); 
 
     let p0 = vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
     let p1 = vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
@@ -816,6 +925,14 @@ fn vs(
 
     if (R.mode < 0.5) {
         world = (p0*R.s0 + p1*R.s1 - vec3(R.center)) * R.scale;
+        // Nibble4: p0=(na,nb,0), p1=(nc,nd,0). Synthesize z from inter-pair distance.
+        // Points where pair1 ≈ pair2 cluster at z=0; dissimilar pairs push outward.
+        if (R.isNibble4 > 0.5) {
+            let dx = p0.x - p1.x;
+            let dy = p0.y - p1.y;
+            let dz = sqrt(dx*dx + dy*dy);
+            world.z = (dz - 7.0) * R.s1 * R.scale * 0.7;
+        }
     } else if (R.mode < 1.5) {
         let ZCOLS = 4u; let D = 16.0;
         let iz0=u32(p0.z); let iz1=u32(p1.z);
@@ -824,14 +941,13 @@ fn vs(
         let px = fx0*R.stepX0 + fx1*R.stepX1;
         let py = fy0*R.stepY0 + fy1*R.stepY1;
         world = vec3((px - R.tiledCenterX) * R.tiledScale, (py - R.tiledCenterY) * R.tiledScale, 0.0);
-    } else {
+    } else if (R.mode < 2.5) {
         let ZCOLS = 4u; let D = 16.0;
         let iz0 = u32(p0.z);
         let flatX = f32(iz0 % ZCOLS) * D + p0.x;
         let flatY = f32(iz0 / ZCOLS) * D + p0.y;
 
         var local = vec3(p1.x / 15.0, p1.y / 15.0, p1.z / 15.0) - 0.5;
-
         let rx = local.x * R.subRotCosY - local.z * R.subRotSinY;
         let rz = local.x * R.subRotSinY + local.z * R.subRotCosY;
         local = vec3(rx, local.y, rz);
@@ -847,11 +963,21 @@ fn vs(
         world = vec3((px - R.tiledCenterX) * R.tiledScale, (py - R.tiledCenterY) * R.tiledScale, pz * R.tiledScale);
     }
 
-    // UMAP blend: morph toward UMAP 2D position when mode==3 or blend > 0
-    if (R.mode > 2.5) {
+    if (R.mode > 2.5 && R.mode < 3.5) {
         let umapWorld = vec3(umapPos.x * 5.0, umapPos.y * 5.0, 0.0);
-        let spatialWorld = (p0*R.s0 + p1*R.s1 - vec3(R.center)) * R.scale;
-        world = mix(spatialWorld, umapWorld, R.umapBlend);
+        var spatialWorld = (p0*R.s0 + p1*R.s1 - vec3(R.center)) * R.scale;
+        if (R.isNibble4 > 0.5) {
+            let dx = p0.x - p1.x;
+            let dy = p0.y - p1.y;
+            spatialWorld.z = (sqrt(dx*dx + dy*dy) - 7.0) * R.s1 * R.scale * 0.7;
+        }
+        // Intra-cell offset: jitter points within their UMAP neighborhood
+        // Uses fractional meso position as a deterministic offset
+        let cellSpread = 0.08;
+        let ox = (p1.x / 15.0 - 0.5) * cellSpread * 5.0;
+        let oy = (p1.y / 15.0 - 0.5) * cellSpread * 5.0;
+        let umapJittered = umapWorld + vec3(ox, oy, 0.0);
+        world = mix(spatialWorld, umapJittered, R.umapBlend);
     }
 
     let gravCenter = vec3(R.gravTargetX, R.gravTargetY, R.gravTargetZ);
@@ -987,7 +1113,7 @@ struct RParams {
     aabbMaxZ: f32, aabbMode: f32, csgMode: f32, gizmoAlpha: f32,
     palette: f32, pulsePhase: f32, selectionActive: f32, densityStrength: f32,
     densityCurve: f32, maxCount: f32, densityThreshold: f32, densityGamma: f32,
-    umapBlend: f32, _upad0: f32, _upad1: f32, _upad2: f32,
+    umapBlend: f32, isNibble4: f32, _upad1: f32, _upad2: f32,
 };
 @group(0) @binding(0) var<uniform> R: RParams;
 
@@ -1027,7 +1153,7 @@ struct RParams {
     aabbMaxZ: f32, aabbMode: f32, csgMode: f32, gizmoAlpha: f32,
     palette: f32, pulsePhase: f32, selectionActive: f32, densityStrength: f32,
     densityCurve: f32, maxCount: f32, densityThreshold: f32, densityGamma: f32,
-    umapBlend: f32, _upad0: f32, _upad1: f32, _upad2: f32,
+    umapBlend: f32, isNibble4: f32, _upad1: f32, _upad2: f32,
 };
 
 struct SelectRect {
@@ -1271,12 +1397,11 @@ self.onmessage=function(e){
 
 let umapWorker = null;
 let umapReady = false;
-let umapCellKeys = null;   // Int32Array: flat [mx,my,mz, mx,my,mz, ...]
+let umapCellKeys = null;   // Int32Array: flat[mx,my,mz, mx,my,mz, ...]
 let umapCellCount = 0;
 let umapEmbedding = null;  // Float32Array: [x,y, x,y, ...] per cell
 let umapPosBuf = null;     // GPU vertex buffer for UMAP positions
 let umapSettings = { neighbors: 15, epochs: 200, minDist: 0.1 };
-let umapDataHash = '';     // detect staleness
 
 function createUMAPWorker() {
     if (umapWorker) { umapWorker.terminate(); umapWorker = null; }
@@ -1314,39 +1439,56 @@ async function extractOccupiedCells() {
     await rb.mapAsync(GPUMapMode.READ);
     const counts = new Uint32Array(rb.getMappedRange());
     
-    // Walk the 16M-entry count table, collect occupied cells
-    const cells = [];
+    const cells =[];
+    const isNibble4 = state.format === 'nibble4';
     for (let key = 0; key < counts.length; key++) {
         if (counts[key] > 0) {
             const mx = key & 0xFF;
             const my = (key >> 8) & 0xFF;
             const mz = (key >> 16) & 0xFF;
-            cells.push(mx, my, mz);
+            if (isNibble4) {
+                const na = mx >> 4;
+                const nc = mx & 0xF;
+                const nb = my >> 4;
+                const nd = my & 0xF;
+                cells.push(na, nb, nc, nd);
+            } else {
+                cells.push(mx, my, mz);
+            }
         }
     }
     rb.unmap(); rb.destroy();
     
     umapCellKeys = new Int32Array(cells);
-    umapCellCount = cells.length / 3;
+    umapCellCount = cells.length / (isNibble4 ? 4 : 3);
     console.log(`UMAP: extracted ${umapCellCount} occupied cells`);
     return umapCellCount;
 }
 
 async function populateUMAPPositions() {
-    // After UMAP completes, map each rendered point to its UMAP position
     if (!device || !outputBuf || !umapEmbedding || pointCount === 0) return;
     
-    // Build a lookup: mesoKey → UMAP position
+    const isNibble4 = state.format === 'nibble4';
     const keyToPos = new Map();
     for (let i = 0; i < umapCellCount; i++) {
-        const mx = umapCellKeys[i * 3];
-        const my = umapCellKeys[i * 3 + 1];
-        const mz = umapCellKeys[i * 3 + 2];
-        const key = (mz << 16) | (my << 8) | mx;
+        let key;
+        if (isNibble4) {
+            const na = umapCellKeys[i * 4];
+            const nb = umapCellKeys[i * 4 + 1];
+            const nc = umapCellKeys[i * 4 + 2];
+            const nd = umapCellKeys[i * 4 + 3];
+            const mx = (na << 4) | nc;
+            const my = (nb << 4) | nd;
+            key = (0 << 16) | (my << 8) | mx;
+        } else {
+            const mx = umapCellKeys[i * 3];
+            const my = umapCellKeys[i * 3 + 1];
+            const mz = umapCellKeys[i * 3 + 2];
+            key = (mz << 16) | (my << 8) | mx;
+        }
         keyToPos.set(key, [umapEmbedding[i * 2], umapEmbedding[i * 2 + 1]]);
     }
     
-    // Readback the packed output to extract each point's meso key
     const readSize = pointCount * BYTES_PER_POINT;
     const rb = device.createBuffer({ size: readSize, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = device.createCommandEncoder();
@@ -1355,7 +1497,6 @@ async function populateUMAPPositions() {
     await rb.mapAsync(GPUMapMode.READ);
     const packed = new Float32Array(rb.getMappedRange());
     
-    // Build UMAP position buffer: 2 floats per point
     const positions = new Float32Array(pointCount * 2);
     for (let i = 0; i < pointCount; i++) {
         const raw0 = new Uint32Array(packed.buffer, packed.byteOffset + i * 16, 1)[0];
@@ -1370,7 +1511,6 @@ async function populateUMAPPositions() {
     }
     rb.unmap(); rb.destroy();
     
-    // Upload to GPU
     device.queue.writeBuffer(umapPosBuf, 0, positions);
     console.log(`UMAP positions baked for ${pointCount} points`);
 }
@@ -1405,7 +1545,6 @@ async function triggerUMAP() {
         } else if (msg.type === 'complete') {
             showUMAPProgress(false);
             
-            // Normalize embedding to [-1, 1]
             const emb = msg.embedding;
             let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
             for (let i = 0; i < umapCellCount; i++) {
@@ -1427,7 +1566,6 @@ async function triggerUMAP() {
             
             document.getElementById('umapStatus').textContent = `${umapCellCount} cells mapped`;
             
-            // Auto-switch to UMAP mode
             state.mode = 3;
             document.getElementById('selMode').value = '3';
             
@@ -1444,14 +1582,15 @@ async function triggerUMAP() {
     };
     
     const k = Math.min(umapSettings.neighbors, cellCount - 1);
+    const isNibble4 = state.format === 'nibble4';
     worker.postMessage({
         cells: umapCellKeys,
         cellCount: umapCellCount,
-        gridSize: 256,
+        gridSize: isNibble4 ? 16 : 256,
         nNeighbors: k,
         nEpochs: umapSettings.epochs,
         minDist: umapSettings.minDist,
-        dims: 3
+        dims: isNibble4 ? 4 : 3
     });
     
     document.getElementById('umapStatus').textContent = `Computing (${cellCount} cells)…`;
@@ -1460,6 +1599,7 @@ async function triggerUMAP() {
 const FORMAT_ID = {
     'uint32':0,'int32':1,'uint16':2,'int16':3,'uint8':4,'int8':5,'uint4':6,'int4':7,
     'fp32':8,'fp64':9,'fp16':10,'bf16':11,'fp8_e4m3':12,'fp8_e5m2':13,'fp4':14,
+    'nibble4':15,
     'img_rgb':4,'img_raw':4
 };
 
@@ -1479,12 +1619,12 @@ let state = {
 };
 
 function getWordSize(f) {
-    if (['uint16','int16','fp16','bf16'].includes(f)) return 2;
+    if (['uint16','int16','fp16','bf16','nibble4'].includes(f)) return 2;
     if (['uint8','int8','fp8_e4m3','fp8_e5m2','fp4','uint4','int4','img_rgb','img_raw'].includes(f)) return 1;
     if (f === 'fp64') return 8;
     return 4;
 }
-function getByteStep(f) { return f.endsWith('4') ? 2 : getWordSize(f) * 3; }
+function getByteStep(f) { return f === 'nibble4' ? 2 : (f.endsWith('4') ? 2 : getWordSize(f) * 3); }
 
 function computeInflation() {
     const g = state.gaps, p = state.inflate;
@@ -1576,7 +1716,7 @@ function applyCamRadius(newRadius) {
 function getMVP(asp) {
     const sp=Math.sin(camPhi),cp=Math.cos(camPhi),st=Math.sin(camTheta),ct=Math.cos(camTheta);
     const eye=[camTarget[0]+camRadius*sp*ct, camTarget[1]+camRadius*cp, camTarget[2]+camRadius*sp*st];
-    return mat4Mul(mat4Persp(Math.PI/3, asp, 0.01, 1000), mat4LookAt(eye, camTarget, [0,1,0]));
+    return mat4Mul(mat4Persp(Math.PI/3, asp, 0.01, 1000), mat4LookAt(eye, camTarget,[0,1,0]));
 }
 
 // =============================================================================
@@ -1586,7 +1726,7 @@ function getMVP(asp) {
 let device, context, canvasEl, canvasFmt;
 let computePipeline, bakePipeline, renderPipeline, wirePipeline, selectPipeline, clearSelectPipeline, reducePipeline, densityEditPipeline;
 let rawDataBuf, bitTableBuf, outputBuf, indirectBuf, computeUniformBuf, bakeUniformBuf;
-let countTableBuf, maxCountBuf, undoCountTableBuf, densityEditUniformBuf;
+let countTableBuf, maxCountBuf, undoCountTableBuf, densityEditUniformBuf, dualStatsBuf;
 let renderUniformBuf, quadVBuf, quadIBuf, wireVBuf;
 let selectUniformBuf;
 let computeBGL, bakeBGL, renderBGL, selectBGL, reduceBGL, densityEditBGL;
@@ -1617,7 +1757,6 @@ async function initWebGPU() {
     mkPipelines();
     mkStaticBufs();
 
-    // Mouse Controls
     canvasEl.addEventListener('mousedown', e => {
         if (e.button === 0 && e.shiftKey) {
             isSelecting = true;
@@ -1709,6 +1848,7 @@ function mkPipelines() {
         {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
         {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
         {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
+        {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
     ]});
     computePipeline = device.createComputePipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[computeBGL]}),
@@ -1729,6 +1869,7 @@ function mkPipelines() {
     const rs = device.createShaderModule({code: RENDER_WGSL});
     renderBGL = device.createBindGroupLayout({ entries:[
         {binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},
+        {binding:1,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'read-only-storage'}},
     ]});
     renderPipeline = device.createRenderPipeline({
         layout: device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
@@ -1812,6 +1953,11 @@ function mkStaticBufs() {
     bitTableBuf = device.createBuffer({size:BIT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     countTableBuf = device.createBuffer({size:COUNT_TABLE_SIZE,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     maxCountBuf = device.createBuffer({size:4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+    
+    dualStatsBuf = device.createBuffer({
+        size: 16384, // 512 elements * 8 uints * 4 bytes
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    });
 
     selectUniformBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     densityEditUniformBuf = device.createBuffer({size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -1830,7 +1976,6 @@ function mkStaticBufs() {
         size: rawBufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     
-    // UMAP: per-point 2D positions (float32x2), max 2M points = 16MB
     const umapBufSize = Math.min(maxOutBytes / 2, 16 * 1024 * 1024);
     umapPosBuf = device.createBuffer({
         size: umapBufSize, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -1885,6 +2030,7 @@ async function runCompute() {
     const statsEl = document.getElementById('stats');
     const initEnc = device.createCommandEncoder();
     initEnc.clearBuffer(bitTableBuf, 0, BIT_TABLE_SIZE);
+    initEnc.clearBuffer(dualStatsBuf, 0, 16384);
     if (state.densityMode === 0) { initEnc.clearBuffer(countTableBuf, 0, COUNT_TABLE_SIZE); }
     device.queue.submit([initEnc.finish()]);
     device.queue.writeBuffer(indirectBuf, 0, indirectResetData);
@@ -1901,6 +2047,7 @@ async function runCompute() {
         { binding: 3, resource: { buffer: indirectBuf } },
         { binding: 4, resource: { buffer: computeUniformBuf } },
         { binding: 5, resource: { buffer: countTableBuf } },
+        { binding: 6, resource: { buffer: dualStatsBuf } },
     ]});
 
     for (let chunk = 0; chunk < totalChunks; chunk++) {
@@ -2006,6 +2153,7 @@ function ensureRenderBindGroup() {
     if (renderBG) return;
     renderBG = device.createBindGroup({ layout:renderBGL, entries:[
         {binding:0,resource:{buffer:renderUniformBuf}},
+        {binding:1,resource:{buffer:dualStatsBuf}},
     ]});
 }
 
@@ -2028,13 +2176,13 @@ function buildWireVerts(sn) {
     function edge(a, b, r, g, bl, al) { v.push(a[0],a[1],a[2], r,g,bl,al, b[0],b[1],b[2], r,g,bl,al); }
 
     if (state.slabEnabled) {
-        const up = (Math.abs(sn[1]) < 0.99) ? [0,1,0] :[1,0,0];
+        const up = (Math.abs(sn[1]) < 0.99) ?[0,1,0] :[1,0,0];
         let t1 = [sn[1]*up[2]-sn[2]*up[1], sn[2]*up[0]-sn[0]*up[2], sn[0]*up[1]-sn[1]*up[0]];
         const len1 = Math.sqrt(t1[0]*t1[0]+t1[1]*t1[1]+t1[2]*t1[2]);
         if (len1 > 0) { t1[0]/=len1; t1[1]/=len1; t1[2]/=len1; }
         let t2 = [sn[1]*t1[2]-sn[2]*t1[1], sn[2]*t1[0]-sn[0]*t1[2], sn[0]*t1[1]-sn[1]*t1[0]];
 
-        for (const sign of [-1, 1]) {
+        for (const sign of[-1, 1]) {
             const d = state.slabPosition + sign * state.slabThickness * 0.5;
             const cx=sn[0]*d, cy=sn[1]*d, cz=sn[2]*d;
             const c =[];
@@ -2048,8 +2196,7 @@ function buildWireVerts(sn) {
     if (state.aabbEnabled !== 0) {
         const mn=state.aabbMin, mx=state.aabbMax;
         const c =[
-            [mn[0],mn[1],mn[2]],[mx[0],mn[1],mn[2]],[mn[0],mx[1],mn[2]],[mx[0],mx[1],mn[2]],
-            [mn[0],mn[1],mx[2]],[mx[0],mn[1],mx[2]],[mn[0],mx[1],mx[2]],[mx[0],mx[1],mx[2]],
+            [mn[0],mn[1],mn[2]],[mx[0],mn[1],mn[2]],[mn[0],mx[1],mn[2]],[mx[0],mx[1],mn[2]],[mn[0],mn[1],mx[2]],[mx[0],mn[1],mx[2]],[mn[0],mx[1],mx[2]],[mx[0],mx[1],mx[2]],
         ];
         const col =[0,1,0.4,1];
         const edges = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
@@ -2060,7 +2207,7 @@ function buildWireVerts(sn) {
 
 function render() {
     requestAnimationFrame(render);
-    if (!device || !outputBuf || pointCount===0) return;
+    if (!device || (!outputBuf && state.mode < 3.5)) return;
     const w=canvasEl.width, h=canvasEl.height;
     if (w===0||h===0) return;
 
@@ -2099,6 +2246,7 @@ function render() {
     ruData[60]=state.densityCurve; ruData[61]=maxCountValue; ruData[62]=state.densityThreshold;
     ruData[63]=state.densityGamma;
     ruData[64]=state.umapBlend;
+    ruData[65]=(state.format === 'nibble4') ? 1.0 : 0.0;
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
@@ -2117,7 +2265,12 @@ function render() {
     pass.setVertexBuffer(1, outputBuf);
     pass.setVertexBuffer(2, umapPosBuf);
     pass.setIndexBuffer(quadIBuf, 'uint16');
-    pass.drawIndexedIndirect(indirectBuf, 0);
+
+    if (state.mode === 4 || state.mode === 5) {
+        pass.drawIndexed(6, 256, 0, 0, 0); 
+    } else if (pointCount > 0) {
+        pass.drawIndexedIndirect(indirectBuf, 0);
+    }
 
     if (state.gizmoAlpha > 0.01 && (state.slabEnabled || state.aabbEnabled !== 0)) {
         const wv = buildWireVerts(sn);
@@ -2371,11 +2524,20 @@ function setFormat(f){
 function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=le?'le':'be';runCompute();}
 function setMode(m){
     if (m === 3 && !umapReady) {
-        // Auto-trigger UMAP if not yet computed
         triggerUMAP();
         return;
     }
+    // Modes 4/5 only meaningful for nibble4
+    if ((m === 4 || m === 5) && state.format !== 'nibble4') {
+        console.log('Dual stats modes require nibble4 format');
+        return;
+    }
     state.mode=m;document.getElementById('selMode').value=String(m);state.subRotX=0;state.subRotY=0;
+    // Auto-snap camera for flat 2D modes
+    if (m === 4 || m === 5) {
+        camPhi = 0.01; camTheta = 0; camRadius = 12;
+        camTarget = [0, 0, 0];
+    }
 }
 function setCompand(c) {
     state.compandCurve = c;
@@ -2622,7 +2784,6 @@ async function applyDensityEdit(mode, value) {
         return;
     }
 
-    // Auto-enable density rendering if too low to see results
     if (state.densityStrength < 0.3) {
         state.densityStrength = 0.7;
         document.getElementById('sDens').value = 0.7;
@@ -2631,7 +2792,6 @@ async function applyDensityEdit(mode, value) {
 
     snapshotCountTable();
 
-    // Dispatch density edit shader
     device.queue.writeBuffer(densityEditUniformBuf, 0, new Uint32Array([pointCount, mode, value, 0]));
     const bg = device.createBindGroup({ layout: densityEditBGL, entries:[
         {binding:0, resource:{buffer:outputBuf}},
@@ -2646,7 +2806,6 @@ async function applyDensityEdit(mode, value) {
     pass.end();
     device.queue.submit([enc.finish()]);
 
-    // Update maxCount and re-bake
     await runMaxCountReduction();
     runBakePass();
 
