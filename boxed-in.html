@@ -865,6 +865,8 @@ class LogicalCube {
         this.scale = 1.0;
         this.isSelected = false;
         this.isDying = false;
+        this.matchPhase = 0; // 0=none, 1=highlight, 2=inflate, 3=popping
+        this.matchTime = 0;  // timestamp when phase started
     }
 }
 
@@ -1506,6 +1508,20 @@ class InstancedCubeRenderer {
         this.cursor.add(this.cursorGlow);
         
         this.scene.add(this.cursor);
+        
+        // Flash overlay for matched cubes — additive white glow
+        const flashMat = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.35,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+        this.flashMesh = new THREE.InstancedMesh(this.geometry, flashMat, this.maxInstances);
+        this.flashMesh.frustumCulled = false;
+        this.flashMesh.renderOrder = 1; // Render after regular cubes
+        this.scene.add(this.flashMesh);
+        
         this.updateTextures(false);
     }
 
@@ -1559,6 +1575,24 @@ class InstancedCubeRenderer {
         Object.values(this.meshes).forEach(mesh => {
             mesh.instanceMatrix.needsUpdate = true;
         });
+        
+        // Flash overlay for matched/dying cubes
+        this.flashMesh.count = 0;
+        const flashPulse = Math.sin(performance.now() * 0.013) * 0.5 + 0.5; // ~2Hz
+        this.flashMesh.material.opacity = 0.15 + 0.25 * flashPulse;
+        
+        logicalCubes.forEach(cube => {
+            if ((cube.matchPhase > 0 || cube.isDying) && cube.scale > 0.05) {
+                const fi = this.flashMesh.count;
+                this.dummy.position.copy(cube.position);
+                this.dummy.rotation.set(0, cube.rotationY, 0);
+                this.dummy.scale.setScalar(cube.scale * 1.02); // Slightly larger
+                this.dummy.updateMatrix();
+                this.flashMesh.setMatrixAt(fi, this.dummy.matrix);
+                this.flashMesh.count++;
+            }
+        });
+        if (this.flashMesh.count > 0) this.flashMesh.instanceMatrix.needsUpdate = true;
         
         // Update cursor
         const selected = logicalCubes.find(c => c.isSelected);
@@ -1615,7 +1649,7 @@ cubeRenderer.updateTextures(usingNumbers);
 
 // Utility Functions
 function wouldCreateMatch(plane, gridX, gridY, gridZ, colorKey) {
-    const active = logicalCubes.filter(c => !c.isDying);
+    const active = logicalCubes.filter(c => !c.isDying && c.matchPhase === 0);
     let neighbors = 0;
     const required = minMatchSize - 1;
     for (const c of active) {
@@ -1777,7 +1811,7 @@ function updateRowArrays() {
     rightWallRows = [[], [], [], [], []];
     floorStrips = [[], [], [], [], []];
     
-    logicalCubes.filter(c => !c.isDying).forEach(c => {
+    logicalCubes.filter(c => !c.isDying && c.matchPhase === 0).forEach(c => {
         if (c.plane === 'left') leftWallRows[c.gridY].push(c);
         else if (c.plane === 'right') rightWallRows[c.gridY].push(c);
         else floorStrips[c.gridX].push(c);
@@ -1789,7 +1823,7 @@ function areNeighbors(c1, c2) {
 }
 
 function findMatches() {
-    const active = logicalCubes.filter(c => !c.isDying);
+    const active = logicalCubes.filter(c => !c.isDying && c.matchPhase === 0);
     const visited = new Set();
     const groups = [];
     
@@ -1814,7 +1848,7 @@ function findMatches() {
 
 function detectLineClears() {
     let lineClears = 0;
-    const dying = logicalCubes.filter(c => c.isDying);
+    const dying = logicalCubes.filter(c => c.isDying || c.matchPhase > 0);
     if (dying.length < gridSize) return 0;
     
     const checkLine = (plane, fixedKey, fixedVal, varKey) => {
@@ -1863,19 +1897,39 @@ function processMatches() {
     
     let cornerCleared = false;
     let allPlanes = new Set();
+    let matchedCubes = [];
     
+    // Phase 1: Highlight all matched cubes
     matches.forEach((group, gi) => {
         if (hasUserInteracted) goalsManager.recordMatch(group);
-        group.forEach((c, ci) => {
-            if (!c.isDying) {
-                c.isDying = true;
-                particles.explode(c.position, colorMap[c.colorKey]);
-                if (hasUserInteracted) soundManager.explode(ci * 30, gi);
+        group.forEach(c => {
+            if (!c.isDying && c.matchPhase === 0) {
+                c.matchPhase = 1;
                 allPlanes.add(c.plane);
                 if (c.gridX === 0 && c.gridY === 0 && c.gridZ === 0) cornerCleared = true;
+                matchedCubes.push(c);
             }
         });
     });
+    
+    // Phase 2: After highlight pause, inflate
+    setTimeout(() => {
+        matchedCubes.forEach(c => { c.matchPhase = 2; });
+    }, 200);
+    
+    // Phase 3: After inflate, pop — particles, sounds, mark dying
+    setTimeout(() => {
+        matches.forEach((group, gi) => {
+            group.forEach((c, ci) => {
+                if (c.matchPhase > 0 && !c.isDying) {
+                    c.isDying = true;
+                    c.matchPhase = 0;
+                    particles.explode(c.position, colorMap[c.colorKey]);
+                    if (hasUserInteracted) soundManager.explode(ci * 30, gi);
+                }
+            });
+        });
+    }, 300);
     
     if (allPlanes.size === 3 || cornerCleared) {
         const bonus = cornerCleared ? 500 : 250;
@@ -1885,7 +1939,7 @@ function processMatches() {
     }
     
     if (comboLevel === 1 && lastSwappedCubes.cube1 && lastSwappedCubes.cube2) {
-        if (lastSwappedCubes.cube1.isDying && lastSwappedCubes.cube2.isDying && hasUserInteracted) {
+        if (lastSwappedCubes.cube1.matchPhase > 0 && lastSwappedCubes.cube2.matchPhase > 0 && hasUserInteracted) {
             score += 10; animateScore(score);
             goalsManager.recordSmartMove(); soundManager.smartMove();
             showBonus('SMART MOVE! +10', 'smart-move');
@@ -1901,13 +1955,14 @@ function processMatches() {
         showBonus(lineClears > 1 ? `${lineClears}x LINE CLEAR! +${lineBonus}` : `LINE CLEAR! +${lineBonus}`, 'line-clear');
     }
     
+    // Wait for highlight(200) + inflate(100) + shrink(~250) before cleanup
     setTimeout(() => {
         // Remove dead cubes from array
         logicalCubes = logicalCubes.filter(c => !c.isDying);
         updateRowArrays();
         applyGravity();
         setTimeout(() => processMatches(), 350);
-    }, 250);
+    }, 600);
 }
 
 function applyGravity() {
@@ -2276,9 +2331,25 @@ function animate() {
     if (globalRotationPhase > Math.PI * 2) globalRotationPhase -= Math.PI * 2;
     
     // Update Logical Cubes
+    const now = performance.now();
     logicalCubes.forEach(cube => {
-        if (cube.isDying) {
-            cube.scale = Math.max(0, cube.scale - 0.08); // Shrink effect
+        // Subtle scale pulse for matched/dying cubes
+        if (cube.matchPhase > 0 || cube.isDying) {
+            const flash = Math.sin(now * 0.013) * 0.5 + 0.5; // ~2Hz pulse, 0–1
+            
+            if (cube.isDying) {
+                // Shrink while pulsing
+                cube.scale = Math.max(0, cube.scale - 0.08);
+                if (cube.scale > 0.05) {
+                    cube.scale *= (0.95 + 0.05 * flash);
+                }
+            } else if (cube.matchPhase === 2) {
+                // Inflate — quick puff
+                cube.scale += (1.2 - cube.scale) * 0.3;
+            } else {
+                // Phase 1: Subtle pulsing highlight — 0.95 to 1.05
+                cube.scale = 0.95 + 0.1 * flash;
+            }
         } else {
             // Position Lerp
             cube.position.lerp(cube.targetPos, 0.12);
