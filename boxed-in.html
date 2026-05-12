@@ -290,6 +290,7 @@
         }
         .bonus-message.line-clear { color: #00ff88; text-shadow: 0 0 15px #00ff88, 0 0 30px #00ffcc; }
         .bonus-message.boxed-in { color: #ff00ff; text-shadow: 0 0 15px #ff00ff, 0 0 30px #cc00ff; }
+        .bonus-message.panel-clear { color: #00ffdd; text-shadow: 0 0 20px #00ffdd, 0 0 40px #00aaff; font-size: clamp(1.8rem, 5.5vw, 2.8rem); }
         .bonus-message.smart-move { color: #ffdd00; text-shadow: 0 0 15px #ffaa00, 0 0 30px #ff8800; }
 
         /* --- GOALS PANEL --- */
@@ -846,6 +847,13 @@ class RetroSoundManager {
 const soundManager = new RetroSoundManager();
 
 // ============================================
+// GAME SPEED COEFFICIENT
+// ============================================
+// Multiplier for all gameplay timing: 1.0 = normal, 0.5 = fast, 2.0 = slow
+// Near-zero used internally by settleBoard() for instant init
+let gameSpeed = 1.0;
+
+// ============================================
 // LOGICAL DATA STRUCTURES
 // ============================================
 
@@ -892,6 +900,7 @@ class GoalsManager {
             'U-shape':  { name: 'U-Shape',    icon: '🏆', description: 'Big U (7 cubes)' },
             'bridge':   { name: 'Bridge',     icon: '🌉', description: 'Match spans 2 faces' },
             'trifecta': { name: 'Trifecta',   icon: '👑', description: 'Match spans all 3 faces' },
+            'panel-clear': { name: 'Panel Clear', icon: '💎', description: 'Entire 5×5 face cleared' },
             'blob':     { name: 'Blob',       icon: '🫠', description: 'Large irregular (6+)' },
         };
         this.patterns = {
@@ -919,7 +928,7 @@ class GoalsManager {
         for (const key of Object.keys(this.shapes)) shapes[key] = { count: 0, firstDate: null };
         return {
             shapes,
-            stats: { totalCubesCleared: 0, totalMatches: 0, maxCombo: 0, boxedInBonuses: 0, smartMoves: 0, lineClears: 0 },
+            stats: { totalCubesCleared: 0, totalMatches: 0, maxCombo: 0, boxedInBonuses: 0, smartMoves: 0, lineClears: 0, panelClears: 0 },
             firstPlayed: new Date().toISOString(),
             lastPlayed: new Date().toISOString()
         };
@@ -1011,6 +1020,14 @@ class GoalsManager {
     recordBoxedIn() { this.data.stats.boxedInBonuses++; this.save(); }
     recordSmartMove() { this.data.stats.smartMoves++; this.save(); }
     recordLineClears(count) { this.data.stats.lineClears += count; this.save(); }
+    recordPanelClear() {
+        this.data.stats.panelClears = (this.data.stats.panelClears || 0) + 1;
+        const wasNew = this.data.shapes['panel-clear'].count === 0;
+        this.data.shapes['panel-clear'].count++;
+        if (!this.data.shapes['panel-clear'].firstDate) this.data.shapes['panel-clear'].firstDate = new Date().toISOString();
+        this.save();
+        if (wasNew) this.queueToast('panel-clear');
+    }
     updateMaxCombo(combo) { if (combo > this.data.stats.maxCombo) { this.data.stats.maxCombo = combo; this.save(); } }
     
     queueToast(key) {
@@ -1078,6 +1095,7 @@ class GoalsManager {
             <div class="stat-item">BOXED IN: <span>${s.boxedInBonuses}</span></div>
             <div class="stat-item">Smart Moves: <span>${s.smartMoves || 0}</span></div>
             <div class="stat-item">Line Clears: <span>${s.lineClears || 0}</span></div>
+            <div class="stat-item">Panel Clears: <span>${s.panelClears || 0}</span></div>
         `;
     }
 }
@@ -1724,6 +1742,39 @@ function initBoard() {
     for (let y = 0; y < gridSize; y++) for (let z = 0; z < gridSize; z++) createCube(-0.6, y * spacing + offset, z * spacing + offset, 'left', y);
     for (let y = 0; y < gridSize; y++) for (let x = 0; x < gridSize; x++) createCube(x * spacing + offset, y * spacing + offset, -0.6, 'right', y);
     for (let x = 0; x < gridSize; x++) for (let z = 0; z < gridSize; z++) createCube(x * spacing + offset, -0.6, z * spacing + offset, 'floor', x);
+    
+    // Let the game play itself until stable — no matches remain
+    settleBoard();
+}
+
+function settleBoard() {
+    let rounds = 0;
+    const maxRounds = 100;
+    
+    while (rounds < maxRounds) {
+        const matches = findMatches();
+        if (matches.length === 0) break;
+        
+        // Remove matched cubes — no animation, no scoring, no sounds
+        matches.forEach(group => {
+            group.forEach(c => {
+                const idx = logicalCubes.indexOf(c);
+                if (idx !== -1) logicalCubes.splice(idx, 1);
+            });
+        });
+        
+        // Rebuild row arrays, apply gravity (creates new cubes), rebuild again
+        updateRowArrays();
+        applyGravity();
+        updateRowArrays();
+        
+        // Snap all cube positions to their targets (no animation loop running)
+        logicalCubes.forEach(c => c.position.copy(c.targetPos));
+        
+        rounds++;
+    }
+    
+    if (rounds > 0) console.log(`settleBoard: resolved in ${rounds} round(s)`);
 }
 
 initBoard();
@@ -1803,7 +1854,7 @@ function trySwap(c1, c2) {
     updateRowArrays();
     lastSwappedCubes = { cube1: c1, cube2: c2 };
     selectCubeLogic(null);
-    setTimeout(() => processMatches(), 300);
+    setTimeout(() => processMatches(), 300 * gameSpeed);
 }
 
 function updateRowArrays() {
@@ -1878,7 +1929,7 @@ function processMatches() {
             comboRunningTotal = 0;
         }
         if (comboLevel > 1) resetComboDisplay();
-        else setTimeout(() => { document.getElementById('combo-display').textContent = ''; }, 500);
+        else setTimeout(() => { document.getElementById('combo-display').textContent = ''; }, 500 * gameSpeed);
         return;
     }
     
@@ -1915,7 +1966,7 @@ function processMatches() {
     // Phase 2: After highlight pause, inflate
     setTimeout(() => {
         matchedCubes.forEach(c => { c.matchPhase = 2; });
-    }, 200);
+    }, 200 * gameSpeed);
     
     // Phase 3: After inflate, pop — particles, sounds, mark dying
     setTimeout(() => {
@@ -1929,7 +1980,7 @@ function processMatches() {
                 }
             });
         });
-    }, 300);
+    }, 300 * gameSpeed);
     
     if (allPlanes.size === 3 || cornerCleared) {
         const bonus = cornerCleared ? 500 : 250;
@@ -1955,14 +2006,29 @@ function processMatches() {
         showBonus(lineClears > 1 ? `${lineClears}x LINE CLEAR! +${lineBonus}` : `LINE CLEAR! +${lineBonus}`, 'line-clear');
     }
     
-    // Wait for highlight(200) + inflate(100) + shrink(~250) before cleanup
+    // Panel clear: entire 5×5 face wiped in one round
+    if (hasUserInteracted) {
+        ['left', 'right', 'floor'].forEach(face => {
+            const faceTotal = logicalCubes.filter(c => c.plane === face).length;
+            const faceMatched = matchedCubes.filter(c => c.plane === face).length;
+            if (faceMatched === faceTotal && faceTotal === gridSize * gridSize) {
+                const panelBonus = 1000;
+                score += panelBonus; animateScore(score);
+                goalsManager.recordPanelClear();
+                soundManager.lineClear(); // Reuse big sound
+                showBonus('PANEL CLEAR! 💎', 'panel-clear');
+            }
+        });
+    }
+    
+    // Wait for highlight + inflate + shrink before cleanup
     setTimeout(() => {
         // Remove dead cubes from array
         logicalCubes = logicalCubes.filter(c => !c.isDying);
         updateRowArrays();
         applyGravity();
-        setTimeout(() => processMatches(), 350);
-    }, 600);
+        setTimeout(() => processMatches(), 350 * gameSpeed);
+    }, 600 * gameSpeed);
 }
 
 function applyGravity() {
@@ -2061,7 +2127,7 @@ function throbComboDisplay(level) {
         { transform: `scale(${peak})`, offset: 0.3 },
         { transform: `scale(${rest * 0.9})`, offset: 0.6 },
         { transform: `scale(${rest})`, offset: 1 }
-    ], { duration: 350, easing: 'cubic-bezier(0.175, 0.885, 0.32, 1.275)', fill: 'forwards' });
+    ], { duration: 350 * gameSpeed, easing: 'cubic-bezier(0.175, 0.885, 0.32, 1.275)', fill: 'forwards' });
 }
 
 function resetComboDisplay() {
@@ -2072,7 +2138,7 @@ function resetComboDisplay() {
     el.animate([
         { transform: `scale(${comboBaseScale})`, opacity: 1, offset: 0 },
         { transform: 'scale(0.5)', opacity: 0, offset: 1 }
-    ], { duration: 300, easing: 'ease-in', fill: 'forwards' }).onfinish = () => {
+    ], { duration: 300 * gameSpeed, easing: 'ease-in', fill: 'forwards' }).onfinish = () => {
         el.textContent = '';
         el.style.color = '';
         el.style.textShadow = '';
@@ -2136,12 +2202,12 @@ function showBonus(text, type = '') {
         // Yank off
         { opacity: 0, transform: exitTransform, top: exitTop, offset: 1 }
     ], {
-        duration: 2000,
+        duration: 2000 * gameSpeed,
         easing: 'ease-in',
         fill: 'forwards'
     });
     
-    setTimeout(() => el.remove(), 2100);
+    setTimeout(() => el.remove(), 2100 * gameSpeed);
 }
 
 // Input Handling
