@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>BOXED IN - build 0.5</title>
+    <title>BOXED IN - build 0.6</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Exo+2:wght@300;600&display=swap');
 
@@ -1336,7 +1336,7 @@ class GoalsManager {
         for (const key of Object.keys(this.shapes)) shapes[key] = { count: 0, firstDate: null };
         return {
             shapes,
-            stats: { totalCubesCleared: 0, totalMatches: 0, maxCombo: 0, boxedInBonuses: 0, tripleThreats: 0, smartMoves: 0, lineClears: 0, panelClears: 0 },
+            stats: { totalCubesCleared: 0, totalMatches: 0, maxCombo: 0, boxedInBonuses: 0, tripleThreats: 0, smartMoves: 0, lineClears: 0, panelClears: 0, lifetimeScore: 0 },
             firstPlayed: new Date().toISOString(),
             lastPlayed: new Date().toISOString()
         };
@@ -1498,6 +1498,7 @@ class GoalsManager {
         
         const s = this.data.stats;
         stats.innerHTML = `
+            <div class="stat-item">Lifetime Score: <span>${(s.lifetimeScore || 0).toLocaleString()}</span></div>
             <div class="stat-item">Cubes Cleared: <span>${s.totalCubesCleared.toLocaleString()}</span></div>
             <div class="stat-item">Total Matches: <span>${s.totalMatches.toLocaleString()}</span></div>
             <div class="stat-item">Best Combo: <span>${s.maxCombo}×</span></div>
@@ -2078,14 +2079,19 @@ const cubeRenderer = new InstancedCubeRenderer(scene);
 let usingNumbers = settingsManager.get('usingNumbers');
 let swapMode = settingsManager.get('swapMode');
 let minMatchSize = settingsManager.get('minMatchSize');
-let score = 0;
-let displayedScore = 0;
+let score = goalsManager.data.stats.lifetimeScore || 0;
+let displayedScore = score;
 let scoreAnimationId = null;
 let comboLevel = 0;
-let comboRunningTotal = 0;
+let comboCubesTotal = 0;
 let isProcessing = false;
 let hasUserInteracted = false;
 let selectedCube = null; // Reference to LogicalCube
+
+function saveLifetimeScore() {
+    goalsManager.data.stats.lifetimeScore = score;
+    goalsManager.save();
+}
 
 const flairSettings = {
     enabled: settingsManager.get('flairEnabled'),
@@ -2240,6 +2246,7 @@ function settleBoard() {
 }
 
 initBoard();
+document.getElementById('score').textContent = `Score: ${score.toLocaleString()}`;
 
 // Selection & Swapping
 function selectCubeLogic(cube) {
@@ -2295,7 +2302,7 @@ function trySwap(c1, c2) {
     
     isProcessing = true;
     soundManager.swap();
-    comboLevel = 0; comboRunningTotal = 0;
+    comboLevel = 0; comboCubesTotal = 0;
     // Clean up combo display
     if (comboThrob) { comboThrob.cancel(); comboThrob = null; }
     comboBaseScale = 1;
@@ -2392,9 +2399,11 @@ function processMatches() {
         const newRecord = bestCombo >= 3 && comboLevel > bestCombo;
         const nearRecord = bestCombo >= 3 && comboLevel >= teaserThreshold && !hitRecord;
         if (hasUserInteracted) goalsManager.updateMaxCombo(comboLevel);
-        if (comboRunningTotal > 0) {
-            score += comboRunningTotal; animateScore(score);
-            comboRunningTotal = 0;
+        if (comboCubesTotal > 0) {
+            const chainScore = comboCubesTotal * comboLevel;
+            score += chainScore; animateScore(score);
+            if (hasUserInteracted) saveLifetimeScore();
+            comboCubesTotal = 0;
         }
         if (comboLevel > 1) {
             const holdDelay = hitRecord ? 2500 : nearRecord ? 1500 : 0;
@@ -2407,8 +2416,7 @@ function processMatches() {
     comboLevel++;
     let cubesCleared = 0;
     matches.forEach(group => cubesCleared += group.length);
-    const roundScore = cubesCleared * comboLevel;
-    comboRunningTotal += roundScore;
+    comboCubesTotal += cubesCleared;
     
     if (comboLevel > 1) {
         if (hasUserInteracted) soundManager.combo(comboLevel);
@@ -2472,9 +2480,9 @@ function processMatches() {
     
     if (comboLevel === 1 && lastSwappedCubes.cube1 && lastSwappedCubes.cube2) {
         if (lastSwappedCubes.cube1.matchPhase > 0 && lastSwappedCubes.cube2.matchPhase > 0 && hasUserInteracted) {
-            score += 10; animateScore(score);
+            score += 50; animateScore(score);
             goalsManager.recordSmartMove(); soundManager.smartMove();
-            showBonus('SMART MOVE! +10', 'smart-move');
+            showBonus('SMART MOVE! +50', 'smart-move');
         }
         lastSwappedCubes = { cube1: null, cube2: null };
     }
@@ -2576,9 +2584,9 @@ function animateScore(targetScore) {
         const progress = Math.min(elapsed / duration, 1);
         const eased = 1 - Math.pow(1 - progress, 3);
         displayedScore = Math.round(startScore + (targetScore - startScore) * eased);
-        scoreEl.textContent = `Score: ${displayedScore}`;
+        scoreEl.textContent = `Score: ${displayedScore.toLocaleString()}`;
         if (progress < 1) scoreAnimationId = requestAnimationFrame(update);
-        else { displayedScore = targetScore; scoreEl.textContent = `Score: ${targetScore}`; scoreAnimationId = null; }
+        else { displayedScore = targetScore; scoreEl.textContent = `Score: ${targetScore.toLocaleString()}`; scoreAnimationId = null; }
     }
     scoreAnimationId = requestAnimationFrame(update);
 }
@@ -3258,6 +3266,8 @@ document.getElementById('reset-cancel').onclick = () => {
 };
 document.getElementById('reset-confirm-btn').onclick = () => {
     goalsManager.reset();
+    score = 0; displayedScore = 0;
+    document.getElementById('score').textContent = 'Score: 0';
     goalsManager.renderPanel(currentGoalSort);
     document.getElementById('reset-confirm').classList.remove('visible');
     soundManager.click();
