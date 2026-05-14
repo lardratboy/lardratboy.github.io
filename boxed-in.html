@@ -2389,6 +2389,7 @@ function processMatches() {
         const bestCombo = goalsManager.data.stats.maxCombo;
         const teaserThreshold = Math.ceil(bestCombo * 0.35);
         const hitRecord = bestCombo >= 3 && comboLevel >= bestCombo;
+        const newRecord = bestCombo >= 3 && comboLevel > bestCombo;
         const nearRecord = bestCombo >= 3 && comboLevel >= teaserThreshold && !hitRecord;
         if (hasUserInteracted) goalsManager.updateMaxCombo(comboLevel);
         if (comboRunningTotal > 0) {
@@ -2397,7 +2398,7 @@ function processMatches() {
         }
         if (comboLevel > 1) {
             const holdDelay = hitRecord ? 2000 : nearRecord ? 1200 : 0;
-            resetComboDisplay(holdDelay);
+            resetComboDisplay(holdDelay, newRecord);
         }
         else setTimeout(() => { document.getElementById('combo-display').textContent = ''; }, 500 * gameSpeed);
         return;
@@ -2592,7 +2593,9 @@ function throbComboDisplay(level) {
     // Combo teaser: show proximity to best combo (starts at 35% of record)
     const bestCombo = goalsManager.data.stats.maxCombo;
     const teaserThreshold = Math.ceil(bestCombo * 0.35);
-    if (bestCombo >= 3 && level >= bestCombo) {
+    if (bestCombo >= 3 && level > bestCombo) {
+        el.innerHTML = `COMBO<span class="combo-teaser">new record +${level - bestCombo}</span><span class="combo-multiplier">×${level}</span>`;
+    } else if (bestCombo >= 3 && level === bestCombo) {
         el.innerHTML = `COMBO<span class="combo-teaser">nice</span><span class="combo-multiplier">×${level}</span>`;
     } else if (bestCombo >= 3 && level >= teaserThreshold) {
         el.innerHTML = `COMBO<span class="combo-teaser">next highest ×${bestCombo}</span><span class="combo-multiplier">×${level}</span>`;
@@ -2612,24 +2615,37 @@ function throbComboDisplay(level) {
     el.style.textShadow = `0 0 15px rgb(${r}, 0, ${g}), 0 0 ${15 + level * 5}px rgb(${r}, 0, 0)`;
     
     if (comboThrob) comboThrob.cancel();
+    const throbOpts = { duration: 350 * gameSpeed, easing: 'cubic-bezier(0.175, 0.885, 0.32, 1.275)', fill: 'forwards' };
     comboThrob = el.animate([
         { transform: `scale(${rest})`, offset: 0 },
         { transform: `scale(${peak})`, offset: 0.3 },
         { transform: `scale(${rest * 0.9})`, offset: 0.6 },
         { transform: `scale(${rest})`, offset: 1 }
-    ], { duration: 350 * gameSpeed, easing: 'cubic-bezier(0.175, 0.885, 0.32, 1.275)', fill: 'forwards' });
+    ], throbOpts);
+    
+    // Counter-scale the teaser span so it stays visually steady while the rest throbs
+    const teaserSpan = el.querySelector('.combo-teaser');
+    if (teaserSpan) {
+        teaserSpan.animate([
+            { transform: `scale(${1/rest})`, offset: 0 },
+            { transform: `scale(${1/peak})`, offset: 0.3 },
+            { transform: `scale(${1/(rest * 0.9)})`, offset: 0.6 },
+            { transform: `scale(${1/rest})`, offset: 1 }
+        ], throbOpts);
+    }
 }
 
-function resetComboDisplay(holdDelay = 0) {
+function resetComboDisplay(holdDelay = 0, scaleUp = false) {
     const el = document.getElementById('combo-display');
     if (comboThrob) { comboThrob.cancel(); comboThrob = null; }
     comboBaseScale = 1;
     
-    const doShrink = () => {
+    const doExit = () => {
+        const exitScale = scaleUp ? 'scale(2.5)' : 'scale(0.5)';
         el.animate([
             { transform: 'scale(1)', opacity: 1, offset: 0 },
-            { transform: 'scale(0.5)', opacity: 0, offset: 1 }
-        ], { duration: 300 * gameSpeed, easing: 'ease-in', fill: 'forwards' }).onfinish = () => {
+            { transform: exitScale, opacity: 0, offset: 1 }
+        ], { duration: scaleUp ? 500 * gameSpeed : 300 * gameSpeed, easing: 'ease-out', fill: 'forwards' }).onfinish = () => {
             el.textContent = '';
             el.style.color = '';
             el.style.textShadow = '';
@@ -2638,9 +2654,9 @@ function resetComboDisplay(holdDelay = 0) {
     };
     
     if (holdDelay > 0) {
-        setTimeout(doShrink, holdDelay * gameSpeed);
+        setTimeout(doExit, holdDelay * gameSpeed);
     } else {
-        doShrink();
+        doExit();
     }
 }
 
