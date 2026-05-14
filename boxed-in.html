@@ -63,6 +63,18 @@
             text-shadow: 0 0 15px #ff0066;
             will-change: transform;
         }
+        .combo-teaser {
+            display: block;
+            font-size: 0.6em;
+            color: #00ffcc;
+            text-shadow: 0 0 10px #00ffcc, 0 0 25px #00aa88;
+            letter-spacing: 1.5px;
+            margin: 2px 0;
+        }
+        .combo-multiplier {
+            display: block;
+            font-size: 1.5em;
+        }
 
         .controls {
             position: absolute;
@@ -2373,12 +2385,20 @@ function processMatches() {
     const matches = findMatches();
     if (matches.length === 0) {
         isProcessing = false;
+        // Capture teaser state BEFORE updating the record
+        const bestCombo = goalsManager.data.stats.maxCombo;
+        const teaserThreshold = Math.ceil(bestCombo * 0.35);
+        const hitRecord = bestCombo >= 3 && comboLevel >= bestCombo;
+        const nearRecord = bestCombo >= 3 && comboLevel >= teaserThreshold && !hitRecord;
         if (hasUserInteracted) goalsManager.updateMaxCombo(comboLevel);
         if (comboRunningTotal > 0) {
             score += comboRunningTotal; animateScore(score);
             comboRunningTotal = 0;
         }
-        if (comboLevel > 1) resetComboDisplay();
+        if (comboLevel > 1) {
+            const holdDelay = hitRecord ? 2000 : nearRecord ? 1200 : 0;
+            resetComboDisplay(holdDelay);
+        }
         else setTimeout(() => { document.getElementById('combo-display').textContent = ''; }, 500 * gameSpeed);
         return;
     }
@@ -2568,7 +2588,17 @@ let comboBaseScale = 1;
 
 function throbComboDisplay(level) {
     const el = document.getElementById('combo-display');
-    el.textContent = `COMBO ×${level}!`;
+    
+    // Combo teaser: show proximity to best combo (starts at 35% of record)
+    const bestCombo = goalsManager.data.stats.maxCombo;
+    const teaserThreshold = Math.ceil(bestCombo * 0.35);
+    if (bestCombo >= 3 && level >= bestCombo) {
+        el.innerHTML = `COMBO<span class="combo-teaser">nice</span><span class="combo-multiplier">×${level}</span>`;
+    } else if (bestCombo >= 3 && level >= teaserThreshold) {
+        el.innerHTML = `COMBO<span class="combo-teaser">next highest ×${bestCombo}</span><span class="combo-multiplier">×${level}</span>`;
+    } else {
+        el.textContent = `COMBO ×${level}!`;
+    }
     
     // Inflate resting size with each level
     comboBaseScale = 1 + (level - 2) * 0.08; // ×2=1.0, ×3=1.08, ×4=1.16...
@@ -2590,20 +2620,28 @@ function throbComboDisplay(level) {
     ], { duration: 350 * gameSpeed, easing: 'cubic-bezier(0.175, 0.885, 0.32, 1.275)', fill: 'forwards' });
 }
 
-function resetComboDisplay() {
+function resetComboDisplay(holdDelay = 0) {
     const el = document.getElementById('combo-display');
     if (comboThrob) { comboThrob.cancel(); comboThrob = null; }
     comboBaseScale = 1;
-    // Shrink away
-    el.animate([
-        { transform: `scale(${comboBaseScale})`, opacity: 1, offset: 0 },
-        { transform: 'scale(0.5)', opacity: 0, offset: 1 }
-    ], { duration: 300 * gameSpeed, easing: 'ease-in', fill: 'forwards' }).onfinish = () => {
-        el.textContent = '';
-        el.style.color = '';
-        el.style.textShadow = '';
-        el.getAnimations().forEach(a => a.cancel());
+    
+    const doShrink = () => {
+        el.animate([
+            { transform: 'scale(1)', opacity: 1, offset: 0 },
+            { transform: 'scale(0.5)', opacity: 0, offset: 1 }
+        ], { duration: 300 * gameSpeed, easing: 'ease-in', fill: 'forwards' }).onfinish = () => {
+            el.textContent = '';
+            el.style.color = '';
+            el.style.textShadow = '';
+            el.getAnimations().forEach(a => a.cancel());
+        };
     };
+    
+    if (holdDelay > 0) {
+        setTimeout(doShrink, holdDelay * gameSpeed);
+    } else {
+        doShrink();
+    }
 }
 
 let bonusSlot = 0;
