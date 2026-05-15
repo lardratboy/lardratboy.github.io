@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>BOXED IN - build 0.6</title>
+    <title>BOXED IN - build 0.7</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Exo+2:wght@300;600&display=swap');
 
@@ -45,10 +45,30 @@
             text-transform: uppercase;
         }
 
+        #status-bar {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: clamp(0.8rem, 3.5vw, 2.5rem);
+            margin-top: 4px;
+            font-family: 'Orbitron', sans-serif;
+            min-height: 1.8em;
+        }
+
+        #blocks-counter {
+            font-size: clamp(0.8rem, 2.2vw, 1.1rem);
+            color: #88ccff;
+            text-shadow: 0 0 8px #4488ff;
+            opacity: 0;
+            transition: opacity 0.3s;
+            min-width: 3.5em;
+            text-align: right;
+        }
+        #blocks-counter.active { opacity: 1; }
+
         #score { 
             font-family: 'Orbitron', sans-serif;
             font-size: clamp(1rem, 3vw, 1.5rem); 
-            margin-top: 4px; 
             color: #ffd700;
             text-shadow: 0 0 10px #ffd700; 
         }
@@ -56,24 +76,62 @@
         #combo-display {
             font-family: 'Orbitron', sans-serif;
             font-size: clamp(0.9rem, 2.5vw, 1.3rem);
-            margin-top: 5px;
             color: #ff6b6b;
-            min-height: 1.5rem;
+            min-width: 5em;
+            text-align: left;
             font-weight: bold;
             text-shadow: 0 0 15px #ff0066;
             will-change: transform;
+            opacity: 0;
+            transition: opacity 0.2s;
         }
-        .combo-teaser {
-            display: block;
-            font-size: 0.6em;
-            color: #00ffcc;
-            text-shadow: 0 0 10px #00ffcc, 0 0 25px #00aa88;
-            letter-spacing: 1.5px;
-            margin: 2px 0;
+        #combo-display.active { opacity: 1; }
+        .combo-label { }
+        @media (max-width: 500px) {
+            .combo-label { display: none; }
         }
         .combo-multiplier {
-            display: block;
-            font-size: 1.5em;
+            display: inline-block;
+            transform-origin: left center;
+        }
+
+        #combo-teaser {
+            font-family: 'Orbitron', sans-serif;
+            font-size: clamp(0.55rem, 1.5vw, 0.75rem);
+            color: #00ffcc;
+            text-shadow: 0 0 10px #00ffcc, 0 0 25px #00aa88;
+            text-align: center;
+            min-height: 1.2em;
+            margin-top: 2px;
+            letter-spacing: 1.5px;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        #combo-teaser.active { opacity: 1; }
+
+        /* Per-round +N popup near blocks counter */
+        .blocks-popup {
+            position: absolute;
+            font-family: 'Orbitron', sans-serif;
+            font-size: clamp(0.7rem, 1.8vw, 0.9rem);
+            color: #88ccff;
+            text-shadow: 0 0 8px #4488ff;
+            pointer-events: none;
+            white-space: nowrap;
+            opacity: 0;
+            z-index: 11;
+        }
+
+        /* Chain-end score flash */
+        .chain-score-flash {
+            font-family: 'Orbitron', sans-serif;
+            font-size: clamp(0.65rem, 1.6vw, 0.8rem);
+            color: #ffd700;
+            text-shadow: 0 0 8px #ffd700;
+            text-align: center;
+            margin-top: 2px;
+            opacity: 0;
+            pointer-events: none;
         }
 
         .controls {
@@ -939,8 +997,12 @@
 
 <div id="ui-layer">
     <h1>BOXED IN</h1>
-    <div id="score">Score: 0</div>
-    <div id="combo-display"></div>
+    <div id="status-bar">
+        <div id="blocks-counter">🟦 0</div>
+        <div id="score">Score: 0</div>
+        <div id="combo-display"><span class="combo-label">COMBO </span><span class="combo-multiplier"></span></div>
+    </div>
+    <div id="combo-teaser"></div>
 </div>
 
 <!-- Menu Button -->
@@ -2307,10 +2369,20 @@ function trySwap(c1, c2) {
     if (comboThrob) { comboThrob.cancel(); comboThrob = null; }
     comboBaseScale = 1;
     const comboEl = document.getElementById('combo-display');
-    comboEl.textContent = '';
-    comboEl.style.color = '';
-    comboEl.style.textShadow = '';
-    comboEl.getAnimations().forEach(a => a.cancel());
+    const multiplierSpan = comboEl.querySelector('.combo-multiplier');
+    multiplierSpan.textContent = '';
+    multiplierSpan.style.color = '';
+    multiplierSpan.style.textShadow = '';
+    multiplierSpan.getAnimations().forEach(a => a.cancel());
+    comboEl.classList.remove('active');
+    // Clean up teaser
+    const teaserEl = document.getElementById('combo-teaser');
+    teaserEl.textContent = '';
+    teaserEl.classList.remove('active');
+    // Reset blocks counter
+    const blocksEl = document.getElementById('blocks-counter');
+    blocksEl.textContent = '🟦 0';
+    blocksEl.classList.remove('active');
     
     const tempTarget = c1.targetPos.clone();
     c1.targetPos.copy(c2.targetPos);
@@ -2402,14 +2474,25 @@ function processMatches() {
         if (comboCubesTotal > 0) {
             const chainScore = comboCubesTotal * comboLevel;
             score += chainScore; animateScore(score);
-            if (hasUserInteracted) saveLifetimeScore();
+            if (hasUserInteracted) {
+                saveLifetimeScore();
+                showChainScoreFlash(comboCubesTotal, comboLevel, chainScore);
+            }
             comboCubesTotal = 0;
         }
+        fadeOutBlocksCounter();
         if (comboLevel > 1) {
             const holdDelay = hitRecord ? 2500 : nearRecord ? 1500 : 0;
             resetComboDisplay(holdDelay, newRecord);
         }
-        else setTimeout(() => { document.getElementById('combo-display').textContent = ''; }, 750 * gameSpeed);
+        else {
+            // Non-combo: clear multiplier after brief pause
+            setTimeout(() => {
+                const el = document.getElementById('combo-display');
+                el.querySelector('.combo-multiplier').textContent = '';
+                el.classList.remove('active');
+            }, 750 * gameSpeed);
+        }
         return;
     }
     
@@ -2417,6 +2500,9 @@ function processMatches() {
     let cubesCleared = 0;
     matches.forEach(group => cubesCleared += group.length);
     comboCubesTotal += cubesCleared;
+    
+    // Update blocks counter with +N popup
+    if (hasUserInteracted) updateBlocksCounter(cubesCleared, comboCubesTotal);
     
     if (comboLevel > 1) {
         if (hasUserInteracted) soundManager.combo(comboLevel);
@@ -2592,74 +2678,131 @@ function animateScore(targetScore) {
     scoreAnimationId = requestAnimationFrame(update);
 }
 
+// Blocks counter update and +N popup
+function updateBlocksCounter(cubesCleared, total) {
+    const blocksEl = document.getElementById('blocks-counter');
+    blocksEl.textContent = `🟦 ${total}`;
+    blocksEl.classList.add('active');
+    
+    // +N popup floats up from blocks counter
+    if (!flairSettings.textPopups) return;
+    const popup = document.createElement('div');
+    popup.className = 'blocks-popup';
+    popup.textContent = `+${cubesCleared}`;
+    
+    // Position near the blocks counter
+    const rect = blocksEl.getBoundingClientRect();
+    popup.style.left = (rect.left + rect.width / 2) + 'px';
+    popup.style.top = rect.top + 'px';
+    document.body.appendChild(popup);
+    
+    popup.animate([
+        { transform: 'translate(-50%, 0)', opacity: 1, offset: 0 },
+        { transform: 'translate(-50%, -30px)', opacity: 1, offset: 0.5 },
+        { transform: 'translate(-50%, -50px)', opacity: 0, offset: 1 }
+    ], { duration: 600 * gameSpeed, easing: 'ease-out', fill: 'forwards' }).onfinish = () => popup.remove();
+}
+
+function fadeOutBlocksCounter() {
+    const blocksEl = document.getElementById('blocks-counter');
+    setTimeout(() => { blocksEl.classList.remove('active'); }, 800 * gameSpeed);
+}
+
+// Chain-end score flash: "15 × 3 = 45"
+function showChainScoreFlash(cubes, combo, total) {
+    if (!flairSettings.textPopups) return;
+    if (combo <= 1 && cubes < 5) return; // Skip trivial single matches
+    const flash = document.createElement('div');
+    flash.className = 'chain-score-flash';
+    if (combo > 1) {
+        flash.textContent = `${cubes} × ${combo} = ${total}`;
+    } else {
+        flash.textContent = `+${total}`;
+    }
+    const uiLayer = document.getElementById('ui-layer');
+    uiLayer.appendChild(flash);
+    
+    flash.animate([
+        { opacity: 0, transform: 'translateY(0)', offset: 0 },
+        { opacity: 1, transform: 'translateY(0)', offset: 0.15 },
+        { opacity: 1, transform: 'translateY(0)', offset: 0.6 },
+        { opacity: 0, transform: 'translateY(-10px)', offset: 1 }
+    ], { duration: 1200 * gameSpeed, easing: 'ease-out', fill: 'forwards' }).onfinish = () => flash.remove();
+}
+
 // Combo HUD throb
 let comboThrob = null;
 let comboBaseScale = 1;
 
 function throbComboDisplay(level) {
     const el = document.getElementById('combo-display');
+    const multiplierSpan = el.querySelector('.combo-multiplier');
+    const teaserEl = document.getElementById('combo-teaser');
     
-    // Combo teaser: show proximity to best combo (starts at 35% of record)
+    // Update multiplier text
+    multiplierSpan.textContent = `×${level}`;
+    el.classList.add('active');
+    
+    // Combo teaser: show proximity to best combo in subscript
     const bestCombo = goalsManager.data.stats.maxCombo;
     const teaserThreshold = Math.ceil(bestCombo * 0.35);
     if (bestCombo >= 3 && level > bestCombo) {
-        el.innerHTML = `COMBO<span class="combo-teaser">new record +${level - bestCombo}</span><span class="combo-multiplier">×${level}</span>`;
+        teaserEl.textContent = `new record +${level - bestCombo}`;
+        teaserEl.classList.add('active');
     } else if (bestCombo >= 3 && level === bestCombo) {
-        el.innerHTML = `COMBO<span class="combo-teaser">nice</span><span class="combo-multiplier">×${level}</span>`;
+        teaserEl.textContent = 'nice';
+        teaserEl.classList.add('active');
     } else if (bestCombo >= 3 && level >= teaserThreshold) {
-        el.innerHTML = `COMBO<span class="combo-teaser">current highest ×${bestCombo}</span><span class="combo-multiplier">×${level}</span>`;
+        teaserEl.textContent = `current highest ×${bestCombo}`;
+        teaserEl.classList.add('active');
     } else {
-        el.textContent = `COMBO ×${level}!`;
+        teaserEl.textContent = '';
+        teaserEl.classList.remove('active');
     }
     
-    // Inflate resting size with each level
-    comboBaseScale = 1 + (level - 2) * 0.08; // ×2=1.0, ×3=1.08, ×4=1.16...
+    // Throb only the multiplier span
+    comboBaseScale = 1 + (level - 2) * 0.08;
     const rest = Math.min(comboBaseScale, 1.6);
-    const peak = rest + 0.25 + level * 0.05; // Punchier each level
+    const peak = rest + 0.25 + level * 0.05;
     
-    // Color intensifies
+    // Color intensifies on multiplier
     const r = Math.min(255, 200 + level * 20);
     const g = Math.max(0, 60 - level * 12);
-    el.style.color = `rgb(${r}, ${g}, ${Math.round(g * 1.5)})`;
-    el.style.textShadow = `0 0 15px rgb(${r}, 0, ${g}), 0 0 ${15 + level * 5}px rgb(${r}, 0, 0)`;
+    multiplierSpan.style.color = `rgb(${r}, ${g}, ${Math.round(g * 1.5)})`;
+    multiplierSpan.style.textShadow = `0 0 15px rgb(${r}, 0, ${g}), 0 0 ${15 + level * 5}px rgb(${r}, 0, 0)`;
     
     if (comboThrob) comboThrob.cancel();
     const throbOpts = { duration: 350 * gameSpeed, easing: 'cubic-bezier(0.175, 0.885, 0.32, 1.275)', fill: 'forwards' };
-    comboThrob = el.animate([
+    comboThrob = multiplierSpan.animate([
         { transform: `scale(${rest})`, offset: 0 },
         { transform: `scale(${peak})`, offset: 0.3 },
         { transform: `scale(${rest * 0.9})`, offset: 0.6 },
         { transform: `scale(${rest})`, offset: 1 }
     ], throbOpts);
-    
-    // Counter-scale the teaser span so it stays visually steady while the rest throbs
-    const teaserSpan = el.querySelector('.combo-teaser');
-    if (teaserSpan) {
-        teaserSpan.animate([
-            { transform: `scale(${1/rest})`, offset: 0 },
-            { transform: `scale(${1/peak})`, offset: 0.3 },
-            { transform: `scale(${1/(rest * 0.9)})`, offset: 0.6 },
-            { transform: `scale(${1/rest})`, offset: 1 }
-        ], throbOpts);
-    }
 }
 
 function resetComboDisplay(holdDelay = 0, scaleUp = false) {
     const el = document.getElementById('combo-display');
+    const multiplierSpan = el.querySelector('.combo-multiplier');
+    const teaserEl = document.getElementById('combo-teaser');
     if (comboThrob) { comboThrob.cancel(); comboThrob = null; }
     comboBaseScale = 1;
     
     const doExit = () => {
         const exitScale = scaleUp ? 'scale(2.5)' : 'scale(0.5)';
-        el.animate([
+        multiplierSpan.animate([
             { transform: 'scale(1)', opacity: 1, offset: 0 },
             { transform: exitScale, opacity: 0, offset: 1 }
         ], { duration: scaleUp ? 500 * gameSpeed : 300 * gameSpeed, easing: 'ease-out', fill: 'forwards' }).onfinish = () => {
-            el.textContent = '';
-            el.style.color = '';
-            el.style.textShadow = '';
-            el.getAnimations().forEach(a => a.cancel());
+            multiplierSpan.textContent = '';
+            multiplierSpan.style.color = '';
+            multiplierSpan.style.textShadow = '';
+            multiplierSpan.getAnimations().forEach(a => a.cancel());
+            el.classList.remove('active');
         };
+        // Fade out teaser
+        teaserEl.classList.remove('active');
+        setTimeout(() => { teaserEl.textContent = ''; }, 300);
     };
     
     if (holdDelay > 0) {
