@@ -2195,6 +2195,129 @@ soundDefs.forEach(s => {
 // Update textures to match saved symbol setting
 cubeRenderer.updateTextures(usingNumbers);
 
+// ============================================
+// SEEDED PRNG (Replay System — Phase 1)
+// ============================================
+function mulberry32(seed) {
+    return function() {
+        seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+        let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+}
+
+let gameSeed = Date.now();
+let gameRng = mulberry32(gameSeed);
+function gameRandom() { return gameRng(); }
+
+function fisherYatesShuffle(arr) {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(gameRandom() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+}
+
+// ============================================
+// MOVE LOG & SNAPSHOTS (Replay System — Phase 2)
+// ============================================
+const moveLog = {
+    seed: gameSeed,
+    settings: {},
+    moves: [],
+    snapshots: [],
+    scores: [],
+    maxWindow: 25
+};
+
+function snapshotBoard() {
+    const snap = [];
+    for (const face of ['left', 'right', 'floor']) {
+        for (let a = 0; a < gridSize; a++) {
+            for (let b = 0; b < gridSize; b++) {
+                const cube = logicalCubes.find(c =>
+                    c.plane === face && !c.isDying && c.matchPhase === 0 &&
+                    ((face === 'left'  && c.gridY === a && c.gridZ === b) ||
+                     (face === 'right' && c.gridY === a && c.gridX === b) ||
+                     (face === 'floor' && c.gridX === a && c.gridZ === b))
+                );
+                snap.push(cube ? cube.colorKey : null);
+            }
+        }
+    }
+    return snap;
+}
+
+function createCubeFromSnapshot(face, a, b, colorKey) {
+    let x, y, z, gridX, gridY, gridZ;
+    if (face === 'left') {
+        x = -0.6; y = a * spacing + offset; z = b * spacing + offset;
+        gridX = -1; gridY = a; gridZ = b;
+    } else if (face === 'right') {
+        x = b * spacing + offset; y = a * spacing + offset; z = -0.6;
+        gridX = b; gridY = a; gridZ = -1;
+    } else {
+        x = a * spacing + offset; y = -0.6; z = b * spacing + offset;
+        gridX = a; gridY = -1; gridZ = b;
+    }
+    const target = new THREE.Vector3(x, y, z);
+    const cube = new LogicalCube(gridX, gridY, gridZ, face, colorKey, target);
+    logicalCubes.push(cube);
+    return cube;
+}
+
+function restoreSnapshot(snap) {
+    logicalCubes = [];
+    leftWallRows = [[], [], [], [], []];
+    rightWallRows = [[], [], [], [], []];
+    floorStrips = [[], [], [], [], []];
+    
+    let idx = 0;
+    for (const face of ['left', 'right', 'floor']) {
+        for (let a = 0; a < gridSize; a++) {
+            for (let b = 0; b < gridSize; b++) {
+                const colorKey = snap[idx++];
+                if (colorKey) createCubeFromSnapshot(face, a, b, colorKey);
+            }
+        }
+    }
+    updateRowArrays();
+}
+
+function initMoveLog() {
+    moveLog.seed = gameSeed;
+    moveLog.settings = { colorCount, minMatchSize, swapMode };
+    moveLog.moves = [];
+    moveLog.snapshots = [snapshotBoard()];
+    moveLog.scores = [score];
+}
+
+function recordMove(c1, c2) {
+    moveLog.moves.push({
+        c1: { plane: c1.plane, gx: c1.gridX, gy: c1.gridY, gz: c1.gridZ },
+        c2: { plane: c2.plane, gx: c2.gridX, gy: c2.gridY, gz: c2.gridZ }
+    });
+}
+
+function recordSnapshot() {
+    moveLog.snapshots.push(snapshotBoard());
+    moveLog.scores.push(score);
+    // Trim to sliding window
+    while (moveLog.moves.length > moveLog.maxWindow) {
+        moveLog.moves.shift();
+        moveLog.snapshots.shift();
+        moveLog.scores.shift();
+    }
+}
+
+function saveMoveLog() {
+    try {
+        localStorage.setItem('boxedin-replay', JSON.stringify(moveLog));
+    } catch (e) { console.warn('Failed to save replay:', e); }
+}
+
 // Utility Functions
 function wouldCreateMatch(plane, gridX, gridY, gridZ, colorKey) {
     const active = logicalCubes.filter(c => !c.isDying && c.matchPhase === 0);
@@ -2238,8 +2361,8 @@ function isAdjacentToPosition(cube, plane, gx, gy, gz) {
 }
 
 function pickSmartColor(plane, gx, gy, gz) {
-    const shuffled = [...activeColorKeys].sort(() => Math.random() - 0.5);
-    if (Math.random() < 0.75) {
+    const shuffled = fisherYatesShuffle(activeColorKeys);
+    if (gameRandom() < 0.75) {
         for (const c of shuffled) if (!wouldCreateMatch(plane, gx, gy, gz, c)) return c;
     }
     return shuffled[0];
@@ -2248,7 +2371,7 @@ function pickSmartColor(plane, gx, gy, gz) {
 function createCube(x, y, z, plane, indexKey = null, finalGridPos = null) {
     const colorKey = finalGridPos 
         ? pickSmartColor(plane, finalGridPos.gridX, finalGridPos.gridY, finalGridPos.gridZ)
-        : activeColorKeys[Math.floor(Math.random() * activeColorKeys.length)];
+        : activeColorKeys[Math.floor(gameRandom() * activeColorKeys.length)];
     
     const target = new THREE.Vector3(x, y, z);
     const gridX = Math.round((x - offset) / spacing);
@@ -2267,6 +2390,10 @@ function createCube(x, y, z, plane, indexKey = null, finalGridPos = null) {
 }
 
 function initBoard() {
+    // Re-seed PRNG for deterministic replay
+    gameSeed = Date.now();
+    gameRng = mulberry32(gameSeed);
+    
     logicalCubes = [];
     leftWallRows = [[],[],[],[],[]]; rightWallRows = [[],[],[],[],[]]; floorStrips = [[],[],[],[],[]];
     for (let y = 0; y < gridSize; y++) for (let z = 0; z < gridSize; z++) createCube(-0.6, y * spacing + offset, z * spacing + offset, 'left', y);
@@ -2275,6 +2402,9 @@ function initBoard() {
     
     // Let the game play itself until stable — no matches remain
     settleBoard();
+    
+    // Record initial board state for replay
+    initMoveLog();
 }
 
 function settleBoard() {
@@ -2384,6 +2514,9 @@ function trySwap(c1, c2) {
     blocksEl.textContent = '🟦 0';
     blocksEl.classList.remove('active');
     
+    // Record move for replay (before positions swap)
+    if (hasUserInteracted) recordMove(c1, c2);
+    
     const tempTarget = c1.targetPos.clone();
     c1.targetPos.copy(c2.targetPos);
     c2.targetPos.copy(tempTarget);
@@ -2481,6 +2614,8 @@ function processMatches() {
             comboCubesTotal = 0;
         }
         fadeOutBlocksCounter();
+        // Record board state for replay
+        if (hasUserInteracted) { recordSnapshot(); saveMoveLog(); }
         if (comboLevel > 1) {
             const holdDelay = hitRecord ? 2500 : nearRecord ? 1500 : 750;
             resetComboDisplay(holdDelay, newRecord);
