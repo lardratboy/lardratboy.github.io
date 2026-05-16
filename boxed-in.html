@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>BOXED IN - build 0.7</title>
+    <title>BOXED IN - build 0.9</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Exo+2:wght@300;600&display=swap');
 
@@ -965,6 +965,74 @@
             border-color: #ff66cc;
         }
 
+        /* --- REPLAY BAR --- */
+        #replay-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: rgba(0, 0, 0, 0.9);
+            border-top: 1px solid #ff00de;
+            padding: 8px 12px;
+            z-index: 150;
+            display: none;
+            align-items: center;
+            gap: 8px;
+            font-family: 'Orbitron', sans-serif;
+            pointer-events: auto;
+        }
+        #replay-bar.active { display: flex; }
+        #replay-bar button {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            color: #fff;
+            font-size: clamp(0.8rem, 2vw, 1rem);
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: background 0.15s;
+        }
+        #replay-bar button:hover { background: rgba(255, 0, 222, 0.3); }
+        #replay-bar button:active { background: rgba(255, 0, 222, 0.5); }
+        #replay-slider {
+            flex: 1;
+            min-width: 80px;
+            accent-color: #ff00de;
+            cursor: pointer;
+        }
+        #replay-label {
+            color: #aaa;
+            font-size: clamp(0.55rem, 1.4vw, 0.7rem);
+            white-space: nowrap;
+            min-width: 7em;
+            text-align: center;
+        }
+        #replay-exit {
+            color: #ff6b6b !important;
+            border-color: rgba(255, 107, 107, 0.4) !important;
+        }
+        #replay-speed {
+            color: #00ffcc !important;
+            border-color: rgba(0, 255, 204, 0.3) !important;
+            font-size: clamp(0.6rem, 1.5vw, 0.75rem) !important;
+            min-width: 2.5em;
+        }
+        #replay-move-indicator {
+            font-size: clamp(0.5rem, 1.2vw, 0.65rem);
+            color: #00ffcc;
+            text-align: center;
+            position: fixed;
+            bottom: 46px;
+            left: 0;
+            right: 0;
+            pointer-events: none;
+            z-index: 150;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        #replay-move-indicator.active { opacity: 1; }
+
         /* --- DEBUG BAR --- */
         #debug-bar {
             position: fixed;
@@ -1172,9 +1240,24 @@
     <span class="toast-text"></span>
 </div>
 
-<div class="controls">Select a cube, then click a neighbor to swap. Match N+ to clear! | Please leave feedback</div>
+<div class="controls">Select a cube, then click a neighbor to swap. Match N+ to clear! | R = replay, Space = auto-play | Please leave feedback</div>
 
 <div id="debug-bar"></div>
+
+<div id="replay-bar">
+    <button id="replay-start" title="First move">⏮</button>
+    <button id="replay-back" title="Step back">◀</button>
+    <button id="replay-fwd" title="Step forward">▶</button>
+    <button id="replay-auto" title="Auto-play">⏩</button>
+    <button id="replay-end" title="Latest move">⏭</button>
+    <button id="replay-speed" title="Playback speed">1×</button>
+    <input type="range" id="replay-slider" min="0" max="0" value="0">
+    <span id="replay-label">Move 0 / 0</span>
+    <button id="replay-export" title="Export replay">💾</button>
+    <button id="replay-import" title="Import replay">📂</button>
+    <button id="replay-exit" title="Exit replay">✕</button>
+</div>
+<div id="replay-move-indicator"></div>
 
 <script>
 // ============================================
@@ -2198,13 +2281,17 @@ cubeRenderer.updateTextures(usingNumbers);
 // ============================================
 // SEEDED PRNG (Replay System — Phase 1)
 // ============================================
-function mulberry32(seed) {
-    return function() {
+function mulberry32(initialSeed) {
+    let seed = initialSeed;
+    const rng = function() {
         seed |= 0; seed = seed + 0x6D2B79F5 | 0;
         let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
         t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
         return ((t ^ t >>> 14) >>> 0) / 4294967296;
     };
+    rng.getState = () => seed;
+    rng.setState = (s) => { seed = s; };
+    return rng;
 }
 
 let gameSeed = Date.now();
@@ -2229,6 +2316,7 @@ const moveLog = {
     moves: [],
     snapshots: [],
     scores: [],
+    rngStates: [],
     maxWindow: 25
 };
 
@@ -2292,6 +2380,7 @@ function initMoveLog() {
     moveLog.moves = [];
     moveLog.snapshots = [snapshotBoard()];
     moveLog.scores = [score];
+    moveLog.rngStates = [gameRng.getState()];
 }
 
 function recordMove(c1, c2) {
@@ -2304,11 +2393,13 @@ function recordMove(c1, c2) {
 function recordSnapshot() {
     moveLog.snapshots.push(snapshotBoard());
     moveLog.scores.push(score);
+    moveLog.rngStates.push(gameRng.getState());
     // Trim to sliding window
     while (moveLog.moves.length > moveLog.maxWindow) {
         moveLog.moves.shift();
         moveLog.snapshots.shift();
         moveLog.scores.shift();
+        moveLog.rngStates.shift();
     }
 }
 
@@ -2316,6 +2407,282 @@ function saveMoveLog() {
     try {
         localStorage.setItem('boxedin-replay', JSON.stringify(moveLog));
     } catch (e) { console.warn('Failed to save replay:', e); }
+}
+
+// ============================================
+// REPLAY MODE (Replay System — Phase 3)
+// ============================================
+let replayMode = false;
+let replayIndex = 0;
+let replayData = null;
+let liveStateSnapshot = null;
+let liveScore = 0;
+
+function enterReplayMode() {
+    if (replayMode || isProcessing) return;
+    if (moveLog.snapshots.length < 2) {
+        console.log('Not enough moves to replay');
+        return;
+    }
+    
+    // Save live state so we can restore on exit
+    liveStateSnapshot = snapshotBoard();
+    liveScore = score;
+    
+    replayMode = true;
+    replayData = moveLog;
+    replayIndex = replayData.snapshots.length - 1; // start at latest
+    
+    restoreSnapshot(replayData.snapshots[replayIndex]);
+    
+    const slider = document.getElementById('replay-slider');
+    slider.min = 0;
+    slider.max = replayData.snapshots.length - 1;
+    slider.value = replayIndex;
+    
+    document.getElementById('replay-bar').classList.add('active');
+    updateReplayDisplay();
+}
+
+function exitReplayMode() {
+    if (!replayMode) return;
+    replayMode = false;
+    replayAutoPlaying = false;
+    if (replayAnimating && savedGameSpeed !== null) { gameSpeed = savedGameSpeed; savedGameSpeed = null; }
+    replayAnimating = false;
+    replayData = null;
+    
+    // Restore live game state
+    if (liveStateSnapshot) {
+        restoreSnapshot(liveStateSnapshot);
+        liveStateSnapshot = null;
+    }
+    score = liveScore;
+    displayedScore = liveScore;
+    document.getElementById('score').textContent = `Score: ${score.toLocaleString()}`;
+    
+    document.getElementById('replay-bar').classList.remove('active');
+    document.getElementById('replay-move-indicator').classList.remove('active');
+}
+
+function replayJump(index) {
+    if (!replayData) return;
+    replayIndex = Math.max(0, Math.min(replayData.snapshots.length - 1, index));
+    restoreSnapshot(replayData.snapshots[replayIndex]);
+    updateReplayDisplay();
+    
+    // Show historical score
+    if (replayData.scores[replayIndex] !== undefined) {
+        const histScore = replayData.scores[replayIndex];
+        document.getElementById('score').textContent = `Score: ${histScore.toLocaleString()}`;
+    }
+}
+
+function replayStep(delta) {
+    const newIndex = replayIndex + delta;
+    if (newIndex < 0 || newIndex >= replayData.snapshots.length) return;
+    replayJump(newIndex);
+    
+    // Highlight the move that led to this state
+    if (delta > 0 && replayIndex > 0) highlightMove(replayIndex);
+    if (delta < 0) highlightMove(replayIndex + 1);
+}
+
+function highlightMove(moveIndex) {
+    if (!replayData || moveIndex < 1 || moveIndex > replayData.moves.length) {
+        document.getElementById('replay-move-indicator').classList.remove('active');
+        return;
+    }
+    const move = replayData.moves[moveIndex - 1];
+    
+    // Find and pulse the two swapped cubes
+    const cube1 = logicalCubes.find(c => c.plane === move.c1.plane &&
+        c.gridX === move.c1.gx && c.gridY === move.c1.gy && c.gridZ === move.c1.gz);
+    const cube2 = logicalCubes.find(c => c.plane === move.c2.plane &&
+        c.gridX === move.c2.gx && c.gridY === move.c2.gy && c.gridZ === move.c2.gz);
+    
+    // Pulse scale to indicate swapped cubes
+    [cube1, cube2].forEach(c => {
+        if (!c) return;
+        c.isSelected = true;
+        setTimeout(() => { c.isSelected = false; }, 600);
+    });
+    
+    // Show move indicator text
+    const indicator = document.getElementById('replay-move-indicator');
+    const face1 = move.c1.plane, face2 = move.c2.plane;
+    indicator.textContent = face1 === face2 ? `swap on ${face1}` : `swap ${face1} ↔ ${face2}`;
+    indicator.classList.add('active');
+    setTimeout(() => indicator.classList.remove('active'), 800);
+}
+
+function updateReplayDisplay() {
+    const total = replayData.snapshots.length - 1;
+    document.getElementById('replay-label').textContent = `Move ${replayIndex} / ${total}`;
+    document.getElementById('replay-slider').value = replayIndex;
+}
+
+// ============================================
+// ANIMATED REPLAY & AUTO-PLAY (Phase 4)
+// ============================================
+let replayAnimating = false;
+let replayAutoPlaying = false;
+let playbackCoefficient = 1;
+let savedGameSpeed = null;
+const playbackSpeeds = [0.25, 0.5, 1, 2, 4, 8];
+let playbackSpeedIndex = 2; // default 1×
+
+function replayAnimatedStep() {
+    if (!replayMode || !replayData) return;
+    if (replayAnimating) return;
+    if (replayIndex >= replayData.snapshots.length - 1) {
+        replayAutoPlaying = false;
+        updateAutoPlayButton();
+        return;
+    }
+    
+    // Load board state at current index (before the move)
+    restoreSnapshot(replayData.snapshots[replayIndex]);
+    
+    // Find the cubes to swap
+    const move = replayData.moves[replayIndex];
+    if (!move) { replayAutoPlaying = false; updateAutoPlayButton(); return; }
+    
+    const cube1 = logicalCubes.find(c => c.plane === move.c1.plane &&
+        c.gridX === move.c1.gx && c.gridY === move.c1.gy && c.gridZ === move.c1.gz);
+    const cube2 = logicalCubes.find(c => c.plane === move.c2.plane &&
+        c.gridX === move.c2.gx && c.gridY === move.c2.gy && c.gridZ === move.c2.gz);
+    
+    if (!cube1 || !cube2) {
+        console.warn('Replay: could not find cubes for move', replayIndex, move);
+        replayAutoPlaying = false;
+        updateAutoPlayButton();
+        return;
+    }
+    
+    replayAnimating = true;
+    savedGameSpeed = gameSpeed;
+    gameSpeed = savedGameSpeed / playbackCoefficient;
+    
+    // Restore PRNG state to match original game at this point
+    if (replayData.rngStates && replayData.rngStates[replayIndex] !== undefined) {
+        gameRng.setState(replayData.rngStates[replayIndex]);
+    }
+    
+    // Highlight the cubes about to swap
+    cube1.isSelected = true;
+    cube2.isSelected = true;
+    
+    // Brief pause to show selection, then execute swap
+    setTimeout(() => {
+        cube1.isSelected = false;
+        cube2.isSelected = false;
+        trySwap(cube1, cube2);
+    }, 300 / playbackCoefficient);
+}
+
+function onReplayChainComplete() {
+    replayAnimating = false;
+    if (savedGameSpeed !== null) { gameSpeed = savedGameSpeed; savedGameSpeed = null; }
+    replayIndex++;
+    
+    // Snap score to historical value
+    if (replayData && replayData.scores[replayIndex] !== undefined) {
+        score = replayData.scores[replayIndex];
+        displayedScore = score;
+        document.getElementById('score').textContent = `Score: ${score.toLocaleString()}`;
+    }
+    
+    updateReplayDisplay();
+    
+    // Continue auto-play if active
+    if (replayAutoPlaying && replayIndex < replayData.snapshots.length - 1) {
+        setTimeout(replayAnimatedStep, Math.max(100, 500 / playbackCoefficient));
+    } else if (replayAutoPlaying) {
+        replayAutoPlaying = false;
+        updateAutoPlayButton();
+    }
+}
+
+function toggleAutoPlay() {
+    if (!replayMode) return;
+    replayAutoPlaying = !replayAutoPlaying;
+    updateAutoPlayButton();
+    if (replayAutoPlaying) replayAnimatedStep();
+}
+
+function updateAutoPlayButton() {
+    const btn = document.getElementById('replay-auto');
+    if (btn) btn.textContent = replayAutoPlaying ? '⏸' : '⏩';
+}
+
+function cyclePlaybackSpeed() {
+    playbackSpeedIndex = (playbackSpeedIndex + 1) % playbackSpeeds.length;
+    playbackCoefficient = playbackSpeeds[playbackSpeedIndex];
+    document.getElementById('replay-speed').textContent = `${playbackCoefficient}×`;
+}
+
+// ============================================
+// REPLAY IMPORT / EXPORT (Phase 4)
+// ============================================
+function exportReplay() {
+    const data = replayMode ? replayData : moveLog;
+    if (!data || data.snapshots.length < 2) {
+        console.log('No replay data to export');
+        return;
+    }
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `boxedin-replay-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function importReplay() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = e => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = evt => {
+            try {
+                const data = JSON.parse(evt.target.result);
+                if (!data.snapshots || !data.moves || data.snapshots.length < 2) {
+                    console.warn('Invalid replay file');
+                    return;
+                }
+                // Exit current replay if active
+                if (replayMode) exitReplayMode();
+                
+                // Save live state and enter replay with imported data
+                liveStateSnapshot = snapshotBoard();
+                liveScore = score;
+                
+                replayMode = true;
+                replayData = data;
+                replayIndex = 0;
+                
+                restoreSnapshot(replayData.snapshots[0]);
+                
+                const slider = document.getElementById('replay-slider');
+                slider.min = 0;
+                slider.max = replayData.snapshots.length - 1;
+                slider.value = 0;
+                
+                document.getElementById('replay-bar').classList.add('active');
+                updateReplayDisplay();
+            } catch (err) {
+                console.warn('Failed to parse replay file:', err);
+            }
+        };
+        reader.readAsText(file);
+    };
+    input.click();
 }
 
 // Utility Functions
@@ -2485,11 +2852,13 @@ function canSwapMoore(c1, c2) {
 let lastSwappedCubes = { cube1: null, cube2: null };
 
 function trySwap(c1, c2) {
-    const canSwap = swapMode === 'free' ? true : swapMode === 'moore' ? canSwapMoore(c1, c2) : canSwapVonNeumann(c1, c2);
-    if (!canSwap) {
-        soundManager.invalidSwap();
-        selectCubeLogic(null);
-        return;
+    if (!replayAnimating) {
+        const canSwap = swapMode === 'free' ? true : swapMode === 'moore' ? canSwapMoore(c1, c2) : canSwapVonNeumann(c1, c2);
+        if (!canSwap) {
+            soundManager.invalidSwap();
+            selectCubeLogic(null);
+            return;
+        }
     }
     
     isProcessing = true;
@@ -2515,7 +2884,7 @@ function trySwap(c1, c2) {
     blocksEl.classList.remove('active');
     
     // Record move for replay (before positions swap)
-    if (hasUserInteracted) recordMove(c1, c2);
+    if (hasUserInteracted && !replayAnimating) recordMove(c1, c2);
     
     const tempTarget = c1.targetPos.clone();
     c1.targetPos.copy(c2.targetPos);
@@ -2603,11 +2972,11 @@ function processMatches() {
         const hitRecord = bestCombo >= 3 && comboLevel >= bestCombo;
         const newRecord = bestCombo >= 3 && comboLevel > bestCombo;
         const nearRecord = bestCombo >= 3 && comboLevel >= teaserThreshold && !hitRecord;
-        if (hasUserInteracted) goalsManager.updateMaxCombo(comboLevel);
+        if (hasUserInteracted && !replayAnimating) goalsManager.updateMaxCombo(comboLevel);
         if (comboCubesTotal > 0) {
             const chainScore = comboCubesTotal * comboLevel;
             score += chainScore; animateScore(score);
-            if (hasUserInteracted) {
+            if (hasUserInteracted && !replayAnimating) {
                 saveLifetimeScore();
                 showChainScoreFlash(comboCubesTotal, comboLevel, chainScore);
             }
@@ -2615,7 +2984,7 @@ function processMatches() {
         }
         fadeOutBlocksCounter();
         // Record board state for replay
-        if (hasUserInteracted) { recordSnapshot(); saveMoveLog(); }
+        if (hasUserInteracted && !replayAnimating) { recordSnapshot(); saveMoveLog(); }
         if (comboLevel > 1) {
             const holdDelay = hitRecord ? 2500 : nearRecord ? 1500 : 750;
             resetComboDisplay(holdDelay, newRecord);
@@ -2628,6 +2997,8 @@ function processMatches() {
                 el.classList.remove('active');
             }, 750 * gameSpeed);
         }
+        // Notify animated replay that chain is done
+        if (replayAnimating) onReplayChainComplete();
         return;
     }
     
@@ -2653,7 +3024,7 @@ function processMatches() {
     
     // Phase 1: Highlight all matched cubes
     matches.forEach((group, gi) => {
-        if (hasUserInteracted) goalsManager.recordMatch(group);
+        if (hasUserInteracted && !replayAnimating) goalsManager.recordMatch(group);
         group.forEach(c => {
             if (!c.isDying && c.matchPhase === 0) {
                 c.position.copy(c.targetPos); // Snap to final position before removal animation
@@ -2692,18 +3063,18 @@ function processMatches() {
     
     if (cornerCleared) {
         score += 500; animateScore(score);
-        if (hasUserInteracted) { goalsManager.recordBoxedIn(); soundManager.boxedIn(); }
+        if (hasUserInteracted) { if (!replayAnimating) goalsManager.recordBoxedIn(); soundManager.boxedIn(); }
         showBonus('BOXED IN! +500', 'boxed-in');
     } else if (allPlanes.size === 3) {
         score += 250; animateScore(score);
-        if (hasUserInteracted) { goalsManager.recordTripleThreat(); soundManager.combo(3); }
+        if (hasUserInteracted) { if (!replayAnimating) goalsManager.recordTripleThreat(); soundManager.combo(3); }
         showBonus('TRIPLE THREAT! +250', 'triple-threat');
     }
     
     if (comboLevel === 1 && lastSwappedCubes.cube1 && lastSwappedCubes.cube2) {
         if (lastSwappedCubes.cube1.matchPhase > 0 && lastSwappedCubes.cube2.matchPhase > 0 && hasUserInteracted) {
             score += 50; animateScore(score);
-            goalsManager.recordSmartMove(); soundManager.smartMove();
+            if (!replayAnimating) goalsManager.recordSmartMove(); soundManager.smartMove();
             showBonus('SMART MOVE! +50', 'smart-move');
         }
         lastSwappedCubes = { cube1: null, cube2: null };
@@ -2713,7 +3084,7 @@ function processMatches() {
     if (lineClears > 0 && hasUserInteracted) {
         const lineBonus = lineClears * 200;
         score += lineBonus; animateScore(score);
-        goalsManager.recordLineClears(lineClears); soundManager.lineClear();
+        if (!replayAnimating) goalsManager.recordLineClears(lineClears); soundManager.lineClear();
         showBonus(lineClears > 1 ? `${lineClears}x LINE CLEAR! +${lineBonus}` : `LINE CLEAR! +${lineBonus}`, 'line-clear');
     }
     
@@ -2725,7 +3096,7 @@ function processMatches() {
             if (faceMatched === faceTotal && faceTotal === gridSize * gridSize) {
                 const panelBonus = 1000;
                 score += panelBonus; animateScore(score);
-                goalsManager.recordPanelClear();
+                if (!replayAnimating) goalsManager.recordPanelClear();
                 soundManager.lineClear(); // Reuse big sound
                 showBonus('PANEL CLEAR! 💎', 'panel-clear');
             }
@@ -3026,7 +3397,7 @@ function isOverlayOpen() {
 }
 
 function handleInput(clientX, clientY) {
-    if (isProcessing || isOverlayOpen()) return;
+    if (isProcessing || isOverlayOpen() || replayMode) return;
     hasUserInteracted = true;
     soundManager.resume();
     
@@ -3254,6 +3625,18 @@ const debug = {
 window.addEventListener('keydown', e => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     if (e.key === 'd' || e.key === 'D') debug.toggle();
+    if (e.key === 'r' || e.key === 'R') {
+        if (replayMode) exitReplayMode();
+        else enterReplayMode();
+    }
+    if (replayMode) {
+        if (e.key === 'ArrowLeft') { e.preventDefault(); replayAutoPlaying = false; updateAutoPlayButton(); replayStep(-1); }
+        if (e.key === 'ArrowRight') { e.preventDefault(); if (!replayAnimating) replayAnimatedStep(); }
+        if (e.key === 'Home') { e.preventDefault(); replayAutoPlaying = false; updateAutoPlayButton(); replayJump(0); }
+        if (e.key === 'End') { e.preventDefault(); replayAutoPlaying = false; updateAutoPlayButton(); replayJump(replayData.snapshots.length - 1); }
+        if (e.key === ' ') { e.preventDefault(); toggleAutoPlay(); }
+        if (e.key === 'Escape') exitReplayMode();
+    }
 });
 
 window.addEventListener('mousemove', e => {
@@ -3551,6 +3934,20 @@ document.getElementById('reset-confirm-btn').onclick = () => {
     document.getElementById('reset-confirm').classList.remove('visible');
     soundManager.click();
 };
+
+// Replay bar controls
+document.getElementById('replay-start').onclick = () => { if (replayMode) { replayAutoPlaying = false; updateAutoPlayButton(); replayJump(0); } };
+document.getElementById('replay-back').onclick = () => { if (replayMode) { replayAutoPlaying = false; updateAutoPlayButton(); replayStep(-1); } };
+document.getElementById('replay-fwd').onclick = () => { if (replayMode && !replayAnimating) replayAnimatedStep(); };
+document.getElementById('replay-auto').onclick = () => { if (replayMode) toggleAutoPlay(); };
+document.getElementById('replay-end').onclick = () => { if (replayMode) { replayAutoPlaying = false; updateAutoPlayButton(); replayJump(replayData.snapshots.length - 1); } };
+document.getElementById('replay-speed').onclick = () => cyclePlaybackSpeed();
+document.getElementById('replay-export').onclick = () => exportReplay();
+document.getElementById('replay-import').onclick = () => importReplay();
+document.getElementById('replay-exit').onclick = () => { replayAutoPlaying = false; exitReplayMode(); };
+document.getElementById('replay-slider').addEventListener('input', e => {
+    if (replayMode) { replayAutoPlaying = false; updateAutoPlayButton(); replayJump(parseInt(e.target.value)); }
+});
 
 animate();
 setTimeout(() => { if (!isProcessing) processMatches(); }, 800);
