@@ -91,10 +91,12 @@
         <button class="file-btn" style="margin-bottom:0;background:#0af;font-size:9px;" onclick="document.getElementById('fInImg').click()">IMG</button>
         <button id="btnWebcam" class="file-btn" style="margin-bottom:0;background:#f0f;font-size:9px;" onclick="toggleWebcam()">CAM</button>
     </div>
-    <select id="selWebcamRes" style="display:none;margin-bottom:10px;" onchange="setWebcamRes(parseInt(this.value))">
-        <option value="128">Cam: 128x128 (16k pts)</option>
-        <option value="256" selected>Cam: 256x256 (65k pts)</option>
-        <option value="512">Cam: 512x512 (262k pts)</option>
+    <select id="selWebcamRes" style="display:none;margin-bottom:10px;" onchange="setWebcamRes(this.value)">
+        <option value="128">Cam: Max 128 (Aspect Preserved)</option>
+        <option value="256" selected>Cam: Max 256 (Aspect Preserved)</option>
+        <option value="512">Cam: Max 512 (Aspect Preserved)</option>
+        <option value="1024">Cam: Max 1024 (Aspect Preserved)</option>
+        <option value="native">Cam: Full Native Resolution</option>
     </select>
 
     <input type="file" id="fIn" style="display:none" onchange="handleFile(this.files)">
@@ -1107,7 +1109,7 @@ let state = {
     webcamVideo: null,
     webcamCanvas: null,
     webcamCtx: null,
-    webcamResolution: 256,
+    webcamResolution: "256",
 };
 
 function getWordSize(f) {
@@ -1609,7 +1611,7 @@ async function runCompute() {
         device.queue.submit([bakeEnc.finish()]);
     }
 
-    const mbFull = (state.fileSize / (1024 * 1024)).toFixed(1);
+    const mbFull = (state.fileSize / (1024 * 1024)).toFixed(2);
     const mbWin = (byteLen / (1024 * 1024)).toFixed(2);
     const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
     const offPct = (state.scrubOffset * 100).toFixed(1);
@@ -1952,6 +1954,28 @@ async function exportPLY() {
 //  WEBCAM CAPTURE HANDLER
 // =============================================================================
 
+function updateWebcamCanvasSize() {
+    if (!state.webcamVideo || !state.webcamCanvas) return;
+    const vw = state.webcamVideo.videoWidth;
+    const vh = state.webcamVideo.videoHeight;
+    if (vw === 0 || vh === 0) return;
+
+    let targetW = vw;
+    let targetH = vh;
+
+    if (state.webcamResolution !== 'native') {
+        const maxDim = parseInt(state.webcamResolution);
+        const scale = Math.min(maxDim / vw, maxDim / vh);
+        targetW = Math.round(vw * scale);
+        targetH = Math.round(vh * scale);
+    }
+
+    if (state.webcamCanvas.width !== targetW || state.webcamCanvas.height !== targetH) {
+        state.webcamCanvas.width = targetW;
+        state.webcamCanvas.height = targetH;
+    }
+}
+
 async function toggleWebcam() {
     const btn = document.getElementById('btnWebcam');
     if (state.webcamActive) {
@@ -1975,7 +1999,8 @@ async function toggleWebcam() {
         }
     } else {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 512, height: 512 } });
+            // Attempt high-res request, let browser scale it as needed
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 } } });
             state.webcamStream = stream;
 
             if (!state.webcamVideo) {
@@ -1988,10 +2013,10 @@ async function toggleWebcam() {
 
             if (!state.webcamCanvas) {
                 state.webcamCanvas = document.createElement('canvas');
-                state.webcamCanvas.width = state.webcamResolution;
-                state.webcamCanvas.height = state.webcamResolution;
                 state.webcamCtx = state.webcamCanvas.getContext('2d');
             }
+
+            updateWebcamCanvasSize();
 
             state.webcamActive = true;
             btn.style.background = '#3a0';
@@ -2002,13 +2027,6 @@ async function toggleWebcam() {
             document.getElementById('selFormat').value = 'img_rgb';
             state.fileName = "LIVE WEBCAM";
             state.file = null;
-
-            const mb = (state.webcamResolution * state.webcamResolution * 3) / (1024 * 1024);
-            const winSlider = document.getElementById('sWin');
-            winSlider.max = Math.max(1, Math.ceil(mb));
-            winSlider.value = mb;
-            state.scrubWindowMB = mb;
-            document.getElementById('vWin').innerText = mb.toFixed(2);
 
             webcamTick();
         } catch (err) {
@@ -2021,22 +2039,35 @@ async function toggleWebcam() {
 async function webcamTick() {
     if (!state.webcamActive) return;
     if (state.webcamVideo && state.webcamVideo.readyState >= 2) {
-        const res = state.webcamResolution;
-        const size = Math.min(state.webcamVideo.videoWidth, state.webcamVideo.videoHeight);
-        const sx = (state.webcamVideo.videoWidth - size) / 2;
-        const sy = (state.webcamVideo.videoHeight - size) / 2;
-        state.webcamCtx.drawImage(state.webcamVideo, sx, sy, size, size, 0, 0, res, res);
+        updateWebcamCanvasSize();
 
-        const imgData = state.webcamCtx.getImageData(0, 0, res, res);
+        const w = state.webcamCanvas.width;
+        const h = state.webcamCanvas.height;
+
+        // Render full uncropped video frame maintaining native aspect ratio
+        state.webcamCtx.drawImage(state.webcamVideo, 0, 0, w, h);
+
+        const imgData = state.webcamCtx.getImageData(0, 0, w, h);
         const rgba = imgData.data;
-        const rgb = new Uint8Array(res * res * 3);
-        for (let i = 0, ri = 0, si = 0; i < res * res; i++, ri += 3, si += 4) {
+        const pixelCount = w * h;
+        const rgb = new Uint8Array(pixelCount * 3);
+        for (let i = 0, ri = 0, si = 0; i < pixelCount; i++, ri += 3, si += 4) {
             rgb[ri] = rgba[si];
             rgb[ri+1] = rgba[si+1];
             rgb[ri+2] = rgba[si+2];
         }
         state.buffer = rgb.buffer;
         state.fileSize = rgb.byteLength;
+        state.fileName = `LIVE WEBCAM (${w}x${h})`;
+
+        // Adjust sWin and vWin reactively to fit the live stream buffer size
+        const mb = rgb.byteLength / (1024 * 1024);
+        const winSlider = document.getElementById('sWin');
+        winSlider.max = Math.max(1, Math.ceil(mb));
+        winSlider.value = mb;
+        state.scrubWindowMB = mb;
+        document.getElementById('vWin').innerText = mb.toFixed(3);
+
         await runCompute();
     }
     if (state.webcamActive) {
@@ -2046,18 +2077,7 @@ async function webcamTick() {
 
 function setWebcamRes(res) {
     state.webcamResolution = res;
-    if (state.webcamCanvas) {
-        state.webcamCanvas.width = res;
-        state.webcamCanvas.height = res;
-    }
-    if (state.webcamActive) {
-        const mb = (res * res * 3) / (1024 * 1024);
-        const winSlider = document.getElementById('sWin');
-        winSlider.max = Math.max(1, Math.ceil(mb));
-        winSlider.value = mb;
-        state.scrubWindowMB = mb;
-        document.getElementById('vWin').innerText = mb.toFixed(2);
-    }
+    updateWebcamCanvasSize();
 }
 
 // =============================================================================
