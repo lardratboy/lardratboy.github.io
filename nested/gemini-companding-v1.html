@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Companding Strata — Step C: Repacked & Baked</title>
+<title>Companding Strata — Stereographic Terrain</title>
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #050508; color: #ccc; font-family: 'Consolas', 'SF Mono', monospace; overflow: hidden; }
@@ -84,7 +84,7 @@
 
 <div id="panelL" class="panel">
     <h1>Companding Strata</h1>
-    <div class="sub-h1">WebGPU Compute · Step C (Baked Output)</div>
+    <div class="sub-h1">WebGPU Compute · Stereographic Terrain</div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
         <button class="file-btn" style="margin-bottom:0;" onclick="document.getElementById('fIn').click()">Open File</button>
@@ -169,6 +169,7 @@
                 <option value="0" selected>3D Spatial</option>
                 <option value="1">Tiled 2D</option>
                 <option value="2">Atlas 3D</option>
+                <option value="3">Stereo Terrain</option>
             </select>
         </div>
         <div>
@@ -770,7 +771,7 @@ fn vs(
         let px = fx0*R.stepX0 + fx1*R.stepX1;
         let py = fy0*R.stepY0 + fy1*R.stepY1;
         world = vec3((px - R.tiledCenterX) * R.tiledScale, (py - R.tiledCenterY) * R.tiledScale, 0.0);
-    } else {
+    } else if (R.mode < 2.5) {
         let ZCOLS = 4u; let D = 16.0;
         let iz0 = u32(p0.z);
         let flatX = f32(iz0 % ZCOLS) * D + p0.x;
@@ -791,6 +792,37 @@ fn vs(
         let pz = (local.z + 0.5) * cubeSize * R.depthScale;
 
         world = vec3((px - R.tiledCenterX) * R.tiledScale, (py - R.tiledCenterY) * R.tiledScale, pz * R.tiledScale);
+    } else {
+        // Mode 3: Stereographic Terrain
+        // Reconstruct full 8-bit address from macro+meso tiers
+        let full = p0 * 16.0 + p1;            // 0..255 per axis
+        let centered = full / 127.5 - 1.0;    // [-1, 1] cube
+
+        // Normalize to unit sphere
+        let r = max(length(centered), 0.001);
+        let onSphere = centered / r;
+
+        // Stereographic projection from north pole (0,0,1)
+        // Using compact form: divide by (1 + |1-z|) to avoid singularity
+        let denom = max(1.0 - onSphere.z, 0.01);
+        var stereoX = onSphere.x / denom;
+        var stereoY = onSphere.y / denom;
+
+        // Clamp to avoid pole blowup (max radius ~3)
+        let stereoR = length(vec2(stereoX, stereoY));
+        if (stereoR > 3.0) {
+            let clampF = 3.0 / stereoR;
+            stereoX = stereoX * clampF;
+            stereoY = stereoY * clampF;
+        }
+
+        // Freed axis: density as terrain height (log scale)
+        var terrainZ = 0.0;
+        if (R.maxCount > 0.0 && rawCount > 0u) {
+            terrainZ = log2(f32(rawCount) + 1.0) / log2(R.maxCount + 1.0);
+        }
+
+        world = vec3(stereoX * 2.0, stereoY * 2.0, terrainZ * R.depthScale * 4.0);
     }
 
     let gravCenter = vec3(R.gravTargetX, R.gravTargetY, R.gravTargetZ);
@@ -1003,7 +1035,7 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
         let fx1 = f32(iz1 % ZCOLS)*D + p1.x; let fy1 = f32(iz1 / ZCOLS)*D + p1.y;
         let px = fx0*R.stepX0 + fx1*R.stepX1; let py = fy0*R.stepY0 + fy1*R.stepY1;
         world = vec3((px - R.tiledCenterX)*R.tiledScale, (py - R.tiledCenterY)*R.tiledScale, 0.0);
-    } else {
+    } else if (R.mode < 2.5) {
         let ZCOLS = 4u; let D = 16.0;
         let iz0 = u32(p0.z);
         let flatX = f32(iz0 % ZCOLS)*D + p0.x;
@@ -1020,6 +1052,23 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
         let py = flatY*R.stepY0 + (local.y+0.5)*cubeSize;
         let pz = (local.z+0.5)*cubeSize*R.depthScale;
         world = vec3((px - R.tiledCenterX)*R.tiledScale, (py - R.tiledCenterY)*R.tiledScale, pz*R.tiledScale);
+    } else {
+        // Stereo Terrain (selection)
+        let full = p0 * 16.0 + p1;
+        let centered = full / 127.5 - 1.0;
+        let r = max(length(centered), 0.001);
+        let onSphere = centered / r;
+        let denom = max(1.0 - onSphere.z, 0.01);
+        var stereoX = onSphere.x / denom;
+        var stereoY = onSphere.y / denom;
+        let stereoR = length(vec2(stereoX, stereoY));
+        if (stereoR > 3.0) { let cf = 3.0/stereoR; stereoX=stereoX*cf; stereoY=stereoY*cf; }
+        let rawCount = bitcast<u32>(points[b+3u]);
+        var terrainZ = 0.0;
+        if (R.maxCount > 0.0 && rawCount > 0u) {
+            terrainZ = log2(f32(rawCount)+1.0) / log2(R.maxCount+1.0);
+        }
+        world = vec3(stereoX*2.0, stereoY*2.0, terrainZ*R.depthScale*4.0);
     }
 
     let soft = max(R.slabSoft, 0.001);
@@ -1835,8 +1884,56 @@ async function runSelectionPass(rectMin, rectMax, selMode) {
 async function exportPLY() {
     if(!outputBuf||pointCount===0)return;
     const st=computeStrides();
+    const ti=computeTiledStrides();
     const exportMode = document.getElementById('selExportMode').value;
     const onlySelected = exportMode === 'selected';
+
+    // Mode-aware position reconstruction (mirrors vertex shader logic)
+    function worldPos(p0x,p0y,p0z,p1x,p1y,p1z,rawCount) {
+        if (state.mode === 0) {
+            return [
+                (p0x*st.s0+p1x*st.s1-st.ctr)*st.scl,
+                (p0y*st.s0+p1y*st.s1-st.ctr)*st.scl,
+                (p0z*st.s0+p1z*st.s1-st.ctr)*st.scl
+            ];
+        } else if (state.mode === 1) {
+            const ZCOLS=4, D=16;
+            const fx0=(p0z%ZCOLS)*D+p0x, fy0=Math.floor(p0z/ZCOLS)*D+p0y;
+            const fx1=(p1z%ZCOLS)*D+p1x, fy1=Math.floor(p1z/ZCOLS)*D+p1y;
+            const px=fx0*ti.stepX0+fx1*ti.stepX1;
+            const py=fy0*ti.stepY0+fy1*ti.stepY1;
+            return [(px-ti.centerX)*ti.scale, (py-ti.centerY)*ti.scale, 0];
+        } else if (state.mode === 2) {
+            const ZCOLS=4, D=16;
+            const flatX=(p0z%ZCOLS)*D+p0x;
+            const flatY=Math.floor(p0z/ZCOLS)*D+p0y;
+            const lx=p1x/15-0.5, ly=p1y/15-0.5, lz=p1z/15-0.5;
+            const sinY=Math.sin(state.subRotY), cosY=Math.cos(state.subRotY);
+            const sinX=Math.sin(state.subRotX), cosX=Math.cos(state.subRotX);
+            const rx=lx*cosY-lz*sinY, rz1=lx*sinY+lz*cosY;
+            const ry=ly*cosX-rz1*sinX, rz2=ly*sinX+rz1*cosX;
+            const cs=ti.stepX0*0.8;
+            const px=flatX*ti.stepX0+(rx+0.5)*cs;
+            const py=flatY*ti.stepY0+(ry+0.5)*cs;
+            const pz=(rz2+0.5)*cs*state.depthScale;
+            return [(px-ti.centerX)*ti.scale, (py-ti.centerY)*ti.scale, pz*ti.scale];
+        } else {
+            // Mode 3: Stereographic Terrain
+            const fx=p0x*16+p1x, fy=p0y*16+p1y, fz=p0z*16+p1z;
+            const cx=fx/127.5-1, cy=fy/127.5-1, cz=fz/127.5-1;
+            const r=Math.max(Math.sqrt(cx*cx+cy*cy+cz*cz), 0.001);
+            const sx=cx/r, sy=cy/r, sz=cz/r;
+            const denom=Math.max(1.0-sz, 0.01);
+            let stX=sx/denom, stY=sy/denom;
+            const stR=Math.sqrt(stX*stX+stY*stY);
+            if(stR>3){const cf=3/stR;stX*=cf;stY*=cf;}
+            let terrainZ=0;
+            if(maxCountValue>0 && rawCount>0){
+                terrainZ=Math.log2(rawCount+1)/Math.log2(maxCountValue+1);
+            }
+            return [stX*2, stY*2, terrainZ*state.depthScale*4];
+        }
+    }
 
     const readSize=pointCount*BYTES_PER_POINT;
     const rb=device.createBuffer({size:readSize,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
@@ -1868,12 +1965,11 @@ async function exportPLY() {
         if (onlySelected && sel === 0) continue;
 
         const raw0=intV[b]|0, raw1=intV[b+1]|0;
+        const rawCount=intV[b+3]>>>0;
         const p0x=(raw0>>16)&0xFF, p0y=(raw0>>8)&0xFF, p0z=raw0&0xFF;
         const p1x=(raw1>>16)&0xFF, p1y=(raw1>>8)&0xFF, p1z=raw1&0xFF;
 
-        const wx = (p0x*st.s0+p1x*st.s1-st.ctr)*st.scl;
-        const wy = (p0y*st.s0+p1y*st.s1-st.ctr)*st.scl;
-        const wz = (p0z*st.s0+p1z*st.s1-st.ctr)*st.scl;
+        const [wx,wy,wz] = worldPos(p0x,p0y,p0z,p1x,p1y,p1z,rawCount);
 
         if (slabActive) {
             const dd = Math.abs(sn[0]*wx + sn[1]*wy + sn[2]*wz - state.slabPosition) - state.slabThickness * 0.5;
@@ -1891,10 +1987,12 @@ async function exportPLY() {
     }
 
     const count = survivors.length;
+    const projNames = ['3D','Tiled2D','Atlas3D','StereoTerrain'];
     const header =[
         "ply", "format binary_little_endian 1.0",
-        `comment Generated by Unified Strata WebGPU — ${state.fileName}`,
+        `comment Generated by Companding Strata — ${state.fileName}`,
         `comment Type: ${state.format} Endian: ${state.isLE?'LE':'BE'} Dive: ${state.shift}`,
+        `comment Projection: ${projNames[state.mode]||state.mode} DepthScale: ${state.depthScale}`,
         `comment Export: ${onlySelected ? 'selected only' : 'all visible'} (${count} of ${pointCount})`,
         `element vertex ${count}`,
         "property float x", "property float y", "property float z",
@@ -1908,14 +2006,16 @@ async function exportPLY() {
     for (let si = 0; si < count; si++) {
         const i = survivors[si];
         const b = i * 4;
-        const raw0=intV[b]|0, raw1=intV[b+1]|0, raw2=intV[b+2]|0; 
+        const raw0=intV[b]|0, raw1=intV[b+1]|0, raw2=intV[b+2]|0;
+        const rawCount=intV[b+3]>>>0;
         const p0x=(raw0>>16)&0xFF, p0y=(raw0>>8)&0xFF, p0z=raw0&0xFF;
         const p1x=(raw1>>16)&0xFF, p1y=(raw1>>8)&0xFF, p1z=raw1&0xFF;
 
+        const [wx,wy,wz] = worldPos(p0x,p0y,p0z,p1x,p1y,p1z,rawCount);
         const off = si * vertexBytes;
-        dv.setFloat32(off,     (p0x*st.s0+p1x*st.s1-st.ctr)*st.scl, true);
-        dv.setFloat32(off + 4, (p0y*st.s0+p1y*st.s1-st.ctr)*st.scl, true);
-        dv.setFloat32(off + 8, (p0z*st.s0+p1z*st.s1-st.ctr)*st.scl, true);
+        dv.setFloat32(off,     wx, true);
+        dv.setFloat32(off + 4, wy, true);
+        dv.setFloat32(off + 8, wz, true);
         dv.setUint8(off + 12, Math.min(255, ((raw2>>16)&0xFF) + 25));
         dv.setUint8(off + 13, Math.min(255, ((raw2>>8)&0xFF) + 25));
         dv.setUint8(off + 14, Math.min(255, (raw2&0xFF) + 25));
@@ -1927,10 +2027,10 @@ async function exportPLY() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${state.fileName.replace(/[^a-z0-9]/gi,'_')}_strata${onlySelected ? '_selected' : ''}.ply`;
+    link.download = `${state.fileName.replace(/[^a-z0-9]/gi,'_')}_strata_${projNames[state.mode]||'unk'}${onlySelected ? '_selected' : ''}.ply`;
     link.click();
     URL.revokeObjectURL(url);
-    console.log(`Exported ${count} particles (${onlySelected ? 'selected' : 'all visible'})`);
+    console.log(`Exported ${count} particles as ${projNames[state.mode]} (${onlySelected ? 'selected' : 'all visible'})`);
 }
 
 // =============================================================================
@@ -1977,7 +2077,7 @@ function setFormat(f){
     }
 }
 function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=le?'le':'be';runCompute();}
-function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);state.subRotX=0;state.subRotY=0;}
+function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);state.subRotX=0;state.subRotY=0;if(m===3){camPhi=Math.PI*0.3;camTheta=Math.PI*0.25;camRadius=10;}}
 function setCompand(c) {
     state.compandCurve = c;
     const ctrl = document.getElementById('ctrlCompParam');
