@@ -170,6 +170,7 @@
                 <option value="1">Tiled 2D</option>
                 <option value="2">Atlas 3D</option>
                 <option value="3">Stereo Terrain</option>
+                <option value="4">Equal-Area Terrain</option>
             </select>
         </div>
         <div>
@@ -792,7 +793,7 @@ fn vs(
         let pz = (local.z + 0.5) * cubeSize * R.depthScale;
 
         world = vec3((px - R.tiledCenterX) * R.tiledScale, (py - R.tiledCenterY) * R.tiledScale, pz * R.tiledScale);
-    } else {
+    } else if (R.mode < 3.5) {
         // Mode 3: Stereographic Terrain
         // Reconstruct full 8-bit address from macro+meso tiers
         let full = p0 * 16.0 + p1;            // 0..255 per axis
@@ -803,7 +804,6 @@ fn vs(
         let onSphere = centered / r;
 
         // Stereographic projection from north pole (0,0,1)
-        // Using compact form: divide by (1 + |1-z|) to avoid singularity
         let denom = max(1.0 - onSphere.z, 0.01);
         var stereoX = onSphere.x / denom;
         var stereoY = onSphere.y / denom;
@@ -823,6 +823,33 @@ fn vs(
         }
 
         world = vec3(stereoX * 2.0, stereoY * 2.0, terrainZ * R.depthScale * 4.0);
+    } else {
+        // Mode 4: Lambert Equal-Area Terrain
+        let full = p0 * 16.0 + p1;
+        let centered = full / 127.5 - 1.0;
+
+        let r = max(length(centered), 0.001);
+        let onSphere = centered / r;
+
+        // Lambert azimuthal equal-area from north pole: k = sqrt(2 / (1 - z))
+        let k = sqrt(2.0 / max(1.0 - onSphere.z, 0.01));
+        var eaX = k * onSphere.x;
+        var eaY = k * onSphere.y;
+
+        // Clamp (gentler blowup than stereographic, but still needs it)
+        let eaR = length(vec2(eaX, eaY));
+        if (eaR > 3.0) {
+            let clampF = 3.0 / eaR;
+            eaX = eaX * clampF;
+            eaY = eaY * clampF;
+        }
+
+        var terrainZ = 0.0;
+        if (R.maxCount > 0.0 && rawCount > 0u) {
+            terrainZ = log2(f32(rawCount) + 1.0) / log2(R.maxCount + 1.0);
+        }
+
+        world = vec3(eaX * 2.0, eaY * 2.0, terrainZ * R.depthScale * 4.0);
     }
 
     let gravCenter = vec3(R.gravTargetX, R.gravTargetY, R.gravTargetZ);
@@ -1052,7 +1079,7 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
         let py = flatY*R.stepY0 + (local.y+0.5)*cubeSize;
         let pz = (local.z+0.5)*cubeSize*R.depthScale;
         world = vec3((px - R.tiledCenterX)*R.tiledScale, (py - R.tiledCenterY)*R.tiledScale, pz*R.tiledScale);
-    } else {
+    } else if (R.mode < 3.5) {
         // Stereo Terrain (selection)
         let full = p0 * 16.0 + p1;
         let centered = full / 127.5 - 1.0;
@@ -1069,6 +1096,23 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
             terrainZ = log2(f32(rawCount)+1.0) / log2(R.maxCount+1.0);
         }
         world = vec3(stereoX*2.0, stereoY*2.0, terrainZ*R.depthScale*4.0);
+    } else {
+        // Lambert Equal-Area Terrain (selection)
+        let full = p0 * 16.0 + p1;
+        let centered = full / 127.5 - 1.0;
+        let r = max(length(centered), 0.001);
+        let onSphere = centered / r;
+        let k = sqrt(2.0 / max(1.0 - onSphere.z, 0.01));
+        var eaX = k * onSphere.x;
+        var eaY = k * onSphere.y;
+        let eaR = length(vec2(eaX, eaY));
+        if (eaR > 3.0) { let cf = 3.0/eaR; eaX=eaX*cf; eaY=eaY*cf; }
+        let rawCount = bitcast<u32>(points[b+3u]);
+        var terrainZ = 0.0;
+        if (R.maxCount > 0.0 && rawCount > 0u) {
+            terrainZ = log2(f32(rawCount)+1.0) / log2(R.maxCount+1.0);
+        }
+        world = vec3(eaX*2.0, eaY*2.0, terrainZ*R.depthScale*4.0);
     }
 
     let soft = max(R.slabSoft, 0.001);
@@ -1917,7 +1961,7 @@ async function exportPLY() {
             const py=flatY*ti.stepY0+(ry+0.5)*cs;
             const pz=(rz2+0.5)*cs*state.depthScale;
             return [(px-ti.centerX)*ti.scale, (py-ti.centerY)*ti.scale, pz*ti.scale];
-        } else {
+        } else if (state.mode === 3) {
             // Mode 3: Stereographic Terrain
             const fx=p0x*16+p1x, fy=p0y*16+p1y, fz=p0z*16+p1z;
             const cx=fx/127.5-1, cy=fy/127.5-1, cz=fz/127.5-1;
@@ -1932,6 +1976,21 @@ async function exportPLY() {
                 terrainZ=Math.log2(rawCount+1)/Math.log2(maxCountValue+1);
             }
             return [stX*2, stY*2, terrainZ*state.depthScale*4];
+        } else {
+            // Mode 4: Lambert Equal-Area Terrain
+            const fx=p0x*16+p1x, fy=p0y*16+p1y, fz=p0z*16+p1z;
+            const cx=fx/127.5-1, cy=fy/127.5-1, cz=fz/127.5-1;
+            const r=Math.max(Math.sqrt(cx*cx+cy*cy+cz*cz), 0.001);
+            const sx=cx/r, sy=cy/r, sz=cz/r;
+            const k=Math.sqrt(2.0/Math.max(1.0-sz, 0.01));
+            let eaX=k*sx, eaY=k*sy;
+            const eaR=Math.sqrt(eaX*eaX+eaY*eaY);
+            if(eaR>3){const cf=3/eaR;eaX*=cf;eaY*=cf;}
+            let terrainZ=0;
+            if(maxCountValue>0 && rawCount>0){
+                terrainZ=Math.log2(rawCount+1)/Math.log2(maxCountValue+1);
+            }
+            return [eaX*2, eaY*2, terrainZ*state.depthScale*4];
         }
     }
 
@@ -1987,7 +2046,7 @@ async function exportPLY() {
     }
 
     const count = survivors.length;
-    const projNames = ['3D','Tiled2D','Atlas3D','StereoTerrain'];
+    const projNames = ['3D','Tiled2D','Atlas3D','StereoTerrain','EqualAreaTerrain'];
     const header =[
         "ply", "format binary_little_endian 1.0",
         `comment Generated by Companding Strata — ${state.fileName}`,
@@ -2077,7 +2136,7 @@ function setFormat(f){
     }
 }
 function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=le?'le':'be';runCompute();}
-function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);state.subRotX=0;state.subRotY=0;if(m===3){camPhi=Math.PI*0.3;camTheta=Math.PI*0.25;camRadius=10;}}
+function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);state.subRotX=0;state.subRotY=0;if(m>=3){camPhi=Math.PI*0.3;camTheta=Math.PI*0.25;camRadius=10;}}
 function setCompand(c) {
     state.compandCurve = c;
     const ctrl = document.getElementById('ctrlCompParam');
