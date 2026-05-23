@@ -1510,11 +1510,21 @@ async function runCompute() {
     state.selectionActive = false;
 
     const statsEl = document.getElementById('stats');
+    
+    const tStart = performance.now();
+    let cpuTime = 0;
+    let gpuTime = 0;
+    let mapTime = 0;
+    let bakeTime = 0;
+
+    // 1. Clear & Setup (CPU prep)
+    let tCpu0 = performance.now();
     const initEnc = device.createCommandEncoder();
     initEnc.clearBuffer(bitTableBuf, 0, BIT_TABLE_SIZE);
     if (state.densityMode === 0) { initEnc.clearBuffer(countTableBuf, 0, COUNT_TABLE_SIZE); }
     device.queue.submit([initEnc.finish()]);
     device.queue.writeBuffer(indirectBuf, 0, indirectResetData);
+    cpuTime += performance.now() - tCpu0;
 
     const MAX_DISPATCH = 65535 * 256;
     const chunkTuples = Math.min(Math.floor(CHUNK_BYTES / byteStep), MAX_DISPATCH);
@@ -1530,7 +1540,9 @@ async function runCompute() {
         { binding: 5, resource: { buffer: countTableBuf } },
     ]});
 
+    // 2. Compute dispatch loop
     for (let chunk = 0; chunk < totalChunks; chunk++) {
+        let tCpuChunk = performance.now();
         const startTuple = chunk * chunkTuples;
         const count = Math.min(chunkTuples, totalTuples - startTuple);
         const chunkByteOff = startTuple * byteStep;
@@ -1563,13 +1575,20 @@ async function runCompute() {
         pass.dispatchWorkgroups(Math.ceil(count / 256));
         pass.end();
         device.queue.submit([enc.finish()]);
+        cpuTime += performance.now() - tCpuChunk;
+
+        // Force wait to prevent async GPU pipeline congestion
+        let tGpu0 = performance.now();
+        await device.queue.onSubmittedWorkDone();
+        gpuTime += performance.now() - tGpu0;
 
         if (totalChunks > 1) {
-            await device.queue.onSubmittedWorkDone();
             statsEl.innerHTML = `Processing: <b>chunk ${chunk + 1}/${totalChunks}</b> · ${((chunk + 1) / totalChunks * 100).toFixed(0)}%`;
         }
     }
 
+    // 3. Reduction dispatch
+    let tCpuRed = performance.now();
     device.queue.writeBuffer(maxCountBuf, 0, new Uint32Array([0]));
     const redBG = device.createBindGroup({ layout:reduceBGL, entries:[
         {binding:0, resource:{buffer:countTableBuf}},
@@ -1582,7 +1601,10 @@ async function runCompute() {
     redPass.dispatchWorkgroups(Math.min(65535, Math.ceil((1 << 24) / 256)));
     redPass.end();
     device.queue.submit([redEnc.finish()]);
+    cpuTime += performance.now() - tCpuRed;
 
+    // 4. Readback memory transfer
+    let tMap0 = performance.now();
     const rb = device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = device.createCommandEncoder();
     enc.copyBufferToBuffer(indirectBuf, 0, rb, 0, 20);
@@ -1593,9 +1615,11 @@ async function runCompute() {
     pointCount = rbData[1];
     maxCountValue = rbData[5];
     rb.unmap(); rb.destroy();
+    mapTime += performance.now() - tMap0;
 
-    // Bake density counts into the final output vertices
+    // 5. Density bake dispatch
     if (pointCount > 0) {
+        let tBake0 = performance.now();
         device.queue.writeBuffer(bakeUniformBuf, 0, new Uint32Array([pointCount]));
         const bakeBG = device.createBindGroup({ layout: bakeBGL, entries:[
             {binding:0, resource:{buffer:outputBuf}},
@@ -1609,17 +1633,29 @@ async function runCompute() {
         bakePass.dispatchWorkgroups(Math.ceil(pointCount / 256));
         bakePass.end();
         device.queue.submit([bakeEnc.finish()]);
+        
+        await device.queue.onSubmittedWorkDone();
+        bakeTime += performance.now() - tBake0;
     }
 
-    const mbFull = (state.fileSize / (1024 * 1024)).toFixed(2);
-    const mbWin = (byteLen / (1024 * 1024)).toFixed(2);
+    const totalTime = performance.now() - tStart;
+
+    const mbFull = (state.fileSize / (1024 * 1024)).toFixed(1);
+    const mbWin = (byteLen / (1024 * 1024)).toFixed(1);
     const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
     const offPct = (state.scrubOffset * 100).toFixed(1);
     const densInfo = maxCountValue > 0 ? ` · Peak: <b>${maxCountValue.toLocaleString()}</b>×` : '';
+
     statsEl.innerHTML =
         `Source: <b>${state.fileName}</b> (${mbFull} MB)<br>` +
         `Window: <b>${mbWin} MB</b> @ ${offPct}% · Nodes: <b>${pointCount.toLocaleString()}</b>${densInfo}<br>` +
-        `GPU: <b>${mbOut} MB</b> · Chunks: <b>${totalChunks}</b> · <b>WebGPU</b>`;
+        `GPU Buf: <b>${mbOut} MB</b> · Chunks: <b>${totalChunks}</b><br>` +
+        `<span style="color:#0ff; font-weight:bold; text-transform:uppercase; font-size:9px; letter-spacing:0.5px; display:inline-block; margin-top:8px; margin-bottom:4px;">Profiling Metrics</span><br>` +
+        `· CPU Setup & Encode: <b style="color:#eee">${cpuTime.toFixed(1)} ms</b><br>` +
+        `· GPU Compute Exec:  <b style="color:#eee">${gpuTime.toFixed(1)} ms</b><br>` +
+        `· MapAsync Readback:  <b style="color:#eee">${mapTime.toFixed(1)} ms</b><br>` +
+        `· Density Bake Pass:  <b style="color:#eee">${bakeTime.toFixed(1)} ms</b><br>` +
+        `· Total Roundtrip:   <b style="color:#0ff">${totalTime.toFixed(1)} ms</b>`;
 }
 
 // =============================================================================
@@ -1999,7 +2035,6 @@ async function toggleWebcam() {
         }
     } else {
         try {
-            // Attempt high-res request, let browser scale it as needed
             const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 } } });
             state.webcamStream = stream;
 
@@ -2044,7 +2079,6 @@ async function webcamTick() {
         const w = state.webcamCanvas.width;
         const h = state.webcamCanvas.height;
 
-        // Render full uncropped video frame maintaining native aspect ratio
         state.webcamCtx.drawImage(state.webcamVideo, 0, 0, w, h);
 
         const imgData = state.webcamCtx.getImageData(0, 0, w, h);
@@ -2060,7 +2094,6 @@ async function webcamTick() {
         state.fileSize = rgb.byteLength;
         state.fileName = `LIVE WEBCAM (${w}x${h})`;
 
-        // Adjust sWin and vWin reactively to fit the live stream buffer size
         const mb = rgb.byteLength / (1024 * 1024);
         const winSlider = document.getElementById('sWin');
         winSlider.max = Math.max(1, Math.ceil(mb));
