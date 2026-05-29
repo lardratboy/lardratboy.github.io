@@ -466,6 +466,40 @@
     .edit-palette-btn[data-paint="Dodeca"]  { color: #f0f0f0; }
     .edit-palette-btn[data-paint="random"]  { color: #ffd54a; font-weight: bold; }
     .edit-palette-btn[data-paint="erase"]   { color: #ff9966; }
+    .edit-palette-btn[data-paint="prize"]   { color: #ffd700; }
+
+    .edit-board-controls {
+      display: flex;
+      flex-direction: row;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .edit-control {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 3px;
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      opacity: 0.7;
+      color: var(--light-text);
+    }
+    .edit-select {
+      background-color: rgba(255, 255, 255, 0.1);
+      color: var(--light-text);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 0.9rem;
+      font-family: inherit;
+      cursor: pointer;
+      min-height: 36px;
+      text-transform: none;
+      letter-spacing: normal;
+      opacity: 1;
+    }
+    .edit-select:hover { background-color: rgba(255, 255, 255, 0.18); }
+    .edit-select option { background-color: rgba(20, 20, 40, 1); color: var(--light-text); }
 
     .reset-confirm-row {
       display: flex;
@@ -634,6 +668,43 @@
     <div id="edit-toolbar" aria-hidden="true">
       <div class="edit-toolbar-header">Edit Mode</div>
       <div class="edit-toolbar-section">
+        <div class="edit-section-label">Board</div>
+        <div class="edit-board-controls">
+          <label class="edit-control">Rows
+            <select id="edit-rows" class="edit-select">
+              <option value="7">7</option>
+              <option value="9">9</option>
+              <option value="11">11</option>
+              <option value="13">13</option>
+              <option value="15">15</option>
+            </select>
+          </label>
+          <label class="edit-control">Cols
+            <select id="edit-columns" class="edit-select">
+              <option value="7">7</option>
+              <option value="9">9</option>
+              <option value="11">11</option>
+              <option value="13">13</option>
+              <option value="15">15</option>
+            </select>
+          </label>
+          <label class="edit-control">Template
+            <select id="edit-template" class="edit-select">
+              <option value="">— load —</option>
+              <option value="rectangle">Rectangle</option>
+              <option value="diamond">Diamond</option>
+              <option value="cross">Cross</option>
+              <option value="circle">Circle</option>
+              <option value="staircase">Staircase</option>
+              <option value="corners">Corners</option>
+              <option value="diagonalCorners">Diagonal Corners</option>
+              <option value="triangle">Triangle</option>
+              <option value="random">Random</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="edit-toolbar-section">
         <div class="edit-section-label">Tools</div>
         <div class="edit-toolbar-row">
           <button id="edit-tool-cell" class="edit-tool-btn selected" data-tool="cellMask" title="Toggle cell on/off">▦ Cell</button>
@@ -651,6 +722,7 @@
           <button class="edit-palette-btn" data-paint="Dodeca" title="Dodecahedron">⬟</button>
           <button class="edit-palette-btn" data-paint="random" title="Random fill on play">?</button>
           <button class="edit-palette-btn" data-paint="erase" title="Empty cell">⌫</button>
+          <button class="edit-palette-btn" data-paint="prize" title="Toggle prize ring">◯</button>
         </div>
       </div>
       <div class="edit-toolbar-row">
@@ -675,6 +747,14 @@
       <div class="reset-confirm-row">
         <button id="reset-cancel" class="btn">Cancel</button>
         <button id="reset-confirm" class="btn btn-primary">Reset</button>
+      </div>
+    </div>
+    <div id="loadTemplateConfirm" class="overlay">
+      <h2>Load template?</h2>
+      <p>This replaces your current board with the chosen template. Discard still recovers the original.</p>
+      <div class="reset-confirm-row">
+        <button id="load-template-cancel" class="btn">Cancel</button>
+        <button id="load-template-confirm" class="btn btn-primary">Load</button>
       </div>
     </div>
   </div>
@@ -1480,6 +1560,8 @@ class BubblePopper {
         // Edit mode state (Phase 3)
         this.currentPaint = 'Sphere';       // active paint when Piece tool is selected
         this.willRandomFill = [];           // 2D bool: if cell has no shape, does it auto-fill on Play?
+        // Edit mode state (Phase 4)
+        this.pendingTemplate = null;        // name of template waiting for load confirmation
 
         this.scoreElement = document.getElementById('game-score');
         this.rotateLeftBtn = document.getElementById('rotate-left-btn');
@@ -1787,6 +1869,7 @@ class BubblePopper {
     // --- Board Rotation ---
     rotateBoard(direction) {
         if (this.isAnimating || this.gamePaused) return;
+        if (this.editMode) { this.rotateBoardEditMode(direction); return; }
         this.isAnimating = true;
         this.clearTubeConnections();
         this.setRotationButtonsEnabled(false);
@@ -1806,6 +1889,35 @@ class BubblePopper {
             this.rotatePrizes(direction, oldRows, oldCols);
             this.positionBoardElements();
             setTimeout(() => this.applyGravity(), 200);
+        });
+    }
+
+    // Phase 4: rotation in edit mode rotates the state and animates, but skips applyGravity.
+    rotateBoardEditMode(direction) {
+        this.isAnimating = true;
+        this.lastRotationDirection = direction;
+        this.setRotationButtonsEnabled(false);
+        soundEngine.play('rotate');
+        // Drop placeholders before animating; rebuild after rotation lands.
+        this.disposeCellPlaceholders();
+        this.setEditHover(null, null);
+        this.animateVisualRotation(() => {
+            const rotatedLayout = this.rotateArray2D(this.boardLayout, direction);
+            const rotatedWillFill = this.rotateArray2D(this.willRandomFill, direction);
+            const rotatedShapes = this.rotateArray2D(this.shapes, direction);
+            const oldRows = this.rows, oldCols = this.columns;
+            this.rows = oldCols;
+            this.columns = oldRows;
+            this.boardLayout = rotatedLayout;
+            this.willRandomFill = rotatedWillFill;
+            this.shapes = rotatedShapes;
+            this.updateShapePositions();
+            this.rotatePrizes(direction, oldRows, oldCols);
+            this.positionBoardElements();
+            this.refreshCellPlaceholders();
+            this.refreshDimensionInputs();
+            this.isAnimating = false;
+            this.setRotationButtonsEnabled(true);
         });
     }
 
@@ -2100,17 +2212,20 @@ class BubblePopper {
         this.currentPaint = 'Sphere';
         this.refreshCellPlaceholders();
         this.ensureEditHoverMesh();
-        this.setRotationButtonsEnabled(false);
+        this.setRotationButtonsEnabled(true); // Phase 4: rotation works in edit mode (no gravity)
         const gizmo = document.getElementById('edit-gizmo');
         const toolbar = document.getElementById('edit-toolbar');
         if (gizmo) gizmo.classList.add('hidden');
         if (toolbar) { toolbar.classList.add('visible'); toolbar.setAttribute('aria-hidden', 'false'); }
         this.refreshToolSelection();
         this.refreshPaletteSelection();
+        this.refreshDimensionInputs();
+        this.resetTemplateSelect();
     }
 
     exitEditMode(action) {
         if (!this.editMode) return;
+        if (this.isAnimating) return; // wait for any in-flight rotation to finish
         if (action === 'discard') {
             this.restoreFromSnapshot(this.editSnapshot);
         } else if (action === 'play') {
@@ -2160,6 +2275,7 @@ class BubblePopper {
         this.prizes = snap.prizes.map(p => ({ row: p.row, col: p.col, collected: p.collected }));
         const offsetX = -((this.columns - 1) * 1.1) / 2;
         const offsetY = ((this.rows - 1) * 1.1) / 2;
+        // Restore pinned pieces.
         for (const piece of snap.pieces) {
             const shapeData = this.shapeAtlas.find(s => s.name === piece.shapeType);
             if (!shapeData) continue;
@@ -2167,12 +2283,16 @@ class BubblePopper {
             const shape = new Shape(x, y, 0, 0.55, shapeData, piece.row, piece.col);
             this.shapes[piece.row][piece.col] = shape;
             this.scene.add(shape.mesh);
-            const prizeData = this.prizes.find(p => p.row === piece.row && p.col === piece.col && !p.collected);
-            if (prizeData) {
-                const prize = new Prize(x, y, 0.1, 0.55 * 1.2);
-                this.scene.add(prize.mesh);
-                prizeData.prizeObj = prize;
-            }
+        }
+        // Restore prize meshes for every uncollected prize, regardless of whether a piece
+        // sits beneath. With the prize tool, prizes can ride above random-fill cells that
+        // have no piece yet — those still need their mesh restored.
+        for (const prizeData of this.prizes) {
+            if (prizeData.collected) continue;
+            const x = offsetX + prizeData.col * 1.1, y = offsetY - prizeData.row * 1.1;
+            const prize = new Prize(x, y, 0.1, 0.55 * 1.2);
+            this.scene.add(prize.mesh);
+            prizeData.prizeObj = prize;
         }
         this.score = snap.score;
         this.updateScore();
@@ -2427,20 +2547,31 @@ class BubblePopper {
     paintCell(row, col) {
         if (!this.boardLayout[row]?.[col]) return; // can't paint cells outside the playfield
         const paint = this.currentPaint;
-        // Remove any existing piece (we're replacing).
+
+        // Prize is an independent layer — toggle it without touching the piece state.
+        if (paint === 'prize') {
+            this.togglePrize(row, col);
+            return;
+        }
+
+        // Replace any existing piece (we're changing the piece layer).
         const existing = this.shapes[row]?.[col];
         if (existing) {
             this.scene.remove(existing.mesh);
             existing.dispose();
             this.shapes[row][col] = null;
         }
-        // Strip any prize tied to this cell. Prizes are a Phase 4+ concern; for now,
-        // editing a cell clears its prize since we don't have a prize tool.
-        const prizeIdx = this.prizes.findIndex(p => p.row === row && p.col === col);
-        if (prizeIdx >= 0) {
-            const prize = this.prizes[prizeIdx];
-            if (prize.prizeObj) prize.prizeObj.dispose();
-            this.prizes.splice(prizeIdx, 1);
+        // Eraser removes any prize on the cell, since an empty-intent cell can never
+        // produce a piece to ride above. Shape paints and Random both preserve the prize:
+        // a shape is the piece the prize will ride on, and Random will still produce one
+        // when "Play this" fires.
+        if (paint === 'erase') {
+            const prizeIdx = this.prizes.findIndex(p => p.row === row && p.col === col);
+            if (prizeIdx >= 0) {
+                const prize = this.prizes[prizeIdx];
+                if (prize.prizeObj) prize.prizeObj.dispose();
+                this.prizes.splice(prizeIdx, 1);
+            }
         }
         this.removeCellPlaceholder(row, col);
         if (!this.willRandomFill[row]) this.willRandomFill[row] = Array(this.columns).fill(false);
@@ -2466,6 +2597,30 @@ class BubblePopper {
         }
     }
 
+    // --- Phase 5: prize tool ---
+    togglePrize(row, col) {
+        if (!this.boardLayout[row]?.[col]) return;
+        // Prize can only attach to a cell that will produce a piece: either pinned shape
+        // or random-fill. Empty-intent and inactive cells reject the prize (uncollectible).
+        const hasShape = !!this.shapes[row]?.[col];
+        const willFill = !!this.willRandomFill[row]?.[col];
+        if (!hasShape && !willFill) return;
+
+        const existingIdx = this.prizes.findIndex(p => p.row === row && p.col === col);
+        if (existingIdx >= 0) {
+            const prize = this.prizes[existingIdx];
+            if (prize.prizeObj) prize.prizeObj.dispose();
+            this.prizes.splice(existingIdx, 1);
+            return;
+        }
+        const offsetX = -((this.columns - 1) * 1.1) / 2;
+        const offsetY = ((this.rows - 1) * 1.1) / 2;
+        const x = offsetX + col * 1.1, y = offsetY - row * 1.1;
+        const prizeObj = new Prize(x, y, 0.1, 0.55 * 1.2);
+        this.scene.add(prizeObj.mesh);
+        this.prizes.push({ row, col, collected: false, prizeObj });
+    }
+
     fillEmptyCellsRandomly() {
         // Only fill cells that are active, have no shape, AND are marked willRandomFill.
         // Cells with willRandomFill=false are "empty intent" and stay empty.
@@ -2484,6 +2639,101 @@ class BubblePopper {
                 }
             }
         }
+    }
+
+    // --- Phase 4: board operations (resize, template load, dimension UI) ---
+    refreshDimensionInputs() {
+        const rowsEl = document.getElementById('edit-rows');
+        const colsEl = document.getElementById('edit-columns');
+        if (rowsEl) rowsEl.value = String(this.rows);
+        if (colsEl) colsEl.value = String(this.columns);
+    }
+
+    resetTemplateSelect() {
+        const tmplEl = document.getElementById('edit-template');
+        if (tmplEl) tmplEl.value = '';
+    }
+
+    resizeBoardInEdit(newRows, newCols) {
+        if (!this.editMode) return;
+        if (this.isAnimating) return;
+        if (newRows === this.rows && newCols === this.columns) return;
+
+        // Allocate fresh arrays sized to the new dimensions, copying overlap top-left.
+        const newLayout = Array(newRows).fill().map(() => Array(newCols).fill(false));
+        const newWillFill = Array(newRows).fill().map(() => Array(newCols).fill(false));
+        const newShapes = Array(newRows).fill().map(() => Array(newCols).fill(null));
+        const rowsToCopy = Math.min(this.rows, newRows);
+        const colsToCopy = Math.min(this.columns, newCols);
+
+        for (let i = 0; i < rowsToCopy; i++) {
+            for (let j = 0; j < colsToCopy; j++) {
+                newLayout[i][j] = !!(this.boardLayout[i]?.[j]);
+                newWillFill[i][j] = !!(this.willRandomFill[i]?.[j]);
+            }
+        }
+        // Keep shapes within bounds; dispose ones outside.
+        for (let i = 0; i < this.rows; i++) {
+            for (let j = 0; j < this.columns; j++) {
+                const shape = this.shapes[i]?.[j];
+                if (!shape) continue;
+                if (i < newRows && j < newCols) {
+                    newShapes[i][j] = shape;
+                } else {
+                    this.scene.remove(shape.mesh);
+                    shape.dispose();
+                }
+            }
+        }
+        // Keep prizes within bounds; dispose ones outside.
+        const keptPrizes = [];
+        for (const p of this.prizes) {
+            if (p.row < newRows && p.col < newCols) {
+                keptPrizes.push(p);
+            } else if (p.prizeObj) {
+                p.prizeObj.dispose();
+            }
+        }
+
+        this.rows = newRows;
+        this.columns = newCols;
+        this.boardLayout = newLayout;
+        this.willRandomFill = newWillFill;
+        this.shapes = newShapes;
+        this.prizes = keptPrizes;
+
+        this.positionBoardElements();
+        this.refreshCellPlaceholders();
+        this.setEditHover(null, null);
+    }
+
+    loadEditTemplate(name) {
+        if (!this.editMode) return;
+        if (this.isAnimating) return;
+        const fn = this.boardTemplates[name];
+        if (!fn) return;
+        const tmpl = fn(this.rows, this.columns);
+        let layout, initialFill;
+        if (Array.isArray(tmpl)) {
+            layout = tmpl;
+            initialFill = tmpl.map(r => r.slice());
+        } else {
+            layout = tmpl.layout;
+            initialFill = tmpl.initialFill;
+        }
+        // Wipe pieces and prizes; the template provides a fresh starting point.
+        this.clearBoard(false);
+        this.boardLayout = layout.map(r => r.slice());
+        // willRandomFill mirrors initialFill: cells that "should have a piece" get random fills on Play.
+        // Cells with layout=true but initialFill=false stay empty-intent (the diagonal-templates pattern).
+        this.willRandomFill = initialFill.map(r => r.slice());
+        this.shapes = Array(this.rows).fill().map(() => Array(this.columns).fill(null));
+        this.prizes = [];
+        this.score = 0;
+        this.updateScore();
+        this.positionBoardElements();
+        this.refreshCellPlaceholders();
+        this.setEditHover(null, null);
     }
 
     updateScore() {
@@ -2607,7 +2857,7 @@ Unboxed.run({
         TWEEN.update();
     },
     input: {
-        excludeSelectors: ['#splash-screen', '#settings-screen', '#gameOver', '#gameWin', '#game-ui', '#edit-gizmo', '#edit-toolbar', '#resetConfirm']
+        excludeSelectors: ['#splash-screen', '#settings-screen', '#gameOver', '#gameWin', '#game-ui', '#edit-gizmo', '#edit-toolbar', '#resetConfirm', '#loadTemplateConfirm']
     },
     sounds: {
         pop: (e, delay = 0, waveIdx = 0) => {
@@ -2747,6 +2997,37 @@ document.querySelectorAll('.edit-palette-btn').forEach(btn => {
         if (game.currentTool !== 'piece') game.selectTool('piece');
         game.selectPaint(paint);
     });
+});
+
+// --- Edit Mode (Phase 4) ---
+document.getElementById('edit-rows').addEventListener('change', e => {
+    if (!game.editMode) return;
+    const n = parseInt(e.target.value, 10);
+    if (Number.isFinite(n)) game.resizeBoardInEdit(n, game.columns);
+});
+document.getElementById('edit-columns').addEventListener('change', e => {
+    if (!game.editMode) return;
+    const n = parseInt(e.target.value, 10);
+    if (Number.isFinite(n)) game.resizeBoardInEdit(game.rows, n);
+});
+document.getElementById('edit-template').addEventListener('change', e => {
+    if (!game.editMode) { e.target.value = ''; return; }
+    const name = e.target.value;
+    if (!name) return;
+    // Stash the selection and ask for confirmation; reset the select either way.
+    game.pendingTemplate = name;
+    e.target.value = '';
+    ui.openOverlay('loadTemplateConfirm');
+});
+ui.setupButton('load-template-cancel', () => {
+    ui.closeOverlay('loadTemplateConfirm');
+    game.pendingTemplate = null;
+});
+ui.setupButton('load-template-confirm', () => {
+    ui.closeOverlay('loadTemplateConfirm');
+    const name = game.pendingTemplate;
+    game.pendingTemplate = null;
+    if (name) game.loadEditTemplate(name);
 });
 
 // --- Boot into splash state ---
