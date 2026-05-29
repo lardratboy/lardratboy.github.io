@@ -2245,24 +2245,37 @@ class BubblePopper {
     }
 
     // --- Phase 2/3: cell placeholders (wireframe markers for active-empty cells) ---
-    // type: 'random' (cube wireframe — will get random fill on Play) | 'empty' (sphere wireframe — stays empty)
+    // type: 'random' (cube wireframe — will get random fill on Play) | 'empty' (sphere wireframe — stays empty) | 'masked' (red X — cell is inactive)
     createCellPlaceholder(row, col, type = 'random') {
         const offsetX = -((this.columns - 1) * 1.1) / 2;
         const offsetY = ((this.rows - 1) * 1.1) / 2;
         let geom, color, opacity;
-        if (type === 'empty') {
-            geom = new THREE.SphereGeometry(0.3, 10, 6);
-            color = 0x888888;
-            opacity = 0.3;
+        if (type === 'masked') {
+            // Two diagonals forming an X on the z=0 plane, marking inactive cells.
+            const h = 0.32;
+            geom = new THREE.BufferGeometry();
+            geom.setAttribute('position', new THREE.Float32BufferAttribute([
+                -h, -h, 0,   h,  h, 0,
+                -h,  h, 0,   h, -h, 0
+            ], 3));
+            color = 0xff5555;
+            opacity = 0.55;
         } else {
-            geom = new THREE.BoxGeometry(0.7, 0.7, 0.7);
-            color = 0xffffff;
-            opacity = 0.2;
+            let src;
+            if (type === 'empty') {
+                src = new THREE.SphereGeometry(0.3, 10, 6);
+                color = 0x888888;
+                opacity = 0.3;
+            } else {
+                src = new THREE.BoxGeometry(0.7, 0.7, 0.7);
+                color = 0xffffff;
+                opacity = 0.2;
+            }
+            geom = new THREE.EdgesGeometry(src);
+            src.dispose();
         }
-        const edges = new THREE.EdgesGeometry(geom);
-        geom.dispose();
         const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity });
-        const mesh = new THREE.LineSegments(edges, mat);
+        const mesh = new THREE.LineSegments(geom, mat);
         mesh.position.set(offsetX + col * 1.1, offsetY - row * 1.1, 0);
         mesh.userData.placeholderType = type;
         return mesh;
@@ -2295,10 +2308,15 @@ class BubblePopper {
         this.cellPlaceholders = Array(this.rows).fill().map(() => Array(this.columns).fill(null));
         for (let i = 0; i < this.rows; i++) {
             for (let j = 0; j < this.columns; j++) {
-                if (this.boardLayout[i]?.[j] && !this.shapes[i]?.[j]) {
+                if (!this.boardLayout[i]?.[j]) {
+                    // Inactive cell: red X
+                    this.addCellPlaceholder(i, j, 'masked');
+                } else if (!this.shapes[i]?.[j]) {
+                    // Active without piece: cube (random fill) or sphere (empty intent)
                     const type = this.willRandomFill[i]?.[j] ? 'random' : 'empty';
                     this.addCellPlaceholder(i, j, type);
                 }
+                // Active with piece: no placeholder (the 3D shape is the visual).
             }
         }
     }
@@ -2382,7 +2400,7 @@ class BubblePopper {
         const wasActive = !!this.boardLayout[row][col];
         this.boardLayout[row][col] = !wasActive;
         if (wasActive) {
-            // Active -> inactive: drop piece, prize, placeholder, willRandomFill
+            // Active -> inactive: drop piece, prize, willRandomFill; swap placeholder to red X
             const shape = this.shapes[row]?.[col];
             if (shape) {
                 this.scene.remove(shape.mesh);
@@ -2395,10 +2413,10 @@ class BubblePopper {
                 if (prize.prizeObj) prize.prizeObj.dispose();
                 this.prizes.splice(prizeIdx, 1);
             }
-            this.removeCellPlaceholder(row, col);
             if (this.willRandomFill[row]) this.willRandomFill[row][col] = false;
+            this.addCellPlaceholder(row, col, 'masked');
         } else {
-            // Inactive -> active: default to "random fill" semantics
+            // Inactive -> active: replace red X with cube (random fill default)
             if (!this.willRandomFill[row]) this.willRandomFill[row] = Array(this.columns).fill(false);
             this.willRandomFill[row][col] = true;
             this.addCellPlaceholder(row, col, 'random');
