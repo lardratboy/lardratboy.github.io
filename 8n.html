@@ -433,6 +433,8 @@
           <option value="circle">Circle</option>
           <option value="staircase">Staircase</option>
           <option value="corners">Corners</option>
+          <option value="diagonalCorners">Diagonal Corners</option>
+          <option value="triangle">Triangle</option>
           <option value="random">Random</option>
         </select>
       </div>
@@ -1336,6 +1338,43 @@ class BubblePopper {
                         for (let j = 0; j < M; j++) layout[rStart + i][cStart + j] = true;
                 return layout;
             },
+            diagonalCorners: (r, c) => {
+                // Playable area: same as 'corners' (four solid M x M mini-boards with a gap).
+                // Initial fill: only the lower triangle of each mini-board has pieces, as if
+                // gravity had already settled them. The empty upper triangles are real empty
+                // space — pieces flow into them on rotation, then collapse back down.
+                const M = Math.min(Math.floor((r - 1) / 2), Math.floor((c - 1) / 2));
+                const layout = Array(r).fill().map(() => Array(c).fill(false));
+                const initialFill = Array(r).fill().map(() => Array(c).fill(false));
+                if (M < 1) return { layout, initialFill };
+                const minis = [
+                    [0, 0, false],
+                    [0, c - M, true],
+                    [r - M, 0, false],
+                    [r - M, c - M, true],
+                ];
+                for (const [rOff, cOff, isRight] of minis) {
+                    for (let i = 0; i < M; i++)
+                        for (let j = 0; j < M; j++) {
+                            layout[rOff + i][cOff + j] = true;
+                            // Left minis: filled when i >= j; right minis: when i + j >= M-1
+                            const filled = isRight ? (i + j >= M - 1) : (i >= j);
+                            if (filled) initialFill[rOff + i][cOff + j] = true;
+                        }
+                }
+                return { layout, initialFill };
+            },
+            triangle: (r, c) => {
+                // Playable area: full rectangle — pieces can be anywhere.
+                // Initial fill: lower-left triangle, as if gravity had already piled pieces
+                // against the bottom-left. Rotation reshuffles, then they collapse again.
+                const layout = Array(r).fill().map(() => Array(c).fill(true));
+                const initialFill = Array(r).fill().map(() => Array(c).fill(false));
+                for (let i = 0; i < r; i++)
+                    for (let j = 0; j < c; j++)
+                        if (j * (r - 1) <= i * (c - 1)) initialFill[i][j] = true;
+                return { layout, initialFill };
+            },
             random: (r, c) => Array(r).fill().map(() => Array(c).fill(false).map(() => Math.random() > 0.4))
         };
     }
@@ -1473,13 +1512,21 @@ class BubblePopper {
 
     generateBoardState() {
         this.clearBoard(false);
-        this.boardLayout = this.boardTemplates[this.boardTemplate](this.rows, this.columns);
+        const tmpl = this.boardTemplates[this.boardTemplate](this.rows, this.columns);
+        // Templates may return either a 2D bool array (the common case, where the layout
+        // is also the initial fill) or an object { layout, initialFill } that decouples
+        // "where pieces are allowed" from "where pieces start". The diagonal templates
+        // use the latter so the upper triangles read as already-emptied space rather than
+        // walled-off inactive cells, letting pieces flow freely under rotation + gravity.
+        const layout = Array.isArray(tmpl) ? tmpl : tmpl.layout;
+        const initialFill = Array.isArray(tmpl) ? tmpl : tmpl.initialFill;
+        this.boardLayout = layout;
         this.shapes = Array(this.rows).fill().map(() => Array(this.columns).fill(null));
         const offsetX = -((this.columns - 1) * 1.1) / 2;
         const offsetY = ((this.rows - 1) * 1.1) / 2;
         const activeCells = [];
         for (let i=0;i<this.rows;i++) for (let j=0;j<this.columns;j++)
-            if (this.boardLayout[i][j]) activeCells.push({row:i, col:j});
+            if (initialFill[i][j]) activeCells.push({row:i, col:j});
 
         this.prizes = [];
         const prizesCount = Math.min(Math.floor(activeCells.length / 5), 10);
@@ -1488,7 +1535,7 @@ class BubblePopper {
             this.prizes.push({ ...activeCells[p], collected: false });
 
         for (let i=0;i<this.rows;i++) for (let j=0;j<this.columns;j++) {
-            if (!this.boardLayout[i][j]) continue;
+            if (!initialFill[i][j]) continue;
             const shapeData = this.shapeAtlas[Math.floor(Math.random() * this.shapeAtlas.length)];
             const x = offsetX + j*1.1, y = offsetY - i*1.1;
             const shape = new Shape(x, y, 0, 0.55, shapeData, i, j);
