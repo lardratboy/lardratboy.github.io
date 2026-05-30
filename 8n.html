@@ -766,6 +766,19 @@
           <button class="edit-palette-btn" data-paint="prize" title="Toggle prize ring">◯</button>
         </div>
       </div>
+      <div class="edit-toolbar-section">
+        <div class="edit-section-label">Randomize</div>
+        <div class="edit-toolbar-row">
+          <button id="edit-randomize-shapes" class="edit-btn" title="Convert every pinned shape into a random-fill cell">🎲 Pieces → Random</button>
+        </div>
+        <div class="edit-toolbar-row" style="align-items:flex-end; gap:6px; flex-wrap:wrap;">
+          <label class="edit-control" style="flex:0 0 auto;">Prize Count
+            <input id="edit-prize-count" type="number" min="1" max="99" placeholder="🎲" class="edit-select" style="width:64px;">
+          </label>
+          <button id="edit-sprinkle-prizes" class="edit-btn" title="Sprinkle prizes on random eligible cells (leave count blank for a random amount)">🎁 Sprinkle</button>
+          <button id="edit-clear-prizes" class="edit-btn" title="Remove all prizes from the board">Clear Prizes</button>
+        </div>
+      </div>
       <div class="edit-toolbar-row">
         <button id="edit-play" class="edit-btn edit-btn-primary">Play this</button>
         <button id="edit-discard" class="edit-btn">Discard</button>
@@ -2202,7 +2215,7 @@ class BubblePopper {
                             new TWEEN.Tween(shape.mesh.position).to({x:newX}, 500)
                                 .easing(TWEEN.Easing.Quadratic.Out).onComplete(onDone).start();
                             const prize = this.prizes.find(p => p.row===i && p.col===j && p.prizeObj);
-                            if (prize) new TWEEN.Tween(prize.prizeObj.mesh.position).to({x:newX}, 500).easing(TWEEN.Quadratic.Out).start();
+                            if (prize) new TWEEN.Tween(prize.prizeObj.mesh.position).to({x:newX}, 500).easing(TWEEN.Easing.Quadratic.Out).start();
                         }
                     }
                 }
@@ -2330,6 +2343,11 @@ class BubblePopper {
         this.currentTool = null;
         const gizmo = document.getElementById('edit-gizmo');
         const toolbar = document.getElementById('edit-toolbar');
+        // Move focus out of the toolbar before we aria-hide it; otherwise the
+        // browser warns about hiding a focused element from assistive tech.
+        if (toolbar && toolbar.contains(document.activeElement)) {
+            document.activeElement.blur();
+        }
         if (toolbar) { toolbar.classList.remove('visible'); toolbar.setAttribute('aria-hidden', 'true'); }
         if (gizmo) gizmo.classList.remove('hidden');
         this.setRotationButtonsEnabled(true);
@@ -2721,6 +2739,87 @@ class BubblePopper {
         const prizeObj = new Prize(x, y, 0.1, 0.55 * 1.2);
         this.scene.add(prizeObj.mesh);
         this.prizes.push({ row, col, collected: false, prizeObj });
+    }
+
+    // --- Randomize tool: convert every cell with a pinned/explicit shape into a
+    // random-fill cell. Empty-intent and inactive cells are left alone. Prizes
+    // are preserved — a prize on a pinned shape still rides above a random fill.
+    randomizeAllShapes() {
+        let converted = 0;
+        for (let i = 0; i < this.rows; i++) {
+            for (let j = 0; j < this.columns; j++) {
+                if (!this.boardLayout[i]?.[j]) continue;
+                const shape = this.shapes[i]?.[j];
+                if (!shape) continue;
+                this.scene.remove(shape.mesh);
+                shape.dispose();
+                this.shapes[i][j] = null;
+                if (!this.willRandomFill[i]) this.willRandomFill[i] = Array(this.columns).fill(false);
+                this.willRandomFill[i][j] = true;
+                this.addCellPlaceholder(i, j, 'random');
+                converted++;
+            }
+        }
+        if (converted === 0) ui.toast('🎲', 'No pinned pieces to convert.');
+        else ui.toast('🎲', `${converted} piece${converted === 1 ? '' : 's'} → random.`);
+    }
+
+    // --- Sprinkle prizes: drop `requestedCount` prizes onto random eligible
+    // cells. Eligible = active, will produce a piece (pinned shape or random
+    // fill), and has no existing prize. If requestedCount is null/invalid, roll
+    // a random count scaled to the candidate pool.
+    sprinklePrizes(requestedCount) {
+        const candidates = [];
+        for (let i = 0; i < this.rows; i++) {
+            for (let j = 0; j < this.columns; j++) {
+                if (!this.boardLayout[i]?.[j]) continue;
+                const hasShape = !!this.shapes[i]?.[j];
+                const willFill = !!this.willRandomFill[i]?.[j];
+                if (!hasShape && !willFill) continue;
+                if (this.prizes.some(p => p.row === i && p.col === j)) continue;
+                candidates.push({ row: i, col: j });
+            }
+        }
+        if (candidates.length === 0) {
+            ui.toast('🎁', 'No eligible cells for prizes.');
+            return;
+        }
+        let count;
+        if (Number.isFinite(requestedCount) && requestedCount > 0) {
+            count = Math.min(requestedCount, candidates.length);
+        } else {
+            // Roll: 1 to roughly a quarter of candidates (min 1, max 10ish)
+            const cap = Math.max(1, Math.min(candidates.length, Math.floor(candidates.length / 4) + 2));
+            count = 1 + Math.floor(Math.random() * cap);
+        }
+        // Partial Fisher-Yates: pull `count` unique candidates to the front.
+        for (let k = 0; k < count; k++) {
+            const idx = k + Math.floor(Math.random() * (candidates.length - k));
+            [candidates[k], candidates[idx]] = [candidates[idx], candidates[k]];
+        }
+        const offsetX = -((this.columns - 1) * 1.1) / 2;
+        const offsetY = ((this.rows - 1) * 1.1) / 2;
+        for (let k = 0; k < count; k++) {
+            const { row, col } = candidates[k];
+            const x = offsetX + col * 1.1, y = offsetY - row * 1.1;
+            const prizeObj = new Prize(x, y, 0.1, 0.55 * 1.2);
+            this.scene.add(prizeObj.mesh);
+            this.prizes.push({ row, col, collected: false, prizeObj });
+        }
+        ui.toast('🎁', `Added ${count} prize${count === 1 ? '' : 's'}.`);
+    }
+
+    clearAllPrizes() {
+        if (this.prizes.length === 0) {
+            ui.toast('🎁', 'No prizes to clear.');
+            return;
+        }
+        const n = this.prizes.length;
+        for (const p of this.prizes) {
+            if (p.prizeObj) p.prizeObj.dispose();
+        }
+        this.prizes = [];
+        ui.toast('🎁', `Cleared ${n} prize${n === 1 ? '' : 's'}.`);
     }
 
     fillEmptyCellsRandomly() {
@@ -3368,6 +3467,22 @@ document.getElementById('edit-file-input').addEventListener('change', (e) => {
     if (file) game.readJsonFile(file);
 });
 game.setupDragAndDrop();
+
+// --- Edit Mode: Randomize tools ---
+ui.setupButton('edit-randomize-shapes', () => {
+    if (!game.editMode) return;
+    game.randomizeAllShapes();
+});
+ui.setupButton('edit-sprinkle-prizes', () => {
+    if (!game.editMode) return;
+    const input = document.getElementById('edit-prize-count');
+    const raw = input ? parseInt(input.value, 10) : NaN;
+    game.sprinklePrizes(Number.isFinite(raw) && raw > 0 ? raw : null);
+});
+ui.setupButton('edit-clear-prizes', () => {
+    if (!game.editMode) return;
+    game.clearAllPrizes();
+});
 
 // --- Boot into splash state ---
 stateManager.switch(new SplashState());
