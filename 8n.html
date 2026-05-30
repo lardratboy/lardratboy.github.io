@@ -501,6 +501,40 @@
     .edit-select:hover { background-color: rgba(255, 255, 255, 0.18); }
     .edit-select option { background-color: rgba(20, 20, 40, 1); color: var(--light-text); }
 
+    .edit-doc-name {
+      opacity: 0.65;
+      font-weight: normal;
+      letter-spacing: 0;
+      text-transform: none;
+      font-size: 0.78rem;
+      margin-left: 6px;
+      color: #ffd54a;
+    }
+
+    #drop-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background-color: rgba(60, 80, 200, 0.35);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      border: 6px dashed rgba(150, 200, 255, 0.95);
+      box-sizing: border-box;
+    }
+    #drop-overlay.visible { display: flex; }
+    .drop-overlay-content {
+      background-color: rgba(20, 20, 60, 0.92);
+      color: var(--light-text);
+      padding: 30px 50px;
+      border-radius: 16px;
+      text-align: center;
+      font-size: 1.3rem;
+      box-shadow: 0 6px 30px rgba(0, 0, 0, 0.6);
+    }
+    .drop-overlay-icon { font-size: 3rem; margin-bottom: 10px; }
+
     .reset-confirm-row {
       display: flex;
       flex-direction: row;
@@ -666,7 +700,7 @@
     </div>
     <div id="edit-gizmo" title="Edit Board">✎</div>
     <div id="edit-toolbar" aria-hidden="true">
-      <div class="edit-toolbar-header">Edit Mode</div>
+      <div class="edit-toolbar-header">Edit Mode <span class="edit-doc-name" id="edit-doc-name">— untitled</span></div>
       <div class="edit-toolbar-section">
         <div class="edit-section-label">Board</div>
         <div class="edit-board-controls">
@@ -702,6 +736,13 @@
               <option value="random">Random</option>
             </select>
           </label>
+        </div>
+      </div>
+      <div class="edit-toolbar-section">
+        <div class="edit-section-label">File</div>
+        <div class="edit-toolbar-row">
+          <button id="edit-open" class="edit-btn" title="Open a JSON layout file">Open…</button>
+          <button id="edit-save" class="edit-btn" title="Download the current layout as JSON">Save</button>
         </div>
       </div>
       <div class="edit-toolbar-section">
@@ -755,6 +796,13 @@
       <div class="reset-confirm-row">
         <button id="load-template-cancel" class="btn">Cancel</button>
         <button id="load-template-confirm" class="btn btn-primary">Load</button>
+      </div>
+    </div>
+    <input id="edit-file-input" type="file" accept=".json,application/json" style="display: none;" />
+    <div id="drop-overlay">
+      <div class="drop-overlay-content">
+        <div class="drop-overlay-icon">⤓</div>
+        <div class="drop-overlay-text">Drop JSON to load layout</div>
       </div>
     </div>
   </div>
@@ -1445,6 +1493,12 @@ class SplashScene {
         this.camera.position.z = 8;
         this.shapes = [];
         this.isAnimating = false;
+        // Defaults so file-drop on splash/settings can run before any game has been created.
+        this.rows = 11;
+        this.columns = 11;
+        this.boardLayout = [];
+        this.willRandomFill = [];
+        this.prizes = [];
         this.shapeAtlas = [
             { name: 'Sphere', color: 0xff4444, geometryFactory: s => new THREE.SphereGeometry(s, 16, 12) },
             { name: 'Cube', color: 0x44ff44, geometryFactory: s => new THREE.BoxGeometry(s, s, s) },
@@ -1562,6 +1616,8 @@ class BubblePopper {
         this.willRandomFill = [];           // 2D bool: if cell has no shape, does it auto-fill on Play?
         // Edit mode state (Phase 4)
         this.pendingTemplate = null;        // name of template waiting for load confirmation
+        // Edit mode state (Phase 6)
+        this.currentDocumentName = 'untitled';  // name of working document (without .json extension)
 
         this.scoreElement = document.getElementById('game-score');
         this.rotateLeftBtn = document.getElementById('rotate-left-btn');
@@ -2196,16 +2252,16 @@ class BubblePopper {
         if (!this.canEnterEditMode()) return;
         this.clearTubeConnections();
         this.hoveredShape = null;
-        // Initialize willRandomFill: default any active-empty cell to "random fill on play".
-        // This preserves the Phase 2 behavior on first entry. Note this means diagonal-template
-        // boards default their upper triangles to "random fill" — use the eraser palette button
-        // to mark cells as "empty intent" before hitting Play this to preserve the design.
+        // willRandomFill is a per-cell "fill me on the next Play this" marker. It's
+        // a deliberate editor-time choice (the ? palette button); it doesn't try to
+        // survive a round-trip through play. On each entry to edit mode we re-derive
+        // it from the visible state: every currently-empty active cell becomes
+        // empty-intent (gray sphere). This keeps the editor's view honest — what you
+        // see is what you have — and avoids "ghost" random-fill markers showing up
+        // in cells that were vacated by gravity, rotation, or popping during play.
+        // Designers who want randomization across multiple plays should save the layout
+        // file (the save format preserves willRandomFill) and reload it for each session.
         this.willRandomFill = Array(this.rows).fill().map(() => Array(this.columns).fill(false));
-        for (let i = 0; i < this.rows; i++) {
-            for (let j = 0; j < this.columns; j++) {
-                if (this.boardLayout[i]?.[j] && !this.shapes[i]?.[j]) this.willRandomFill[i][j] = true;
-            }
-        }
         this.editSnapshot = this.captureSnapshot();
         this.editMode = true;
         this.currentTool = 'cellMask';
@@ -2221,6 +2277,7 @@ class BubblePopper {
         this.refreshPaletteSelection();
         this.refreshDimensionInputs();
         this.resetTemplateSelect();
+        this.refreshDocumentNameDisplay();
     }
 
     exitEditMode(action) {
@@ -2259,6 +2316,7 @@ class BubblePopper {
             pieces,
             prizes: this.prizes.map(p => ({ row: p.row, col: p.col, collected: !!p.collected })),
             score: this.score,
+            documentName: this.currentDocumentName,
         };
     }
 
@@ -2295,8 +2353,10 @@ class BubblePopper {
             prizeData.prizeObj = prize;
         }
         this.score = snap.score;
+        if (snap.documentName !== undefined) this.currentDocumentName = snap.documentName;
         this.updateScore();
         this.positionBoardElements();
+        this.refreshDocumentNameDisplay();
     }
 
     resetToScratch() {
@@ -2307,10 +2367,12 @@ class BubblePopper {
         this.willRandomFill = Array(this.rows).fill().map(() => Array(this.columns).fill(true));
         this.prizes = [];
         this.score = 0;
+        this.currentDocumentName = 'untitled';
         this.updateScore();
         this.positionBoardElements();
         this.refreshCellPlaceholders();
         this.setEditHover(null, null);
+        this.refreshDocumentNameDisplay();
     }
 
     updateGizmoAvailability() {
@@ -2730,10 +2792,224 @@ class BubblePopper {
         this.shapes = Array(this.rows).fill().map(() => Array(this.columns).fill(null));
         this.prizes = [];
         this.score = 0;
+        this.currentDocumentName = 'untitled';
         this.updateScore();
         this.positionBoardElements();
         this.refreshCellPlaceholders();
         this.setEditHover(null, null);
+        this.refreshDocumentNameDisplay();
+    }
+
+    // --- Phase 6: file I/O (single working document, save/open/drop) ---
+    refreshDocumentNameDisplay() {
+        const el = document.getElementById('edit-doc-name');
+        if (el) el.textContent = '— ' + (this.currentDocumentName || 'untitled');
+    }
+
+    serializeDocument() {
+        // Build a 2D pieces array. Each cell is null (no pinned piece) or an integer 0-5
+        // (index into shapeAtlas). v1 doesn't write {set: ...} but the reader tolerates it.
+        const pieces = [];
+        for (let i = 0; i < this.rows; i++) {
+            const row = [];
+            for (let j = 0; j < this.columns; j++) {
+                const s = this.shapes[i]?.[j];
+                if (s) {
+                    const idx = this.shapeAtlas.findIndex(sd => sd.name === s.shapeType);
+                    row.push(idx >= 0 ? idx : null);
+                } else {
+                    row.push(null);
+                }
+            }
+            pieces.push(row);
+        }
+        return {
+            version: 1,
+            name: this.currentDocumentName || 'untitled',
+            rows: this.rows,
+            columns: this.columns,
+            boardLayout: this.boardLayout.map(r => r.map(v => !!v)),
+            willRandomFill: this.willRandomFill.map(r => r.map(v => !!v)),
+            pieces,
+            prizes: this.prizes.map(p => [p.row, p.col]),
+        };
+    }
+
+    validateDocument(data) {
+        const errors = [];
+        if (!data || typeof data !== 'object') { errors.push('not a JSON object'); return errors; }
+        const validDims = [7, 9, 11, 13, 15];
+        if (!Number.isInteger(data.rows) || !validDims.includes(data.rows)) errors.push('rows must be 7/9/11/13/15');
+        if (!Number.isInteger(data.columns) || !validDims.includes(data.columns)) errors.push('columns must be 7/9/11/13/15');
+        if (errors.length > 0) return errors;
+        const checkGrid = (key, type) => {
+            const g = data[key];
+            if (!Array.isArray(g) || g.length !== data.rows) { errors.push(`${key} missing or wrong row count`); return; }
+            for (const row of g) {
+                if (!Array.isArray(row) || row.length !== data.columns) { errors.push(`${key} has a malformed row`); return; }
+            }
+        };
+        checkGrid('boardLayout');
+        checkGrid('willRandomFill');
+        checkGrid('pieces');
+        if (!Array.isArray(data.prizes)) errors.push('prizes missing or not an array');
+        return errors;
+    }
+
+    loadDocument(data, sourceName) {
+        const errors = this.validateDocument(data);
+        if (errors.length > 0) {
+            console.error('Layout validation failed:', errors);
+            ui.toast('⚠', 'Could not load: ' + errors[0]);
+            return false;
+        }
+        if (this.isAnimating) {
+            ui.toast('⌛', 'Wait for the board to settle');
+            return false;
+        }
+        // If we're not in edit mode, jump into it so the user can review.
+        if (!this.editMode) {
+            if (!this.canEnterEditMode()) {
+                ui.toast('⌛', 'Wait for the board to settle');
+                return false;
+            }
+            this.enterEditMode();
+        }
+        // Replace the working document. The entry snapshot is intentionally NOT refreshed —
+        // Discard still returns to whatever state the editor was in when this session began.
+        this.clearBoard(false);
+        this.rows = data.rows;
+        this.columns = data.columns;
+        this.boardLayout = data.boardLayout.map(r => r.map(v => !!v));
+        this.willRandomFill = data.willRandomFill.map(r => r.map(v => !!v));
+        this.shapes = Array(this.rows).fill().map(() => Array(this.columns).fill(null));
+        this.prizes = (data.prizes || []).map(p => ({ row: p[0], col: p[1], collected: false }));
+        this.score = 0;
+
+        const offsetX = -((this.columns - 1) * 1.1) / 2;
+        const offsetY = ((this.rows - 1) * 1.1) / 2;
+        // Build pinned pieces. Integer => shape index. {set:"..."} treated as null (v2 fwd compat).
+        for (let i = 0; i < this.rows; i++) {
+            for (let j = 0; j < this.columns; j++) {
+                const v = data.pieces[i]?.[j];
+                if (typeof v === 'number' && v >= 0 && v < this.shapeAtlas.length) {
+                    const shapeData = this.shapeAtlas[v];
+                    const x = offsetX + j * 1.1, y = offsetY - i * 1.1;
+                    const shape = new Shape(x, y, 0, 0.55, shapeData, i, j);
+                    this.shapes[i][j] = shape;
+                    this.scene.add(shape.mesh);
+                }
+            }
+        }
+        // Build prize meshes for each uncollected prize.
+        for (const prizeData of this.prizes) {
+            const x = offsetX + prizeData.col * 1.1, y = offsetY - prizeData.row * 1.1;
+            const prize = new Prize(x, y, 0.1, 0.55 * 1.2);
+            this.scene.add(prize.mesh);
+            prizeData.prizeObj = prize;
+        }
+        // Pick the new name: the data's own name if it has one, otherwise the filename.
+        this.currentDocumentName = (data.name && String(data.name).trim()) || sourceName || 'untitled';
+        this.updateScore();
+        this.positionBoardElements();
+        this.refreshCellPlaceholders();
+        this.refreshDimensionInputs();
+        this.refreshDocumentNameDisplay();
+        this.setEditHover(null, null);
+        ui.toast('📂', 'Loaded ' + (sourceName || this.currentDocumentName));
+        return true;
+    }
+
+    saveDocument() {
+        if (!this.editMode) return;
+        if (this.isAnimating) return;
+        const data = this.serializeDocument();
+        const json = JSON.stringify(data, null, 2);
+        const filename = (data.name || 'untitled') + '.json';
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+        ui.toast('💾', 'Saved ' + filename);
+    }
+
+    readJsonFile(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            let data;
+            try {
+                data = JSON.parse(e.target.result);
+            } catch (err) {
+                console.error('JSON parse error:', err);
+                ui.toast('⚠', 'Not a valid JSON file');
+                return;
+            }
+            const sourceName = (file.name || '').replace(/\.json$/i, '') || 'untitled';
+            // Make sure the game screen is visible before loading. If the user dropped a
+            // file on the splash or settings screens, switch to PlayState first (passing
+            // startFresh=false to skip generating a random board we're about to replace).
+            if (!(stateManager.current() instanceof PlayState)) {
+                stateManager.switch(new PlayState(false));
+            }
+            this.loadDocument(data, sourceName);
+        };
+        reader.onerror = () => ui.toast('⚠', 'Could not read file');
+        reader.readAsText(file);
+    }
+
+    setupDragAndDrop() {
+        // Window-level drag-and-drop. A counter avoids flickering when the cursor crosses
+        // child element boundaries during a drag (dragenter/leave fire on every child).
+        let dragDepth = 0;
+        const hasFile = (e) => {
+            const t = e.dataTransfer;
+            if (!t) return false;
+            const types = t.types;
+            if (!types) return false;
+            for (let i = 0; i < types.length; i++) if (types[i] === 'Files') return true;
+            return false;
+        };
+        const showOverlay = () => document.getElementById('drop-overlay')?.classList.add('visible');
+        const hideOverlay = () => document.getElementById('drop-overlay')?.classList.remove('visible');
+
+        window.addEventListener('dragenter', (e) => {
+            if (!hasFile(e)) return;
+            e.preventDefault();
+            dragDepth++;
+            if (dragDepth === 1) showOverlay();
+        });
+        window.addEventListener('dragover', (e) => {
+            if (!hasFile(e)) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+        });
+        window.addEventListener('dragleave', (e) => {
+            if (!hasFile(e)) return;
+            dragDepth = Math.max(0, dragDepth - 1);
+            if (dragDepth === 0) hideOverlay();
+        });
+        window.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dragDepth = 0;
+            hideOverlay();
+            const files = e.dataTransfer?.files;
+            if (!files || files.length === 0) return;
+            // Take the first JSON file in the drop.
+            let target = null;
+            for (let i = 0; i < files.length; i++) {
+                if (files[i].name.toLowerCase().endsWith('.json')) { target = files[i]; break; }
+            }
+            if (!target) {
+                ui.toast('⚠', 'Drop a .json file to load a layout');
+                return;
+            }
+            this.readJsonFile(target);
+        });
     }
 
     updateScore() {
@@ -3029,6 +3305,22 @@ ui.setupButton('load-template-confirm', () => {
     game.pendingTemplate = null;
     if (name) game.loadEditTemplate(name);
 });
+
+// --- Edit Mode (Phase 6) ---
+ui.setupButton('edit-save', () => {
+    game.saveDocument();
+});
+ui.setupButton('edit-open', () => {
+    const input = document.getElementById('edit-file-input');
+    if (!input) return;
+    input.value = ''; // reset so re-picking the same file fires change again
+    input.click();
+});
+document.getElementById('edit-file-input').addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (file) game.readJsonFile(file);
+});
+game.setupDragAndDrop();
 
 // --- Boot into splash state ---
 stateManager.switch(new SplashState());
