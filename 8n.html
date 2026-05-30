@@ -1066,6 +1066,10 @@ class InputManager {
     _bindEvents() {
         window.addEventListener('click', e => {
             if (Date.now() - this._lastTouchTime < this.ghostClickDelay) return;
+            // Desktop tap leak fix
+            for (const sel of this.excludeSelectors) {
+                if (e.target.closest(sel)) return;
+            }
             this._fireTap(e.clientX, e.clientY);
         });
         this.domElement.addEventListener('touchstart', e => {
@@ -1087,11 +1091,25 @@ class InputManager {
             if (dist <= this.tapThreshold) this._fireTap(t.clientX, t.clientY);
             this._touchStartPos = null;
         }, { passive: false });
-        // Hover / pointer move
-        window.addEventListener('mousemove', e => { this._fireHover(e.clientX, e.clientY); });
+        // Hover / pointer move (checks excludeSelectors to hide 3D hover overlays when over panels)
+        window.addEventListener('mousemove', e => {
+            for (const sel of this.excludeSelectors) {
+                if (e.target.closest(sel)) {
+                    this._fireHover(null, null);
+                    return;
+                }
+            }
+            this._fireHover(e.clientX, e.clientY);
+        });
         this.domElement.addEventListener('touchmove', e => {
             if (e.touches.length > 0) {
                 const t = e.touches[0];
+                for (const sel of this.excludeSelectors) {
+                    if (t.target.closest(sel)) {
+                        this._fireHover(null, null);
+                        return;
+                    }
+                }
                 this._fireHover(t.clientX, t.clientY);
             }
         }, { passive: true });
@@ -1736,6 +1754,10 @@ class BubblePopper {
 
     // --- Input handling (called from states) ---
     getPointerCoordinates(clientX, clientY) {
+        if (clientX === null || clientY === null || clientX === undefined || clientY === undefined) {
+            this.pointerPos.set(NaN, NaN);
+            return;
+        }
         this.pointerPos.x = (clientX / window.innerWidth) * 2 - 1;
         this.pointerPos.y = -(clientY / window.innerHeight) * 2 + 1;
     }
@@ -1758,6 +1780,14 @@ class BubblePopper {
     handleHover(clientX, clientY) {
         if (this.isAnimating || this.gamePaused) return;
         if (this.editMode) { this.handleEditHover(clientX, clientY); return; }
+        
+        // Hide hover preview when passing over excluded selectors (like UI headers)
+        if (clientX === null || clientY === null) {
+            this.clearTubeConnections();
+            this.hoveredShape = null;
+            return;
+        }
+
         this.getPointerCoordinates(clientX, clientY);
         this.raycaster.setFromCamera(this.pointerPos, this.camera);
         const intersects = this.raycaster.intersectObjects(this.getShapeMeshes());
@@ -1843,6 +1873,11 @@ class BubblePopper {
     }
 
     createNewBoard() {
+        // Exit active edit session if restarting from splash screen while editing
+        if (this.editMode) {
+            this.exitEditMode('discard');
+        }
+
         this.clearBoard();
         this.score = 0;
         this.updateScore();
@@ -1870,11 +1905,6 @@ class BubblePopper {
     generateBoardState() {
         this.clearBoard(false);
         const tmpl = this.boardTemplates[this.boardTemplate](this.rows, this.columns);
-        // Templates may return either a 2D bool array (the common case, where the layout
-        // is also the initial fill) or an object { layout, initialFill } that decouples
-        // "where pieces are allowed" from "where pieces start". The diagonal templates
-        // use the latter so the upper triangles read as already-emptied space rather than
-        // walled-off inactive cells, letting pieces flow freely under rotation + gravity.
         const layout = Array.isArray(tmpl) ? tmpl : tmpl.layout;
         const initialFill = Array.isArray(tmpl) ? tmpl : tmpl.initialFill;
         this.boardLayout = layout;
@@ -2172,7 +2202,7 @@ class BubblePopper {
                             new TWEEN.Tween(shape.mesh.position).to({x:newX}, 500)
                                 .easing(TWEEN.Easing.Quadratic.Out).onComplete(onDone).start();
                             const prize = this.prizes.find(p => p.row===i && p.col===j && p.prizeObj);
-                            if (prize) new TWEEN.Tween(prize.prizeObj.mesh.position).to({x:newX}, 500).easing(TWEEN.Easing.Quadratic.Out).start();
+                            if (prize) new TWEEN.Tween(prize.prizeObj.mesh.position).to({x:newX}, 500).easing(TWEEN.Quadratic.Out).start();
                         }
                     }
                 }
@@ -2287,6 +2317,11 @@ class BubblePopper {
             this.restoreFromSnapshot(this.editSnapshot);
         } else if (action === 'play') {
             this.fillEmptyCellsRandomly();
+            // Polishing: Toast a warning if the custom layout has zero prize targets
+            if (this.prizes.length === 0) {
+                ui.toast('💡', 'Tip: Add some prizes (◯) so you can win the level!');
+            }
+            this.checkGameState(); // Forces check on moves or early completed boards right away
         }
         this.disposeCellPlaceholders();
         this.disposeEditHoverMesh();
@@ -2414,6 +2449,7 @@ class BubblePopper {
     // --- Phase 2: pointer-to-cell mapping (raycast against z=0 plane) ---
     getCellFromPointer(clientX, clientY) {
         this.getPointerCoordinates(clientX, clientY);
+        if (Number.isNaN(this.pointerPos.x) || Number.isNaN(this.pointerPos.y)) return null;
         this.raycaster.setFromCamera(this.pointerPos, this.camera);
         const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
         const intersect = new THREE.Vector3();
@@ -2554,6 +2590,10 @@ class BubblePopper {
 
     // --- Phase 2/3: edit-mode input handlers (dispatched from handleTap/Hover) ---
     handleEditHover(clientX, clientY) {
+        if (clientX === null || clientY === null) {
+            this.setEditHover(null, null);
+            return;
+        }
         const cell = this.getCellFromPointer(clientX, clientY);
         if (!cell) {
             if (this.editHoveredCell) this.setEditHover(null, null);
@@ -2842,7 +2882,7 @@ class BubblePopper {
         if (!Number.isInteger(data.rows) || !validDims.includes(data.rows)) errors.push('rows must be 7/9/11/13/15');
         if (!Number.isInteger(data.columns) || !validDims.includes(data.columns)) errors.push('columns must be 7/9/11/13/15');
         if (errors.length > 0) return errors;
-        const checkGrid = (key, type) => {
+        const checkGrid = (key) => {
             const g = data[key];
             if (!Array.isArray(g) || g.length !== data.rows) { errors.push(`${key} missing or wrong row count`); return; }
             for (const row of g) {
@@ -2850,7 +2890,10 @@ class BubblePopper {
             }
         };
         checkGrid('boardLayout');
-        checkGrid('willRandomFill');
+        // make willRandomFill optional in schema validator to allow loading legacy formats smoothly
+        if (data.willRandomFill !== undefined) {
+            checkGrid('willRandomFill');
+        }
         checkGrid('pieces');
         if (!Array.isArray(data.prizes)) errors.push('prizes missing or not an array');
         return errors;
@@ -2881,7 +2924,11 @@ class BubblePopper {
         this.rows = data.rows;
         this.columns = data.columns;
         this.boardLayout = data.boardLayout.map(r => r.map(v => !!v));
-        this.willRandomFill = data.willRandomFill.map(r => r.map(v => !!v));
+        // Graceful legacy file conversion logic:
+        this.willRandomFill = data.willRandomFill
+            ? data.willRandomFill.map(r => r.map(v => !!v))
+            : data.boardLayout.map((row, i) => row.map((val, j) => !!val && data.pieces[i]?.[j] === null));
+
         this.shapes = Array(this.rows).fill().map(() => Array(this.columns).fill(null));
         this.prizes = (data.prizes || []).map(p => ({ row: p[0], col: p[1], collected: false }));
         this.score = 0;
