@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>graphgames v0.5</title>
+<title>graphgames v0.6</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #1a1a26; color: #e8e8f0;
                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -43,6 +43,18 @@
     45% { transform: scale(1.18); background: rgba(255, 220, 130, 0.45); }
     100% { transform: scale(1); background: rgba(255,255,255,0.07); }
   }
+
+  #endpoint-status { display: flex; align-items: center; gap: 6px; margin-top: 8px;
+                     padding: 4px 8px; background: rgba(255, 200, 80, 0.10);
+                     border: 1px solid rgba(255, 200, 80, 0.35); border-radius: 6px;
+                     width: fit-content; font-size: 13px; }
+  .endpoint-dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%;
+                  background: #555; border: 1.5px solid rgba(255, 200, 80, 0.7);
+                  transition: background 180ms; }
+  .endpoint-dot.empty { background: transparent; }
+  .endpoint-arrow { opacity: 0.55; font-size: 14px; }
+  #endpoint-status.matched { background: rgba(80, 220, 120, 0.18); border-color: rgba(120, 255, 160, 0.7); }
+  #endpoint-status.matched .endpoint-arrow { content: '='; opacity: 0.9; color: #aaffbb; }
 
   #hud-bottom { position: fixed; bottom: 0; left: 0; right: 0; padding: 14px 18px;
                 display: flex; gap: 10px; align-items: center; z-index: 10;
@@ -87,10 +99,15 @@
 
 <div id="hud-top">
   <div id="goal">
-    <div id="goal-line"><span class="label">Goal</span><span class="value">Clear the board</span></div>
+    <div id="goal-line"><span class="label">Goal</span><span class="value">Match the endpoint colors</span></div>
     <div id="solve-info">
       <span id="solve-text">solving...</span>
       <span class="pip" id="difficulty-pip"></span>
+    </div>
+    <div id="endpoint-status">
+      <span class="endpoint-dot" id="endpoint-a-dot"></span>
+      <span class="endpoint-arrow" id="endpoint-arrow">→</span>
+      <span class="endpoint-dot" id="endpoint-b-dot"></span>
     </div>
   </div>
   <div id="right-stack">
@@ -107,11 +124,13 @@
 </div>
 
 <div id="info">
-  <strong>v0.5</strong> — tetrahedron <b>triggers</b>! Matching a trigger flips gravity in its region.<br>
-  <span class="legend-swatch" style="background:#252e44;"></span><b>Upper</b> default: gravity ↓.
-  <span class="legend-swatch" style="background:#442825;"></span><b>Lower</b> default: gravity ↑.<br>
-  <b>▲ triggers</b> are immovable and clear on match; ◼ anchors are immovable; ● sliders swap freely.<br>
-  Per-cell arrows show the live flow; chips at top right show region state.
+  <strong>v0.6</strong> — connect the <b>endpoints</b>. Two cells are framed in gold; win by making
+  the pieces on them the same color (any color, just match).<br>
+  Sliders still swap, anchors still block, triggers still flip gravity — all in service of routing
+  the right colors to the two endpoints. Cascade matches still clear pieces, so be careful: if an
+  endpoint's piece gets matched away, that endpoint goes empty (sinks refill from upstream).<br>
+  Win check fires before match-clear, so a winning configuration registers even if it would also
+  have triggered a match.
 </div>
 
 <div id="hud-bottom">
@@ -126,8 +145,8 @@
 </div>
 
 <div id="banner" hidden>
-  <div id="banner-text">cleared! 🎉</div>
-  <div id="banner-sub">You drained the whole board through the triggers.</div>
+  <div id="banner-text">matched! 🎯</div>
+  <div id="banner-sub">Both endpoints showing the same color.</div>
   <button id="banner-restart">new puzzle</button>
 </div>
 
@@ -142,50 +161,52 @@
 'use strict';
 
 // =====================================================================
-// graphgames v0.5
+// graphgames v0.6
 //
-// What's new since v0.4:
-//   - TETRAHEDRON TRIGGERS. A new piece type whose match-firing
-//     side-effect is to flip the gravity phase of the region it
-//     occupies. Visual: spiky tetrahedron with a slow idle rotation.
-//   - PHASE STATE on State. Each State now carries a `phases` object,
-//     e.g. {upper: 0, lower: 0}. The gravity DAG is no longer baked
-//     into the graph — it's a FUNCTION of (graph, phases). Switching
-//     gravity is now a first-class state transition that the solver
-//     reasons about.
-//   - PRECOMPUTED PHASE TABLES. For each of the 2^|regions| possible
-//     phase combinations, the graph caches a downstream map and a
-//     sorted-upstream map. settleGravity reads from these tables via
-//     graph.upstreamsOf(vid, phases).
-//   - SERIALIZATION INCLUDES PHASES. State.serialize() now appends a
-//     canonical phase string after the piece list. The solver's
-//     visited-set hashing therefore distinguishes states that have
-//     the same pieces but different gravity directions — which is
-//     exactly what we need now that gravity is mutable.
-//   - CASCADE FIRES TRIGGERS BEFORE CLEARING. When a match contains
-//     trigger pieces, their effects are computed FIRST (counted per
-//     region; odd count flips, even count cancels — Z_2 arithmetic),
-//     then matched pieces are cleared, then gravity settles under
-//     the NEW phases. The whole thing iterates until stable.
-//   - PER-CELL GRAVITY ARROWS. Tiny chevrons on each non-sink cell,
-//     pointing in the direction pieces currently flow. When a phase
-//     flips, the arrows in that region rotate 180° via TWEEN.
-//   - PHASE CHIPS IN HUD. Top-right shows "upper ↓ lower ↑" as live
-//     indicators. They pulse gold when a flip happens.
-//   - REGION FLASH. When a region's phase flips, its cell backplates
-//     briefly brighten before the arrows rotate.
+// What's new since v0.5:
+//   - ENDPOINTS. The graph now carries an `endpoints` array of vids,
+//     two cells marked as the win-condition targets. Visually, golden
+//     rings on those cells.
+//   - NEW WIN CONDITION. Replace "clear the board" with "both endpoints
+//     hold pieces of the same color." Generic enough to support more
+//     elaborate conditions later (paths, multi-endpoint chains).
+//   - WIN CHECK PRIORITY OVER MATCH-CLEAR. After every cascade settle,
+//     winCondition(state) is checked BEFORE the next round of
+//     findMatches. A configuration that simultaneously wins AND would
+//     trigger a match-clear counts as a win — the piece doesn't get
+//     cleared out from under the player's victory.
+//   - ENDPOINT-AWARE PLACEMENT. Endpoints sit on the two corner sinks
+//     of the diagonal split: (0, size-1) which is fed only by the
+//     LOWER region, and (size-1, 0) which is fed only by the UPPER
+//     region. That asymmetry is the whole point — to win, you need
+//     to choreograph the two regions independently, and the trigger
+//     gravity-flip becomes the natural lever for doing so.
+//   - SOLVER GOAL CHANGED. solve() now uses winCondition() instead of
+//     state.isEmpty(). State serialization and BFS structure are
+//     unchanged; only the goal predicate differs. This is the payoff
+//     of keeping state hashing pure — swapping the goal is one line.
 //
-// Deferred to later versions:
-//   - Persistent triggers (re-firable across cascades, not consumed).
-//     Conflicts with clear-the-board win condition — a re-firable
-//     trigger never gets cleared, so you can't win. We'd need a
-//     different win condition (connect-A-to-B) for that to work.
-//   - Z_4 rotations (cardinal-direction gravity cycling). We're using
-//     Z_2 (binary flip) which is enough to demonstrate the mechanic.
-//   - Trigger color matters only for matching, not for effect. Could
-//     extend so red triggers flip upper, blue triggers flip lower,
-//     etc. — but for now the effect is determined by which REGION the
-//     trigger sits in, not its color.
+// Generation notes:
+//   - The trigger-fires-before-end filter from v0.5 is dropped here.
+//     With endpoint-color wins, the trigger doesn't have to be cleared
+//     to finish the puzzle — it just has to manipulate gravity. Many
+//     more random configurations are reachable now, so generation is
+//     both faster AND more often "ideal" (the trigger contributes
+//     meaningfully to the solve).
+//   - Difficulty depths trend higher because the goal state is more
+//     specific than "any empty board." Most levels solve in 4–8 moves.
+//
+// Deferred to v0.7 or later:
+//   - Persistent triggers (re-fire on each match instead of being
+//     consumed). The clear-the-board contradiction is gone now, so
+//     persistent triggers are mechanically valid — but they make the
+//     state space substantially larger and need a careful generation
+//     pass.
+//   - Connectivity requirement: same-color path between endpoints, not
+//     just same color. More puzzle-shaped but harder to design around
+//     the polyomino match rule.
+//   - More than two endpoints (chains, all-same-color, target colors).
+//   - Endpoints somewhere other than corner sinks.
 // =====================================================================
 
 // ---------- Configuration ----------
@@ -223,6 +244,7 @@ const ALL_PHASES = [
 // trigger flips often give the player a SHORTER path (more options).
 const SOLVER_MAX_NODES = 300000;
 const SOLVER_MAX_DEPTH = 15;
+const SOLVER_MIN_DEPTH = 4;     // reject trivial 1-2 move puzzles
 const GENERATION_ATTEMPTS = 80;
 
 const TYPES = {
@@ -244,6 +266,7 @@ class Graph {
   constructor() {
     this.vertices = new Map();       // id -> { id, position, region }
     this.matchEdges = new Set();
+    this.endpoints = [];             // vids of the two win-condition cells
     this._matchAdj = new Map();
     this._gravityDown = new Map();   // phaseKey -> Map<from, to>
     this._gravityUp = new Map();     // phaseKey -> Map<to, [from,...] sorted>
@@ -256,6 +279,8 @@ class Graph {
     const key = a < b ? `${a}|${b}` : `${b}|${a}`;
     this.matchEdges.add(key);
   }
+  setEndpoints(a, b) { this.endpoints = [a, b]; }
+  isEndpoint(id) { return this.endpoints.includes(id); }
   finalize() {
     for (const id of this.vertices.keys()) this._matchAdj.set(id, []);
     for (const key of this.matchEdges) {
@@ -352,6 +377,14 @@ function makeDiagonalSplitGraph(size) {
   };
   g.setGravityModel(model, ALL_PHASES);
 
+  // The two corner sinks: (0, size-1) and (size-1, 0). Both lie on the
+  // anti-diagonal, both are sinks (no outflow), but they are fed from
+  // DIFFERENT regions — (0, size-1) from the lower region's upward
+  // flow, (size-1, 0) from the upper region's downward flow. That
+  // asymmetry is what makes trigger gravity-flip meaningful for the
+  // win: you control each endpoint by manipulating its own region.
+  g.setEndpoints(`0,${size - 1}`, `${size - 1},0`);
+
   return g;
 }
 
@@ -432,6 +465,20 @@ function findMatches(state, n = N_MATCH) {
   return matched;
 }
 
+// ---------- Win condition ----------
+
+// v0.6 win: both endpoint cells hold pieces of the same color. Empty
+// endpoints never win (a cell with no piece has no color to match).
+// Type doesn't matter — a slider matching a trigger by color still
+// wins.
+function winCondition(state) {
+  const [a, b] = state.graph.endpoints;
+  const pa = state.get(a);
+  const pb = state.get(b);
+  if (!pa || !pb) return false;
+  return pa.color === pb.color;
+}
+
 // ---------- Gravity ----------
 
 // Iterative settler — phase-aware. Reads the upstream tables for the
@@ -504,9 +551,14 @@ function applyFlips(phases, flips) {
 
 // ---------- Cascade (headless, used by solver) ----------
 
+// Resolves matches until either no matches remain OR the state becomes
+// a winning state. The win check happens BEFORE each round of
+// findMatches so a configuration that would simultaneously win and
+// match-clear preserves the win (the cascade halts before clearing).
 function resolveCascade(state) {
   let s = state;
   while (true) {
+    if (winCondition(s)) break;
     const matched = findMatches(s);
     if (matched.size === 0) break;
     const triggers = [];
@@ -526,6 +578,10 @@ function resolveCascade(state) {
 
 // ---------- Solver ----------
 
+// A "valid swap" is one that produces SOME consequential outcome:
+// either a match (triggering a cascade) or an immediate win. v0.5
+// only checked for matches; v0.6 must also accept swap-to-win moves
+// that don't happen to also create a match.
 function findValidSwaps(state, shuffleMoves = false) {
   const out = [];
   const graph = state.graph;
@@ -535,9 +591,9 @@ function findValidSwaps(state, shuffleMoves = false) {
     if (!TYPES[pa.type].canSwap || !TYPES[pb.type].canSwap) continue;
     if (pa.color === pb.color) continue;
     state.set(a, pb); state.set(b, pa);
-    const hasMatch = findMatches(state).size > 0;
+    const consequential = findMatches(state).size > 0 || winCondition(state);
     state.set(a, pa); state.set(b, pb);
-    if (hasMatch) out.push([a, b]);
+    if (consequential) out.push([a, b]);
   }
   if (shuffleMoves) {
     for (let i = out.length - 1; i > 0; i--) {
@@ -553,7 +609,7 @@ function findValidSwaps(state, shuffleMoves = false) {
 // affects WHICH optimal path is returned when multiple exist — useful
 // for the generator when it wants to sample different "tied" solutions.
 function solve(state, maxDepth = SOLVER_MAX_DEPTH, maxNodes = SOLVER_MAX_NODES, shuffleMoves = false) {
-  if (state.isEmpty()) return { path: [], explored: 0 };
+  if (winCondition(state)) return { path: [], explored: 0 };
 
   const startKey = state.serialize();
   const parent = new Map();
@@ -582,7 +638,7 @@ function solve(state, maxDepth = SOLVER_MAX_DEPTH, maxNodes = SOLVER_MAX_NODES, 
         if (parent.has(key)) continue;
         parent.set(key, { from: curKey, move: [a, b] });
         stateByKey.set(key, settled);
-        if (settled.isEmpty()) {
+        if (winCondition(settled)) {
           const path = [];
           let k = key;
           while (parent.get(k)) { const e = parent.get(k); path.unshift(e.move); k = e.from; }
@@ -638,45 +694,58 @@ function countTriggers(state) {
   return n;
 }
 
-// Replay the optimal solution and check that at least one trigger
-// is cleared on a non-last move. If a trigger only clears as part
-// of the final move's cascade, the player never gets to act under
-// the flipped gravity — they just see a flash and the level ends.
-// This filter rejects such "cosmetic-only" trigger placements.
-function triggerFiresBeforeEnd(initialState, solutionPath) {
-  if (solutionPath.length < 2) return false;
+// Replay the optimal solution and return true if at least one trigger
+// is cleared (fired) somewhere along the way. We use this to filter
+// out "decorative trigger" levels where the optimal path simply
+// matches the endpoints without ever needing the gravity flip.
+function solutionUsesTrigger(initialState, solutionPath) {
   let cur = initialState.clone();
-  const lastIdx = solutionPath.length - 1;
-  for (let i = 0; i < solutionPath.length; i++) {
-    const [a, b] = solutionPath[i];
-    const beforeCount = countTriggers(cur);
+  let initialTriggerCount = countTriggers(cur);
+  if (initialTriggerCount === 0) return false;
+  for (const [a, b] of solutionPath) {
     const next = cur.clone();
     const pa = next.get(a), pb = next.get(b);
     next.set(a, pb); next.set(b, pa);
     cur = resolveCascade(next);
-    const afterCount = countTriggers(cur);
-    if (beforeCount > afterCount && i < lastIdx) return true;
+    if (countTriggers(cur) < initialTriggerCount) return true;
   }
   return false;
 }
 
 function generateSolvableState(graph, maxAttempts = GENERATION_ATTEMPTS) {
-  // We keep the BEST solvable level seen so far as a fallback. If we
-  // never find one where a trigger fires before the last move (the
-  // "ideal" case the user can actually feel), we'll return the fallback
-  // rather than fail outright. "Best" = longest solution among levels
-  // that at least have triggers placed.
+  const endpointSet = new Set(graph.endpoints);
   let fallback = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let state = randomSliderCandidate(graph);
+
+    // Don't ship a level that's already won at start. Try recoloring
+    // one endpoint until colors differ. If we can't avoid it after a
+    // few tries, just continue to the next attempt.
+    let tries = 0;
+    while (winCondition(state) && tries++ < 4) {
+      const ep = graph.endpoints[0];
+      const cur = state.get(ep);
+      if (!cur) break;
+      const alt = COLOR_NAMES.filter(c => c !== cur.color);
+      const next = alt[Math.floor(Math.random() * alt.length)];
+      state.set(ep, { color: next, type: cur.type });
+    }
+    if (winCondition(state)) continue;
+
+    // Verify the base slider puzzle is solvable. If the random colors
+    // happen to make the endpoints match-impossible within the depth
+    // budget, skip this attempt.
     const base = solve(state);
     if (!base) continue;
 
-    // Place one trigger per region.
+    // Place one trigger per region. Skip endpoint cells — a trigger on
+    // an endpoint pins the endpoint color (immovable) and is annoying
+    // to clear, both bad for puzzle quality.
     const upperCells = [];
     const lowerCells = [];
     for (const id of graph.vertices.keys()) {
+      if (endpointSet.has(id)) continue;
       const r = graph.region(id);
       if (r === 'upper') upperCells.push(id);
       else if (r === 'lower') lowerCells.push(id);
@@ -702,12 +771,10 @@ function generateSolvableState(graph, maxAttempts = GENERATION_ATTEMPTS) {
         }
       }
     }
-    // If no triggers placed at all, this attempt is wasted — bail.
-    if (triggersPlaced === 0) continue;
 
-    // Place anchors (verified, one at a time).
+    // Place anchors, also avoiding endpoint cells.
     let anchorsPlaced = 0;
-    const anchorCandidates = Array.from(graph.vertices.keys());
+    const anchorCandidates = Array.from(graph.vertices.keys()).filter(id => !endpointSet.has(id));
     shuffle(anchorCandidates);
     let anchorTries = 0;
     for (const vid of anchorCandidates) {
@@ -723,46 +790,27 @@ function generateSolvableState(graph, maxAttempts = GENERATION_ATTEMPTS) {
       }
     }
 
-    // Run the solver several times with shuffled tiebreaking. Multiple
-    // optimal paths often exist; some may fire the trigger early and
-    // others may fire it on the last move. We want one that fires it
-    // early. Keep the first such path we find; otherwise remember the
-    // best deterministic one as a fallback.
-    let acceptedPath = null;
-    const deterministicResult = solve(state);
-    if (!deterministicResult) continue;
-    if (triggerFiresBeforeEnd(state, deterministicResult.path)) {
-      acceptedPath = deterministicResult.path;
-    } else {
-      const SHUFFLE_TRIES = 3;
-      for (let t = 0; t < SHUFFLE_TRIES; t++) {
-        const r = solve(state, SOLVER_MAX_DEPTH, SOLVER_MAX_NODES, true);
-        if (r && triggerFiresBeforeEnd(state, r.path)) {
-          acceptedPath = r.path;
-          break;
-        }
+    // Final solvability check with everything placed. Prefer levels
+    // whose optimal solution actually fires a trigger; fall back to
+    // less-good levels if we run out of attempts.
+    const finalResult = solve(state);
+    if (finalResult && finalResult.path.length >= SOLVER_MIN_DEPTH) {
+      const usesTrigger = solutionUsesTrigger(state, finalResult.path);
+      if (usesTrigger) {
+        return {
+          state,
+          solution: finalResult.path,
+          attempts: attempt,
+          triggersPlaced,
+          anchorsPlaced,
+        };
       }
-    }
-
-    if (acceptedPath) {
-      return {
-        state,
-        solution: acceptedPath,
-        attempts: attempt,
-        triggersPlaced,
-        anchorsPlaced,
-      };
-    }
-
-    // Not ideal — keep as fallback if it has triggers and is the best
-    // we've seen. Fallback levels still show the gravity flip clearly
-    // thanks to the sequenced cascade animation, even though the player
-    // doesn't get a deliberate move under flipped gravity.
-    if (triggersPlaced > 0) {
-      if (!fallback || deterministicResult.path.length > fallback.solution.length) {
+      // Decorative-trigger level — keep as fallback in case we don't
+      // find a better one.
+      if (!fallback || finalResult.path.length > fallback.solution.length) {
         fallback = {
           state: state.clone(),
-          solution: deterministicResult.path,
+          solution: finalResult.path,
           attempts: attempt,
           triggersPlaced,
           anchorsPlaced,
@@ -771,9 +819,8 @@ function generateSolvableState(graph, maxAttempts = GENERATION_ATTEMPTS) {
       }
     }
   }
-
   if (fallback) {
-    console.warn('generateSolvableState: returning fallback (trigger fires on last move)');
+    console.warn('generateSolvableState: returning fallback (trigger not used in optimal solution)');
     return fallback;
   }
   return null;
@@ -851,6 +898,44 @@ class Renderer {
     }
 
     this._addRegionBoundaryLines();
+
+    // Endpoint markers. Bright gold rings around the two endpoint
+    // cells. Tween a slow pulse to draw the eye. Pieces sitting on
+    // endpoints render normally on top — the ring is on the cell.
+    this.endpointRings = [];
+    for (const vid of graph.endpoints) {
+      const v = graph.vertices.get(vid);
+      if (!v) continue;
+      // Outer gold halo
+      const haloGeom = new THREE.RingGeometry(0.50, 0.60, 32);
+      const haloMat = new THREE.MeshBasicMaterial({
+        color: 0xffd47a, transparent: true, opacity: 0.85, side: THREE.DoubleSide,
+      });
+      const halo = new THREE.Mesh(haloGeom, haloMat);
+      halo.position.set(v.position.x, v.position.y, -0.03);
+      this.scene.add(halo);
+      // Inner faint frame
+      const frameGeom = new THREE.RingGeometry(0.42, 0.44, 32);
+      const frameMat = new THREE.MeshBasicMaterial({
+        color: 0xffe7a0, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+      });
+      const frame = new THREE.Mesh(frameGeom, frameMat);
+      frame.position.set(v.position.x, v.position.y, -0.03);
+      this.scene.add(frame);
+      // Keep defaults so the victory animation can be undone on next level.
+      const ring = {
+        vid, halo, frame,
+        defaults: {
+          haloColor: 0xffd47a,
+          frameColor: 0xffe7a0,
+          haloOpacity: 0.85,
+          frameOpacity: 0.55,
+        },
+        pulseTween: null,
+      };
+      this.endpointRings.push(ring);
+      this._startEndpointPulse(ring);
+    }
 
     // Per-cell gravity arrows.
     this.gravityArrows = new Map();
@@ -965,6 +1050,66 @@ class Renderer {
         .onComplete(() => mesh.material.color.copy(orig))
         .start();
     }
+  }
+
+  // Slow breathing opacity pulse on a ring's halo. Stored on the ring
+  // so resetEndpointRings can stop and restart it cleanly.
+  _startEndpointPulse(ring) {
+    if (ring.pulseTween) { ring.pulseTween.stop(); ring.pulseTween = null; }
+    const proxy = { o: ring.defaults.haloOpacity };
+    ring.pulseTween = new TWEEN.Tween(proxy)
+      .to({ o: 0.45 }, 1400)
+      .yoyo(true).repeat(Infinity)
+      .easing(TWEEN.Easing.Sinusoidal.InOut)
+      .onUpdate(() => { ring.halo.material.opacity = proxy.o; })
+      .start();
+  }
+
+  // Snap endpoint rings back to their default appearance and restart
+  // the breathing pulse. Called when a new level loads, since the
+  // victory animation mutates the rings (scale, color, opacity) and
+  // doesn't reset them on its own.
+  resetEndpointRings() {
+    for (const ring of this.endpointRings) {
+      ring.halo.scale.set(1, 1, 1);
+      ring.frame.scale.set(1, 1, 1);
+      ring.halo.material.color.setHex(ring.defaults.haloColor);
+      ring.frame.material.color.setHex(ring.defaults.frameColor);
+      ring.halo.material.opacity = ring.defaults.haloOpacity;
+      ring.frame.material.opacity = ring.defaults.frameOpacity;
+      this._startEndpointPulse(ring);
+    }
+  }
+
+  // Burst both endpoint rings green when the win condition is hit.
+  animateEndpointVictory() {
+    return new Promise(resolve => {
+      let done = 0;
+      const total = this.endpointRings.length * 2;
+      if (total === 0) { resolve(); return; }
+      const finish = () => { if (++done === total) resolve(); };
+      for (const ring of this.endpointRings) {
+        // Stop the breathing pulse so it doesn't fight the fade-out.
+        if (ring.pulseTween) { ring.pulseTween.stop(); ring.pulseTween = null; }
+        const { halo, frame } = ring;
+        halo.material.color.setHex(0x88ffa8);
+        frame.material.color.setHex(0xaaffbb);
+        const haloProxy = { s: 1 };
+        new TWEEN.Tween(haloProxy)
+          .to({ s: 2.2 }, 380)
+          .easing(TWEEN.Easing.Cubic.Out)
+          .onUpdate(() => halo.scale.set(haloProxy.s, haloProxy.s, 1))
+          .onComplete(finish)
+          .start();
+        const opProxy = { o: 1 };
+        new TWEEN.Tween(opProxy)
+          .to({ o: 0 }, 380)
+          .easing(TWEEN.Easing.Cubic.Out)
+          .onUpdate(() => halo.material.opacity = opProxy.o)
+          .onComplete(finish)
+          .start();
+      }
+    });
   }
 
   _computeBounds() {
@@ -1327,13 +1472,16 @@ class Game {
       this.history = new History(this.state);
       this.renderer.sync(this.state);
       this.renderer.clearHint();
+      this.renderer.resetEndpointRings();
+      this.renderer.applyPhasesToArrows(this.state.phases, false);
       this.selected = null;
       this.renderer.highlight(null);
       this._updateHUD();
       overlay.hidden = true;
-      console.log(`v0.5 level: solvable in ${result.solution.length} moves ` +
+      console.log(`v0.6 level: solvable in ${result.solution.length} moves ` +
                   `(${result.attempts} attempt${result.attempts === 1 ? '' : 's'}, ` +
-                  `${result.triggersPlaced} triggers, ${result.anchorsPlaced} anchors, ${dt}ms)`);
+                  `${result.triggersPlaced} triggers, ${result.anchorsPlaced} anchors, ${dt}ms` +
+                  `${result.fallback ? ', FALLBACK' : ''})`);
     }));
   }
 
@@ -1389,9 +1537,10 @@ class Game {
       trial.set(v1, p2);
       trial.set(v2, p1);
       const wouldMatch = findMatches(trial).size > 0;
+      const wouldWin = winCondition(trial);
       await this.renderer.animateSwap(v1, v2);
       this.renderer.commitSwap(v1, v2);
-      if (!wouldMatch) {
+      if (!wouldMatch && !wouldWin) {
         await this.renderer.animateSwap(v1, v2);
         this.renderer.commitSwap(v1, v2);
         return;
@@ -1400,7 +1549,10 @@ class Game {
       await this._runCascade();
       this.history.push(this.state);
       this._updateHUD();
-      if (this.state.isEmpty()) this._showWin();
+      if (winCondition(this.state)) {
+        await this.renderer.animateEndpointVictory();
+        this._showWin();
+      }
     } finally {
       this.locked = false;
     }
@@ -1408,6 +1560,7 @@ class Game {
 
   async _runCascade() {
     while (true) {
+      if (winCondition(this.state)) break;  // win takes precedence over match-clear
       const matched = findMatches(this.state);
       if (matched.size === 0) break;
 
@@ -1464,7 +1617,7 @@ class Game {
 
   hint() {
     if (this.locked) return;
-    if (this.state.isEmpty()) return;
+    if (winCondition(this.state)) return;
     this.renderer.clearHint();
     const t0 = Date.now();
     const result = solve(this.state);
@@ -1478,7 +1631,7 @@ class Game {
     const [a, b] = result.path[0];
     this.renderer.showHint([a, b]);
     document.getElementById('solve-text').textContent =
-      `${result.path.length} optimal move${result.path.length === 1 ? '' : 's'} to clear`;
+      `${result.path.length} optimal move${result.path.length === 1 ? '' : 's'} to match`;
   }
 
   undo() {
@@ -1506,7 +1659,7 @@ class Game {
     this.selected = null;
     this.renderer.highlight(null);
     this._updateHUD();
-    if (this.state.isEmpty()) this._showWin();
+    if (winCondition(this.state)) this._showWin();
   }
 
   scrubTo(index) {
@@ -1519,7 +1672,7 @@ class Game {
     this.selected = null;
     this.renderer.highlight(null);
     this._updateHUD();
-    document.getElementById('banner').hidden = !this.state.isEmpty();
+    document.getElementById('banner').hidden = !winCondition(this.state);
   }
 
   _updatePhaseHUD() {
@@ -1549,6 +1702,26 @@ class Game {
     document.getElementById('solve-text').textContent =
       `solvable in ${this.initialSolutionDepth} move${this.initialSolutionDepth === 1 ? '' : 's'}`;
     this._updatePhaseHUD();
+    this._updateEndpointHUD();
+  }
+
+  _updateEndpointHUD() {
+    const [a, b] = this.graph.endpoints;
+    const pa = this.state.get(a);
+    const pb = this.state.get(b);
+    const dotA = document.getElementById('endpoint-a-dot');
+    const dotB = document.getElementById('endpoint-b-dot');
+    const arrow = document.getElementById('endpoint-arrow');
+    const wrap = document.getElementById('endpoint-status');
+    const hexA = pa ? '#' + COLORS[pa.color].toString(16).padStart(6, '0') : '';
+    const hexB = pb ? '#' + COLORS[pb.color].toString(16).padStart(6, '0') : '';
+    if (pa) { dotA.style.background = hexA; dotA.classList.remove('empty'); }
+    else    { dotA.style.background = ''; dotA.classList.add('empty'); }
+    if (pb) { dotB.style.background = hexB; dotB.classList.remove('empty'); }
+    else    { dotB.style.background = ''; dotB.classList.add('empty'); }
+    const matched = pa && pb && pa.color === pb.color;
+    wrap.classList.toggle('matched', matched);
+    arrow.textContent = matched ? '=' : '→';
   }
 
   _showWin() {
@@ -1566,8 +1739,9 @@ window.game = game;
 window.solve = solve;
 window.findMatches = findMatches;
 window.settleGravity = settleGravity;
-window.computePhaseFlips = computePhaseFlips;
-console.log('graphgames v0.5 — game instance exposed as window.game');
+window.winCondition = winCondition;
+console.log('graphgames v0.6 — game instance exposed as window.game');
+console.log('endpoints:', game.graph.endpoints);
 </script>
 </body>
 </html>
