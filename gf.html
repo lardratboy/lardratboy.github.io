@@ -1,0 +1,1478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>graphgames v0.5</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #1a1a26; color: #e8e8f0;
+               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+               overflow: hidden; user-select: none; -webkit-user-select: none; }
+  canvas#board { display: block; width: 100vw; height: 100vh; position: fixed; inset: 0; }
+
+  #hud-top { position: fixed; top: 0; left: 0; right: 0; padding: 14px 18px;
+             display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none;
+             background: linear-gradient(to bottom, rgba(0,0,0,0.4), transparent); z-index: 10; }
+  #hud-top .label { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.75; }
+  #hud-top .value { font-size: 22px; font-weight: 600; margin-left: 6px; }
+  #goal { display: flex; flex-direction: column; gap: 4px; }
+  #goal-line { display: flex; align-items: baseline; gap: 4px; }
+  #solve-info { font-size: 12px; opacity: 0.7; margin-top: 2px; }
+  #solve-info .pip { display: inline-block; padding: 2px 8px; border-radius: 4px; margin-left: 6px;
+                     font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+  .pip-easy { background: #2a6e3a; }
+  .pip-medium { background: #6e5a2a; }
+  .pip-hard { background: #6e3a2a; }
+  .pip-expert { background: #5a2a6e; }
+
+  #right-stack { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+  #counts { display: flex; gap: 12px; align-items: baseline; }
+  #counts .chip { display: inline-flex; align-items: baseline; gap: 4px; font-size: 14px; }
+  #counts .chip-icon { font-size: 16px; opacity: 0.85; }
+
+  #phase-chips { display: flex; gap: 6px; }
+  .phase-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
+                padding: 3px 9px; border-radius: 6px; background: rgba(255,255,255,0.07);
+                border: 1px solid rgba(255,255,255,0.1); letter-spacing: 0.05em; }
+  .phase-chip.upper { border-color: rgba(140, 170, 220, 0.35); }
+  .phase-chip.lower { border-color: rgba(220, 140, 120, 0.35); }
+  .phase-chip .dir { font-size: 14px; font-weight: 600; }
+  .phase-chip.pulsing { animation: phasePulse 350ms ease; }
+  @keyframes phasePulse {
+    0% { transform: scale(1); background: rgba(255,255,255,0.07); }
+    45% { transform: scale(1.18); background: rgba(255, 220, 130, 0.45); }
+    100% { transform: scale(1); background: rgba(255,255,255,0.07); }
+  }
+
+  #hud-bottom { position: fixed; bottom: 0; left: 0; right: 0; padding: 14px 18px;
+                display: flex; gap: 10px; align-items: center; z-index: 10;
+                background: linear-gradient(to top, rgba(0,0,0,0.4), transparent); }
+  #hud-bottom button { background: rgba(60,60,80,0.85); color: #e8e8f0; border: 1px solid rgba(255,255,255,0.12);
+                       padding: 9px 14px; border-radius: 8px; font-size: 14px; cursor: pointer;
+                       font-family: inherit; min-width: 56px; transition: background 120ms; }
+  #hud-bottom button:hover:not(:disabled) { background: rgba(80,80,100,0.95); }
+  #hud-bottom button:disabled { opacity: 0.35; cursor: not-allowed; }
+  #hud-bottom button.accent { background: rgba(85, 119, 255, 0.85); border-color: rgba(150, 180, 255, 0.3); }
+  #hud-bottom button.accent:hover:not(:disabled) { background: rgba(105, 139, 255, 0.95); }
+  #hud-bottom input[type="range"] { flex: 1; cursor: pointer; accent-color: #88aaff; }
+  #scrub-wrap { flex: 1; display: flex; align-items: center; gap: 10px; }
+  #scrub-info { font-size: 12px; opacity: 0.7; min-width: 90px; text-align: center; }
+
+  #banner { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+            justify-content: center; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); z-index: 100;
+            gap: 20px; }
+  #banner[hidden] { display: none; }
+  #banner-text { font-size: 48px; font-weight: 700; letter-spacing: 0.02em; }
+  #banner-sub { font-size: 16px; opacity: 0.75; max-width: 480px; text-align: center; padding: 0 20px; }
+  #banner button { background: #5577ff; color: white; border: none; padding: 12px 24px;
+                   border-radius: 10px; font-size: 16px; cursor: pointer; font-family: inherit; }
+
+  #generating { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+                justify-content: center; background: rgba(26,26,38,0.94); z-index: 200; gap: 16px; }
+  #generating[hidden] { display: none; }
+  #generating-text { font-size: 16px; opacity: 0.85; }
+  #generating-spinner { width: 36px; height: 36px; border: 3px solid rgba(255,255,255,0.15);
+                        border-top-color: #88aaff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #info { position: fixed; left: 18px; bottom: 64px; font-size: 11px; opacity: 0.6; max-width: 360px;
+          line-height: 1.55; pointer-events: none; }
+  #info b { color: #e8e8f0; opacity: 0.95; }
+  .legend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 3px;
+                   vertical-align: middle; }
+</style>
+</head>
+<body>
+<canvas id="board"></canvas>
+
+<div id="hud-top">
+  <div id="goal">
+    <div id="goal-line"><span class="label">Goal</span><span class="value">Clear the board</span></div>
+    <div id="solve-info">
+      <span id="solve-text">solving...</span>
+      <span class="pip" id="difficulty-pip"></span>
+    </div>
+  </div>
+  <div id="right-stack">
+    <div id="counts">
+      <span class="chip"><span class="chip-icon">●</span><span id="slider-count">0</span></span>
+      <span class="chip"><span class="chip-icon">◼</span><span id="anchor-count">0</span></span>
+      <span class="chip"><span class="chip-icon">▲</span><span id="trigger-count">0</span></span>
+    </div>
+    <div id="phase-chips">
+      <span class="phase-chip upper" id="phase-upper">upper <span class="dir" id="phase-upper-dir">↓</span></span>
+      <span class="phase-chip lower" id="phase-lower">lower <span class="dir" id="phase-lower-dir">↑</span></span>
+    </div>
+  </div>
+</div>
+
+<div id="info">
+  <strong>v0.5</strong> — tetrahedron <b>triggers</b>! Matching a trigger flips gravity in its region.<br>
+  <span class="legend-swatch" style="background:#252e44;"></span><b>Upper</b> default: gravity ↓.
+  <span class="legend-swatch" style="background:#442825;"></span><b>Lower</b> default: gravity ↑.<br>
+  <b>▲ triggers</b> are immovable and clear on match; ◼ anchors are immovable; ● sliders swap freely.<br>
+  Per-cell arrows show the live flow; chips at top right show region state.
+</div>
+
+<div id="hud-bottom">
+  <button id="undo" title="Undo (Z)">↶</button>
+  <button id="redo" title="Redo (Y)">↷</button>
+  <button id="hint" class="accent" title="Hint (H)">hint</button>
+  <div id="scrub-wrap">
+    <input type="range" id="scrub" min="0" max="0" value="0" step="1">
+    <span id="scrub-info">move 0 / 0</span>
+  </div>
+  <button id="restart" title="Restart">new</button>
+</div>
+
+<div id="banner" hidden>
+  <div id="banner-text">cleared! 🎉</div>
+  <div id="banner-sub">You drained the whole board through the triggers.</div>
+  <button id="banner-restart">new puzzle</button>
+</div>
+
+<div id="generating" hidden>
+  <div id="generating-spinner"></div>
+  <div id="generating-text">searching for a solvable arrangement...</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+<script>
+'use strict';
+
+// =====================================================================
+// graphgames v0.5
+//
+// What's new since v0.4:
+//   - TETRAHEDRON TRIGGERS. A new piece type whose match-firing
+//     side-effect is to flip the gravity phase of the region it
+//     occupies. Visual: spiky tetrahedron with a slow idle rotation.
+//   - PHASE STATE on State. Each State now carries a `phases` object,
+//     e.g. {upper: 0, lower: 0}. The gravity DAG is no longer baked
+//     into the graph — it's a FUNCTION of (graph, phases). Switching
+//     gravity is now a first-class state transition that the solver
+//     reasons about.
+//   - PRECOMPUTED PHASE TABLES. For each of the 2^|regions| possible
+//     phase combinations, the graph caches a downstream map and a
+//     sorted-upstream map. settleGravity reads from these tables via
+//     graph.upstreamsOf(vid, phases).
+//   - SERIALIZATION INCLUDES PHASES. State.serialize() now appends a
+//     canonical phase string after the piece list. The solver's
+//     visited-set hashing therefore distinguishes states that have
+//     the same pieces but different gravity directions — which is
+//     exactly what we need now that gravity is mutable.
+//   - CASCADE FIRES TRIGGERS BEFORE CLEARING. When a match contains
+//     trigger pieces, their effects are computed FIRST (counted per
+//     region; odd count flips, even count cancels — Z_2 arithmetic),
+//     then matched pieces are cleared, then gravity settles under
+//     the NEW phases. The whole thing iterates until stable.
+//   - PER-CELL GRAVITY ARROWS. Tiny chevrons on each non-sink cell,
+//     pointing in the direction pieces currently flow. When a phase
+//     flips, the arrows in that region rotate 180° via TWEEN.
+//   - PHASE CHIPS IN HUD. Top-right shows "upper ↓ lower ↑" as live
+//     indicators. They pulse gold when a flip happens.
+//   - REGION FLASH. When a region's phase flips, its cell backplates
+//     briefly brighten before the arrows rotate.
+//
+// Deferred to later versions:
+//   - Persistent triggers (re-firable across cascades, not consumed).
+//     Conflicts with clear-the-board win condition — a re-firable
+//     trigger never gets cleared, so you can't win. We'd need a
+//     different win condition (connect-A-to-B) for that to work.
+//   - Z_4 rotations (cardinal-direction gravity cycling). We're using
+//     Z_2 (binary flip) which is enough to demonstrate the mechanic.
+//   - Trigger color matters only for matching, not for effect. Could
+//     extend so red triggers flip upper, blue triggers flip lower,
+//     etc. — but for now the effect is determined by which REGION the
+//     trigger sits in, not its color.
+// =====================================================================
+
+// ---------- Configuration ----------
+
+const COLORS = {
+  red:    0xff5566,
+  yellow: 0xffcc44,
+  blue:   0x5588ff,
+  green:  0x66dd88,
+};
+const COLOR_NAMES = Object.keys(COLORS);
+const N_MATCH = 3;
+const BOARD_SIZE = 5;
+const SPACING = 1.15;
+
+const NUM_ANCHORS = 1;        // reduced from v0.4's 2 to make room for triggers
+const NUM_TRIGGERS = 2;       // one per region (upper + lower)
+
+const REGION_COLORS = {
+  upper: 0x252e44,
+  lower: 0x442825,
+  sink:  0x3a3525,
+};
+
+// All Z_2 region phase combinations on a 2-region board.
+const ALL_PHASES = [
+  { upper: 0, lower: 0 },
+  { upper: 0, lower: 1 },
+  { upper: 1, lower: 0 },
+  { upper: 1, lower: 1 },
+];
+
+// Solver budget — 2 binary phases means up to 4x the reachable state
+// space vs v0.4, so bump the node cap. Depth stays modest because
+// trigger flips often give the player a SHORTER path (more options).
+const SOLVER_MAX_NODES = 300000;
+const SOLVER_MAX_DEPTH = 14;
+const GENERATION_ATTEMPTS = 50;
+
+const TYPES = {
+  slider:  { canSwap: true,  fallsUnderGravity: true,  trigger: false },
+  anchor:  { canSwap: false, fallsUnderGravity: false, trigger: false },
+  trigger: { canSwap: false, fallsUnderGravity: false, trigger: true  },
+};
+
+function phaseKey(phases) {
+  // Canonical key: keys sorted alphabetically, joined with '|'.
+  return Object.keys(phases).sort().map(k => `${k}=${phases[k]}`).join('|');
+}
+
+function clonePhases(p) { return { ...p }; }
+
+// ---------- Graph ----------
+
+class Graph {
+  constructor() {
+    this.vertices = new Map();       // id -> { id, position, region }
+    this.matchEdges = new Set();
+    this._matchAdj = new Map();
+    this._gravityDown = new Map();   // phaseKey -> Map<from, to>
+    this._gravityUp = new Map();     // phaseKey -> Map<to, [from,...] sorted>
+    this._allMatchPairs = null;
+  }
+  addVertex(id, position, meta = {}) {
+    this.vertices.set(id, { id, position, ...meta });
+  }
+  addMatchEdge(a, b) {
+    const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+    this.matchEdges.add(key);
+  }
+  finalize() {
+    for (const id of this.vertices.keys()) this._matchAdj.set(id, []);
+    for (const key of this.matchEdges) {
+      const [a, b] = key.split('|');
+      this._matchAdj.get(a).push(b);
+      this._matchAdj.get(b).push(a);
+    }
+    this._allMatchPairs = [];
+    for (const key of this.matchEdges) this._allMatchPairs.push(key.split('|'));
+  }
+  // The gravity model is supplied externally as a function
+  // (vid, phases) -> downstream vid or null. We memoize it for every
+  // phase combination listed in allPhases.
+  setGravityModel(model, allPhases) {
+    for (const phases of allPhases) {
+      const key = phaseKey(phases);
+      const down = new Map();
+      for (const id of this.vertices.keys()) {
+        const dst = model(id, phases);
+        if (dst) down.set(id, dst);
+      }
+      const up = new Map();
+      for (const id of this.vertices.keys()) up.set(id, []);
+      for (const [from, to] of down) up.get(to).push(from);
+      for (const arr of up.values()) arr.sort();
+      this._gravityDown.set(key, down);
+      this._gravityUp.set(key, up);
+    }
+  }
+  matchNeighbors(id) { return this._matchAdj.get(id) || []; }
+  downstreamOf(id, phases) {
+    const t = this._gravityDown.get(phaseKey(phases));
+    return t ? (t.get(id) || null) : null;
+  }
+  upstreamsOf(id, phases) {
+    const t = this._gravityUp.get(phaseKey(phases));
+    return t ? (t.get(id) || []) : [];
+  }
+  allMatchPairs() { return this._allMatchPairs; }
+  region(id) {
+    const v = this.vertices.get(id);
+    return v ? v.region : null;
+  }
+}
+
+// Diagonal-split graph. Same geometry as v0.4 but gravity is now a
+// FUNCTION of phases: each region has phase 0 (default) and phase 1
+// (reversed). Sink cells (anti-diagonal) never have outgoing gravity
+// in any phase.
+function makeDiagonalSplitGraph(size) {
+  const g = new Graph();
+  const diag = size - 1;
+
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      const id = `${r},${c}`;
+      const sum = r + c;
+      let region;
+      if (sum < diag) region = 'upper';
+      else if (sum > diag) region = 'lower';
+      else region = 'sink';
+      const x = (c - (size - 1) / 2) * SPACING;
+      const y = -(r - (size - 1) / 2) * SPACING;
+      g.addVertex(id, { x, y, z: 0 }, { region });
+    }
+  }
+
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      const v = `${r},${c}`;
+      if (c + 1 < size) g.addMatchEdge(v, `${r},${c + 1}`);
+      if (r + 1 < size) g.addMatchEdge(v, `${r + 1},${c}`);
+    }
+  }
+
+  g.finalize();
+
+  // Gravity model: per-region, phase-dependent.
+  // Upper region: phase 0 -> down, phase 1 -> up.
+  // Lower region: phase 0 -> up, phase 1 -> down.
+  // Sink cells: no outgoing flow ever.
+  const model = (id, phases) => {
+    const v = g.vertices.get(id);
+    if (!v) return null;
+    if (v.region === 'sink') return null;
+    const [r, c] = id.split(',').map(Number);
+    const ph = phases[v.region];
+    let dr;
+    if (v.region === 'upper') dr = (ph === 0 ? +1 : -1);
+    else                       dr = (ph === 0 ? -1 : +1); // lower
+    const nr = r + dr;
+    if (nr < 0 || nr >= size) return null;
+    return `${nr},${c}`;
+  };
+  g.setGravityModel(model, ALL_PHASES);
+
+  return g;
+}
+
+// ---------- State ----------
+
+class State {
+  constructor(graph) {
+    this.graph = graph;
+    this.pieces = new Map();
+    this.phases = { upper: 0, lower: 0 };
+  }
+  clone() {
+    const s = new State(this.graph);
+    for (const [vid, p] of this.pieces) s.pieces.set(vid, { ...p });
+    s.phases = clonePhases(this.phases);
+    return s;
+  }
+  get(vid) { return this.pieces.get(vid) || null; }
+  set(vid, piece) {
+    if (piece) this.pieces.set(vid, piece);
+    else this.pieces.delete(vid);
+  }
+  isEmpty() { return this.pieces.size === 0; }
+  countByType() {
+    const out = { slider: 0, anchor: 0, trigger: 0 };
+    for (const p of this.pieces.values()) out[p.type] = (out[p.type] || 0) + 1;
+    return out;
+  }
+  serialize() {
+    const entries = [];
+    for (const [vid, p] of this.pieces) entries.push(`${vid}:${p.color[0]}${p.type[0]}`);
+    entries.sort();
+    return entries.join(',') + '#' + phaseKey(this.phases);
+  }
+  toData() {
+    return {
+      pieces: Array.from(this.pieces.entries()).map(([vid, p]) => [vid, p.color, p.type]),
+      phases: clonePhases(this.phases),
+    };
+  }
+  static fromData(graph, data) {
+    const s = new State(graph);
+    for (const [vid, color, type] of data.pieces) s.pieces.set(vid, { color, type });
+    s.phases = clonePhases(data.phases);
+    return s;
+  }
+}
+
+// ---------- Matching ----------
+
+// Same-color connected component (polyomino) of size ≥ N. Matching
+// IGNORES phase — it's a property of the static match-adjacency graph
+// and the piece colors. Phases only affect gravity.
+function findMatches(state, n = N_MATCH) {
+  const matched = new Set();
+  const visited = new Set();
+  for (const [vid, piece] of state.pieces) {
+    if (visited.has(vid)) continue;
+    if (!piece) { visited.add(vid); continue; }
+    const comp = [];
+    const queue = [vid];
+    visited.add(vid);
+    while (queue.length) {
+      const u = queue.shift();
+      comp.push(u);
+      const upiece = state.get(u);
+      for (const w of state.graph.matchNeighbors(u)) {
+        if (visited.has(w)) continue;
+        const wpiece = state.get(w);
+        if (wpiece && wpiece.color === upiece.color) {
+          visited.add(w);
+          queue.push(w);
+        }
+      }
+    }
+    if (comp.length >= n) for (const u of comp) matched.add(u);
+  }
+  return matched;
+}
+
+// ---------- Gravity ----------
+
+// Iterative settler — phase-aware. Reads the upstream tables for the
+// state's current phases. Same convergence semantics as v0.4: lex-
+// sorted upstreams give deterministic tiebreaking when two regions
+// converge on a shared sink.
+function settleGravity(state) {
+  const out = state.clone();
+  const graph = state.graph;
+  const phases = state.phases;
+
+  const origin = new Map();
+  for (const vid of out.pieces.keys()) origin.set(vid, vid);
+
+  let changed = true;
+  let iter = 0;
+  while (changed && iter < 200) {
+    changed = false;
+    iter++;
+    for (const vid of graph.vertices.keys()) {
+      if (out.get(vid)) continue;
+      const upstreams = graph.upstreamsOf(vid, phases);
+      for (const u of upstreams) {
+        const upPiece = out.get(u);
+        if (!upPiece) continue;
+        if (!TYPES[upPiece.type].fallsUnderGravity) continue;
+        out.set(vid, upPiece);
+        out.set(u, null);
+        origin.set(vid, origin.get(u));
+        origin.delete(u);
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  const moves = [];
+  for (const [to, from] of origin) {
+    if (from !== to) moves.push({ from, to });
+  }
+  return { state: out, moves };
+}
+
+// ---------- Trigger phase arithmetic ----------
+
+// Z_2 per region: each trigger in the matched set increments the
+// fire count for its region. Regions with odd total counts get
+// their phase XOR-flipped; even counts cancel out (no flip).
+function computePhaseFlips(state, triggerVids) {
+  const counts = {};
+  for (const vid of triggerVids) {
+    const region = state.graph.region(vid);
+    if (region === 'sink') continue;
+    counts[region] = (counts[region] || 0) + 1;
+  }
+  const flips = {};
+  for (const [region, c] of Object.entries(counts)) {
+    if (c % 2 === 1) flips[region] = true;
+  }
+  return flips;
+}
+
+function applyFlips(phases, flips) {
+  const out = clonePhases(phases);
+  for (const region of Object.keys(flips)) {
+    out[region] = 1 - out[region];
+  }
+  return out;
+}
+
+// ---------- Cascade (headless, used by solver) ----------
+
+function resolveCascade(state) {
+  let s = state;
+  while (true) {
+    const matched = findMatches(s);
+    if (matched.size === 0) break;
+    const triggers = [];
+    for (const vid of matched) {
+      const piece = s.get(vid);
+      if (piece && TYPES[piece.type].trigger) triggers.push(vid);
+    }
+    const flips = computePhaseFlips(s, triggers);
+
+    const cleared = s.clone();
+    for (const vid of matched) cleared.set(vid, null);
+    cleared.phases = applyFlips(cleared.phases, flips);
+    s = settleGravity(cleared).state;
+  }
+  return s;
+}
+
+// ---------- Solver ----------
+
+function findValidSwaps(state) {
+  const out = [];
+  const graph = state.graph;
+  for (const [a, b] of graph.allMatchPairs()) {
+    const pa = state.get(a), pb = state.get(b);
+    if (!pa || !pb) continue;
+    if (!TYPES[pa.type].canSwap || !TYPES[pb.type].canSwap) continue;
+    if (pa.color === pb.color) continue;
+    state.set(a, pb); state.set(b, pa);
+    const hasMatch = findMatches(state).size > 0;
+    state.set(a, pa); state.set(b, pb);
+    if (hasMatch) out.push([a, b]);
+  }
+  return out;
+}
+
+function solve(state, maxDepth = SOLVER_MAX_DEPTH, maxNodes = SOLVER_MAX_NODES) {
+  if (state.isEmpty()) return { path: [], explored: 0 };
+
+  const startKey = state.serialize();
+  const parent = new Map();
+  parent.set(startKey, null);
+  const stateByKey = new Map();
+  stateByKey.set(startKey, state.clone());
+
+  let queue = [startKey];
+  let explored = 0;
+  let depth = 0;
+
+  while (queue.length > 0 && explored < maxNodes && depth < maxDepth) {
+    const nextQueue = [];
+    depth++;
+    for (const curKey of queue) {
+      if (explored >= maxNodes) break;
+      explored++;
+      const cur = stateByKey.get(curKey);
+      const swaps = findValidSwaps(cur);
+      for (const [a, b] of swaps) {
+        const next = cur.clone();
+        const pa = next.get(a), pb = next.get(b);
+        next.set(a, pb); next.set(b, pa);
+        const settled = resolveCascade(next);
+        const key = settled.serialize();
+        if (parent.has(key)) continue;
+        parent.set(key, { from: curKey, move: [a, b] });
+        stateByKey.set(key, settled);
+        if (settled.isEmpty()) {
+          const path = [];
+          let k = key;
+          while (parent.get(k)) { const e = parent.get(k); path.unshift(e.move); k = e.from; }
+          return { path, explored };
+        }
+        nextQueue.push(key);
+      }
+    }
+    queue = nextQueue;
+  }
+  return null;
+}
+
+// ---------- Initial state generation ----------
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function randomSliderCandidate(graph) {
+  const s = new State(graph);
+  for (const id of graph.vertices.keys()) {
+    const color = COLOR_NAMES[Math.floor(Math.random() * COLOR_NAMES.length)];
+    s.set(id, { color, type: 'slider' });
+  }
+  let safety = 200;
+  while (safety-- > 0) {
+    const matched = findMatches(s);
+    if (matched.size === 0) break;
+    for (const vid of matched) {
+      const neighborColors = new Set();
+      for (const n of graph.matchNeighbors(vid)) {
+        const p = s.get(n);
+        if (p) neighborColors.add(p.color);
+      }
+      const ok = COLOR_NAMES.filter(c => !neighborColors.has(c));
+      const next = ok.length ? ok[Math.floor(Math.random() * ok.length)]
+                             : COLOR_NAMES[Math.floor(Math.random() * COLOR_NAMES.length)];
+      s.set(vid, { color: next, type: 'slider' });
+    }
+  }
+  return s;
+}
+
+function generateSolvableState(graph, maxAttempts = GENERATION_ATTEMPTS) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let state = randomSliderCandidate(graph);
+    const base = solve(state);
+    if (!base) continue;
+
+    // Place one trigger per region.
+    const upperCells = [];
+    const lowerCells = [];
+    for (const id of graph.vertices.keys()) {
+      const r = graph.region(id);
+      if (r === 'upper') upperCells.push(id);
+      else if (r === 'lower') lowerCells.push(id);
+    }
+    shuffle(upperCells);
+    shuffle(lowerCells);
+
+    let triggersPlaced = 0;
+    for (const list of [upperCells, lowerCells]) {
+      let placed = false;
+      let tries = 0;
+      for (const vid of list) {
+        if (placed) break;
+        if (tries++ >= 8) break;
+        const piece = state.get(vid);
+        if (!piece || piece.type !== 'slider') continue;
+        const trial = state.clone();
+        trial.set(vid, { color: piece.color, type: 'trigger' });
+        if (solve(trial)) {
+          state = trial;
+          triggersPlaced++;
+          placed = true;
+        }
+      }
+    }
+
+    // Place anchors (verified, one at a time).
+    let anchorsPlaced = 0;
+    const anchorCandidates = Array.from(graph.vertices.keys());
+    shuffle(anchorCandidates);
+    let anchorTries = 0;
+    for (const vid of anchorCandidates) {
+      if (anchorsPlaced >= NUM_ANCHORS) break;
+      if (anchorTries++ >= NUM_ANCHORS * 8) break;
+      const piece = state.get(vid);
+      if (!piece || piece.type !== 'slider') continue;
+      const trial = state.clone();
+      trial.set(vid, { color: piece.color, type: 'anchor' });
+      if (solve(trial)) {
+        state = trial;
+        anchorsPlaced++;
+      }
+    }
+
+    const finalResult = solve(state);
+    if (finalResult) {
+      return {
+        state,
+        solution: finalResult.path,
+        attempts: attempt,
+        triggersPlaced,
+        anchorsPlaced,
+      };
+    }
+  }
+  return null;
+}
+
+function difficultyFromDepth(depth) {
+  if (depth <= 3) return { label: 'easy', class: 'pip-easy' };
+  if (depth <= 6) return { label: 'medium', class: 'pip-medium' };
+  if (depth <= 10) return { label: 'hard', class: 'pip-hard' };
+  return { label: 'expert', class: 'pip-expert' };
+}
+
+// ---------- History ----------
+
+class History {
+  constructor(initialState) {
+    this.graph = initialState.graph;
+    this.snapshots = [initialState.toData()];
+    this.cursor = 0;
+  }
+  push(state) {
+    if (this.cursor < this.snapshots.length - 1) {
+      this.snapshots.length = this.cursor + 1;
+    }
+    this.snapshots.push(state.toData());
+    this.cursor = this.snapshots.length - 1;
+  }
+  jumpTo(index) {
+    if (index < 0 || index >= this.snapshots.length) return null;
+    this.cursor = index;
+    return State.fromData(this.graph, this.snapshots[index]);
+  }
+  canUndo() { return this.cursor > 0; }
+  canRedo() { return this.cursor < this.snapshots.length - 1; }
+  length() { return this.snapshots.length; }
+}
+
+// ---------- Renderer ----------
+
+class Renderer {
+  constructor(canvas, graph) {
+    this.canvas = canvas;
+    this.graph = graph;
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x1a1a26);
+
+    const bounds = this._computeBounds();
+    this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
+    this.camera.position.set(0, 0, 10);
+    this.camera.lookAt(0, 0, 0);
+    this._frameBounds = bounds;
+
+    this.three = new THREE.WebGLRenderer({ canvas, antialias: true });
+    this.three.setPixelRatio(window.devicePixelRatio || 1);
+    this.resize();
+
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const key = new THREE.DirectionalLight(0xffffff, 0.7);
+    key.position.set(3, 6, 8);
+    this.scene.add(key);
+
+    // Per-cell backplates. baseColor saved so flashRegion can restore.
+    this.cellMeshes = new Map();
+    const cellGeom = new THREE.PlaneGeometry(0.92, 0.92);
+    for (const [id, v] of graph.vertices) {
+      const regionColor = REGION_COLORS[v.region] || 0x252535;
+      const mat = new THREE.MeshBasicMaterial({ color: regionColor, transparent: true, opacity: 0.95 });
+      const mesh = new THREE.Mesh(cellGeom, mat);
+      mesh.position.set(v.position.x, v.position.y, -0.05);
+      mesh.userData.vid = id;
+      mesh.userData.baseColor = new THREE.Color(regionColor);
+      this.scene.add(mesh);
+      this.cellMeshes.set(id, mesh);
+    }
+
+    this._addRegionBoundaryLines();
+
+    // Per-cell gravity arrows.
+    this.gravityArrows = new Map();
+    this._makeGravityArrows();
+
+    // Selection / hint rings.
+    const ringGeom = new THREE.RingGeometry(0.48, 0.56, 32);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, side: THREE.DoubleSide });
+    this.selectionRing = new THREE.Mesh(ringGeom, ringMat);
+    this.selectionRing.visible = false;
+    this.selectionRing.position.z = 0.6;
+    this.scene.add(this.selectionRing);
+
+    this.hintRings = [];
+    for (let i = 0; i < 2; i++) {
+      const hg = new THREE.RingGeometry(0.55, 0.66, 32);
+      const hm = new THREE.MeshBasicMaterial({ color: 0x88ccff, transparent: true, opacity: 0.0, side: THREE.DoubleSide });
+      const r = new THREE.Mesh(hg, hm);
+      r.position.z = 0.5;
+      r.visible = false;
+      this.scene.add(r);
+      this.hintRings.push(r);
+    }
+
+    // Piece geometries.
+    this._sphereGeom = new THREE.SphereGeometry(0.4, 24, 18);
+    this._cubeGeom = new THREE.BoxGeometry(0.7, 0.7, 0.7);
+    this._tetraGeom = new THREE.TetrahedronGeometry(0.5);
+    this.pieceMeshes = new Map();
+    this.raycaster = new THREE.Raycaster();
+  }
+
+  _addRegionBoundaryLines() {
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xfff0c0, transparent: true, opacity: 0.4 });
+    for (const key of this.graph.matchEdges) {
+      const [a, b] = key.split('|');
+      const ra = this.graph.region(a);
+      const rb = this.graph.region(b);
+      if (ra === rb) continue;
+      const va = this.graph.vertices.get(a);
+      const vb = this.graph.vertices.get(b);
+      const mx = (va.position.x + vb.position.x) / 2;
+      const my = (va.position.y + vb.position.y) / 2;
+      const dx = vb.position.x - va.position.x;
+      const dy = vb.position.y - va.position.y;
+      const px = -dy, py = dx;
+      const len = Math.hypot(px, py) || 1;
+      const half = 0.46;
+      const lineGeom = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(mx - px * half / len, my - py * half / len, -0.04),
+        new THREE.Vector3(mx + px * half / len, my + py * half / len, -0.04),
+      ]);
+      const line = new THREE.Line(lineGeom, lineMat);
+      this.scene.add(line);
+    }
+  }
+
+  _makeGravityArrows() {
+    // Small chevron, default direction = DOWN (negative Y).
+    const arrowMat = new THREE.LineBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0.22,
+    });
+    for (const [id, v] of this.graph.vertices) {
+      if (v.region === 'sink') continue;
+      const points = [
+        new THREE.Vector3(-0.13, 0.10, 0),
+        new THREE.Vector3(0,    -0.13, 0),
+        new THREE.Vector3(0.13,  0.10, 0),
+      ];
+      const geom = new THREE.BufferGeometry().setFromPoints(points);
+      const line = new THREE.Line(geom, arrowMat.clone());
+      line.position.set(v.position.x, v.position.y, -0.03);
+      this.scene.add(line);
+      this.gravityArrows.set(id, line);
+    }
+  }
+
+  // Rotation 0 = points down (default chevron orientation).
+  // Rotation PI = points up.
+  applyPhasesToArrows(phases, animate = false) {
+    for (const [vid, arrow] of this.gravityArrows) {
+      const region = this.graph.region(vid);
+      const ph = phases[region];
+      let targetRotZ;
+      if (region === 'upper') targetRotZ = (ph === 0 ? 0 : Math.PI);
+      else                    targetRotZ = (ph === 0 ? Math.PI : 0); // lower
+      if (animate) {
+        const start = { z: arrow.rotation.z };
+        new TWEEN.Tween(start)
+          .to({ z: targetRotZ }, 350)
+          .easing(TWEEN.Easing.Cubic.InOut)
+          .onUpdate(() => { arrow.rotation.z = start.z; })
+          .start();
+      } else {
+        arrow.rotation.z = targetRotZ;
+      }
+    }
+  }
+
+  flashRegion(region, duration = 260) {
+    for (const [vid, mesh] of this.cellMeshes) {
+      if (this.graph.region(vid) !== region) continue;
+      const orig = mesh.userData.baseColor;
+      const proxy = { r: orig.r, g: orig.g, b: orig.b };
+      const target = { r: Math.min(1, orig.r * 2.2 + 0.4),
+                       g: Math.min(1, orig.g * 2.2 + 0.4),
+                       b: Math.min(1, orig.b * 2.2 + 0.4) };
+      new TWEEN.Tween(proxy)
+        .to(target, duration / 2)
+        .yoyo(true).repeat(1)
+        .onUpdate(() => mesh.material.color.setRGB(proxy.r, proxy.g, proxy.b))
+        .onComplete(() => mesh.material.color.copy(orig))
+        .start();
+    }
+  }
+
+  _computeBounds() {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const v of this.graph.vertices.values()) {
+      if (v.position.x < minX) minX = v.position.x;
+      if (v.position.x > maxX) maxX = v.position.x;
+      if (v.position.y < minY) minY = v.position.y;
+      if (v.position.y > maxY) maxY = v.position.y;
+    }
+    return { width: maxX - minX + SPACING, height: maxY - minY + SPACING };
+  }
+
+  resize() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    this.three.setSize(w, h, false);
+    const margin = 1.0;
+    const targetW = this._frameBounds.width + margin;
+    const targetH = this._frameBounds.height + margin;
+    const aspect = w / h;
+    let viewW, viewH;
+    if (targetW / targetH > aspect) { viewW = targetW; viewH = targetW / aspect; }
+    else { viewH = targetH; viewW = targetH * aspect; }
+    this.camera.left = -viewW / 2;
+    this.camera.right = viewW / 2;
+    this.camera.top = viewH / 2;
+    this.camera.bottom = -viewH / 2;
+    this.camera.updateProjectionMatrix();
+  }
+
+  _createPieceMesh(piece) {
+    let geom, mat;
+    if (piece.type === 'anchor') {
+      geom = this._cubeGeom;
+      mat = new THREE.MeshLambertMaterial({
+        color: COLORS[piece.color],
+        emissive: COLORS[piece.color],
+        emissiveIntensity: 0.08,
+      });
+    } else if (piece.type === 'trigger') {
+      geom = this._tetraGeom;
+      mat = new THREE.MeshLambertMaterial({
+        color: COLORS[piece.color],
+        emissive: COLORS[piece.color],
+        emissiveIntensity: 0.22,
+      });
+    } else {
+      geom = this._sphereGeom;
+      mat = new THREE.MeshLambertMaterial({ color: COLORS[piece.color] });
+    }
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.userData.type = piece.type;
+    if (piece.type === 'anchor') {
+      mesh.rotation.x = -0.25;
+      mesh.rotation.y = 0.35;
+    }
+    if (piece.type === 'trigger') {
+      mesh.rotation.x = 0.3;
+      mesh.rotation.y = 0.6;
+    }
+    return mesh;
+  }
+
+  sync(state) {
+    const seen = new Set();
+    for (const [vid, piece] of state.pieces) {
+      seen.add(vid);
+      const v = this.graph.vertices.get(vid);
+      let mesh = this.pieceMeshes.get(vid);
+      const needsRecreate = !mesh || mesh.userData.type !== piece.type;
+      if (needsRecreate) {
+        if (mesh) {
+          this.scene.remove(mesh);
+          mesh.material.dispose();
+        }
+        mesh = this._createPieceMesh(piece);
+        this.scene.add(mesh);
+        this.pieceMeshes.set(vid, mesh);
+      } else {
+        mesh.material.color.setHex(COLORS[piece.color]);
+        if (mesh.material.emissive) mesh.material.emissive.setHex(COLORS[piece.color]);
+        mesh.scale.set(1, 1, 1);
+      }
+      mesh.userData.vid = vid;
+      mesh.position.set(v.position.x, v.position.y, 0);
+    }
+    for (const [vid, mesh] of Array.from(this.pieceMeshes)) {
+      if (!seen.has(vid)) {
+        this.scene.remove(mesh);
+        mesh.material.dispose();
+        this.pieceMeshes.delete(vid);
+      }
+    }
+    this.applyPhasesToArrows(state.phases, false);
+  }
+
+  highlight(vid) {
+    if (!vid) { this.selectionRing.visible = false; return; }
+    const v = this.graph.vertices.get(vid);
+    this.selectionRing.position.x = v.position.x;
+    this.selectionRing.position.y = v.position.y;
+    this.selectionRing.visible = true;
+  }
+
+  showHint(pair) {
+    if (!pair) { this.clearHint(); return; }
+    for (let i = 0; i < 2; i++) {
+      const vid = pair[i];
+      const v = this.graph.vertices.get(vid);
+      const r = this.hintRings[i];
+      r.position.x = v.position.x;
+      r.position.y = v.position.y;
+      r.visible = true;
+      r.material.opacity = 0.0;
+      const tween = new TWEEN.Tween(r.material)
+        .to({ opacity: 0.9 }, 400)
+        .yoyo(true).repeat(Infinity)
+        .easing(TWEEN.Easing.Sinusoidal.InOut)
+        .start();
+      r.userData.pulseTween = tween;
+    }
+  }
+
+  clearHint() {
+    for (const r of this.hintRings) {
+      if (r.userData.pulseTween) {
+        r.userData.pulseTween.stop();
+        r.userData.pulseTween = null;
+      }
+      r.visible = false;
+      r.material.opacity = 0;
+    }
+  }
+
+  animateSwap(vid1, vid2, duration = 200) {
+    return new Promise(resolve => {
+      const m1 = this.pieceMeshes.get(vid1);
+      const m2 = this.pieceMeshes.get(vid2);
+      const v1 = this.graph.vertices.get(vid1);
+      const v2 = this.graph.vertices.get(vid2);
+      if (!m1 || !m2) { resolve(); return; }
+      let done = 0;
+      const finish = () => { if (++done === 2) resolve(); };
+      new TWEEN.Tween(m1.position).to({ x: v2.position.x, y: v2.position.y }, duration)
+        .easing(TWEEN.Easing.Quadratic.InOut).onComplete(finish).start();
+      new TWEEN.Tween(m2.position).to({ x: v1.position.x, y: v1.position.y }, duration)
+        .easing(TWEEN.Easing.Quadratic.InOut).onComplete(finish).start();
+    });
+  }
+
+  commitSwap(vid1, vid2) {
+    const m1 = this.pieceMeshes.get(vid1);
+    const m2 = this.pieceMeshes.get(vid2);
+    this.pieceMeshes.set(vid1, m2);
+    this.pieceMeshes.set(vid2, m1);
+    if (m1) m1.userData.vid = vid2;
+    if (m2) m2.userData.vid = vid1;
+  }
+
+  animateAnchorReject(vid) {
+    return new Promise(resolve => {
+      const mesh = this.pieceMeshes.get(vid);
+      if (!mesh) { resolve(); return; }
+      const origX = mesh.position.x;
+      const offset = 0.09;
+      const seq = [origX + offset, origX - offset, origX + offset * 0.6, origX - offset * 0.6, origX];
+      let i = 0;
+      const step = () => {
+        if (i >= seq.length) { resolve(); return; }
+        new TWEEN.Tween(mesh.position).to({ x: seq[i] }, 55)
+          .easing(TWEEN.Easing.Sinusoidal.InOut).onComplete(() => { i++; step(); }).start();
+      };
+      step();
+    });
+  }
+
+  animateClear(vids, duration = 280) {
+    return new Promise(resolve => {
+      const list = Array.from(vids);
+      if (list.length === 0) { resolve(); return; }
+      let done = 0;
+      const finish = () => { if (++done === list.length) resolve(); };
+      for (const vid of list) {
+        const mesh = this.pieceMeshes.get(vid);
+        if (!mesh) { finish(); continue; }
+        new TWEEN.Tween(mesh.scale).to({ x: 0, y: 0, z: 0 }, duration)
+          .easing(TWEEN.Easing.Back.In).onComplete(() => {
+            this.scene.remove(mesh);
+            mesh.material.dispose();
+            this.pieceMeshes.delete(vid);
+            finish();
+          }).start();
+      }
+    });
+  }
+
+  // Triggers get a louder farewell: scale up briefly, brighten, then
+  // implode. Visually distinct from normal clears so the player learns
+  // to associate the bigger pop with the gravity flip they're about
+  // to witness.
+  animateTriggerFire(vids) {
+    return new Promise(resolve => {
+      const list = Array.from(vids);
+      if (list.length === 0) { resolve(); return; }
+      let done = 0;
+      const finish = () => { if (++done === list.length) resolve(); };
+      for (const vid of list) {
+        const mesh = this.pieceMeshes.get(vid);
+        if (!mesh) { finish(); continue; }
+        if (mesh.material.emissive) {
+          const em = { i: mesh.material.emissiveIntensity || 0.22 };
+          new TWEEN.Tween(em).to({ i: 1.2 }, 140)
+            .easing(TWEEN.Easing.Quadratic.Out)
+            .onUpdate(() => { mesh.material.emissiveIntensity = em.i; })
+            .start();
+        }
+        new TWEEN.Tween(mesh.scale).to({ x: 1.6, y: 1.6, z: 1.6 }, 140)
+          .easing(TWEEN.Easing.Quadratic.Out)
+          .onComplete(() => {
+            new TWEEN.Tween(mesh.scale).to({ x: 0, y: 0, z: 0 }, 180)
+              .easing(TWEEN.Easing.Back.In).onComplete(() => {
+                this.scene.remove(mesh);
+                mesh.material.dispose();
+                this.pieceMeshes.delete(vid);
+                finish();
+              }).start();
+          }).start();
+      }
+    });
+  }
+
+  animateSettle(moves, duration = 320) {
+    return new Promise(resolve => {
+      if (moves.length === 0) { resolve(); return; }
+      const meshByMoveFrom = new Map();
+      for (const m of moves) {
+        const mesh = this.pieceMeshes.get(m.from);
+        meshByMoveFrom.set(m.from, mesh);
+        this.pieceMeshes.delete(m.from);
+      }
+      for (const m of moves) {
+        const mesh = meshByMoveFrom.get(m.from);
+        if (mesh) {
+          mesh.userData.vid = m.to;
+          this.pieceMeshes.set(m.to, mesh);
+        }
+      }
+      let done = 0;
+      const finish = () => { if (++done === moves.length) resolve(); };
+      for (const m of moves) {
+        const mesh = meshByMoveFrom.get(m.from);
+        const targetV = this.graph.vertices.get(m.to);
+        if (!mesh || !targetV) { finish(); continue; }
+        new TWEEN.Tween(mesh.position).to({ x: targetV.position.x, y: targetV.position.y }, duration)
+          .easing(TWEEN.Easing.Quadratic.In).onComplete(finish).start();
+      }
+    });
+  }
+
+  pickCell(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+    this.raycaster.setFromCamera(mouse, this.camera);
+    const hits = this.raycaster.intersectObjects(Array.from(this.cellMeshes.values()));
+    if (hits.length > 0) return hits[0].object.userData.vid;
+    return null;
+  }
+
+  frame() {
+    TWEEN.update();
+    // Triggers idle-spin to telegraph interactability.
+    const t = performance.now() / 1000;
+    for (const mesh of this.pieceMeshes.values()) {
+      if (mesh.userData.type === 'trigger') {
+        mesh.rotation.y = t * 0.7;
+        mesh.rotation.x = 0.3 + Math.sin(t * 0.5) * 0.25;
+      }
+    }
+    this.three.render(this.scene, this.camera);
+  }
+}
+
+// ---------- Game ----------
+
+class Game {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.graph = makeDiagonalSplitGraph(BOARD_SIZE);
+    this.state = null;
+    this.history = null;
+    this.initialSolutionDepth = 0;
+
+    this.renderer = new Renderer(canvas, this.graph);
+    this.selected = null;
+    this.locked = false;
+
+    this._wireInput();
+    this._wireUI();
+    this._loop();
+    this._generateNewLevel();
+  }
+
+  _loop() {
+    this.renderer.frame();
+    requestAnimationFrame(() => this._loop());
+  }
+
+  _wireInput() {
+    this.canvas.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this._onClick(e.clientX, e.clientY);
+    });
+    window.addEventListener('resize', () => this.renderer.resize());
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'z' || e.key === 'Z') { e.preventDefault(); this.undo(); }
+      else if (e.key === 'y' || e.key === 'Y') { e.preventDefault(); this.redo(); }
+      else if (e.key === 'h' || e.key === 'H') { e.preventDefault(); this.hint(); }
+      else if (e.key === 'Escape') {
+        this.selected = null;
+        this.renderer.highlight(null);
+        this.renderer.clearHint();
+      }
+    });
+  }
+
+  _wireUI() {
+    document.getElementById('undo').addEventListener('click', () => this.undo());
+    document.getElementById('redo').addEventListener('click', () => this.redo());
+    document.getElementById('hint').addEventListener('click', () => this.hint());
+    document.getElementById('restart').addEventListener('click', () => this._generateNewLevel());
+    document.getElementById('banner-restart').addEventListener('click', () => {
+      document.getElementById('banner').hidden = true;
+      this._generateNewLevel();
+    });
+    document.getElementById('scrub').addEventListener('input', (e) => this.scrubTo(parseInt(e.target.value, 10)));
+  }
+
+  _generateNewLevel() {
+    const overlay = document.getElementById('generating');
+    overlay.hidden = false;
+    document.getElementById('solve-text').textContent = 'solving...';
+    document.getElementById('difficulty-pip').className = 'pip';
+    document.getElementById('difficulty-pip').textContent = '';
+
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const t0 = Date.now();
+      const result = generateSolvableState(this.graph);
+      const dt = Date.now() - t0;
+      if (!result) {
+        document.getElementById('generating-text').textContent =
+          'no solvable layout found — try refreshing the page';
+        return;
+      }
+      this.state = result.state;
+      this.initialSolutionDepth = result.solution.length;
+      this.history = new History(this.state);
+      this.renderer.sync(this.state);
+      this.renderer.clearHint();
+      this.selected = null;
+      this.renderer.highlight(null);
+      this._updateHUD();
+      overlay.hidden = true;
+      console.log(`v0.5 level: solvable in ${result.solution.length} moves ` +
+                  `(${result.attempts} attempt${result.attempts === 1 ? '' : 's'}, ` +
+                  `${result.triggersPlaced} triggers, ${result.anchorsPlaced} anchors, ${dt}ms)`);
+    }));
+  }
+
+  async _onClick(x, y) {
+    if (this.locked) return;
+    this.renderer.clearHint();
+    const vid = this.renderer.pickCell(x, y);
+    if (!vid) { this.selected = null; this.renderer.highlight(null); return; }
+    const piece = this.state.get(vid);
+    if (!piece) { this.selected = null; this.renderer.highlight(null); return; }
+    if (!this.selected) {
+      this.selected = vid;
+      this.renderer.highlight(vid);
+      if (!TYPES[piece.type].canSwap) {
+        this.locked = true;
+        await this.renderer.animateAnchorReject(vid);
+        this.locked = false;
+      }
+      return;
+    }
+    if (this.selected === vid) {
+      this.selected = null;
+      this.renderer.highlight(null);
+      return;
+    }
+    if (this.graph.matchNeighbors(this.selected).includes(vid)) {
+      const sel = this.selected;
+      this.selected = null;
+      this.renderer.highlight(null);
+      await this._attemptSwap(sel, vid);
+    } else {
+      this.selected = vid;
+      this.renderer.highlight(vid);
+      if (!TYPES[piece.type].canSwap) {
+        this.locked = true;
+        await this.renderer.animateAnchorReject(vid);
+        this.locked = false;
+      }
+    }
+  }
+
+  async _attemptSwap(v1, v2) {
+    this.locked = true;
+    try {
+      const p1 = this.state.get(v1);
+      const p2 = this.state.get(v2);
+      if (!TYPES[p1.type].canSwap || !TYPES[p2.type].canSwap) {
+        const stuckVid = !TYPES[p1.type].canSwap ? v1 : v2;
+        await this.renderer.animateAnchorReject(stuckVid);
+        return;
+      }
+      const trial = this.state.clone();
+      trial.set(v1, p2);
+      trial.set(v2, p1);
+      const wouldMatch = findMatches(trial).size > 0;
+      await this.renderer.animateSwap(v1, v2);
+      this.renderer.commitSwap(v1, v2);
+      if (!wouldMatch) {
+        await this.renderer.animateSwap(v1, v2);
+        this.renderer.commitSwap(v1, v2);
+        return;
+      }
+      this.state = trial;
+      await this._runCascade();
+      this.history.push(this.state);
+      this._updateHUD();
+      if (this.state.isEmpty()) this._showWin();
+    } finally {
+      this.locked = false;
+    }
+  }
+
+  async _runCascade() {
+    while (true) {
+      const matched = findMatches(this.state);
+      if (matched.size === 0) break;
+
+      // Partition matched pieces into triggers vs everyone else.
+      const triggerVids = [];
+      const otherVids = [];
+      for (const vid of matched) {
+        const p = this.state.get(vid);
+        if (p && TYPES[p.type].trigger) triggerVids.push(vid);
+        else otherVids.push(vid);
+      }
+      const flips = computePhaseFlips(this.state, triggerVids);
+      const newPhases = applyFlips(this.state.phases, flips);
+
+      // Pulse the HUD chip and flash the cells for any region whose
+      // phase just flipped.
+      for (const region of Object.keys(flips)) {
+        const chip = document.getElementById(`phase-${region}`);
+        if (chip) {
+          chip.classList.remove('pulsing');
+          void chip.offsetWidth; // force reflow so animation restarts
+          chip.classList.add('pulsing');
+        }
+        this.renderer.flashRegion(region);
+      }
+
+      // Rotate gravity arrows under the new phases.
+      this.renderer.applyPhasesToArrows(newPhases, true);
+
+      // Clear pieces. Triggers get the louder animation; sliders/
+      // anchors the usual scale-to-zero. Run them in parallel.
+      await Promise.all([
+        this.renderer.animateTriggerFire(triggerVids),
+        this.renderer.animateClear(otherVids),
+      ]);
+
+      // Commit state changes.
+      const cleared = this.state.clone();
+      for (const vid of matched) cleared.set(vid, null);
+      cleared.phases = newPhases;
+
+      // Settle and animate.
+      const { state: settled, moves } = settleGravity(cleared);
+      await this.renderer.animateSettle(moves);
+      this.state = settled;
+      this._updatePhaseHUD();
+    }
+  }
+
+  hint() {
+    if (this.locked) return;
+    if (this.state.isEmpty()) return;
+    this.renderer.clearHint();
+    const t0 = Date.now();
+    const result = solve(this.state);
+    const dt = Date.now() - t0;
+    if (!result) {
+      console.log(`hint: no solution within solver budget (${dt}ms)`);
+      document.getElementById('solve-text').textContent = 'no path forward — try undoing';
+      return;
+    }
+    if (result.path.length === 0) return;
+    const [a, b] = result.path[0];
+    this.renderer.showHint([a, b]);
+    document.getElementById('solve-text').textContent =
+      `${result.path.length} optimal move${result.path.length === 1 ? '' : 's'} to clear`;
+  }
+
+  undo() {
+    if (this.locked) return;
+    if (!this.history.canUndo()) return;
+    const s = this.history.jumpTo(this.history.cursor - 1);
+    if (!s) return;
+    this.state = s;
+    this.renderer.sync(this.state);
+    this.renderer.clearHint();
+    this.selected = null;
+    this.renderer.highlight(null);
+    this._updateHUD();
+    document.getElementById('banner').hidden = true;
+  }
+
+  redo() {
+    if (this.locked) return;
+    if (!this.history.canRedo()) return;
+    const s = this.history.jumpTo(this.history.cursor + 1);
+    if (!s) return;
+    this.state = s;
+    this.renderer.sync(this.state);
+    this.renderer.clearHint();
+    this.selected = null;
+    this.renderer.highlight(null);
+    this._updateHUD();
+    if (this.state.isEmpty()) this._showWin();
+  }
+
+  scrubTo(index) {
+    if (this.locked) return;
+    const s = this.history.jumpTo(index);
+    if (!s) return;
+    this.state = s;
+    this.renderer.sync(this.state);
+    this.renderer.clearHint();
+    this.selected = null;
+    this.renderer.highlight(null);
+    this._updateHUD();
+    document.getElementById('banner').hidden = !this.state.isEmpty();
+  }
+
+  _updatePhaseHUD() {
+    const upDir = this.state.phases.upper === 0 ? '↓' : '↑';
+    const loDir = this.state.phases.lower === 0 ? '↑' : '↓';
+    document.getElementById('phase-upper-dir').textContent = upDir;
+    document.getElementById('phase-lower-dir').textContent = loDir;
+  }
+
+  _updateHUD() {
+    const counts = this.state.countByType();
+    document.getElementById('slider-count').textContent = counts.slider || 0;
+    document.getElementById('anchor-count').textContent = counts.anchor || 0;
+    document.getElementById('trigger-count').textContent = counts.trigger || 0;
+    const scrub = document.getElementById('scrub');
+    scrub.max = this.history.length() - 1;
+    scrub.value = this.history.cursor;
+    document.getElementById('scrub-info').textContent =
+      `move ${this.history.cursor} / ${this.history.length() - 1}`;
+    document.getElementById('undo').disabled = !this.history.canUndo();
+    document.getElementById('redo').disabled = !this.history.canRedo();
+
+    const diff = difficultyFromDepth(this.initialSolutionDepth);
+    const pip = document.getElementById('difficulty-pip');
+    pip.className = 'pip ' + diff.class;
+    pip.textContent = diff.label;
+    document.getElementById('solve-text').textContent =
+      `solvable in ${this.initialSolutionDepth} move${this.initialSolutionDepth === 1 ? '' : 's'}`;
+    this._updatePhaseHUD();
+  }
+
+  _showWin() {
+    document.getElementById('banner-sub').textContent =
+      `Optimal solve was ${this.initialSolutionDepth} moves. You used ${this.history.cursor}.`;
+    document.getElementById('banner').hidden = false;
+  }
+}
+
+// ---------- Bootstrap ----------
+
+const canvas = document.getElementById('board');
+const game = new Game(canvas);
+window.game = game;
+window.solve = solve;
+window.findMatches = findMatches;
+window.settleGravity = settleGravity;
+window.computePhaseFlips = computePhaseFlips;
+console.log('graphgames v0.5 — game instance exposed as window.game');
+</script>
+</body>
+</html>
