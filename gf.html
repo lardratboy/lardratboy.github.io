@@ -223,7 +223,7 @@ const ALL_PHASES = [
 // trigger flips often give the player a SHORTER path (more options).
 const SOLVER_MAX_NODES = 300000;
 const SOLVER_MAX_DEPTH = 14;
-const GENERATION_ATTEMPTS = 50;
+const GENERATION_ATTEMPTS = 60;
 
 const TYPES = {
   slider:  { canSwap: true,  fallsUnderGravity: true,  trigger: false },
@@ -526,7 +526,7 @@ function resolveCascade(state) {
 
 // ---------- Solver ----------
 
-function findValidSwaps(state) {
+function findValidSwaps(state, shuffleMoves = false) {
   const out = [];
   const graph = state.graph;
   for (const [a, b] of graph.allMatchPairs()) {
@@ -539,10 +539,20 @@ function findValidSwaps(state) {
     state.set(a, pa); state.set(b, pb);
     if (hasMatch) out.push([a, b]);
   }
+  if (shuffleMoves) {
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+  }
   return out;
 }
 
-function solve(state, maxDepth = SOLVER_MAX_DEPTH, maxNodes = SOLVER_MAX_NODES) {
+// When shuffleMoves is true, the BFS expands children in a random order
+// at each node. Since BFS still finds an optimal-length path, this only
+// affects WHICH optimal path is returned when multiple exist — useful
+// for the generator when it wants to sample different "tied" solutions.
+function solve(state, maxDepth = SOLVER_MAX_DEPTH, maxNodes = SOLVER_MAX_NODES, shuffleMoves = false) {
   if (state.isEmpty()) return { path: [], explored: 0 };
 
   const startKey = state.serialize();
@@ -562,7 +572,7 @@ function solve(state, maxDepth = SOLVER_MAX_DEPTH, maxNodes = SOLVER_MAX_NODES) 
       if (explored >= maxNodes) break;
       explored++;
       const cur = stateByKey.get(curKey);
-      const swaps = findValidSwaps(cur);
+      const swaps = findValidSwaps(cur, shuffleMoves);
       for (const [a, b] of swaps) {
         const next = cur.clone();
         const pa = next.get(a), pb = next.get(b);
@@ -621,7 +631,43 @@ function randomSliderCandidate(graph) {
   return s;
 }
 
+// Count trigger pieces currently on the board.
+function countTriggers(state) {
+  let n = 0;
+  for (const p of state.pieces.values()) if (p.type === 'trigger') n++;
+  return n;
+}
+
+// Replay the optimal solution and check that at least one trigger
+// is cleared on a non-last move. If a trigger only clears as part
+// of the final move's cascade, the player never gets to act under
+// the flipped gravity — they just see a flash and the level ends.
+// This filter rejects such "cosmetic-only" trigger placements.
+function triggerFiresBeforeEnd(initialState, solutionPath) {
+  if (solutionPath.length < 2) return false;
+  let cur = initialState.clone();
+  const lastIdx = solutionPath.length - 1;
+  for (let i = 0; i < solutionPath.length; i++) {
+    const [a, b] = solutionPath[i];
+    const beforeCount = countTriggers(cur);
+    const next = cur.clone();
+    const pa = next.get(a), pb = next.get(b);
+    next.set(a, pb); next.set(b, pa);
+    cur = resolveCascade(next);
+    const afterCount = countTriggers(cur);
+    if (beforeCount > afterCount && i < lastIdx) return true;
+  }
+  return false;
+}
+
 function generateSolvableState(graph, maxAttempts = GENERATION_ATTEMPTS) {
+  // We keep the BEST solvable level seen so far as a fallback. If we
+  // never find one where a trigger fires before the last move (the
+  // "ideal" case the user can actually feel), we'll return the fallback
+  // rather than fail outright. "Best" = longest solution among levels
+  // that at least have triggers placed.
+  let fallback = null;
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let state = randomSliderCandidate(graph);
     const base = solve(state);
@@ -644,7 +690,7 @@ function generateSolvableState(graph, maxAttempts = GENERATION_ATTEMPTS) {
       let tries = 0;
       for (const vid of list) {
         if (placed) break;
-        if (tries++ >= 8) break;
+        if (tries++ >= 20) break;
         const piece = state.get(vid);
         if (!piece || piece.type !== 'slider') continue;
         const trial = state.clone();
@@ -675,16 +721,53 @@ function generateSolvableState(graph, maxAttempts = GENERATION_ATTEMPTS) {
       }
     }
 
-    const finalResult = solve(state);
-    if (finalResult) {
+    // Run the solver several times with shuffled tiebreaking. Multiple
+    // optimal paths often exist; some may fire the trigger early and
+    // others may fire it on the last move. We want one that fires it
+    // early. Keep the first such path we find; otherwise remember the
+    // best deterministic one as a fallback.
+    let acceptedPath = null;
+    const deterministicResult = solve(state);
+    if (!deterministicResult) continue;
+    if (triggerFiresBeforeEnd(state, deterministicResult.path)) {
+      acceptedPath = deterministicResult.path;
+    } else {
+      const SHUFFLE_TRIES = 5;
+      for (let t = 0; t < SHUFFLE_TRIES; t++) {
+        const r = solve(state, SOLVER_MAX_DEPTH, SOLVER_MAX_NODES, true);
+        if (r && triggerFiresBeforeEnd(state, r.path)) {
+          acceptedPath = r.path;
+          break;
+        }
+      }
+    }
+
+    if (acceptedPath) {
       return {
         state,
-        solution: finalResult.path,
+        solution: acceptedPath,
         attempts: attempt,
         triggersPlaced,
         anchorsPlaced,
       };
     }
+
+    // Not ideal — keep as fallback if it's the best we've seen.
+    if (!fallback || deterministicResult.path.length > fallback.solution.length) {
+      fallback = {
+        state: state.clone(),
+        solution: deterministicResult.path,
+        attempts: attempt,
+        triggersPlaced,
+        anchorsPlaced,
+        fallback: true,
+      };
+    }
+  }
+
+  if (fallback) {
+    console.warn('generateSolvableState: returning fallback (trigger fires on last move)');
+    return fallback;
   }
   return null;
 }
@@ -1331,35 +1414,40 @@ class Game {
       }
       const flips = computePhaseFlips(this.state, triggerVids);
       const newPhases = applyFlips(this.state.phases, flips);
+      const hasFlip = Object.keys(flips).length > 0;
 
-      // Pulse the HUD chip and flash the cells for any region whose
-      // phase just flipped.
-      for (const region of Object.keys(flips)) {
-        const chip = document.getElementById(`phase-${region}`);
-        if (chip) {
-          chip.classList.remove('pulsing');
-          void chip.offsetWidth; // force reflow so animation restarts
-          chip.classList.add('pulsing');
+      // Stage 1: if a trigger is firing, give the gravity-flip its own
+      // beat. Player needs to SEE arrows rotate before pieces fall.
+      if (hasFlip) {
+        for (const region of Object.keys(flips)) {
+          const chip = document.getElementById(`phase-${region}`);
+          if (chip) {
+            chip.classList.remove('pulsing');
+            void chip.offsetWidth;
+            chip.classList.add('pulsing');
+          }
+          this.renderer.flashRegion(region);
         }
-        this.renderer.flashRegion(region);
+        this.renderer.applyPhasesToArrows(newPhases, true);
+        // Pop the trigger(s) — uses its own dramatic animation.
+        await this.renderer.animateTriggerFire(triggerVids);
+        // Brief beat to let the rotated arrows register before the
+        // rest of the cascade resumes.
+        await new Promise(r => setTimeout(r, 200));
+      } else if (triggerVids.length > 0) {
+        // Trigger matched but the flip cancels (e.g. two triggers in
+        // the same region in the same match — Z_2 arithmetic). Still
+        // animate the pop, but skip the flip beat.
+        await this.renderer.animateTriggerFire(triggerVids);
       }
 
-      // Rotate gravity arrows under the new phases.
-      this.renderer.applyPhasesToArrows(newPhases, true);
+      // Stage 2: clear the other matched pieces.
+      await this.renderer.animateClear(otherVids);
 
-      // Clear pieces. Triggers get the louder animation; sliders/
-      // anchors the usual scale-to-zero. Run them in parallel.
-      await Promise.all([
-        this.renderer.animateTriggerFire(triggerVids),
-        this.renderer.animateClear(otherVids),
-      ]);
-
-      // Commit state changes.
+      // Stage 3: settle under the (possibly new) phases.
       const cleared = this.state.clone();
       for (const vid of matched) cleared.set(vid, null);
       cleared.phases = newPhases;
-
-      // Settle and animate.
       const { state: settled, moves } = settleGravity(cleared);
       await this.renderer.animateSettle(moves);
       this.state = settled;
