@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>graphgames v0.6</title>
+<title>graphgames v0.7</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #1a1a26; color: #e8e8f0;
                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -44,17 +44,20 @@
     100% { transform: scale(1); background: rgba(255,255,255,0.07); }
   }
 
-  #endpoint-status { display: flex; align-items: center; gap: 6px; margin-top: 8px;
-                     padding: 4px 8px; background: rgba(255, 200, 80, 0.10);
+  #endpoint-status { display: flex; align-items: center; gap: 8px; margin-top: 8px;
+                     padding: 4px 10px; background: rgba(255, 200, 80, 0.10);
                      border: 1px solid rgba(255, 200, 80, 0.35); border-radius: 6px;
                      width: fit-content; font-size: 13px; }
+  #endpoint-status-label { opacity: 0.7; font-size: 11px; letter-spacing: 0.06em;
+                           text-transform: uppercase; }
+  #endpoint-dots { display: inline-flex; gap: 4px; }
   .endpoint-dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%;
                   background: #555; border: 1.5px solid rgba(255, 200, 80, 0.7);
                   transition: background 180ms; }
   .endpoint-dot.empty { background: transparent; }
-  .endpoint-arrow { opacity: 0.55; font-size: 14px; }
+  #endpoint-status-icon { opacity: 0.55; font-size: 14px; min-width: 14px; text-align: center; }
   #endpoint-status.matched { background: rgba(80, 220, 120, 0.18); border-color: rgba(120, 255, 160, 0.7); }
-  #endpoint-status.matched .endpoint-arrow { content: '='; opacity: 0.9; color: #aaffbb; }
+  #endpoint-status.matched #endpoint-status-icon { opacity: 0.95; color: #aaffbb; }
 
   #hud-bottom { position: fixed; bottom: 0; left: 0; right: 0; padding: 14px 18px;
                 display: flex; gap: 10px; align-items: center; z-index: 10;
@@ -105,9 +108,9 @@
       <span class="pip" id="difficulty-pip"></span>
     </div>
     <div id="endpoint-status">
-      <span class="endpoint-dot" id="endpoint-a-dot"></span>
-      <span class="endpoint-arrow" id="endpoint-arrow">→</span>
-      <span class="endpoint-dot" id="endpoint-b-dot"></span>
+      <span id="endpoint-status-label">target</span>
+      <span id="endpoint-dots"></span>
+      <span id="endpoint-status-icon">→</span>
     </div>
   </div>
   <div id="right-stack">
@@ -124,13 +127,12 @@
 </div>
 
 <div id="info">
-  <strong>v0.6</strong> — connect the <b>endpoints</b>. Two cells are framed in gold; win by making
-  the pieces on them the same color (any color, just match).<br>
-  Sliders still swap, anchors still block, triggers still flip gravity — all in service of routing
-  the right colors to the two endpoints. Cascade matches still clear pieces, so be careful: if an
-  endpoint's piece gets matched away, that endpoint goes empty (sinks refill from upstream).<br>
-  Win check fires before match-clear, so a winning configuration registers even if it would also
-  have triggered a match.
+  <strong>v0.7</strong> — three endpoints now, all framed in gold. Win by making the pieces on all
+  three the same color.<br>
+  The center sink (2,2) is the new one. It's fed by <em>both</em> regions, so flipping either
+  region's gravity changes what lands there. Coordinating all three colors is the puzzle.<br>
+  Win check still fires before match-clear, so a winning configuration registers even if it would
+  also have triggered a polyomino match.
 </div>
 
 <div id="hud-bottom">
@@ -145,8 +147,8 @@
 </div>
 
 <div id="banner" hidden>
-  <div id="banner-text">matched! 🎯</div>
-  <div id="banner-sub">Both endpoints showing the same color.</div>
+  <div id="banner-text">three of a kind! 🎯</div>
+  <div id="banner-sub">All three endpoints showing the same color.</div>
   <button id="banner-restart">new puzzle</button>
 </div>
 
@@ -161,52 +163,50 @@
 'use strict';
 
 // =====================================================================
-// graphgames v0.6
+// graphgames v0.7
 //
-// What's new since v0.5:
-//   - ENDPOINTS. The graph now carries an `endpoints` array of vids,
-//     two cells marked as the win-condition targets. Visually, golden
-//     rings on those cells.
-//   - NEW WIN CONDITION. Replace "clear the board" with "both endpoints
-//     hold pieces of the same color." Generic enough to support more
-//     elaborate conditions later (paths, multi-endpoint chains).
-//   - WIN CHECK PRIORITY OVER MATCH-CLEAR. After every cascade settle,
-//     winCondition(state) is checked BEFORE the next round of
-//     findMatches. A configuration that simultaneously wins AND would
-//     trigger a match-clear counts as a win — the piece doesn't get
-//     cleared out from under the player's victory.
-//   - ENDPOINT-AWARE PLACEMENT. Endpoints sit on the two corner sinks
-//     of the diagonal split: (0, size-1) which is fed only by the
-//     LOWER region, and (size-1, 0) which is fed only by the UPPER
-//     region. That asymmetry is the whole point — to win, you need
-//     to choreograph the two regions independently, and the trigger
-//     gravity-flip becomes the natural lever for doing so.
-//   - SOLVER GOAL CHANGED. solve() now uses winCondition() instead of
-//     state.isEmpty(). State serialization and BFS structure are
-//     unchanged; only the goal predicate differs. This is the payoff
-//     of keeping state hashing pure — swapping the goal is one line.
+// What's new since v0.6:
+//   - THREE ENDPOINTS now, all framed in gold. Win condition generalizes
+//     from "both endpoints same color" to "ALL endpoints same color."
+//     The new third endpoint is the center sink (2,2). The full set is
+//     [(0, size-1), (size-1, 0), (mid, mid)] — the two corner sinks
+//     from v0.6 plus the center.
+//   - The center sink is FED BY BOTH REGIONS. Its piece is whatever
+//     happens to settle there given each region's current gravity
+//     direction. So unlike the corner sinks (each fed by exactly one
+//     region), (2,2) requires you to coordinate both regions' flows.
+//     This is the puzzle's "why three endpoints?" — to demand region
+//     coordination rather than independent solves.
+//   - Generic n-endpoint plumbing. Graph.endpoints is an array of any
+//     length; winCondition iterates it; the HUD and renderer build
+//     visuals per endpoint at runtime. v0.8+ can plug in 4, 5, ... or
+//     mixed configurations with zero structural changes.
+//   - SOLVER_MAX_NODES bumped because the win condition is stricter
+//     (three constraints to satisfy simultaneously) and the BFS has
+//     to explore more states before finding a goal.
 //
-// Generation notes:
-//   - The trigger-fires-before-end filter from v0.5 is dropped here.
-//     With endpoint-color wins, the trigger doesn't have to be cleared
-//     to finish the puzzle — it just has to manipulate gravity. Many
-//     more random configurations are reachable now, so generation is
-//     both faster AND more often "ideal" (the trigger contributes
-//     meaningfully to the solve).
-//   - Difficulty depths trend higher because the goal state is more
-//     specific than "any empty board." Most levels solve in 4–8 moves.
+// What stays the same:
+//   - 5x5 diagonal-split board. Bigger boards would help breathing
+//     room but blow up state-space exploration; deferred.
+//   - Polyomino match-3 rule. Same win-takes-precedence-over-match
+//     ordering in the cascade.
+//   - Iterative gravity settler. Same convergence semantics.
+//   - One-shot triggers (no persistent yet). Even with the new win
+//     condition, persistent triggers raise generation complexity
+//     enough that they deserve their own pass.
 //
-// Deferred to v0.7 or later:
-//   - Persistent triggers (re-fire on each match instead of being
-//     consumed). The clear-the-board contradiction is gone now, so
-//     persistent triggers are mechanically valid — but they make the
-//     state space substantially larger and need a careful generation
-//     pass.
-//   - Connectivity requirement: same-color path between endpoints, not
-//     just same color. More puzzle-shaped but harder to design around
-//     the polyomino match rule.
-//   - More than two endpoints (chains, all-same-color, target colors).
-//   - Endpoints somewhere other than corner sinks.
+// Deferred to later:
+//   - Configurable board size. The graph generator is parametric in
+//     size, but the solver budget needs tuning per size and the UI
+//     has no setting for it.
+//   - Same-color path requirement between endpoints. Mechanically
+//     much harder due to match-3 polyomino interaction — partial
+//     paths of length 3+ would clear during construction.
+//   - Persistent triggers (re-firable). Trickier in a multi-endpoint
+//     win because you can fire a trigger that breaks a partial
+//     match more aggressively than the player intended.
+//   - More than 3 endpoints, or endpoints in non-sink cells. The
+//     n-endpoint plumbing supports it; just hasn't been tried.
 // =====================================================================
 
 // ---------- Configuration ----------
@@ -242,10 +242,10 @@ const ALL_PHASES = [
 // Solver budget — 2 binary phases means up to 4x the reachable state
 // space vs v0.4, so bump the node cap. Depth stays modest because
 // trigger flips often give the player a SHORTER path (more options).
-const SOLVER_MAX_NODES = 300000;
-const SOLVER_MAX_DEPTH = 15;
+const SOLVER_MAX_NODES = 500000;
+const SOLVER_MAX_DEPTH = 16;
 const SOLVER_MIN_DEPTH = 4;     // reject trivial 1-2 move puzzles
-const GENERATION_ATTEMPTS = 80;
+const GENERATION_ATTEMPTS = 100;
 
 const TYPES = {
   slider:  { canSwap: true,  fallsUnderGravity: true,  trigger: false },
@@ -279,7 +279,7 @@ class Graph {
     const key = a < b ? `${a}|${b}` : `${b}|${a}`;
     this.matchEdges.add(key);
   }
-  setEndpoints(a, b) { this.endpoints = [a, b]; }
+  setEndpoints(...vids) { this.endpoints = vids.slice(); }
   isEndpoint(id) { return this.endpoints.includes(id); }
   finalize() {
     for (const id of this.vertices.keys()) this._matchAdj.set(id, []);
@@ -377,13 +377,20 @@ function makeDiagonalSplitGraph(size) {
   };
   g.setGravityModel(model, ALL_PHASES);
 
-  // The two corner sinks: (0, size-1) and (size-1, 0). Both lie on the
-  // anti-diagonal, both are sinks (no outflow), but they are fed from
-  // DIFFERENT regions — (0, size-1) from the lower region's upward
-  // flow, (size-1, 0) from the upper region's downward flow. That
-  // asymmetry is what makes trigger gravity-flip meaningful for the
-  // win: you control each endpoint by manipulating its own region.
-  g.setEndpoints(`0,${size - 1}`, `${size - 1},0`);
+  // Three endpoints — the two corner sinks plus the center sink.
+  // (0, size-1):    fed only by the LOWER region
+  // (size-1, 0):    fed only by the UPPER region
+  // (mid, mid):     fed by BOTH regions (this is the new one in v0.7)
+  //
+  // Lining all three up to the same color requires coordinating both
+  // gravity flows. The corner sinks can be steered independently; the
+  // center forces them to converge on a shared answer.
+  const mid = Math.floor((size - 1) / 2);
+  g.setEndpoints(
+    `0,${size - 1}`,
+    `${size - 1},0`,
+    `${mid},${mid}`,
+  );
 
   return g;
 }
@@ -467,16 +474,20 @@ function findMatches(state, n = N_MATCH) {
 
 // ---------- Win condition ----------
 
-// v0.6 win: both endpoint cells hold pieces of the same color. Empty
-// endpoints never win (a cell with no piece has no color to match).
-// Type doesn't matter — a slider matching a trigger by color still
-// wins.
+// v0.7 win: ALL endpoint cells hold pieces of the same color. Empty
+// endpoints never win (an unpopulated cell has no color). Type doesn't
+// matter — a slider matching a trigger by color still wins.
 function winCondition(state) {
-  const [a, b] = state.graph.endpoints;
-  const pa = state.get(a);
-  const pb = state.get(b);
-  if (!pa || !pb) return false;
-  return pa.color === pb.color;
+  const eps = state.graph.endpoints;
+  if (eps.length === 0) return false;
+  const first = state.get(eps[0]);
+  if (!first) return false;
+  const color = first.color;
+  for (let i = 1; i < eps.length; i++) {
+    const p = state.get(eps[i]);
+    if (!p || p.color !== color) return false;
+  }
+  return true;
 }
 
 // ---------- Gravity ----------
@@ -719,16 +730,23 @@ function generateSolvableState(graph, maxAttempts = GENERATION_ATTEMPTS) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let state = randomSliderCandidate(graph);
 
-    // Don't ship a level that's already won at start. Try recoloring
-    // one endpoint until colors differ. If we can't avoid it after a
-    // few tries, just continue to the next attempt.
+    // Don't ship a level that's already won at start. Recolor endpoints
+    // one at a time, picking a different color than the others to break
+    // the match. Bail to next attempt if we can't avoid it.
     let tries = 0;
-    while (winCondition(state) && tries++ < 4) {
-      const ep = graph.endpoints[0];
+    while (winCondition(state) && tries++ < 8) {
+      const ep = graph.endpoints[tries % graph.endpoints.length];
       const cur = state.get(ep);
       if (!cur) break;
-      const alt = COLOR_NAMES.filter(c => c !== cur.color);
-      const next = alt[Math.floor(Math.random() * alt.length)];
+      // Look at the OTHER endpoint colors; pick something different.
+      const otherColors = new Set();
+      for (const otherEp of graph.endpoints) {
+        if (otherEp === ep) continue;
+        const op = state.get(otherEp);
+        if (op) otherColors.add(op.color);
+      }
+      const alt = COLOR_NAMES.filter(c => !otherColors.has(c) || c !== cur.color);
+      const next = alt.length ? alt[Math.floor(Math.random() * alt.length)] : cur.color;
       state.set(ep, { color: next, type: cur.type });
     }
     if (winCondition(state)) continue;
@@ -878,10 +896,14 @@ class Renderer {
     this.three.setPixelRatio(window.devicePixelRatio || 1);
     this.resize();
 
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-    const key = new THREE.DirectionalLight(0xffffff, 0.7);
-    key.position.set(3, 6, 8);
-    this.scene.add(key);
+    // No scene lights. All piece, cell, and ring materials are
+    // MeshBasicMaterial which ignores lights and shows assigned colors
+    // directly. Earlier versions used Lambert with a directional key
+    // light, which created bright highlights on the lit side of each
+    // sphere — the highlight on blue read as cyan/green and conflated
+    // with the green piece color. Flat shading fixes that ambiguity,
+    // at the cost of 3D-ness on the pieces. Shape (sphere/box/tetra)
+    // alone now carries piece type; color is uniform.
 
     // Per-cell backplates. baseColor saved so flashRegion can restore.
     this.cellMeshes = new Map();
@@ -1142,25 +1164,17 @@ class Renderer {
   }
 
   _createPieceMesh(piece) {
-    let geom, mat;
-    if (piece.type === 'anchor') {
-      geom = this._cubeGeom;
-      mat = new THREE.MeshLambertMaterial({
-        color: COLORS[piece.color],
-        emissive: COLORS[piece.color],
-        emissiveIntensity: 0.08,
-      });
-    } else if (piece.type === 'trigger') {
-      geom = this._tetraGeom;
-      mat = new THREE.MeshLambertMaterial({
-        color: COLORS[piece.color],
-        emissive: COLORS[piece.color],
-        emissiveIntensity: 0.22,
-      });
-    } else {
-      geom = this._sphereGeom;
-      mat = new THREE.MeshLambertMaterial({ color: COLORS[piece.color] });
-    }
+    // All piece materials are MeshBasicMaterial: ignores lighting,
+    // shows the exact assigned color everywhere on the mesh. This is
+    // critical for color-matching gameplay — the previous Lambert
+    // shading made lit-side blue indistinguishable from lit-side
+    // green. Shapes alone (sphere / box / tetrahedron) carry piece
+    // type; color is uniform across the silhouette.
+    let geom;
+    if (piece.type === 'anchor')      geom = this._cubeGeom;
+    else if (piece.type === 'trigger') geom = this._tetraGeom;
+    else                               geom = this._sphereGeom;
+    const mat = new THREE.MeshBasicMaterial({ color: COLORS[piece.color] });
     const mesh = new THREE.Mesh(geom, mat);
     mesh.userData.type = piece.type;
     if (piece.type === 'anchor') {
@@ -1478,7 +1492,7 @@ class Game {
       this.renderer.highlight(null);
       this._updateHUD();
       overlay.hidden = true;
-      console.log(`v0.6 level: solvable in ${result.solution.length} moves ` +
+      console.log(`v0.7 level: solvable in ${result.solution.length} moves ` +
                   `(${result.attempts} attempt${result.attempts === 1 ? '' : 's'}, ` +
                   `${result.triggersPlaced} triggers, ${result.anchorsPlaced} anchors, ${dt}ms` +
                   `${result.fallback ? ', FALLBACK' : ''})`);
@@ -1706,22 +1720,42 @@ class Game {
   }
 
   _updateEndpointHUD() {
-    const [a, b] = this.graph.endpoints;
-    const pa = this.state.get(a);
-    const pb = this.state.get(b);
-    const dotA = document.getElementById('endpoint-a-dot');
-    const dotB = document.getElementById('endpoint-b-dot');
-    const arrow = document.getElementById('endpoint-arrow');
+    const dotsContainer = document.getElementById('endpoint-dots');
+    const icon = document.getElementById('endpoint-status-icon');
     const wrap = document.getElementById('endpoint-status');
-    const hexA = pa ? '#' + COLORS[pa.color].toString(16).padStart(6, '0') : '';
-    const hexB = pb ? '#' + COLORS[pb.color].toString(16).padStart(6, '0') : '';
-    if (pa) { dotA.style.background = hexA; dotA.classList.remove('empty'); }
-    else    { dotA.style.background = ''; dotA.classList.add('empty'); }
-    if (pb) { dotB.style.background = hexB; dotB.classList.remove('empty'); }
-    else    { dotB.style.background = ''; dotB.classList.add('empty'); }
-    const matched = pa && pb && pa.color === pb.color;
-    wrap.classList.toggle('matched', matched);
-    arrow.textContent = matched ? '=' : '→';
+    const eps = this.graph.endpoints;
+
+    // Build dots on first call (or when endpoint count changed).
+    if (dotsContainer.children.length !== eps.length) {
+      dotsContainer.innerHTML = '';
+      for (let i = 0; i < eps.length; i++) {
+        const dot = document.createElement('span');
+        dot.className = 'endpoint-dot';
+        dotsContainer.appendChild(dot);
+      }
+    }
+
+    // Update each dot's color from current piece.
+    const colors = [];
+    for (let i = 0; i < eps.length; i++) {
+      const dot = dotsContainer.children[i];
+      const piece = this.state.get(eps[i]);
+      if (piece) {
+        const hex = '#' + COLORS[piece.color].toString(16).padStart(6, '0');
+        dot.style.background = hex;
+        dot.classList.remove('empty');
+        colors.push(piece.color);
+      } else {
+        dot.style.background = '';
+        dot.classList.add('empty');
+        colors.push(null);
+      }
+    }
+
+    const allFilled = colors.every(c => c !== null);
+    const allSame = allFilled && colors.every(c => c === colors[0]);
+    wrap.classList.toggle('matched', allSame);
+    icon.textContent = allSame ? '=' : '→';
   }
 
   _showWin() {
@@ -1740,7 +1774,7 @@ window.solve = solve;
 window.findMatches = findMatches;
 window.settleGravity = settleGravity;
 window.winCondition = winCondition;
-console.log('graphgames v0.6 — game instance exposed as window.game');
+console.log('graphgames v0.7 — game instance exposed as window.game');
 console.log('endpoints:', game.graph.endpoints);
 </script>
 </body>
