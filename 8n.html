@@ -509,8 +509,8 @@
     <div id="game-ui">
       <div id="game-menu-btn">☰</div>
       <div class="rotation-controls">
-        <button id="rotate-left-btn" class="rotate-btn" title="Rotate Left">↺</button>
-        <button id="rotate-right-btn" class="rotate-btn" title="Rotate Right">↻</button>
+        <button id="rotate-left-btn" class="rotate-btn" title="Rotate Left (← or swipe left)">↺</button>
+        <button id="rotate-right-btn" class="rotate-btn" title="Rotate Right (→ or swipe right)">↻</button>
       </div>
       <div id="game-score" style="visibility: hidden;">0</div>
     </div>
@@ -2307,6 +2307,56 @@ ui.setupButton('rotate-left-btn', () => {
 ui.setupButton('rotate-right-btn', () => {
     game.rotateBoard('right');
 });
+
+// --- Keyboard rotation: arrow keys during PlayState ---
+// rotateBoard() already gates on isAnimating/gamePaused, so calls during
+// pops, falls, or open overlays are silent no-ops. Holding the key produces
+// at most one rotation per ~800ms (the rotation animation duration).
+window.addEventListener('keydown', (e) => {
+    if (!(stateManager.current() instanceof PlayState)) return;
+    const ae = document.activeElement;
+    if (ae && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName)) return;
+    if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        game.rotateBoard('left');
+    } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        game.rotateBoard('right');
+    }
+});
+
+// --- Touch swipe rotation: horizontal drag across the play surface ---
+// Coexists with InputManager's tap detection: that fires only for movements
+// <= 15px, while we require >= 60px AND a dominant horizontal axis. A swipe
+// will never accidentally pop a piece, and a tap will never accidentally
+// rotate the board.
+(() => {
+    const container = document.getElementById('container');
+    const SWIPE_DIST = 60;        // px; min horizontal travel
+    const SWIPE_RATIO = 1.5;      // |dx| must exceed this * |dy|
+    const SWIPE_MAX_TIME = 600;   // ms; slow drags don't count
+    let start = null;
+
+    container.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1) { start = null; return; }
+        const t = e.touches[0];
+        start = { x: t.clientX, y: t.clientY, time: Date.now() };
+    }, { passive: true });
+
+    container.addEventListener('touchend', (e) => {
+        if (!start) return;
+        const s = start; start = null;
+        if (!(stateManager.current() instanceof PlayState)) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - s.x;
+        const dy = t.clientY - s.y;
+        const dt = Date.now() - s.time;
+        if (dt > SWIPE_MAX_TIME) return;
+        if (Math.abs(dx) < SWIPE_DIST) return;
+        if (Math.abs(dx) < SWIPE_RATIO * Math.abs(dy)) return;
+        game.rotateBoard(dx > 0 ? 'right' : 'left');
+    }, { passive: true });
+})();
 
 stateManager.switch(new SplashState());
 Unboxed.start();
