@@ -333,6 +333,58 @@
     .overlay p { font-size: clamp(1rem, 4vw, 1.2rem); margin: 20px 0; }
     .overlay .btn { margin-top: 10px; width: 100%; }
 
+    /* --- Level Transitions: progression controls on win/lose overlays --- */
+    .progression-row {
+      display: grid;
+      grid-template-columns: 44px 1fr 44px;
+      gap: 8px;
+      align-items: center;
+      margin-top: 14px;
+    }
+    .progression-step-btn {
+      width: 44px; height: 44px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.12);
+      color: #fff;
+      border: 2px solid rgba(255,255,255,0.35);
+      font-size: 1.3rem;
+      font-weight: bold;
+      cursor: pointer;
+      transition: transform 0.15s ease, background 0.2s ease, opacity 0.2s ease;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0;
+    }
+    .progression-step-btn:hover:not(:disabled) {
+      background: rgba(255,255,255,0.25);
+      transform: scale(1.05);
+    }
+    .progression-step-btn:active:not(:disabled) { transform: scale(0.95); }
+    .progression-step-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .progression-shape-select {
+      width: 100%;
+      padding: 12px 10px;
+      background: rgba(255,255,255,0.95);
+      color: #1a1a1a;
+      border: 2px solid rgba(255,255,255,0.35);
+      border-radius: 12px;
+      font-size: 1rem;
+      font-weight: 600;
+      font-family: inherit;
+      text-align: center;
+      cursor: pointer;
+    }
+    .progression-hint {
+      margin: 10px 0 0;
+      font-size: 0.85rem;
+      color: rgba(255,255,255,0.65);
+      font-weight: 500;
+    }
+    .progression-hint .next-size {
+      color: #fbbf24;
+      font-weight: bold;
+    }
+    #gameWin .progression-hint .next-size { color: #fde68a; }
+
     /* --- Sound toggle button --- */
     #sound-toggle-btn {
       position: fixed;
@@ -465,12 +517,50 @@
     <div id="gameOver" class="overlay">
       <h2>Game Over!</h2>
       <p>No more moves available.</p>
-      <button id="restartGame" class="btn btn-primary">Play Again</button>
+      <button id="restartGame" class="btn btn-primary">Next Level</button>
+      <div class="progression-row">
+        <button id="gameOver-smaller" class="progression-step-btn" aria-label="Smaller board" title="Smaller board">−</button>
+        <select id="gameOver-shape" class="progression-shape-select" aria-label="Board shape">
+          <option value="rectangle">Rectangle</option>
+          <option value="diamond">Diamond</option>
+          <option value="cross">Cross</option>
+          <option value="circle">Circle</option>
+          <option value="staircase">Staircase</option>
+          <option value="corners">Corners</option>
+          <option value="diagonalCorners">Diagonal Corners</option>
+          <option value="triangle">Triangle</option>
+          <option value="random">Random</option>
+        </select>
+        <button id="gameOver-larger" class="progression-step-btn" aria-label="Larger board" title="Larger board">+</button>
+      </div>
+      <p class="progression-hint" id="gameOver-hint">&nbsp;</p>
     </div>
     <div id="gameWin" class="overlay">
       <h2>Level Complete!</h2>
       <p>You collected all the prizes!</p>
       <button id="nextLevel" class="btn btn-primary">Next Level</button>
+      <div class="progression-row">
+        <button id="gameWin-smaller" class="progression-step-btn" aria-label="Smaller board" title="Smaller board">−</button>
+        <select id="gameWin-shape" class="progression-shape-select" aria-label="Board shape">
+          <option value="rectangle">Rectangle</option>
+          <option value="diamond">Diamond</option>
+          <option value="cross">Cross</option>
+          <option value="circle">Circle</option>
+          <option value="staircase">Staircase</option>
+          <option value="corners">Corners</option>
+          <option value="diagonalCorners">Diagonal Corners</option>
+          <option value="triangle">Triangle</option>
+          <option value="random">Random</option>
+        </select>
+        <button id="gameWin-larger" class="progression-step-btn" aria-label="Larger board" title="Larger board">+</button>
+      </div>
+      <p class="progression-hint" id="gameWin-hint">&nbsp;</p>
+    </div>
+    <div id="abandonConfirm" class="overlay">
+      <h2>Abandon level?</h2>
+      <p>Your current board will be lost.</p>
+      <button id="abandon-confirm" class="btn btn-danger">Abandon</button>
+      <button id="abandon-cancel" class="btn btn-primary">Keep playing</button>
     </div>
   </div>
 
@@ -1505,9 +1595,18 @@ class BubblePopper {
         this.isAnimating = true;
         this.setRotationButtonsEnabled(false);
 
-        this.rows = settingsManager.get('rows');
-        this.columns = settingsManager.get('cols');
-        this.boardTemplate = settingsManager.get('template');
+        // Use a queued next-level choice (set by win/lose overlay) if present,
+        // otherwise fall back to the persistent settings defaults.
+        if (this.nextLevelChoice) {
+            this.rows = this.nextLevelChoice.rows;
+            this.columns = this.nextLevelChoice.cols;
+            this.boardTemplate = this.nextLevelChoice.template;
+            this.nextLevelChoice = null;
+        } else {
+            this.rows = settingsManager.get('rows');
+            this.columns = settingsManager.get('cols');
+            this.boardTemplate = settingsManager.get('template');
+        }
         this.minGroupSize = settingsManager.get('minGroupSize');
 
         let attempts = 0;
@@ -1837,10 +1936,114 @@ class BubblePopper {
         return false;
     }
 
+    // --- Level Transitions: size stepping + overlay state ---
+    // Sizes step along: 7×7 → 7×9 → 9×9 → 9×11 → 11×11 → 11×13 → 13×13 → 13×15 → 15×15
+    // Rule: Larger grows the smaller dim; if tied, grow cols.
+    //       Smaller shrinks the larger dim; if tied, shrink rows.
+    static SIZE_STEPS = [7, 9, 11, 13, 15];
+
+    bumpSize(rows, cols, direction) {
+        const MIN = 7, MAX = 15;
+        if (direction === 'larger') {
+            if (rows >= MAX && cols >= MAX) return { rows, cols };
+            if (cols < rows) return { rows, cols: cols + 2 };       // grow smaller (cols)
+            if (rows < cols) return { rows: rows + 2, cols };       // grow smaller (rows)
+            // tied: grow cols if possible, else rows
+            return cols < MAX ? { rows, cols: cols + 2 } : { rows: rows + 2, cols };
+        } else { // 'smaller'
+            if (rows <= MIN && cols <= MIN) return { rows, cols };
+            if (cols > rows) return { rows, cols: cols - 2 };       // shrink larger (cols)
+            if (rows > cols) return { rows: rows - 2, cols };       // shrink larger (rows)
+            // tied: shrink rows if possible, else cols
+            return rows > MIN ? { rows: rows - 2, cols } : { rows, cols: cols - 2 };
+        }
+    }
+
+    canBump(rows, cols, direction) {
+        const after = this.bumpSize(rows, cols, direction);
+        return after.rows !== rows || after.cols !== cols;
+    }
+
+    // The progression-overlay state is stored on a per-overlay basis ('win' or 'over')
+    // so opening the other overlay doesn't inherit the first's tweaks.
+    primeProgressionOverlay(which) {
+        const direction = (which === 'win') ? 'larger' : 'smaller';
+        // Start from whatever board the player just finished.
+        const startRows = this.rows;
+        const startCols = this.columns;
+        // Auto-bump in the appropriate direction (no-op if already at the bound).
+        const bumped = this.bumpSize(startRows, startCols, direction);
+        this.progressionChoice = {
+            which,
+            startRows, startCols,
+            rows: bumped.rows,
+            cols: bumped.cols,
+            template: this.boardTemplate,
+        };
+        this.refreshProgressionUI();
+    }
+
+    adjustProgressionSize(direction) {
+        if (!this.progressionChoice) return;
+        const c = this.progressionChoice;
+        const after = this.bumpSize(c.rows, c.cols, direction);
+        c.rows = after.rows;
+        c.cols = after.cols;
+        this.refreshProgressionUI();
+        soundEngine.play('click');
+    }
+
+    setProgressionTemplate(template) {
+        if (!this.progressionChoice) return;
+        this.progressionChoice.template = template;
+        this.refreshProgressionUI();
+    }
+
+    refreshProgressionUI() {
+        if (!this.progressionChoice) return;
+        const c = this.progressionChoice;
+        const prefix = c.which === 'win' ? 'gameWin' : 'gameOver';
+        // Shape select
+        const sel = document.getElementById(prefix + '-shape');
+        if (sel && sel.value !== c.template) sel.value = c.template;
+        // Smaller/Larger button enabled state
+        const smaller = document.getElementById(prefix + '-smaller');
+        const larger = document.getElementById(prefix + '-larger');
+        if (smaller) smaller.disabled = !this.canBump(c.rows, c.cols, 'smaller');
+        if (larger) larger.disabled = !this.canBump(c.rows, c.cols, 'larger');
+        // Hint
+        const hint = document.getElementById(prefix + '-hint');
+        if (hint) {
+            const sameSize = (c.rows === c.startRows && c.cols === c.startCols);
+            if (sameSize) {
+                hint.innerHTML = `Next: <span class="next-size">${c.rows} × ${c.cols}</span>`;
+            } else {
+                hint.innerHTML = `${c.startRows} × ${c.startCols} → <span class="next-size">${c.rows} × ${c.cols}</span>`;
+            }
+        }
+    }
+
+    commitProgressionChoice() {
+        if (!this.progressionChoice) return;
+        const c = this.progressionChoice;
+        this.nextLevelChoice = { rows: c.rows, cols: c.cols, template: c.template };
+        this.progressionChoice = null;
+    }
+
+    isLevelInProgress() {
+        // A level is "in progress" if neither end-of-level overlay is open.
+        const winEl = document.getElementById('gameWin');
+        const overEl = document.getElementById('gameOver');
+        const winOpen = winEl && winEl.classList.contains('visible');
+        const overOpen = overEl && overEl.classList.contains('visible');
+        return !winOpen && !overOpen;
+    }
+
     endGame() {
         this.pauseGame(true);
         this.setRotationButtonsEnabled(false);
         soundEngine.play('lose');
+        this.primeProgressionOverlay('over');
         ui.openOverlay('gameOver');
     }
 
@@ -1848,6 +2051,7 @@ class BubblePopper {
         this.pauseGame(true);
         this.setRotationButtonsEnabled(false);
         soundEngine.play('win');
+        this.primeProgressionOverlay('win');
         ui.openOverlay('gameWin');
     }
 
@@ -1975,7 +2179,7 @@ Unboxed.run({
         TWEEN.update();
     },
     input: {
-        excludeSelectors: ['#splash-screen', '#settings-screen', '#gameOver', '#gameWin', '#game-ui']
+        excludeSelectors: ['#splash-screen', '#settings-screen', '#gameOver', '#gameWin', '#abandonConfirm', '#game-ui']
     },
     sounds: {
         pop: (e, delay = 0, waveIdx = 0) => {
@@ -2048,20 +2252,52 @@ ui.setupButton('back-to-splash-btn', () => {
 
 ui.setupButton('game-menu-btn', () => {
     soundEngine.play('click');
+    // If the player is mid-board, ask before abandoning. If the win/lose overlay
+    // is already up, there's nothing to abandon — go straight to the splash.
+    if (game.isLevelInProgress()) {
+        ui.openOverlay('abandonConfirm');
+    } else {
+        game.pauseGame(true);
+        stateManager.switch(new SplashState());
+    }
+});
+
+ui.setupButton('abandon-cancel', () => {
+    soundEngine.play('click');
+    ui.closeOverlay('abandonConfirm');
+});
+
+ui.setupButton('abandon-confirm', () => {
+    soundEngine.play('click');
+    ui.closeOverlay('abandonConfirm');
     game.pauseGame(true);
     stateManager.switch(new SplashState());
 });
 
 ui.setupButton('restartGame', () => {
     soundEngine.play('click');
+    game.commitProgressionChoice();
     ui.closeOverlay('gameOver');
     game.createNewBoard();
 });
 
 ui.setupButton('nextLevel', () => {
     soundEngine.play('click');
+    game.commitProgressionChoice();
     ui.closeOverlay('gameWin');
     game.createNewBoard();
+});
+
+// Progression controls: smaller / larger / shape, on both overlays
+ui.setupButton('gameWin-smaller', () => game.adjustProgressionSize('smaller'));
+ui.setupButton('gameWin-larger',  () => game.adjustProgressionSize('larger'));
+ui.setupButton('gameOver-smaller', () => game.adjustProgressionSize('smaller'));
+ui.setupButton('gameOver-larger',  () => game.adjustProgressionSize('larger'));
+document.getElementById('gameWin-shape').addEventListener('change', (e) => {
+    game.setProgressionTemplate(e.target.value);
+});
+document.getElementById('gameOver-shape').addEventListener('change', (e) => {
+    game.setProgressionTemplate(e.target.value);
 });
 
 ui.setupButton('rotate-left-btn', () => {
