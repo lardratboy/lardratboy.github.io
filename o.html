@@ -1,0 +1,1789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpenJRPG — Battle Prototype</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0d0a16; color: #e8e2f0;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden; user-select: none;
+  }
+  #app { position: relative; width: 100vw; height: 100vh; }
+  #canvas-container { position: absolute; inset: 0; }
+  canvas { display: block; }
+
+  /* Turn order bar */
+  #turn-order {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 6px; align-items: center;
+    padding: 8px 12px;
+    background: rgba(20, 14, 36, 0.78);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    backdrop-filter: blur(8px);
+    max-width: 92vw; overflow-x: auto;
+  }
+  #turn-order .label {
+    font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: #9b8fc4; padding-right: 6px; border-right: 1px solid rgba(255,255,255,0.1);
+    margin-right: 4px;
+  }
+  .turn-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 9px; border-radius: 6px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.06);
+    font-size: 12px; white-space: nowrap;
+    transition: all 0.25s ease;
+  }
+  .turn-chip.current {
+    background: rgba(255, 230, 120, 0.18);
+    border-color: rgba(255, 230, 120, 0.6);
+    transform: scale(1.06);
+    box-shadow: 0 0 12px rgba(255, 230, 120, 0.3);
+  }
+  .turn-chip.done { opacity: 0.3; }
+  .turn-chip.dead { text-decoration: line-through; opacity: 0.4; }
+  .turn-chip .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    box-shadow: 0 0 6px currentColor;
+  }
+  .turn-chip .icon { font-size: 13px; }
+
+  /* Party status panel (bottom left) */
+  #party {
+    position: absolute; bottom: 16px; left: 16px;
+    display: flex; flex-direction: column; gap: 6px;
+    min-width: 280px;
+  }
+  .unit-card {
+    padding: 8px 10px;
+    background: rgba(20, 14, 36, 0.78);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    backdrop-filter: blur(8px);
+    transition: border-color 0.2s;
+  }
+  .unit-card.active { border-color: #ffe678; box-shadow: 0 0 14px rgba(255,230,120,0.25); }
+  .unit-card.dead { opacity: 0.45; }
+  .unit-card .header {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .unit-card .dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
+  .unit-card .row-ind {
+    font-size: 11px; color: #ffe678; padding: 0 2px;
+  }
+  .unit-card .class { font-size: 10px; color: #9b8fc4; letter-spacing: 0.08em; text-transform: uppercase; margin-left: auto; }
+  .bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.08); overflow: hidden; margin-top: 3px; }
+  .bar > div { height: 100%; transition: width 0.35s cubic-bezier(.4,.0,.2,1); }
+  .bar.hp > div { background: linear-gradient(90deg, #ff5577, #ff88aa); }
+  .bar.mp > div { background: linear-gradient(90deg, #5588ff, #88bbff); }
+  .bar.xp { height: 3px; }
+  .bar.xp > div { background: linear-gradient(90deg, #ffe678, #fff099); }
+  .stat-line { display: flex; justify-content: space-between; font-size: 10px; color: #c7bbe0; margin-top: 4px; }
+  .stat-line .label { color: #9b8fc4; }
+
+  /* Element + status badges */
+  .element-badge {
+    display: inline-block;
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: 11px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid currentColor;
+  }
+  .statuses { display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 2px;
+    padding: 1px 5px;
+    background: rgba(0,0,0,0.4);
+    border-radius: 4px;
+    font-size: 10px;
+    border: 1px solid currentColor;
+  }
+
+  /* Command menu (bottom right) */
+  #menu {
+    position: absolute; bottom: 16px; right: 16px;
+    display: flex; flex-direction: column; gap: 6px;
+    min-width: 240px;
+  }
+  #menu .panel {
+    padding: 10px;
+    background: rgba(20, 14, 36, 0.86);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px;
+    backdrop-filter: blur(8px);
+  }
+  #menu .prompt {
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: #9b8fc4; margin-bottom: 6px;
+  }
+  #menu button {
+    display: block; width: 100%;
+    padding: 8px 12px; margin-bottom: 4px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: #e8e2f0;
+    border-radius: 6px;
+    text-align: left;
+    font: inherit; font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  #menu button:hover:not(:disabled) {
+    background: rgba(255,230,120,0.12);
+    border-color: rgba(255,230,120,0.5);
+    transform: translateX(2px);
+  }
+  #menu button:disabled { opacity: 0.35; cursor: not-allowed; }
+  #menu button .right { float: right; color: #9b8fc4; font-size: 11px; }
+  #menu button.back { margin-top: 6px; opacity: 0.7; }
+
+  /* Log */
+  #log {
+    position: absolute; top: 70px; left: 16px;
+    width: 340px; max-height: 220px; overflow: hidden;
+    font-size: 12px; color: #c7bbe0;
+    pointer-events: none;
+  }
+  #log .line {
+    padding: 3px 8px; margin-bottom: 2px;
+    background: rgba(20, 14, 36, 0.6);
+    border-left: 2px solid rgba(255,255,255,0.15);
+    border-radius: 0 4px 4px 0;
+    animation: logIn 0.3s ease;
+  }
+  #log .line.boss {
+    border-left-color: #ff5555;
+    color: #ff8888;
+    font-weight: 600;
+  }
+  @keyframes logIn { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
+
+  /* Damage numbers */
+  #damage-layer {
+    position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+  }
+  .damage-num {
+    position: absolute;
+    font-weight: 800; font-size: 22px;
+    text-shadow: 0 0 6px rgba(0,0,0,0.9), 0 2px 4px rgba(0,0,0,0.7);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    will-change: transform, opacity;
+  }
+  .damage-num.crit { font-size: 30px; color: #ffd44d !important; }
+  .damage-num.heal { color: #88ff88; }
+  .damage-num.miss { color: #cccccc; font-size: 16px; }
+  .damage-num.eff-weak { color: #ffaa44; font-size: 15px; letter-spacing: 0.06em; }
+  .damage-num.eff-resist { color: #88aaff; font-size: 14px; letter-spacing: 0.06em; }
+  .damage-num.status-applied { font-size: 14px; letter-spacing: 0.05em; }
+  .damage-num.dot { font-size: 16px; }
+  .damage-num.dot.burn { color: #ff8844; }
+  .damage-num.dot.poison { color: #cc88ff; }
+  .damage-num.xp { color: #ffe678; font-size: 18px; }
+  .damage-num.levelup {
+    color: #aaff88; font-size: 22px; letter-spacing: 0.08em;
+    text-shadow: 0 0 12px rgba(170,255,136,0.7), 0 2px 4px rgba(0,0,0,0.8);
+  }
+  .damage-num.phase {
+    color: #ff4466; font-size: 26px; letter-spacing: 0.1em;
+    text-shadow: 0 0 14px rgba(255,68,102,0.8), 0 2px 4px rgba(0,0,0,0.8);
+    font-weight: 900;
+  }
+  .damage-num.telegraph {
+    color: #ff7777; font-size: 16px; letter-spacing: 0.1em;
+    text-shadow: 0 0 10px rgba(255,68,68,0.7);
+  }
+
+  /* Enemy floating labels */
+  #enemy-labels { position: absolute; inset: 0; pointer-events: none; }
+  .enemy-label {
+    position: absolute;
+    transform: translate(-50%, -100%);
+    padding: 5px 9px;
+    background: rgba(20,14,36,0.85);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    font-size: 11px;
+    white-space: nowrap;
+    min-width: 110px;
+    backdrop-filter: blur(4px);
+    will-change: transform, left, top;
+  }
+  .enemy-label.dead { opacity: 0.25; }
+  .enemy-label .header {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .enemy-label .dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 5px currentColor; }
+  .enemy-label .name { font-weight: 600; }
+  .enemy-label .element-badge { margin-left: auto; }
+  .enemy-label .bar { margin-top: 3px; }
+  .enemy-label.boss {
+    min-width: 180px;
+    border-color: rgba(255, 100, 100, 0.45);
+    background: rgba(40, 14, 24, 0.9);
+    box-shadow: 0 0 16px rgba(255, 60, 80, 0.18);
+  }
+  .enemy-label.boss .name {
+    color: #ff8888; font-size: 13px;
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .enemy-label .phase-tag {
+    font-size: 9px; color: #ffaaaa;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    margin-top: 2px; opacity: 0.8;
+  }
+  .enemy-label .charging {
+    color: #ff5555; font-size: 10px;
+    margin-top: 3px;
+    font-weight: 700;
+    animation: pulseBlink 0.8s ease-in-out infinite;
+  }
+  @keyframes pulseBlink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* Overlay for win/lose */
+  #overlay {
+    position: absolute; inset: 0;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(10, 6, 20, 0.7);
+    backdrop-filter: blur(4px);
+    z-index: 50;
+  }
+  #overlay .box {
+    padding: 28px 40px;
+    background: rgba(20, 14, 36, 0.95);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 12px;
+    text-align: center;
+    min-width: 360px; max-width: 480px;
+  }
+  #overlay h1 { margin: 0 0 16px; font-size: 32px; letter-spacing: 0.06em; }
+  #overlay-body { margin-bottom: 18px; text-align: left; font-size: 13px; line-height: 1.6; }
+  #overlay-body .xp-info {
+    color: #ffe678;
+    font-size: 16px; font-weight: 600;
+    text-align: center; margin-bottom: 14px;
+  }
+  #overlay-body .boss-defeat {
+    color: #ff8888;
+    text-align: center; font-size: 14px;
+    margin-bottom: 10px; letter-spacing: 0.05em;
+  }
+  #overlay-body .level-up {
+    color: #aaff88; font-weight: 600;
+    padding: 6px 10px; margin-bottom: 6px;
+    background: rgba(170, 255, 136, 0.08);
+    border-left: 3px solid #aaff88;
+    border-radius: 0 4px 4px 0;
+  }
+  #overlay-body .level-up .delta {
+    display: block; font-size: 11px;
+    color: #c7bbe0; font-weight: normal;
+    margin-top: 2px; letter-spacing: 0.02em;
+  }
+  #overlay-body .xp-status {
+    margin-top: 14px; padding-top: 12px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+    font-size: 11px; color: #9b8fc4;
+  }
+  #overlay-body .xp-status .row {
+    display: flex; justify-content: space-between; padding: 2px 0;
+  }
+  #overlay button {
+    padding: 10px 28px; font-size: 14px;
+    background: #ffe678; color: #1a1426;
+    border: none; border-radius: 6px;
+    cursor: pointer; font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  #overlay button:hover { background: #fff099; }
+
+  /* Boss warning banner */
+  #boss-banner {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 48px; font-weight: 900;
+    color: #ff4466; letter-spacing: 0.15em;
+    text-shadow: 0 0 20px rgba(255,68,102,0.8), 0 4px 12px rgba(0,0,0,0.9);
+    pointer-events: none;
+    opacity: 0;
+    z-index: 40;
+  }
+
+  /* Title */
+  #title {
+    position: absolute; top: 12px; left: 16px;
+    font-size: 11px; letter-spacing: 0.2em; color: #6b5d8c;
+    text-transform: uppercase;
+  }
+
+  /* Help button + legend */
+  #help-btn {
+    position: absolute; top: 12px; right: 16px;
+    width: 28px; height: 28px; border-radius: 50%;
+    background: rgba(20,14,36,0.78);
+    border: 1px solid rgba(255,255,255,0.1);
+    color: #e8e2f0; cursor: pointer;
+    font-weight: 700; font-size: 14px;
+  }
+  #help-btn:hover { border-color: #ffe678; color: #ffe678; }
+  #legend {
+    position: absolute; top: 48px; right: 16px;
+    width: 280px; padding: 12px 14px;
+    background: rgba(20, 14, 36, 0.92);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    backdrop-filter: blur(8px);
+    font-size: 11px; line-height: 1.5;
+    display: none;
+    z-index: 20;
+  }
+  #legend h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: 0.08em; color: #ffe678; text-transform: uppercase; }
+  #legend h3:not(:first-child) { margin-top: 10px; }
+  #legend .row { margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="canvas-container"></div>
+  <div id="title">OpenJRPG · Round-Based</div>
+  <button id="help-btn" title="Legend">?</button>
+  <div id="legend">
+    <h3>Element Cycle</h3>
+    <div class="row">Fire 🔥 → beats Air 🌪 → beats Earth ⛰ → beats Water 💧 → beats Fire 🔥</div>
+    <div class="row">Light ☀ ↔ Dark 🌙 (mutually super)</div>
+    <div class="row" style="color:#9b8fc4">Same element = 0.5× resist. Off-cycle = 1×.</div>
+    <h3>Status</h3>
+    <div class="row">🔥 Burn — chip dmg + halves Attack</div>
+    <div class="row">☠ Poison — chip damage / turn</div>
+    <div class="row">⚡ Paralyze — half speed, may skip turn</div>
+    <div class="row">💤 Sleep — skip turn until hit</div>
+    <h3>Rows</h3>
+    <div class="row">▶ Front — full physical damage in/out</div>
+    <div class="row">◁ Back — half physical in/out (magic unaffected)</div>
+    <h3>Bosses</h3>
+    <div class="row">Every 3rd battle. Multi-phase scripted AI with telegraphs.</div>
+    <div class="row" style="color:#ff8888">⚠ = boss is charging an attack. Defend or burst it down.</div>
+  </div>
+  <div id="turn-order"><span class="label">Order</span></div>
+  <div id="log"></div>
+  <div id="party"></div>
+  <div id="menu"></div>
+  <div id="enemy-labels"></div>
+  <div id="damage-layer"></div>
+  <div id="boss-banner">BOSS BATTLE</div>
+  <div id="overlay">
+    <div class="box">
+      <h1 id="overlay-title">VICTORY</h1>
+      <div id="overlay-body"></div>
+      <button id="overlay-btn">Next Battle</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+<script>
+/* =========================================================================
+   OpenJRPG — Classic Round-Based Battle Prototype
+   With element chart, status effects, XP/leveling, rows, and bosses.
+   ========================================================================= */
+
+// ---------- Utility ----------
+const rand = (a, b) => Math.random() * (b - a) + a;
+const randInt = (a, b) => Math.floor(rand(a, b + 1));
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function saturatedColor() {
+  const c = new THREE.Color();
+  c.setHSL(Math.random(), 0.82, 0.58);
+  return c;
+}
+function colorToCSS(c) { return '#' + c.getHexString(); }
+function tween(obj, to, dur, easing = TWEEN.Easing.Quadratic.InOut) {
+  return new Promise(resolve => {
+    new TWEEN.Tween(obj).to(to, dur).easing(easing).onComplete(resolve).start();
+  });
+}
+
+// ---------- Elements & Type Chart ----------
+const ELEMENTS = {
+  fire:    { name: 'Fire',    icon: '🔥', color: '#ff7733' },
+  water:   { name: 'Water',   icon: '💧', color: '#5599ff' },
+  air:     { name: 'Air',     icon: '🌪', color: '#bbeeff' },
+  earth:   { name: 'Earth',   icon: '⛰',  color: '#cc9966' },
+  light:   { name: 'Light',   icon: '☀',  color: '#ffee88' },
+  dark:    { name: 'Dark',    icon: '🌙', color: '#bb88ff' },
+  neutral: { name: 'Neutral', icon: '·',  color: '#cccccc' }
+};
+const ELEMENT_CHART = {
+  fire:    { air: 2.0, water: 0.5, fire: 0.5 },
+  air:     { earth: 2.0, fire: 0.5, air: 0.5 },
+  earth:   { water: 2.0, air: 0.5, earth: 0.5 },
+  water:   { fire: 2.0, earth: 0.5, water: 0.5 },
+  light:   { dark: 2.0, light: 0.5 },
+  dark:    { light: 2.0, dark: 0.5 },
+  neutral: {}
+};
+function elementMult(atkEl, defEl) {
+  if (!atkEl || atkEl === 'neutral') return 1;
+  const row = ELEMENT_CHART[atkEl];
+  if (!row) return 1;
+  return row[defEl] !== undefined ? row[defEl] : 1;
+}
+function effLabel(eff) {
+  if (eff >= 2)    return { text: 'WEAK!',    cls: 'eff-weak' };
+  if (eff >= 1.5)  return { text: 'STRONG!',  cls: 'eff-weak' };
+  if (eff === 0)   return { text: 'IMMUNE',   cls: 'eff-resist' };
+  if (eff <= 0.5)  return { text: 'RESIST',   cls: 'eff-resist' };
+  return null;
+}
+
+// ---------- Status conditions ----------
+const STATUSES = {
+  burn:     { name: 'Burn',     icon: '🔥', color: '#ff8844', dot: true },
+  poison:   { name: 'Poison',   icon: '☠',  color: '#cc88ff', dot: true },
+  paralyze: { name: 'Paralyze', icon: '⚡', color: '#ffdd44', dot: false },
+  sleep:    { name: 'Sleep',    icon: '💤', color: '#88aaff', dot: false }
+};
+function hasStatus(unit, type) {
+  return unit.statuses && unit.statuses.some(s => s.type === type);
+}
+function applyStatusEffect(unit, type, turns) {
+  if (!unit.statuses) unit.statuses = [];
+  if (hasStatus(unit, type)) return false;
+  unit.statuses.push({ type, turns });
+  return true;
+}
+function clearStatus(unit, type) {
+  unit.statuses = unit.statuses.filter(s => s.type !== type);
+}
+function effectiveSpeed(unit) {
+  let s = unit.spd;
+  if (hasStatus(unit, 'paralyze')) s *= 0.5;
+  return s;
+}
+function canAct(unit) {
+  if (hasStatus(unit, 'sleep'))    return { ok: false, reason: 'asleep'    };
+  if (hasStatus(unit, 'paralyze') && Math.random() < 0.25)
+                                   return { ok: false, reason: 'paralyzed' };
+  return { ok: true };
+}
+
+// ---------- XP / Leveling ----------
+function xpForLevel(n) { return Math.floor(0.8 * Math.pow(n, 3)); }
+function statAtLevel(cls, level, stat) {
+  return Math.floor(cls.base[stat] + cls.growth[stat] * (level - 1));
+}
+function levelUp(h) {
+  h.level++;
+  const cls = HERO_CLASSES.find(c => c.name === h.name);
+  const prev = { hp: h.maxHp, mp: h.maxMp, atk: h.atk, def: h.def, mag: h.mag, mdef: h.mdef, spd: h.spd };
+  h.maxHp = statAtLevel(cls, h.level, 'hp');
+  h.maxMp = statAtLevel(cls, h.level, 'mp');
+  h.atk   = statAtLevel(cls, h.level, 'atk');
+  h.def   = statAtLevel(cls, h.level, 'def');
+  h.mag   = statAtLevel(cls, h.level, 'mag');
+  h.mdef  = statAtLevel(cls, h.level, 'mdef');
+  h.spd   = statAtLevel(cls, h.level, 'spd');
+  h.hp = Math.min(h.maxHp, h.hp + (h.maxHp - prev.hp));
+  h.mp = Math.min(h.maxMp, h.mp + (h.maxMp - prev.mp));
+  return {
+    hp:   h.maxHp - prev.hp,  mp:   h.maxMp - prev.mp,
+    atk:  h.atk   - prev.atk, def:  h.def   - prev.def,
+    mag:  h.mag   - prev.mag, mdef: h.mdef  - prev.mdef,
+    spd:  h.spd   - prev.spd,
+  };
+}
+function awardXP(amount) {
+  const aliveHeroes = state.heroes.filter(h => h.alive);
+  const summary = {};
+  aliveHeroes.forEach(h => {
+    h.xp += amount;
+    let levels = 0;
+    let totalDelta = null;
+    while (h.xp >= xpForLevel(h.level + 1) && h.level < 99) {
+      h.xp -= xpForLevel(h.level + 1);
+      const delta = levelUp(h);
+      levels++;
+      if (!totalDelta) totalDelta = delta;
+      else for (const k in delta) totalDelta[k] += delta[k];
+    }
+    if (levels > 0) summary[h.id] = { hero: h, levels, delta: totalDelta };
+  });
+  return Object.values(summary);
+}
+
+// ---------- Three.js setup ----------
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0a16);
+scene.fog = new THREE.Fog(0x0d0a16, 14, 32);
+
+const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 4.2, 9.5);
+camera.lookAt(0, 0.6, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+container.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0x5a4a78, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.75);
+dirLight.position.set(4, 9, 6);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(1024, 1024);
+dirLight.shadow.camera.left = -8; dirLight.shadow.camera.right = 8;
+dirLight.shadow.camera.top = 8; dirLight.shadow.camera.bottom = -8;
+scene.add(dirLight);
+const rim1 = new THREE.PointLight(0xff5588, 0.5, 18); rim1.position.set(-6, 2, -2); scene.add(rim1);
+const rim2 = new THREE.PointLight(0x5588ff, 0.5, 18); rim2.position.set(6, 2, -2); scene.add(rim2);
+
+const ground = new THREE.Mesh(
+  new THREE.CircleGeometry(14, 64),
+  new THREE.MeshStandardMaterial({ color: 0x1f1830, roughness: 0.95, metalness: 0.0 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -1.2;
+ground.receiveShadow = true;
+scene.add(ground);
+const grid = new THREE.GridHelper(20, 20, 0x3a2d56, 0x2a2040);
+grid.position.y = -1.19;
+grid.material.opacity = 0.35; grid.material.transparent = true;
+scene.add(grid);
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- Row positions ----------
+const ROW_X = { front: -3.2, back: -5.0 };
+const ROW_LABEL = { front: '▶', back: '◁' };
+const ENEMY_X = 3.8;
+const BOSS_X = 4.2;
+
+// ---------- Data ----------
+const HERO_CLASSES = [
+  { name: 'Knight', kind: 'warrior', element: 'light', defaultRow: 'front',
+    base:   { hp: 36, mp: 0,  atk: 8,  def: 6, mag: 2,   mdef: 3,   spd: 5 },
+    growth: { hp: 11, mp: 0,  atk: 1.8, def: 1.3, mag: 0.3, mdef: 0.7, spd: 0.5 },
+    spells: [] },
+  { name: 'Sage',   kind: 'mage',    element: 'neutral', defaultRow: 'back',
+    base:   { hp: 22, mp: 10, atk: 3,  def: 2, mag: 8,   mdef: 5,   spd: 4 },
+    growth: { hp: 7,  mp: 5,  atk: 0.5, def: 0.5, mag: 2.0, mdef: 1.2, spd: 0.6 },
+    spells: ['fire', 'frost', 'bolt', 'quake', 'heal'] },
+  { name: 'Scout',  kind: 'rogue',   element: 'air', defaultRow: 'back',
+    base:   { hp: 28, mp: 6,  atk: 6,  def: 3, mag: 4,   mdef: 3,   spd: 8 },
+    growth: { hp: 9,  mp: 2,  atk: 1.3, def: 0.8, mag: 0.8, mdef: 0.7, spd: 1.2 },
+    spells: ['focus', 'slumber'] }
+];
+
+const ENEMY_TYPES = [
+  { shape: 'tetra', name: 'Spike',  element: 'fire',
+    hp: 32, atk: 11, def: 4, mag: 8, mdef: 4, spd: 12, skill: 'ember',   xp: 12 },
+  { shape: 'cube',  name: 'Block',  element: 'earth',
+    hp: 58, atk: 9, def: 11, mag: 6, mdef: 6, spd: 4, skill: 'boulder', xp: 22 },
+  { shape: 'octa',  name: 'Shard',  element: 'air',
+    hp: 38, atk: 8, def: 6, mag: 12, mdef: 8, spd: 10, skill: 'gust',   xp: 16 },
+  { shape: 'dodec', name: 'Orbus',  element: 'dark',
+    hp: 62, atk: 12, def: 7, mag: 9, mdef: 7, spd: 6, skill: 'hex',     xp: 26 },
+  { shape: 'icosa', name: 'Starix', element: 'water',
+    hp: 50, atk: 10, def: 5, mag: 10, mdef: 7, spd: 11, skill: 'splash', xp: 20 }
+];
+
+// Bosses: dramatic single foes with phase-triggered scripted rotations.
+const BOSS_TYPES = [
+  {
+    name: 'Tyrant Prism', shape: 'dodec', element: 'dark', size: 1.65, level: 8,
+    hp: 380, atk: 18, def: 9, mag: 17, mdef: 9, spd: 9, xp: 120,
+    phases: [
+      { name: 'Composed', threshold: 1.0, rotation: [
+        { type: 'ATTACK' },
+        { type: 'MAGIC', spell: 'hex' },
+        { type: 'ATTACK' },
+        { type: 'DEFEND' }
+      ]},
+      { name: 'Enraged', threshold: 0.5, rotation: [
+        { type: 'TELEGRAPH', spell: 'annihilate' },
+        { type: 'MAGIC', spell: 'annihilate' },
+        { type: 'MAGIC', spell: 'dark_storm' },
+        { type: 'ATTACK' }
+      ]}
+    ]
+  }
+];
+
+const SPELLS = {
+  // Hero spells
+  fire:    { name: 'Fire',    cost: 8,  target: 'enemy',      power: 1.5, magic: true,  element: 'fire',
+             inflict: { status: 'burn', chance: 0.35, turns: 4 }, desc: 'Fire damage, may burn' },
+  frost:   { name: 'Frost',   cost: 8,  target: 'enemy',      power: 1.5, magic: true,  element: 'water',
+             desc: 'Water damage' },
+  bolt:    { name: 'Bolt',    cost: 8,  target: 'enemy',      power: 1.4, magic: true,  element: 'air',
+             inflict: { status: 'paralyze', chance: 0.35, turns: 4 }, desc: 'Air damage, may stun' },
+  quake:   { name: 'Quake',   cost: 16, target: 'allEnemies', power: 1.0, magic: true,  element: 'earth',
+             desc: 'Earth damage, all foes' },
+  heal:    { name: 'Heal',    cost: 6,  target: 'ally',       power: 1.6, magic: true,  element: 'light',
+             heal: true, desc: 'Heal ally' },
+  focus:   { name: 'Focus',   cost: 5,  target: 'enemy',      power: 1.9, magic: false, element: 'neutral',
+             desc: 'Strong physical strike' },
+  slumber: { name: 'Slumber', cost: 7,  target: 'enemy',      power: 0,   magic: true,  element: 'dark',
+             inflict: { status: 'sleep', chance: 0.75, turns: 3 }, statusOnly: true,
+             desc: 'Put foe to sleep' },
+  // Enemy skills
+  ember:   { name: 'Ember',   cost: 6,  target: 'enemy',      power: 1.3, magic: true,  element: 'fire',
+             inflict: { status: 'burn', chance: 0.4, turns: 3 } },
+  boulder: { name: 'Boulder', cost: 6,  target: 'enemy',      power: 1.4, magic: true,  element: 'earth' },
+  gust:    { name: 'Gust',    cost: 6,  target: 'enemy',      power: 1.3, magic: true,  element: 'air',
+             inflict: { status: 'paralyze', chance: 0.3, turns: 3 } },
+  hex:     { name: 'Hex',     cost: 6,  target: 'enemy',      power: 1.2, magic: true,  element: 'dark',
+             inflict: { status: 'sleep', chance: 0.4, turns: 2 } },
+  splash:  { name: 'Splash',  cost: 6,  target: 'enemy',      power: 1.3, magic: true,  element: 'water' },
+  // Boss spells
+  dark_storm: { name: 'Dark Storm', cost: 0, target: 'allEnemies', power: 1.3, magic: true, element: 'dark',
+                desc: 'AOE dark blast' },
+  annihilate: { name: 'Annihilate', cost: 0, target: 'enemy',      power: 2.8, magic: true, element: 'dark',
+                desc: 'Massive dark strike' }
+};
+
+// ---------- Unit factories ----------
+let unitIdCounter = 0;
+function makeMeshForShape(shape, color, size = 0.7) {
+  let geo;
+  const s = size;
+  switch (shape) {
+    case 'sphere': geo = new THREE.SphereGeometry(s, 32, 20); break;
+    case 'tetra':  geo = new THREE.TetrahedronGeometry(s * 1.15); break;
+    case 'cube':   geo = new THREE.BoxGeometry(s * 1.4, s * 1.4, s * 1.4); break;
+    case 'octa':   geo = new THREE.OctahedronGeometry(s * 1.05); break;
+    case 'dodec':  geo = new THREE.DodecahedronGeometry(s * 1.05); break;
+    case 'icosa':  geo = new THREE.IcosahedronGeometry(s * 1.05); break;
+  }
+  const mat = new THREE.MeshStandardMaterial({
+    color: color, roughness: 0.35, metalness: 0.3,
+    flatShading: shape !== 'sphere',
+    emissive: color.clone().multiplyScalar(0.15)
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true;
+  return mesh;
+}
+
+function createHero(classData, level, slot) {
+  const color = saturatedColor();
+  const mesh = makeMeshForShape('sphere', color);
+  const group = new THREE.Group();
+  group.add(mesh);
+  const row = classData.defaultRow;
+  group.position.set(ROW_X[row], 0, (slot - 1) * 1.8);
+  scene.add(group);
+
+  return {
+    id: ++unitIdCounter, kind: 'hero', side: 'party',
+    name: classData.name, className: classData.kind, level,
+    element: classData.element,
+    row,
+    xp: 0,
+    hp:   statAtLevel(classData, level, 'hp'),
+    maxHp:statAtLevel(classData, level, 'hp'),
+    mp:   statAtLevel(classData, level, 'mp'),
+    maxMp:statAtLevel(classData, level, 'mp'),
+    atk:  statAtLevel(classData, level, 'atk'),
+    def:  statAtLevel(classData, level, 'def'),
+    mag:  statAtLevel(classData, level, 'mag'),
+    mdef: statAtLevel(classData, level, 'mdef'),
+    spd:  statAtLevel(classData, level, 'spd'),
+    spells: classData.spells.slice(),
+    items: { potion: 2, ether: 1 },
+    statuses: [],
+    alive: true, defending: false,
+    color, mesh, group,
+    basePos: group.position.clone()
+  };
+}
+
+function createEnemy(type, slot, totalSlots) {
+  const color = saturatedColor();
+  const mesh = makeMeshForShape(type.shape, color);
+  const group = new THREE.Group();
+  group.add(mesh);
+  const spread = (totalSlots - 1) * 1.6;
+  group.position.set(ENEMY_X, 0, slot * 1.6 - spread / 2);
+  scene.add(group);
+
+  return {
+    id: ++unitIdCounter, kind: 'enemy', side: 'foes',
+    name: type.name, level: randInt(4, 6),
+    element: type.element,
+    row: 'front',
+    hp: type.hp, maxHp: type.hp,
+    mp: 30, maxMp: 30,
+    atk: type.atk, def: type.def, mag: type.mag, mdef: type.mdef, spd: type.spd,
+    statuses: [],
+    skill: type.skill,
+    xpValue: type.xp,
+    alive: true, defending: false,
+    color, mesh, group,
+    basePos: group.position.clone(),
+    spinSpeed: rand(0.4, 1.2) * (Math.random() < 0.5 ? -1 : 1),
+    labelYOffset: 1.4
+  };
+}
+
+function createBoss(type) {
+  // Boss color: a deep saturated tone (boss-y feel)
+  const color = new THREE.Color();
+  color.setHSL(0.78, 0.85, 0.55); // purple-magenta. Could randomize within a range.
+  const mesh = makeMeshForShape(type.shape, color, type.size);
+  // Stronger emissive for menace
+  mesh.material.emissive = color.clone().multiplyScalar(0.35);
+
+  const group = new THREE.Group();
+  group.add(mesh);
+  group.position.set(BOSS_X, type.size * 0.5, 0);
+  scene.add(group);
+
+  // Orbiting satellites
+  const satellitesGroup = new THREE.Group();
+  group.add(satellitesGroup);
+  const satellites = [];
+  const satColor = color.clone();
+  for (let i = 0; i < 4; i++) {
+    const sg = new THREE.TetrahedronGeometry(0.22);
+    const sm = new THREE.MeshStandardMaterial({
+      color: satColor,
+      emissive: satColor.clone().multiplyScalar(0.7),
+      roughness: 0.25, metalness: 0.4,
+      flatShading: true
+    });
+    const sat = new THREE.Mesh(sg, sm);
+    sat.castShadow = true;
+    satellitesGroup.add(sat);
+    satellites.push({
+      mesh: sat,
+      angle: (i / 4) * Math.PI * 2,
+      angleSpeed: 0.7 + Math.random() * 0.3,
+      radius: type.size * 1.4,
+      phase: Math.random() * Math.PI * 2
+    });
+  }
+
+  return {
+    id: ++unitIdCounter, kind: 'enemy', side: 'foes',
+    isBoss: true,
+    bossData: type,
+    name: type.name, level: type.level,
+    element: type.element,
+    row: 'front',
+    hp: type.hp, maxHp: type.hp,
+    mp: 999, maxMp: 999,  // bosses cast freely
+    atk: type.atk, def: type.def, mag: type.mag, mdef: type.mdef, spd: type.spd,
+    statuses: [],
+    xpValue: type.xp,
+    alive: true, defending: false,
+    color, mesh, group,
+    satellitesGroup, satellites,
+    basePos: group.position.clone(),
+    spinSpeed: 0.5,
+    currentPhase: 0,
+    rotationIdx: 0,
+    charging: null,        // spell id if telegraphed
+    labelYOffset: 2.6
+  };
+}
+
+// ---------- State ----------
+const state = {
+  heroes: [], enemies: [],
+  phase: 'INPUT',
+  inputIndex: 0,
+  menuStack: [],
+  pendingActions: [],
+  resolvedQueue: [],
+  currentResolveIdx: 0,
+  turnNumber: 0,
+  battleNumber: 0,
+  busy: false,
+  lastResult: null,
+  bossDefeatedThisBattle: false,
+};
+
+// ---------- Damage / heal math ----------
+function calcDamage(actor, target, opts = {}) {
+  if (opts.statusOnly) return { dmg: 0, crit: false, eff: 1, rowMul: 1 };
+  let a = opts.magic ? actor.mag : actor.atk;
+  if (!opts.magic && hasStatus(actor, 'burn')) a = Math.max(1, Math.floor(a * 0.5));
+  const d = opts.magic ? target.mdef : target.def;
+  let base = Math.max(1, a * 2 - d);
+  let dmg = Math.floor(base * (1 + actor.level / 20));
+  if (opts.power) dmg = Math.floor(dmg * opts.power);
+  dmg = Math.floor(dmg * (0.85 + Math.random() * 0.3));
+  const crit = !opts.magic && Math.random() < 1 / 16;
+  if (crit) dmg = Math.floor(dmg * 2);
+  if (target.defending) dmg = Math.floor(dmg / 2);
+  const eff = elementMult(opts.element || 'neutral', target.element || 'neutral');
+  dmg = Math.floor(dmg * eff);
+  let rowMul = 1;
+  if (!opts.magic) {
+    if (actor.row === 'back') rowMul *= 0.5;
+    if (target.row === 'back') rowMul *= 0.5;
+  }
+  dmg = Math.floor(dmg * rowMul);
+  return { dmg: Math.max(eff === 0 ? 0 : 1, dmg), crit, eff, rowMul };
+}
+function calcHeal(actor, opts = {}) {
+  let h = Math.floor(actor.mag * 1.8 * (opts.power || 1));
+  return Math.floor(h * (0.9 + Math.random() * 0.2));
+}
+
+// ---------- Animations ----------
+function flashColor(unit, hex, dur = 200) {
+  const mat = unit.mesh.material;
+  const orig = mat.emissive.getHex();
+  mat.emissive.setHex(hex);
+  setTimeout(() => mat.emissive.setHex(orig), dur);
+}
+const flashHit  = u => flashColor(u, 0xff4444, 180);
+const flashHeal = u => flashColor(u, 0x44ff66, 280);
+
+async function shakeMesh(mesh, amount = 0.18, dur = 260) {
+  const steps = 8, stepMs = dur / steps;
+  for (let i = 0; i < steps; i++) {
+    mesh.position.x = (Math.random() - 0.5) * amount;
+    mesh.position.y = (Math.random() - 0.5) * amount;
+    await sleep(stepMs);
+  }
+  mesh.position.set(0, 0, 0);
+}
+
+async function attackAnim(actor, target) {
+  if (!target.alive) return;
+  const start = actor.basePos.clone();
+  const enemyPos = target.group.position.clone();
+  const dir = enemyPos.clone().sub(start).normalize();
+  // back off a bit more for bigger targets
+  const standoff = target.isBoss ? 2.2 : 1.5;
+  const dest = enemyPos.clone().sub(dir.multiplyScalar(standoff));
+  await tween(actor.group.position,
+    { x: dest.x, y: dest.y + 0.3, z: dest.z }, 240, TWEEN.Easing.Quadratic.In);
+  actor.group.position.y = dest.y;
+}
+async function returnHome(actor) {
+  await tween(actor.group.position,
+    { x: actor.basePos.x, y: actor.basePos.y, z: actor.basePos.z },
+    340, TWEEN.Easing.Quadratic.Out);
+}
+async function castAnim(actor, targets, element) {
+  const mat = actor.mesh.material;
+  const origEmissive = mat.emissive.getHex();
+  const elemColor = new THREE.Color(ELEMENTS[element || 'neutral'].color);
+  mat.emissive.set(elemColor);
+  await tween(actor.group.position, { y: actor.basePos.y + 0.6 }, 250, TWEEN.Easing.Quadratic.Out);
+  await sleep(180);
+  mat.emissive.setHex(origEmissive);
+  for (const t of targets) {
+    if (!t.alive) continue;
+    spawnBolt(actor.group.position, t.group.position, elemColor);
+  }
+  await sleep(380);
+  await tween(actor.group.position, { y: actor.basePos.y }, 220, TWEEN.Easing.Quadratic.In);
+}
+function spawnBolt(from, to, color, big = false) {
+  const sz = big ? 0.4 : 0.2;
+  const geo = new THREE.SphereGeometry(sz, 12, 8);
+  const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 });
+  const bolt = new THREE.Mesh(geo, mat);
+  bolt.position.copy(from); bolt.position.y += 0.3;
+  scene.add(bolt);
+  const dest = to.clone(); dest.y += 0.2;
+  new TWEEN.Tween(bolt.position).to({ x: dest.x, y: dest.y, z: dest.z }, big ? 520 : 380)
+    .easing(TWEEN.Easing.Quadratic.In)
+    .onComplete(() => { scene.remove(bolt); geo.dispose(); mat.dispose(); })
+    .start();
+  new TWEEN.Tween(bolt.scale).to({ x: 1.7, y: 1.7, z: 1.7 }, big ? 520 : 380).start();
+}
+async function dieAnim(unit) {
+  unit.mesh.material.transparent = true;
+  const tasks = [
+    tween(unit.mesh.scale, { x: 0.001, y: 0.001, z: 0.001 }, 500, TWEEN.Easing.Quadratic.In),
+    tween(unit.mesh.material, { opacity: 0 }, 500)
+  ];
+  if (unit.satellitesGroup) {
+    tasks.push(tween(unit.satellitesGroup.scale, { x: 0.001, y: 0.001, z: 0.001 }, 500));
+  }
+  await Promise.all(tasks);
+}
+async function rowSwapAnim(hero, newRow) {
+  const newX = ROW_X[newRow];
+  hero.basePos.x = newX;
+  await tween(hero.group.position, { x: newX, y: 0.3 }, 380, TWEEN.Easing.Quadratic.InOut);
+  await tween(hero.group.position, { y: 0 }, 180, TWEEN.Easing.Quadratic.Out);
+}
+
+// ---------- Boss-specific ----------
+function currentPhaseIndex(boss) {
+  const pct = boss.hp / boss.maxHp;
+  let active = 0;
+  for (let i = 0; i < boss.bossData.phases.length; i++) {
+    if (pct <= boss.bossData.phases[i].threshold) active = i;
+  }
+  return active;
+}
+
+async function applyDamageToTarget(target, dmg) {
+  target.hp = Math.max(0, target.hp - dmg);
+  if (target.isBoss && target.alive) {
+    const newPhase = currentPhaseIndex(target);
+    if (newPhase !== target.currentPhase) {
+      target.currentPhase = newPhase;
+      target.rotationIdx = 0;
+      target.charging = null;  // a phase change interrupts a telegraph
+      await onPhaseChange(target);
+    }
+  }
+}
+
+async function onPhaseChange(boss) {
+  const phase = boss.bossData.phases[boss.currentPhase];
+  logBoss(`${boss.name} enters Phase ${boss.currentPhase + 1}: ${phase.name}!`);
+  showFloatingText(boss, `PHASE ${boss.currentPhase + 1}`, 'phase', -60);
+  // Visual: big flash + scale pulse
+  const mat = boss.mesh.material;
+  const orig = mat.emissive.getHex();
+  mat.emissive.setHex(0xff2244);
+  // Aggressively pulse satellites outward briefly
+  if (boss.satellites) {
+    boss.satellites.forEach(s => s.angleSpeed *= 1.4);
+  }
+  await Promise.all([
+    tween(boss.mesh.scale, { x: 1.35, y: 1.35, z: 1.35 }, 400, TWEEN.Easing.Quadratic.Out),
+    sleep(400)
+  ]);
+  await tween(boss.mesh.scale, { x: 1.0, y: 1.0, z: 1.0 }, 400, TWEEN.Easing.Quadratic.In);
+  mat.emissive.setHex(orig);
+  // Slightly stronger glow permanently for enraged phase
+  mat.emissive.lerp(new THREE.Color(0xff3344), 0.25);
+}
+
+function bossPickAction(boss) {
+  const phase = boss.bossData.phases[boss.currentPhase];
+  const step = phase.rotation[boss.rotationIdx % phase.rotation.length];
+  boss.rotationIdx++;
+
+  const action = { actor: boss, priority: 0 };
+  if (step.type === 'ATTACK') {
+    action.type = 'ATTACK';
+    action.target = pickAITarget();
+  } else if (step.type === 'MAGIC') {
+    action.type = 'MAGIC';
+    action.spell = step.spell;
+    const spell = SPELLS[step.spell];
+    action.target = spell.target === 'allEnemies' ? null : pickAITarget();
+  } else if (step.type === 'DEFEND') {
+    action.type = 'DEFEND';
+    action.priority = 1;
+  } else if (step.type === 'TELEGRAPH') {
+    action.type = 'TELEGRAPH';
+    action.charging = step.spell;
+  }
+  return action;
+}
+
+// ---------- Floating text ----------
+const damageLayer = document.getElementById('damage-layer');
+function showFloatingText(unit, text, kind = '', offsetY = 0) {
+  const div = document.createElement('div');
+  div.className = 'damage-num ' + kind;
+  div.textContent = text;
+  damageLayer.appendChild(div);
+
+  const v = unit.group.position.clone();
+  v.y += (unit.labelYOffset || 1.2);
+  v.project(camera);
+  const px = (v.x * 0.5 + 0.5) * window.innerWidth;
+  const py = (1 - (v.y * 0.5 + 0.5)) * window.innerHeight + offsetY;
+  div.style.left = px + 'px';
+  div.style.top  = py + 'px';
+
+  const obj = { y: 0, opacity: 1 };
+  new TWEEN.Tween(obj).to({ y: -70, opacity: 0 }, 1200)
+    .easing(TWEEN.Easing.Quadratic.Out)
+    .onUpdate(() => {
+      div.style.transform = `translate(-50%, calc(-50% + ${obj.y}px))`;
+      div.style.opacity = obj.opacity;
+    })
+    .onComplete(() => div.remove())
+    .start();
+}
+
+// ---------- Log ----------
+const logEl = document.getElementById('log');
+function log(msg) {
+  const d = document.createElement('div');
+  d.className = 'line';
+  d.textContent = msg;
+  logEl.appendChild(d);
+  while (logEl.children.length > 8) logEl.removeChild(logEl.firstChild);
+}
+function logBoss(msg) {
+  const d = document.createElement('div');
+  d.className = 'line boss';
+  d.textContent = msg;
+  logEl.appendChild(d);
+  while (logEl.children.length > 8) logEl.removeChild(logEl.firstChild);
+}
+
+// ---------- UI ----------
+const partyEl = document.getElementById('party');
+const menuEl = document.getElementById('menu');
+const turnOrderEl = document.getElementById('turn-order');
+const enemyLabelsLayer = document.getElementById('enemy-labels');
+
+function statusBadgesHTML(unit) {
+  if (!unit.statuses.length) return '';
+  return `<div class="statuses">${unit.statuses.map(s => {
+    const st = STATUSES[s.type];
+    return `<span class="status-badge" style="color:${st.color}">${st.icon}${s.turns}</span>`;
+  }).join('')}</div>`;
+}
+function elementBadgeHTML(unit) {
+  const el = ELEMENTS[unit.element];
+  return `<span class="element-badge" style="color:${el.color}">${el.icon}</span>`;
+}
+
+function renderParty() {
+  partyEl.innerHTML = '';
+  state.heroes.forEach((h, i) => {
+    const card = document.createElement('div');
+    card.className = 'unit-card' + (h.alive ? '' : ' dead') +
+                     (state.phase === 'INPUT' && state.inputIndex === i ? ' active' : '');
+    const nextXP = xpForLevel(h.level + 1);
+    card.innerHTML = `
+      <div class="header">
+        <span class="dot" style="color:${colorToCSS(h.color)}"></span>
+        <span>${h.name}</span>
+        <span class="row-ind" title="${h.row} row">${ROW_LABEL[h.row]}</span>
+        ${elementBadgeHTML(h)}
+        <span class="class">L${h.level} ${h.className}</span>
+      </div>
+      <div class="bar hp"><div style="width:${(h.hp/h.maxHp)*100}%"></div></div>
+      <div class="stat-line"><span class="label">HP</span><span>${h.hp} / ${h.maxHp}</span></div>
+      ${h.maxMp > 0 ? `
+        <div class="bar mp"><div style="width:${(h.mp/h.maxMp)*100}%"></div></div>
+        <div class="stat-line"><span class="label">MP</span><span>${h.mp} / ${h.maxMp}</span></div>
+      ` : ''}
+      <div class="bar xp"><div style="width:${(h.xp/nextXP)*100}%"></div></div>
+      <div class="stat-line"><span class="label">XP</span><span>${h.xp} / ${nextXP}</span></div>
+      ${statusBadgesHTML(h)}
+    `;
+    partyEl.appendChild(card);
+  });
+}
+
+function buildEnemyLabels() {
+  enemyLabelsLayer.innerHTML = '';
+  state.enemies.forEach(e => {
+    const div = document.createElement('div');
+    div.className = 'enemy-label' + (e.isBoss ? ' boss' : '');
+    e.labelEl = div;
+    enemyLabelsLayer.appendChild(div);
+  });
+  renderEnemyLabels();
+}
+function renderEnemyLabels() {
+  state.enemies.forEach(e => {
+    if (!e.labelEl) return;
+    e.labelEl.className = 'enemy-label' + (e.isBoss ? ' boss' : '') + (e.alive ? '' : ' dead');
+    const phaseTag = e.isBoss && e.alive
+      ? `<div class="phase-tag">Phase ${e.currentPhase + 1}: ${e.bossData.phases[e.currentPhase].name}</div>`
+      : '';
+    const charging = e.charging
+      ? `<div class="charging">⚠ Charging ${SPELLS[e.charging].name}!</div>`
+      : '';
+    e.labelEl.innerHTML = `
+      <div class="header">
+        <span class="dot" style="color:${colorToCSS(e.color)}"></span>
+        <span class="name">${e.name}</span>
+        ${elementBadgeHTML(e)}
+      </div>
+      <div class="bar hp"><div style="width:${(e.hp/e.maxHp)*100}%"></div></div>
+      ${phaseTag}
+      ${statusBadgesHTML(e)}
+      ${charging}
+    `;
+  });
+}
+function updateEnemyLabelPositions() {
+  state.enemies.forEach(e => {
+    if (!e.labelEl) return;
+    const v = e.group.position.clone();
+    v.y += (e.labelYOffset || 1.4);
+    v.project(camera);
+    const x = (v.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (1 - (v.y * 0.5 + 0.5)) * window.innerHeight;
+    e.labelEl.style.left = x + 'px';
+    e.labelEl.style.top  = y + 'px';
+  });
+}
+
+function renderTurnOrder() {
+  turnOrderEl.querySelectorAll('.turn-chip').forEach(n => n.remove());
+  if (state.phase !== 'RESOLVE') return;
+  const iconMap = { ATTACK: '⚔', MAGIC: '✦', DEFEND: '🛡', ITEM: '◇', ROW: '⇄', TELEGRAPH: '⚠' };
+  state.resolvedQueue.forEach((action, idx) => {
+    const u = action.actor;
+    const chip = document.createElement('div');
+    chip.className = 'turn-chip';
+    if (idx < state.currentResolveIdx) chip.classList.add('done');
+    if (idx === state.currentResolveIdx) chip.classList.add('current');
+    if (!u.alive) chip.classList.add('dead');
+    chip.innerHTML = `
+      <span class="dot" style="color:${colorToCSS(u.color)}"></span>
+      <span class="name">${u.name}</span>
+      <span class="icon">${iconMap[action.type] || '·'}</span>
+    `;
+    turnOrderEl.appendChild(chip);
+  });
+}
+
+function renderMenu() {
+  menuEl.innerHTML = '';
+  if (state.phase !== 'INPUT') return;
+  const hero = state.heroes[state.inputIndex];
+  if (!hero) return;
+
+  const panel = document.createElement('div'); panel.className = 'panel';
+  const prompt = document.createElement('div'); prompt.className = 'prompt';
+  prompt.textContent = `${hero.name}'s turn (${hero.row})`;
+  panel.appendChild(prompt);
+  const top = state.menuStack[state.menuStack.length - 1] || { type: 'main' };
+
+  if (top.type === 'main') {
+    addBtn(panel, 'Attack', () => state.menuStack.push({ type: 'target', side: 'foes', payload: { kind: 'ATTACK' } }));
+    addBtn(panel, 'Magic',  () => state.menuStack.push({ type: 'magic' }), hero.spells.length === 0);
+    addBtn(panel, 'Defend', () => commitAction({ type: 'DEFEND', actor: hero }));
+    addBtn(panel, 'Item',   () => state.menuStack.push({ type: 'item' }),
+      hero.items.potion + hero.items.ether === 0);
+    addBtn(panel, `Row → ${hero.row === 'front' ? 'Back' : 'Front'} <span class="right">${ROW_LABEL[hero.row === 'front' ? 'back' : 'front']}</span>`,
+      () => commitAction({ type: 'ROW', actor: hero }));
+  } else if (top.type === 'magic') {
+    hero.spells.forEach(spellId => {
+      const s = SPELLS[spellId];
+      const disabled = hero.mp < s.cost;
+      const elIcon = ELEMENTS[s.element].icon;
+      const b = addBtn(panel, `${elIcon} ${s.name} <span class="right">${s.cost} MP</span>`,
+        () => {
+          if (s.target === 'enemy')
+            state.menuStack.push({ type: 'target', side: 'foes', payload: { kind: 'MAGIC', spell: spellId } });
+          else if (s.target === 'ally')
+            state.menuStack.push({ type: 'target', side: 'party', payload: { kind: 'MAGIC', spell: spellId } });
+          else if (s.target === 'allEnemies')
+            commitAction({ type: 'MAGIC', spell: spellId, actor: hero, target: null });
+        }, disabled);
+      b.title = s.desc;
+    });
+    addBack(panel);
+  } else if (top.type === 'item') {
+    if (hero.items.potion > 0)
+      addBtn(panel, `Potion <span class="right">x${hero.items.potion}</span>`,
+        () => state.menuStack.push({ type: 'target', side: 'party', payload: { kind: 'ITEM', item: 'potion' } }));
+    if (hero.items.ether > 0)
+      addBtn(panel, `Ether <span class="right">x${hero.items.ether}</span>`,
+        () => state.menuStack.push({ type: 'target', side: 'party', payload: { kind: 'ITEM', item: 'ether' } }));
+    addBack(panel);
+  } else if (top.type === 'target') {
+    const list = top.side === 'foes' ? state.enemies : state.heroes;
+    list.filter(u => u.alive).forEach(u => {
+      const elIcon = ELEMENTS[u.element].icon;
+      addBtn(panel, `${elIcon} ${u.name} <span class="right">${u.hp}/${u.maxHp}</span>`, () => {
+        const a = { actor: hero, target: u };
+        const p = top.payload;
+        if (p.kind === 'ATTACK') a.type = 'ATTACK';
+        else if (p.kind === 'MAGIC') { a.type = 'MAGIC'; a.spell = p.spell; }
+        else if (p.kind === 'ITEM')  { a.type = 'ITEM'; a.item = p.item; }
+        commitAction(a);
+      });
+    });
+    addBack(panel);
+  }
+  menuEl.appendChild(panel);
+}
+
+function addBtn(parent, html, onClick, disabled = false) {
+  const b = document.createElement('button');
+  b.innerHTML = html;
+  b.disabled = disabled;
+  b.onclick = () => {
+    if (b.disabled || state.busy) return;
+    onClick();
+    renderAll();
+  };
+  parent.appendChild(b);
+  return b;
+}
+function addBack(parent) {
+  const b = addBtn(parent, '← Back', () => state.menuStack.pop());
+  b.classList.add('back');
+}
+
+function renderAll() {
+  renderParty();
+  renderMenu();
+  renderTurnOrder();
+  renderEnemyLabels();
+}
+
+// ---------- Action commit + scheduling ----------
+function commitAction(action) {
+  action.priority = (action.type === 'DEFEND' || action.type === 'ITEM' || action.type === 'ROW') ? 1 : 0;
+  state.pendingActions.push(action);
+  state.menuStack = [];
+  state.inputIndex++;
+  while (state.inputIndex < state.heroes.length && !state.heroes[state.inputIndex].alive)
+    state.inputIndex++;
+  if (state.inputIndex >= state.heroes.length) startResolvePhase();
+}
+
+function pickAITarget() {
+  return pick(state.heroes.filter(h => h.alive));
+}
+
+function startResolvePhase() {
+  state.enemies.filter(e => e.alive).forEach(e => {
+    if (e.isBoss) {
+      state.pendingActions.push(bossPickAction(e));
+    } else {
+      const r = Math.random();
+      const skill = SPELLS[e.skill];
+      if (r < 0.20 && e.mp >= skill.cost) {
+        state.pendingActions.push({ actor: e, type: 'MAGIC', spell: e.skill,
+                                     target: pickAITarget(), priority: 0 });
+      } else if (r < 0.35) {
+        state.pendingActions.push({ actor: e, type: 'DEFEND', priority: 1 });
+      } else {
+        state.pendingActions.push({ actor: e, type: 'ATTACK', target: pickAITarget(), priority: 0 });
+      }
+    }
+  });
+
+  state.heroes.concat(state.enemies).forEach(u => u.defending = false);
+
+  state.pendingActions.sort((a, b) => {
+    if (b.priority !== a.priority) return b.priority - a.priority;
+    return (effectiveSpeed(b.actor) + Math.random() * 0.001) -
+           (effectiveSpeed(a.actor) + Math.random() * 0.001);
+  });
+
+  state.resolvedQueue = state.pendingActions;
+  state.pendingActions = [];
+  state.currentResolveIdx = 0;
+  state.phase = 'RESOLVE';
+  state.turnNumber++;
+  renderAll();
+  resolveNext();
+}
+
+async function resolveNext() {
+  if (state.busy) return;
+  if (state.currentResolveIdx >= state.resolvedQueue.length) {
+    state.busy = true;
+    await endOfRoundTick();
+    if (checkBattleEnd()) { state.busy = false; return; }
+    state.busy = false;
+    startInputPhase();
+    return;
+  }
+  state.busy = true;
+  const action = state.resolvedQueue[state.currentResolveIdx];
+  renderTurnOrder();
+
+  if (action.actor.alive) {
+    await executeAction(action);
+  }
+  if (checkBattleEnd()) {
+    state.busy = false;
+    return;
+  }
+  state.currentResolveIdx++;
+  state.busy = false;
+  await sleep(120);
+  resolveNext();
+}
+
+function startInputPhase() {
+  state.phase = 'INPUT';
+  state.inputIndex = 0;
+  while (state.inputIndex < state.heroes.length && !state.heroes[state.inputIndex].alive)
+    state.inputIndex++;
+  state.menuStack = [];
+  state.pendingActions = [];
+  state.resolvedQueue = [];
+  if (state.inputIndex >= state.heroes.length) {
+    startResolvePhase();
+    return;
+  }
+  renderAll();
+}
+
+// ---------- Execute action ----------
+async function executeAction(action) {
+  const a = action.actor;
+
+  const gate = canAct(a);
+  if (!gate.ok) {
+    if (gate.reason === 'asleep') {
+      log(`${a.name} is fast asleep.`);
+      showFloatingText(a, 'Zzz...', 'miss');
+    } else {
+      log(`${a.name} is paralyzed and can't move!`);
+      showFloatingText(a, 'Paralyzed!', 'miss');
+    }
+    flashColor(a, 0x888888, 280);
+    await sleep(500);
+    return;
+  }
+
+  if (action.type === 'ATTACK') {
+    let target = action.target;
+    if (!target || !target.alive) {
+      const pool = (a.kind === 'hero' ? state.enemies : state.heroes).filter(u => u.alive);
+      target = pick(pool);
+    }
+    if (!target) return;
+    log(`${a.name} attacks ${target.name}.`);
+    await attackAnim(a, target);
+    const { dmg, crit, eff, rowMul } = calcDamage(a, target);
+    await applyDamageToTarget(target, dmg);
+    flashHit(target);
+    shakeMesh(target.mesh, 0.18, 240);
+    showFloatingText(target, dmg, crit ? 'crit' : '');
+    const el = effLabel(eff);
+    if (el) showFloatingText(target, el.text, el.cls, -28);
+    if (rowMul < 1) log(`  (back-row reduces damage)`);
+    if (crit) log(`Critical hit! ${dmg} damage.`);
+    else log(`${dmg} damage.`);
+    if (hasStatus(target, 'sleep')) {
+      clearStatus(target, 'sleep');
+      log(`${target.name} woke up!`);
+    }
+    renderAll();
+    await sleep(380);
+    await returnHome(a);
+    if (target.hp <= 0) await handleKO(target);
+
+  } else if (action.type === 'MAGIC') {
+    const spell = SPELLS[action.spell];
+    if (a.mp < spell.cost) { log(`${a.name} has no MP for ${spell.name}.`); return; }
+    a.mp = Math.max(0, a.mp - spell.cost);
+    let targets = [];
+    if (spell.target === 'enemy')         targets = [action.target];
+    else if (spell.target === 'ally')     targets = [action.target];
+    else if (spell.target === 'allEnemies'){
+      targets = (a.kind === 'hero' ? state.enemies : state.heroes).filter(u => u.alive);
+    }
+    targets = targets.filter(t => t && t.alive);
+    if (!targets.length) {
+      const pool = (a.kind === 'hero' ? state.enemies : state.heroes).filter(u => u.alive);
+      if (pool.length) targets = [pick(pool)];
+    }
+    if (a.isBoss && (action.spell === 'annihilate' || action.spell === 'dark_storm')) {
+      logBoss(`${a.name} unleashes ${spell.name}!`);
+    } else {
+      log(`${a.name} casts ${spell.name}.`);
+    }
+    // Clear telegraph if this is the charged spell
+    if (a.charging) a.charging = null;
+    await castAnim(a, targets, spell.element);
+
+    for (const t of targets) {
+      if (!t.alive) continue;
+      if (spell.heal) {
+        const h = calcHeal(a, { power: spell.power });
+        const before = t.hp;
+        t.hp = Math.min(t.maxHp, t.hp + h);
+        flashHeal(t);
+        showFloatingText(t, '+' + (t.hp - before), 'heal');
+        log(`${t.name} recovers ${t.hp - before} HP.`);
+      } else if (spell.statusOnly) {
+        flashHit(t);
+      } else {
+        const { dmg, eff } = calcDamage(a, t, { magic: true, power: spell.power, element: spell.element });
+        await applyDamageToTarget(t, dmg);
+        flashHit(t);
+        shakeMesh(t.mesh, 0.16, 230);
+        showFloatingText(t, dmg);
+        const el = effLabel(eff);
+        if (el) showFloatingText(t, el.text, el.cls, -28);
+        if (hasStatus(t, 'sleep')) {
+          clearStatus(t, 'sleep');
+          log(`${t.name} woke up!`);
+        }
+      }
+      if (spell.inflict && t.alive && Math.random() < spell.inflict.chance) {
+        const st = STATUSES[spell.inflict.status];
+        if (applyStatusEffect(t, spell.inflict.status, spell.inflict.turns)) {
+          showFloatingText(t, `${st.icon} ${st.name}!`, 'status-applied', -50);
+          log(`${t.name} is afflicted with ${st.name}.`);
+        }
+      }
+    }
+    renderAll();
+    await sleep(450);
+    for (const t of targets) if (t.alive && t.hp <= 0) await handleKO(t);
+
+  } else if (action.type === 'DEFEND') {
+    a.defending = true;
+    log(`${a.name} defends.`);
+    flashColor(a, 0xffffff, 260);
+    await sleep(280);
+
+  } else if (action.type === 'ROW') {
+    const newRow = a.row === 'front' ? 'back' : 'front';
+    log(`${a.name} moves to ${newRow} row.`);
+    a.row = newRow;
+    await rowSwapAnim(a, newRow);
+    renderAll();
+
+  } else if (action.type === 'TELEGRAPH') {
+    const spell = SPELLS[action.charging];
+    a.charging = action.charging;
+    logBoss(`${a.name} is charging ${spell.name}!`);
+    showFloatingText(a, `⚠ ${spell.name.toUpperCase()}`, 'telegraph', -40);
+    // Visual: stronger pulse
+    const mat = a.mesh.material;
+    const orig = mat.emissive.getHex();
+    mat.emissive.setHex(0xff3333);
+    await tween(a.mesh.scale, { x: 1.18, y: 1.18, z: 1.18 }, 380, TWEEN.Easing.Quadratic.Out);
+    await tween(a.mesh.scale, { x: 1.0, y: 1.0, z: 1.0 }, 380, TWEEN.Easing.Quadratic.In);
+    mat.emissive.setHex(orig);
+    renderAll();
+
+  } else if (action.type === 'ITEM') {
+    const item = action.item;
+    const t = action.target || a;
+    if (item === 'potion' && a.items.potion > 0) {
+      a.items.potion--;
+      const before = t.hp;
+      t.hp = Math.min(t.maxHp, t.hp + 50);
+      flashHeal(t);
+      showFloatingText(t, '+' + (t.hp - before), 'heal');
+      log(`${a.name} uses Potion on ${t.name}. +${t.hp - before} HP.`);
+    } else if (item === 'ether' && a.items.ether > 0) {
+      a.items.ether--;
+      const before = t.mp;
+      t.mp = Math.min(t.maxMp, t.mp + 20);
+      flashHeal(t);
+      showFloatingText(t, '+' + (t.mp - before) + ' MP', 'heal');
+      log(`${a.name} uses Ether on ${t.name}. +${t.mp - before} MP.`);
+    }
+    renderAll();
+    await sleep(420);
+  }
+}
+
+async function handleKO(unit) {
+  if (!unit.alive) return;
+  unit.alive = false;
+  unit.statuses = [];
+  unit.charging = null;
+  if (unit.isBoss) {
+    logBoss(`${unit.name} has been defeated!`);
+    state.bossDefeatedThisBattle = true;
+  } else {
+    log(`${unit.name} is defeated.`);
+  }
+  await dieAnim(unit);
+  renderAll();
+}
+
+// ---------- End-of-round status tick ----------
+async function endOfRoundTick() {
+  const all = [...state.heroes, ...state.enemies].filter(u => u.alive);
+  for (const u of all) {
+    if (!u.statuses.length) continue;
+    for (const s of u.statuses.slice()) {
+      const st = STATUSES[s.type];
+      if (st.dot && u.alive) {
+        const dmg = Math.max(1, Math.floor(u.maxHp / 8));
+        await applyDamageToTarget(u, dmg);
+        flashColor(u, parseInt(st.color.replace('#', ''), 16), 240);
+        showFloatingText(u, dmg, `dot ${s.type}`);
+        log(`${u.name} takes ${dmg} ${st.name.toLowerCase()} damage.`);
+        await sleep(280);
+        if (u.hp <= 0) {
+          await handleKO(u);
+          break;
+        }
+      }
+    }
+    if (u.alive) {
+      u.statuses.forEach(s => s.turns--);
+      const expired = u.statuses.filter(s => s.turns <= 0);
+      expired.forEach(s => log(`${u.name}'s ${STATUSES[s.type].name} wore off.`));
+      u.statuses = u.statuses.filter(s => s.turns > 0);
+    }
+  }
+  renderAll();
+}
+
+// ---------- End of battle + XP screen ----------
+function checkBattleEnd() {
+  const partyAlive = state.heroes.some(h => h.alive);
+  const foesAlive  = state.enemies.some(e => e.alive);
+  if (!partyAlive) { endBattle('LOSE'); return true; }
+  if (!foesAlive)  { endBattle('WIN');  return true; }
+  return false;
+}
+
+const overlay = document.getElementById('overlay');
+const overlayTitle = document.getElementById('overlay-title');
+const overlayBody = document.getElementById('overlay-body');
+const overlayBtn = document.getElementById('overlay-btn');
+
+function formatDelta(d) {
+  const parts = [];
+  if (d.hp)   parts.push(`+${d.hp} HP`);
+  if (d.mp)   parts.push(`+${d.mp} MP`);
+  if (d.atk)  parts.push(`+${d.atk} ATK`);
+  if (d.def)  parts.push(`+${d.def} DEF`);
+  if (d.mag)  parts.push(`+${d.mag} MAG`);
+  if (d.mdef) parts.push(`+${d.mdef} MDEF`);
+  if (d.spd)  parts.push(`+${d.spd} SPD`);
+  return parts.join('  ·  ');
+}
+
+async function endBattle(result) {
+  state.phase = 'OVER';
+  state.lastResult = result;
+  overlayTitle.textContent = result === 'WIN' ? (state.bossDefeatedThisBattle ? 'BOSS DEFEATED' : 'VICTORY') : 'DEFEAT';
+  overlayTitle.style.color = result === 'WIN'
+    ? (state.bossDefeatedThisBattle ? '#ff88aa' : '#ffe678')
+    : '#ff7788';
+  overlayBtn.textContent = result === 'WIN' ? 'Next Battle' : 'New Game';
+
+  if (result === 'WIN') {
+    const xpAmount = state.enemies.reduce((sum, e) => sum + e.xpValue, 0);
+    state.heroes.filter(h => h.alive).forEach(h => {
+      showFloatingText(h, `+${xpAmount} XP`, 'xp', -10);
+    });
+    await sleep(700);
+
+    const levelUps = awardXP(xpAmount);
+
+    for (const lu of levelUps) {
+      showFloatingText(lu.hero, `LEVEL UP!`, 'levelup', -40);
+    }
+    if (levelUps.length) await sleep(900);
+
+    let html = '';
+    if (state.bossDefeatedThisBattle) {
+      html += `<div class="boss-defeat">A boss has fallen.</div>`;
+    }
+    html += `<div class="xp-info">+${xpAmount} XP shared</div>`;
+    if (levelUps.length) {
+      html += levelUps.map(lu => `
+        <div class="level-up">
+          ${lu.hero.name} reached Level ${lu.hero.level}!
+          <span class="delta">${formatDelta(lu.delta)}</span>
+        </div>
+      `).join('');
+    }
+    html += `<div class="xp-status">`;
+    state.heroes.forEach(h => {
+      const next = xpForLevel(h.level + 1);
+      const status = h.alive ? '' : ' (KO)';
+      html += `<div class="row"><span>${h.name}${status}</span><span>L${h.level} · ${h.xp}/${next} XP</span></div>`;
+    });
+    html += `</div>`;
+    overlayBody.innerHTML = html;
+  } else {
+    overlayBody.innerHTML = `<div style="text-align:center;color:#c7bbe0">Your party fell. Start over from Level 4 with fresh heroes.</div>`;
+  }
+  overlay.style.display = 'flex';
+}
+
+overlayBtn.onclick = () => {
+  overlay.style.display = 'none';
+  if (state.lastResult === 'LOSE') {
+    resetGame();
+  }
+  startNewBattle();
+};
+
+// ---------- Help/Legend toggle ----------
+const helpBtn = document.getElementById('help-btn');
+const legend = document.getElementById('legend');
+helpBtn.onclick = () => {
+  legend.style.display = legend.style.display === 'block' ? 'none' : 'block';
+};
+
+// ---------- Persistence between battles ----------
+function disposeUnit(u) {
+  scene.remove(u.group);
+  // Walk the group and dispose meshes/materials
+  u.group.traverse(obj => {
+    if (obj.isMesh) {
+      obj.geometry && obj.geometry.dispose();
+      obj.material && obj.material.dispose();
+    }
+  });
+}
+
+function resetGame() {
+  state.heroes.forEach(disposeUnit);
+  state.heroes = [];
+  state.enemies.forEach(disposeUnit);
+  state.enemies = [];
+  enemyLabelsLayer.innerHTML = '';
+  state.battleNumber = 0;
+}
+
+function clearEnemies() {
+  state.enemies.forEach(disposeUnit);
+  state.enemies = [];
+  enemyLabelsLayer.innerHTML = '';
+}
+
+function healAndReposition(h) {
+  h.hp = h.maxHp;
+  h.mp = h.maxMp;
+  h.alive = true;
+  h.statuses = [];
+  h.defending = false;
+  h.mesh.scale.set(1, 1, 1);
+  if (h.mesh.material.transparent) {
+    h.mesh.material.opacity = 1;
+    h.mesh.material.transparent = false;
+  }
+  const x = ROW_X[h.row];
+  h.group.position.set(x, 0, h.group.position.z);
+  h.basePos.set(x, 0, h.group.position.z);
+}
+
+// Boss banner intro
+const bossBanner = document.getElementById('boss-banner');
+async function showBossBanner() {
+  bossBanner.style.opacity = 0;
+  bossBanner.textContent = 'BOSS BATTLE';
+  await tween(bossBanner.style, {}, 0); // no-op; we just want to set
+  // animate via TWEEN on a plain object
+  const o = { v: 0 };
+  await tween(o, { v: 1 }, 400, TWEEN.Easing.Quadratic.Out).then(() => bossBanner.style.opacity = 1);
+  // hold + then fade
+  await sleep(900);
+  const o2 = { v: 1 };
+  await new Promise(res => {
+    new TWEEN.Tween(o2).to({ v: 0 }, 600)
+      .onUpdate(() => bossBanner.style.opacity = o2.v)
+      .onComplete(res).start();
+  });
+}
+
+function startNewBattle() {
+  if (state.heroes.length === 0) {
+    HERO_CLASSES.forEach((c, i) => state.heroes.push(createHero(c, 4, i)));
+  } else {
+    clearEnemies();
+    state.heroes.forEach(healAndReposition);
+  }
+  state.battleNumber++;
+  state.bossDefeatedThisBattle = false;
+
+  // Every 3rd battle is a boss
+  const isBoss = (state.battleNumber % 3 === 0);
+  if (isBoss) {
+    state.enemies.push(createBoss(pick(BOSS_TYPES)));
+  } else {
+    const enemyCount = randInt(2, 4);
+    const picks = [];
+    for (let i = 0; i < enemyCount; i++) picks.push(pick(ENEMY_TYPES));
+    picks.forEach((p, i) => state.enemies.push(createEnemy(p, i, enemyCount)));
+  }
+
+  state.phase = 'INPUT';
+  state.turnNumber = 0;
+  state.menuStack = [];
+  state.pendingActions = [];
+  state.resolvedQueue = [];
+  state.inputIndex = 0;
+  state.busy = false;
+  logEl.innerHTML = '';
+  if (isBoss) {
+    logBoss(`Battle ${state.battleNumber}: ${state.enemies[0].name} appears!`);
+    // banner intro
+    state.busy = true;
+    showBossBanner().then(() => {
+      state.busy = false;
+      buildEnemyLabels();
+      startInputPhase();
+    });
+  } else {
+    log(`Battle ${state.battleNumber}: a group of ${state.enemies.length} appears!`);
+    buildEnemyLabels();
+    startInputPhase();
+  }
+}
+
+// ---------- Render loop ----------
+const clock = new THREE.Clock();
+function loop() {
+  requestAnimationFrame(loop);
+  const dt = clock.getDelta();
+  const t = clock.getElapsedTime();
+  TWEEN.update();
+
+  state.enemies.forEach(e => {
+    if (e.alive) {
+      e.mesh.rotation.y += e.spinSpeed * dt;
+      e.mesh.rotation.x += e.spinSpeed * dt * 0.4;
+      if (e.satellites) {
+        e.satellites.forEach(s => {
+          s.angle += s.angleSpeed * dt;
+          s.mesh.position.set(
+            Math.cos(s.angle) * s.radius,
+            Math.sin(s.angle * 1.3 + s.phase) * 0.4,
+            Math.sin(s.angle) * s.radius
+          );
+          s.mesh.rotation.x += dt * 3;
+          s.mesh.rotation.y += dt * 2;
+        });
+      }
+    }
+  });
+  state.heroes.forEach((h, i) => {
+    if (h.alive) {
+      const s = 1 + Math.sin(t * 1.5 + i) * 0.025;
+      h.mesh.scale.set(s, s, s);
+    }
+  });
+
+  updateEnemyLabelPositions();
+  renderer.render(scene, camera);
+}
+
+startNewBattle();
+loop();
+
+console.log('%cOpenJRPG prototype loaded.', 'color:#ffe678;font-weight:bold');
+console.log('Bosses every 3 battles. Available:', BOSS_TYPES.map(b => b.name).join(', '));
+</script>
+</body>
+</html>
