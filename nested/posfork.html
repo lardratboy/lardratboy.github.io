@@ -155,11 +155,22 @@
         </div>
     </div>
 
-    <div class="group-label" style="margin-top:10px;">Coordinate Source</div>
-    <select id="selCoord" onchange="setCoordSrc(parseInt(this.value))">
-        <option value="0" selected>Value space</option>
-        <option value="1">Tuple space (index)</option>
-    </select>
+    <div class="select-row" style="margin-top:10px;">
+        <div>
+            <div class="group-label">Coordinate Source</div>
+            <select id="selCoord" onchange="setCoordSrc(parseInt(this.value))">
+                <option value="0" selected>Value space</option>
+                <option value="1">Tuple space (index)</option>
+            </select>
+        </div>
+        <div>
+            <div class="group-label">Index Layout</div>
+            <select id="selLayout" onchange="setLayout(parseInt(this.value))">
+                <option value="0" selected>Odometer (Raster)</option>
+                <option value="1">Morton (Z-order)</option>
+            </select>
+        </div>
+    </div>
 
     <details>
         <summary>Hierarchy Gaps</summary>
@@ -407,7 +418,7 @@ const COMPUTE_WGSL = `
 struct Params {
     format: u32, isLE: u32, shift: u32, tupleCount: u32,
     byteStep: u32, wSize: u32, coordSrc: u32, tierShift: u32,
-    cubeSide: u32, chunkBase: u32, _pad0: u32, _pad1: u32,
+    cubeSide: u32, chunkBase: u32, idxLayout: u32, mortonBits: u32,
 };
 
 @group(0) @binding(0) var<storage, read> raw: array<u32>;
@@ -543,17 +554,34 @@ fn main(
         let cr=(cdx*255u)/511u; let cg=(cdy*255u)/511u; let cb=(cdz*255u)/511u;
 
         // Position coordinates: value space (default) or tuple/index space.
-        // Tuple space lays the global tuple index out on a cube of side cubeSide
-        // (odometer fill), then normalizes each axis to the 32-bit canvas so the
-        // existing tier extraction below treats it exactly like a value.
+        // Tuple space lays the global tuple index out on a cube (odometer/raster
+        // fill, or Morton/Z-order for locality), then normalizes each axis to the
+        // 32-bit canvas so the existing tier extraction below treats it as a value.
         var vx=valx; var vy=valy; var vz=valz;
         if (P.coordSrc == 1u) {
             let gIdx = P.chunkBase + idx;
-            let A = max(P.cubeSide, 2u);
-            let den = f32(A - 1u);
-            let ix = gIdx % A;
-            let iy = (gIdx / A) % A;
-            let iz = (gIdx / (A * A)) % A;
+            var ix = 0u; var iy = 0u; var iz = 0u;
+            var den = 1.0;
+            if (P.idxLayout == 1u) {
+                // Morton / Z-order: deinterleave the index bits across x,y,z.
+                // Consecutive indices trace a locality-preserving space-filling
+                // curve, so nearby file positions stay nearby in the cube and the
+                // hierarchy tiers become octree levels of the file timeline.
+                let mb = P.mortonBits;
+                for (var b = 0u; b < mb; b = b + 1u) {
+                    ix = ix | (((gIdx >> (3u*b))       & 1u) << b);
+                    iy = iy | (((gIdx >> (3u*b + 1u))  & 1u) << b);
+                    iz = iz | (((gIdx >> (3u*b + 2u))  & 1u) << b);
+                }
+                den = f32(max((1u << mb) - 1u, 1u));
+            } else {
+                // Odometer / raster: fill x fastest, then y, then z.
+                let A = max(P.cubeSide, 2u);
+                ix = gIdx % A;
+                iy = (gIdx / A) % A;
+                iz = (gIdx / (A * A)) % A;
+                den = f32(A - 1u);
+            }
             vx = u32(clamp(f32(ix)/den, 0.0, 1.0) * S);
             vy = u32(clamp(f32(iy)/den, 0.0, 1.0) * S);
             vz = u32(clamp(f32(iz)/den, 0.0, 1.0) * S);
@@ -1085,6 +1113,7 @@ const FORMAT_ID = {
 let state = {
     format: 'uint32', isLE: true, shift: 23, tierShift: 20,
     coordSrc: 0, // 0 = value space, 1 = tuple/index space
+    layout: 0,   // 0 = odometer/raster, 1 = Morton/Z-order (tuple space only)
     gaps: [0.25, 0.1, 0.05], inflate: 0.5,
     file: null, fileSize: 0, buffer: null, fileName: "Internal",
     mode: 0, // 0 = 3D, 1 = Tiled 2D, 2 = Atlas 3D
@@ -1583,6 +1612,10 @@ async function runCompute() {
     // Tuple space: side length of the cube the global index is laid out on.
     // Computed from the whole window so the layout is consistent across chunks.
     const cubeSide = Math.max(2, Math.ceil(Math.cbrt(totalTuples)));
+    // Morton needs a power-of-two cube; bits per axis = ceil(log2(cubeSide)).
+    // Capped at 10 (cube of ~1e9 points, well past the output cap) so the
+    // shader's 3*b bit shift can never reach 32 (which would be undefined).
+    const mortonBits = Math.min(10, Math.max(1, Math.ceil(Math.log2(cubeSide))));
 
     // Fix #4: Bind group is stable — rawDataBuf, outputBuf, etc. are all reused
     const computeBG = device.createBindGroup({ layout: computeBGL, entries: [
@@ -1623,6 +1656,8 @@ async function runCompute() {
         computeUniformData[7] = state.tierShift;
         computeUniformData[8] = cubeSide;                  // side length for the index odometer (whole window)
         computeUniformData[9] = startTuple;                // global index of this chunk's first tuple
+        computeUniformData[10] = state.layout ? 1 : 0;     // 0 = odometer/raster, 1 = Morton
+        computeUniformData[11] = mortonBits;               // bits per axis for Morton deinterleave
         device.queue.writeBuffer(computeUniformBuf, 0, computeUniformData);
 
         // Dispatch
@@ -2053,7 +2088,7 @@ async function exportPLY() {
         "ply",
         "format binary_little_endian 1.0",
         `comment Generated by Unified Strata WebGPU — ${state.fileName}`,
-        `comment Type: ${state.format} Endian: ${state.isLE?'LE':'BE'} Dive: ${state.shift} Zoom: ${state.tierShift} Coord: ${state.coordSrc?'tuple':'value'}`,
+        `comment Type: ${state.format} Endian: ${state.isLE?'LE':'BE'} Dive: ${state.shift} Zoom: ${state.tierShift} Coord: ${state.coordSrc?('tuple/'+(state.layout?'morton':'odometer')):'value'}`,
         `comment Export: ${onlySelected ? 'selected only' : 'all visible'} (${count} of ${pointCount})`,
         `element vertex ${count}`,
         "property float x", "property float y", "property float z",
@@ -2145,6 +2180,7 @@ function setFormat(f){
 function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=le?'le':'be';runCompute();}
 function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);state.subRotX=0;state.subRotY=0;}
 function setCoordSrc(c){state.coordSrc=c;document.getElementById('selCoord').value=String(c);scheduleCompute();}
+function setLayout(l){state.layout=l;document.getElementById('selLayout').value=String(l);scheduleCompute();}
 function handleFile(files){
     if(!files[0])return;
     const f = files[0];
