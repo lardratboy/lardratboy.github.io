@@ -73,6 +73,10 @@
   .txt{height:38px;padding:0 15px;font-size:13px;font-weight:600;letter-spacing:.02em;}
   .txt.primary{background:#1c2433;border-color:#2a3850;}
   .txt.primary:hover{border-color:var(--signal-dim);color:var(--signal);}
+  .gselect{height:38px;padding:0 10px;font-family:var(--mono);font-size:12px;background:#161d29;
+    color:var(--text);border:1px solid var(--hair);border-radius:9px;cursor:pointer;max-width:46vw;}
+  .gselect:hover{border-color:#2a3850;}
+  .gselect option{background:#10151f;color:var(--text);}
 
   /* ── overlays ── */
   .overlay{position:absolute;inset:0;z-index:50;display:none;align-items:center;justify-content:center;
@@ -118,14 +122,16 @@
         <button class="gbtn on" data-grav="down" title="Gravity down">↓</button>
         <button class="gbtn" data-grav="right" title="Gravity right">→</button>
       </div>
-      <div class="divider"></div>
-      <div class="grp">
-        <span class="label">Rotate</span>
-        <button class="tbtn" id="rot-ccw" title="Rotate counter-clockwise">↺</button>
-        <button class="tbtn" id="rot-cw"  title="Rotate clockwise">↻</button>
+      <div class="divider" id="tr-div"></div>
+      <div class="grp" id="transform-grp">
+        <span class="label">Transform</span>
+        <span id="transform-btns" style="display:flex;gap:5px;"></span>
       </div>
       <div class="divider"></div>
-      <button class="txt primary" id="new-board">New board</button>
+      <div class="grp">
+        <select id="game-select" class="gselect" title="Choose a game definition"></select>
+        <button class="txt primary" id="new-board">New board</button>
+      </div>
     </div>
   </div>
 
@@ -209,6 +215,7 @@ class RulesEngine{
     return moves;
   }
   collapse(){
+    if(this.def.rules.laneCollapse===false)return null;
     if(this.gravityField)return null;
     const g=GRAVITY[this.gravityDir];if(g.dr===0&&g.dc===0)return null;
     const vertical=g.dr!==0;
@@ -265,6 +272,23 @@ class RulesEngine{
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
     const cm=this.collapse();if(cm)steps.push({kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm});
     steps.push({kind:'state',...this.checkState()});return steps;}
+  // Toroidal scroll: translate the MOBILE layer one lane (mask stays fixed — §7). Full-rect torus only.
+  scroll(spec){
+    if(this.topology!=='torus')return null;
+    let dr=0,dc=0;
+    if(spec==='scrollC+')dc=1; else if(spec==='scrollC-')dc=-1;
+    else if(spec==='scrollR+')dr=1; else if(spec==='scrollR-')dr=-1; else return null;
+    const ng=grid(this.rows,this.cols,()=>null);
+    for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){const id=this.grid[r][c];if(id==null)continue;
+      ng[(r+dr+this.rows)%this.rows][(c+dc+this.cols)%this.cols]=id;}
+    this.grid=ng; return this._snapshotMoves();
+  }
+  scrollBoard(spec){
+    const sm0=this.scroll(spec); if(!sm0)return[{kind:'state',...this.checkState()}];
+    const steps=[{kind:'scroll',moves:sm0}];
+    const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
+    const cm=this.collapse();if(cm)steps.push({kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm});
+    steps.push({kind:'state',...this.checkState()});return steps;}
   hasValidMoves(){for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++)
     if(this.grid[r][c]!=null&&this.findGroup(r,c).length>=this.def.rules.minGroupSize)return true;return false;}
   checkState(){
@@ -275,13 +299,14 @@ class RulesEngine{
   }
 }
 
-// ████ DEFINITION — Eight Neighbors, expressed as data ████
-function eightNeighbors(rows,cols,prizeCells){
-  return {
-    name:'Eight Neighbors', format:'lattice-game/1',
+// ████ DEFINITIONS — each game is just a rules object over the same engine (§10) ████
+const PALETTE=[{id:'sphere',color:0xff5b5b},{id:'cube',color:0x5bd97a},{id:'tetra',color:0x5b9dff},
+               {id:'octa',color:0xffd24a},{id:'icosa',color:0xff5bff},{id:'dodeca',color:0xe8eef7}];
+function baseDef(name,rows,cols,prizeCells,over){
+  const d={
+    name, format:'lattice-game/1',
     lattice:{rows,cols,topology:'plane'},
-    palette:[{id:'sphere',color:0xff5b5b},{id:'cube',color:0x5bd97a},{id:'tetra',color:0x5b9dff},
-             {id:'octa',color:0xffd24a},{id:'icosa',color:0xff5bff},{id:'dodeca',color:0xe8eef7}],
+    palette:PALETTE,
     layers:{
       mask:{binding:'substrate',grid:grid(rows,cols,()=>true)},
       pieces:{binding:'mobile',grid:grid(rows,cols,()=>null)},
@@ -289,10 +314,30 @@ function eightNeighbors(rows,cols,prizeCells){
       prizes:{binding:'rider',cells:prizeCells||[]}
     },
     rules:{matchAdjacency:'moore',matchBy:'type',minGroupSize:2,gravity:'down',laneCollapse:true,
-           transforms:['rotateCW','rotateCCW']},
+           transforms:['rotateCCW','rotateCW']},
     win:{type:'collectAllPrizes'}, lose:{type:'noValidMoves'}
   };
+  return over?over(d):d;
 }
+// The §10 sanity set — same engine, different switches. Each proves one generalization.
+const GAMES=[
+  {key:'eight', label:'Eight Neighbors',
+    build:(r,c,pz)=>baseDef('Eight Neighbors',r,c,pz)},
+  {key:'same', label:'SameGame · orthogonal',
+    build:(r,c,pz)=>baseDef('SameGame',r,c,pz,d=>{d.rules.matchAdjacency='vonNeumann';d.rules.transforms=[];return d;})},
+  {key:'sideways', label:'Sideways collapse',
+    build:(r,c,pz)=>baseDef('Sideways collapse',r,c,pz,d=>{d.rules.gravity='left';return d;})},
+  {key:'torus', label:'Torus tap · wrap + scroll',
+    build:(r,c,pz)=>baseDef('Torus tap',r,c,pz,d=>{d.lattice.topology='torus';d.rules.laneCollapse=false;
+      d.rules.transforms=['scrollC-','scrollC+'];return d;})},
+  {key:'twozone', label:'Two-zone gravity',
+    build:(r,c,pz)=>baseDef('Two-zone gravity',r,c,pz,d=>{
+      // right half locked to 'right'; left half null → follows the global gravity buttons
+      d.layers.gravityZones={binding:'field',anchored:true,
+        grid:grid(r,c,(rr,cc)=> cc>=Math.floor(c/2)?'right':null)};
+      return d;})},
+];
+
 
 // ████ VIEW — THREE.js. Consumes engine state + animates the engine's step list. ████
 const PIECE_GEOM={
@@ -371,6 +416,7 @@ class View{
     for(const step of steps){
       if(step.kind==='clear') await this._animClear(step);
       else if(step.kind==='settle') await this._animMoves(step.moves,'bounce');
+      else if(step.kind==='scroll') await this._animMoves(step.moves,'slide');
       else if(step.kind==='collapse'){this.dims=step.dims;this.frameCamera();await this._animMoves(step.moves,'slide');}
       else if(step.kind==='rotate'){this.dims=step.dims;this.frameCamera();await this._animMoves(step.moves,'spin');}
     }
@@ -458,14 +504,15 @@ function pickPrizeCells(rows,cols,n){
   for(let i=all.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[all[i],all[j]]=[all[j],all[i]];}
   return all.slice(0,n);
 }
+let currentGame=GAMES[0];
 function newBoard(){
   const prizeN=Math.min(8,Math.max(4,Math.floor(ROWS*COLS/16)));
   let tries=0;
-  do{ const def=eightNeighbors(ROWS,COLS,pickPrizeCells(ROWS,COLS,prizeN));
+  do{ const def=currentGame.build(ROWS,COLS,pickPrizeCells(ROWS,COLS,prizeN));
       engine=new RulesEngine(def); tries++; }
-  while(!engine.hasValidMoves()&&tries<60);
+  while(!engine.hasValidMoves()&&tries<80);
   view.build(engine);
-  syncHUD(); renderDefinition();
+  syncHUD(); renderDefinition(); renderTransformControls();
   hide('ov-win'); hide('ov-lose');
 }
 function syncHUD(){
@@ -479,11 +526,31 @@ function renderDefinition(){
     ['lattice', engine.rows+'×'+engine.cols+' · '+d.lattice.topology, false],
     ['adjacency', d.rules.matchAdjacency, false],
     ['minGroup', d.rules.minGroupSize, false],
-    ['gravity', engine.gravityDir, true],
+    ['gravity', engine.gravityField?engine.gravityDir+' +field':engine.gravityDir, true],
     ['win', d.win.type, false],
   ];
   document.getElementById('def-rows').innerHTML=rows.map(([k,v,acc])=>
     `<div class="row"><span class="k">${k}</span><span class="val${acc?' accent':''}">${v}</span></div>`).join('');
+}
+// transform buttons are driven by the definition's rules.transforms list
+const TRANSFORM_BTN={
+  rotateCCW:{g:'↺',t:'Rotate counter-clockwise',run:()=>engine.rotateBoard('ccw')},
+  rotateCW:{g:'↻',t:'Rotate clockwise',run:()=>engine.rotateBoard('cw')},
+  'scrollC-':{g:'⇠',t:'Scroll columns left (wrap)',run:()=>engine.scrollBoard('scrollC-')},
+  'scrollC+':{g:'⇢',t:'Scroll columns right (wrap)',run:()=>engine.scrollBoard('scrollC+')},
+  'scrollR-':{g:'⇡',t:'Scroll rows up (wrap)',run:()=>engine.scrollBoard('scrollR-')},
+  'scrollR+':{g:'⇣',t:'Scroll rows down (wrap)',run:()=>engine.scrollBoard('scrollR+')},
+};
+function renderTransformControls(){
+  const list=engine.def.rules.transforms||[];
+  const grp=document.getElementById('transform-grp'), div=document.getElementById('tr-div');
+  const host=document.getElementById('transform-btns'); host.innerHTML='';
+  const show=list.some(k=>TRANSFORM_BTN[k]);
+  grp.style.display=show?'':'none'; div.style.display=show?'':'none';
+  for(const key of list){const t=TRANSFORM_BTN[key];if(!t)continue;
+    const b=document.createElement('button');b.className='tbtn';b.textContent=t.g;b.title=t.t;
+    b.addEventListener('click',()=>{if(view.busy)return;const steps=t.run();renderDefinition();runSteps(steps);});
+    host.appendChild(b);}
 }
 async function runSteps(steps){
   await view.playSteps(steps);
@@ -515,8 +582,13 @@ document.querySelectorAll('.gbtn').forEach(b=>b.addEventListener('click',()=>{
   if(view.busy)return;const dir=b.dataset.grav;if(dir===engine.gravityDir)return;
   const steps=engine.setGravity(dir);renderDefinition();runSteps(steps);
 }));
-document.getElementById('rot-cw').addEventListener('click',()=>{if(!view.busy)runSteps(engine.rotateBoard('cw')).then(renderDefinition);});
-document.getElementById('rot-ccw').addEventListener('click',()=>{if(!view.busy)runSteps(engine.rotateBoard('ccw')).then(renderDefinition);});
+// game selector — the "simple list" next to New board
+const sel=document.getElementById('game-select');
+GAMES.forEach(g=>{const o=document.createElement('option');o.value=g.key;o.textContent=g.label;sel.appendChild(o);});
+sel.addEventListener('change',()=>{
+  currentGame=GAMES.find(g=>g.key===sel.value)||GAMES[0];
+  newBoard();
+});
 document.getElementById('new-board').addEventListener('click',newBoard);
 document.getElementById('win-again').addEventListener('click',newBoard);
 document.getElementById('lose-again').addEventListener('click',newBoard);
