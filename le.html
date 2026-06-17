@@ -135,9 +135,13 @@
       </div>
       <div class="divider"></div>
       <div class="grp">
-        <select id="game-select" class="gselect" title="Choose a game definition"></select>
+        <select id="shape-select" class="gselect" title="Board shape (mask template)"></select>
+        <select id="game-select" class="gselect" title="Game definition (rules)"></select>
         <label class="floors-toggle" title="Randomly mask out cells — they act as floors/walls">
           <input type="checkbox" id="floors-check"><span>Floors</span>
+        </label>
+        <label class="floors-toggle" title="Randomize board size 5–15 each axis (odd/even, rectangular)">
+          <input type="checkbox" id="size-check"><span>Size</span>
         </label>
         <button class="txt primary" id="new-board">New board</button>
       </div>
@@ -347,6 +351,17 @@ const GAMES=[
       return d;})},
 ];
 
+// Board-shape templates — mask generators, independent of rules. Work for any rows×cols (odd/even/rect).
+const TEMPLATES={
+  rectangle:(r,c)=>grid(r,c,()=>true),
+  diamond:(r,c)=>{const mr=(r-1)/2,mc=(c-1)/2,maxD=Math.min(mr,mc);
+    return grid(r,c,(i,j)=>Math.abs(i-mr)+Math.abs(j-mc)<=maxD+1e-9);},
+  cross:(r,c)=>{const mr=(r-1)/2,mc=(c-1)/2,arm=Math.max(0,Math.floor(Math.min(r,c)/5));
+    return grid(r,c,(i,j)=>Math.abs(i-mr)<=arm+0.5||Math.abs(j-mc)<=arm+0.5);},
+  diagonal:(r,c)=>grid(r,c,(i,j)=> j/Math.max(1,c-1) <= i/Math.max(1,r-1)+1e-9),
+};
+const TEMPLATE_LABELS={rectangle:'Rectangle',diamond:'Diamond',cross:'Cross',diagonal:'Diagonal'};
+
 
 // ████ VIEW — THREE.js. Consumes engine state + animates the engine's step list. ████
 const PIECE_GEOM={
@@ -547,22 +562,31 @@ function pickPrizeCells(def,n){
   }
   return shuffle(cand).slice(0,n);
 }
-let currentGame=GAMES[0];
+function countActive(def){let n=0;for(const row of def.layers.mask.grid)for(const v of row)if(v)n++;return n;}
+let currentGame=GAMES[0], currentTemplate='rectangle';
+function chosenSize(){
+  if(!document.getElementById('size-check').checked) return {rows:11,cols:11};
+  const rnd=()=>5+Math.floor(Math.random()*11);  // 5..15, independent per axis
+  return {rows:rnd(), cols:rnd()};
+}
 function newBoard(){
-  const prizeN=Math.min(8,Math.max(4,Math.floor(ROWS*COLS/16)));
   const floors=document.getElementById('floors-check').checked;
   let tries=0, ok=false;
   do{
-    const def=currentGame.build(ROWS,COLS,[]);          // build first, no prizes yet
-    if(floors) randomizeMask(def,0.16);                 // punch holes
-    if(!maskIsFull(def))                                // §7/§12: scroll needs a full-rect mask
+    const {rows,cols}=chosenSize();                       // size each try (re-roll if a size fails)
+    const def=currentGame.build(rows,cols,[]);            // rules + full-size layers
+    def.layers.mask.grid=TEMPLATES[currentTemplate](rows,cols); // shape the mask
+    if(floors) randomizeMask(def,0.16);                   // optionally punch holes
+    if(!maskIsFull(def))                                  // §7/§12: scroll needs a full-rect mask
       def.rules.transforms=def.rules.transforms.filter(t=>!t.startsWith('scroll'));
-    def.layers.prizes.cells=pickPrizeCells(def,prizeN); // prizes on active, non-isolated cells
+    const active=countActive(def);
+    const prizeN=Math.max(3,Math.min(10,Math.floor(active/14)));
+    def.layers.prizes.cells=pickPrizeCells(def,prizeN);   // prizes on active, non-isolated cells
     engine=new RulesEngine(def);
     ok = engine.hasValidMoves() &&
          (engine.def.win.type!=='collectAllPrizes' || engine.totalPrizes>0);
     tries++;
-  } while(!ok && tries<120);
+  } while(!ok && tries<160);
   view.build(engine);
   syncHUD(); renderDefinition(); renderTransformControls();
   hide('ov-win'); hide('ov-lose');
@@ -576,6 +600,7 @@ function renderDefinition(){
   const d=engine.def, rows=[
     ['name', d.name, true],
     ['lattice', engine.rows+'×'+engine.cols+' · '+d.lattice.topology, false],
+    ['shape', TEMPLATE_LABELS[currentTemplate]||currentTemplate, false],
     ['adjacency', d.rules.matchAdjacency, false],
     ['minGroup', d.rules.minGroupSize, false],
     ['gravity', engine.gravityField?engine.gravityDir+' +field':engine.gravityDir, true],
@@ -634,14 +659,18 @@ document.querySelectorAll('.gbtn').forEach(b=>b.addEventListener('click',()=>{
   if(view.busy)return;const dir=b.dataset.grav;if(dir===engine.gravityDir)return;
   const steps=engine.setGravity(dir);renderDefinition();runSteps(steps);
 }));
-// game selector — the "simple list" next to New board
+// game selector — rules; shape selector — mask template
 const sel=document.getElementById('game-select');
 GAMES.forEach(g=>{const o=document.createElement('option');o.value=g.key;o.textContent=g.label;sel.appendChild(o);});
 sel.addEventListener('change',()=>{
   currentGame=GAMES.find(g=>g.key===sel.value)||GAMES[0];
   newBoard();
 });
+const shapeSel=document.getElementById('shape-select');
+Object.keys(TEMPLATES).forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=TEMPLATE_LABELS[k]||k;shapeSel.appendChild(o);});
+shapeSel.addEventListener('change',()=>{currentTemplate=shapeSel.value;newBoard();});
 document.getElementById('floors-check').addEventListener('change',newBoard);
+document.getElementById('size-check').addEventListener('change',newBoard);
 document.getElementById('new-board').addEventListener('click',newBoard);
 document.getElementById('win-again').addEventListener('click',newBoard);
 document.getElementById('lose-again').addEventListener('click',newBoard);
