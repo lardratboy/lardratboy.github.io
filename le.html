@@ -77,6 +77,12 @@
     color:var(--text);border:1px solid var(--hair);border-radius:9px;cursor:pointer;max-width:46vw;}
   .gselect:hover{border-color:#2a3850;}
   .gselect option{background:#10151f;color:var(--text);}
+  .floors-toggle{display:flex;align-items:center;gap:6px;height:38px;padding:0 11px;cursor:pointer;
+    font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--muted);
+    background:#161d29;border:1px solid var(--hair);border-radius:9px;user-select:none;white-space:nowrap;}
+  .floors-toggle:hover{border-color:#2a3850;}
+  .floors-toggle input{accent-color:var(--signal);width:14px;height:14px;cursor:pointer;}
+  .floors-toggle:has(input:checked){color:var(--signal);border-color:var(--signal-dim);}
 
   /* ── overlays ── */
   .overlay{position:absolute;inset:0;z-index:50;display:none;align-items:center;justify-content:center;
@@ -130,6 +136,9 @@
       <div class="divider"></div>
       <div class="grp">
         <select id="game-select" class="gselect" title="Choose a game definition"></select>
+        <label class="floors-toggle" title="Randomly mask out cells — they act as floors/walls">
+          <input type="checkbox" id="floors-check"><span>Floors</span>
+        </label>
         <button class="txt primary" id="new-board">New board</button>
       </div>
     </div>
@@ -365,6 +374,7 @@ class View{
     const rim=new THREE.DirectionalLight(0x6b9dff,0.35);rim.position.set(-6,-3,4);this.scene.add(rim);
     this.raycaster=new THREE.Raycaster();this.pointer=new THREE.Vector2();
     this.meshes=new Map();           // id -> THREE.Mesh
+    this.maskMarkers=[];             // dim tiles marking masked-off cells (floors)
     this.dims={rows:0,cols:0};
     this.busy=false;this.hoverGroup=new Set();
   }
@@ -389,6 +399,25 @@ class View{
       this._mesh(id,engine.pieceData.get(id),r,c,true);
     }
     this.frameCamera();
+    this.syncMaskMarkers(engine);
+  }
+  syncMaskMarkers(engine){
+    for(const o of this.maskMarkers){this.scene.remove(o);o.geometry.dispose();o.material.dispose();}
+    this.maskMarkers=[];
+    this.dims={rows:engine.rows,cols:engine.cols};
+    const s=SPACING*0.72;
+    for(let r=0;r<engine.rows;r++)for(let c=0;c<engine.cols;c++){
+      if(engine.mask[r][c])continue;                 // only mark masked-OFF cells
+      const {x,y}=this.cellToWorld(r,c);
+      const tile=new THREE.Mesh(new THREE.PlaneGeometry(s,s),
+        new THREE.MeshBasicMaterial({color:0x161d29,transparent:true,opacity:0.55}));
+      tile.position.set(x,y,-0.35);
+      this.scene.add(tile);this.maskMarkers.push(tile);
+      const edge=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(s,s)),
+        new THREE.LineBasicMaterial({color:0x2a3850,transparent:true,opacity:0.6}));
+      edge.position.set(x,y,-0.34);
+      this.scene.add(edge);this.maskMarkers.push(edge);
+    }
   }
   _mesh(id,pd,r,c,pop){
     const p=this.palette[pd.palette];
@@ -421,6 +450,7 @@ class View{
       else if(step.kind==='rotate'){this.dims=step.dims;this.frameCamera();await this._animMoves(step.moves,'spin');}
     }
     this.busy=false;
+    this.syncMaskMarkers(engine);
   }
   _animClear(step){
     return new Promise(res=>{
@@ -499,18 +529,40 @@ const stage=document.getElementById('stage');
 const view=new View(stage);
 let engine=null;
 
-function pickPrizeCells(rows,cols,n){
-  const all=[];for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)all.push([r,c]);
-  for(let i=all.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[all[i],all[j]]=[all[j],all[i]];}
-  return all.slice(0,n);
+function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
+// Floors modifier: flip ~frac of mask cells to false (they become walls/floors). Composes with any game.
+function randomizeMask(def,frac){
+  const m=def.layers.mask.grid;
+  for(let r=0;r<def.lattice.rows;r++)for(let c=0;c<def.lattice.cols;c++) if(Math.random()<frac) m[r][c]=false;
+}
+function maskIsFull(def){ for(const row of def.layers.mask.grid) for(const v of row) if(!v) return false; return true; }
+// Prizes only on ACTIVE cells that have at least one active neighbor (avoid stranding a prize on an island)
+function pickPrizeCells(def,n){
+  const m=def.layers.mask.grid, R=def.lattice.rows, C=def.lattice.cols, cand=[];
+  for(let r=0;r<R;r++)for(let c=0;c<C;c++){
+    if(!m[r][c])continue; let nb=false;
+    for(let dr=-1;dr<=1&&!nb;dr++)for(let dc=-1;dc<=1;dc++){if(!dr&&!dc)continue;
+      const nr=r+dr,nc=c+dc; if(nr>=0&&nr<R&&nc>=0&&nc<C&&m[nr][nc]){nb=true;break;}}
+    if(nb)cand.push([r,c]);
+  }
+  return shuffle(cand).slice(0,n);
 }
 let currentGame=GAMES[0];
 function newBoard(){
   const prizeN=Math.min(8,Math.max(4,Math.floor(ROWS*COLS/16)));
-  let tries=0;
-  do{ const def=currentGame.build(ROWS,COLS,pickPrizeCells(ROWS,COLS,prizeN));
-      engine=new RulesEngine(def); tries++; }
-  while(!engine.hasValidMoves()&&tries<80);
+  const floors=document.getElementById('floors-check').checked;
+  let tries=0, ok=false;
+  do{
+    const def=currentGame.build(ROWS,COLS,[]);          // build first, no prizes yet
+    if(floors) randomizeMask(def,0.16);                 // punch holes
+    if(!maskIsFull(def))                                // §7/§12: scroll needs a full-rect mask
+      def.rules.transforms=def.rules.transforms.filter(t=>!t.startsWith('scroll'));
+    def.layers.prizes.cells=pickPrizeCells(def,prizeN); // prizes on active, non-isolated cells
+    engine=new RulesEngine(def);
+    ok = engine.hasValidMoves() &&
+         (engine.def.win.type!=='collectAllPrizes' || engine.totalPrizes>0);
+    tries++;
+  } while(!ok && tries<120);
   view.build(engine);
   syncHUD(); renderDefinition(); renderTransformControls();
   hide('ov-win'); hide('ov-lose');
@@ -589,6 +641,7 @@ sel.addEventListener('change',()=>{
   currentGame=GAMES.find(g=>g.key===sel.value)||GAMES[0];
   newBoard();
 });
+document.getElementById('floors-check').addEventListener('change',newBoard);
 document.getElementById('new-board').addEventListener('click',newBoard);
 document.getElementById('win-again').addEventListener('click',newBoard);
 document.getElementById('lose-again').addEventListener('click',newBoard);
