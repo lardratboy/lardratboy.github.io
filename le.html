@@ -204,7 +204,7 @@ class RulesEngine{
     const seen=new Set([r+','+c]),out=[{r,c}],st=[{r,c}];
     while(st.length){const{r:cr,c:cc}=st.pop();
       for(const[dr,dc]of offs){let nr=cr+dr,nc=cc+dc;
-        if(this.topology==='torus'){nr=(nr+this.rows)%this.rows;nc=(nc+this.cols)%this.cols;}
+        if(this.def.rules.wrapMatch){nr=(nr+this.rows)%this.rows;nc=(nc+this.cols)%this.cols;}
         if(!this.inBounds(nr,nc))continue;const k=nr+','+nc;if(seen.has(k))continue;
         if(this.palAt(nr,nc)===target){seen.add(k);out.push({r:nr,c:nc});st.push({r:nr,c:nc});}}}
     return out;
@@ -285,9 +285,9 @@ class RulesEngine{
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
     const cm=this.collapse();if(cm)steps.push({kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm});
     steps.push({kind:'state',...this.checkState()});return steps;}
-  // Toroidal scroll: translate the MOBILE layer one lane (mask stays fixed — §7). Full-rect torus only.
+  // Scroll inherently wraps (that's what distinguishes it from a destructive shift). All four cardinals.
+  // Availability is controlled by the transforms list + the full-rect-mask rule (§7), not by a topology flag.
   scroll(spec){
-    if(this.topology!=='torus')return null;
     let dr=0,dc=0;
     if(spec==='scrollC+')dc=1; else if(spec==='scrollC-')dc=-1;
     else if(spec==='scrollR+')dr=1; else if(spec==='scrollR-')dr=-1; else return null;
@@ -340,9 +340,9 @@ const GAMES=[
     build:(r,c,pz)=>baseDef('SameGame',r,c,pz,d=>{d.rules.matchAdjacency='vonNeumann';d.rules.transforms=[];return d;})},
   {key:'sideways', label:'Sideways collapse',
     build:(r,c,pz)=>baseDef('Sideways collapse',r,c,pz,d=>{d.rules.gravity='left';return d;})},
-  {key:'torus', label:'Torus tap · wrap + scroll',
-    build:(r,c,pz)=>baseDef('Torus tap',r,c,pz,d=>{d.lattice.topology='torus';d.rules.laneCollapse=false;
-      d.rules.transforms=['scrollC-','scrollC+'];return d;})},
+  {key:'carousel', label:'Carousel · scroll & match',
+    build:(r,c,pz)=>baseDef('Carousel',r,c,pz,d=>{d.rules.laneCollapse=false;
+      d.rules.transforms=['scrollC-','scrollC+','scrollR-','scrollR+'];return d;})},
   {key:'twozone', label:'Two-zone gravity',
     build:(r,c,pz)=>baseDef('Two-zone gravity',r,c,pz,d=>{
       // right half locked to 'right'; left half null → follows the global gravity buttons
@@ -599,9 +599,9 @@ function syncHUD(){
 function renderDefinition(){
   const d=engine.def, rows=[
     ['name', d.name, true],
-    ['lattice', engine.rows+'×'+engine.cols+' · '+d.lattice.topology, false],
+    ['lattice', engine.rows+'×'+engine.cols, false],
     ['shape', TEMPLATE_LABELS[currentTemplate]||currentTemplate, false],
-    ['adjacency', d.rules.matchAdjacency, false],
+    ['adjacency', d.rules.matchAdjacency+(d.rules.wrapMatch?' · wrap':''), false],
     ['minGroup', d.rules.minGroupSize, false],
     ['gravity', engine.gravityField?engine.gravityDir+' +field':engine.gravityDir, true],
     ['win', d.win.type, false],
@@ -618,13 +618,22 @@ const TRANSFORM_BTN={
   'scrollR-':{g:'⇡',t:'Scroll rows up (wrap)',run:()=>engine.scrollBoard('scrollR-')},
   'scrollR+':{g:'⇣',t:'Scroll rows down (wrap)',run:()=>engine.scrollBoard('scrollR+')},
 };
+// scroll is only useful perpendicular to gravity (a parallel scroll is undone by settle); all four when none
+function scrollAxisOK(key){
+  const g=GRAVITY[engine.gravityDir];
+  if(g.dr===0&&g.dc===0) return true;                 // gravity none → every scroll matters
+  return key.startsWith('scrollC') ? g.dr!==0 : g.dc!==0;  // horizontal scroll ⟂ vertical gravity, & vice versa
+}
 function renderTransformControls(){
-  const list=engine.def.rules.transforms||[];
+  const list=(engine.def.rules.transforms||[]).filter(k=>{
+    if(!TRANSFORM_BTN[k]) return false;
+    return k.startsWith('scroll') ? scrollAxisOK(k) : true;
+  });
   const grp=document.getElementById('transform-grp'), div=document.getElementById('tr-div');
   const host=document.getElementById('transform-btns'); host.innerHTML='';
-  const show=list.some(k=>TRANSFORM_BTN[k]);
+  const show=list.length>0;
   grp.style.display=show?'':'none'; div.style.display=show?'':'none';
-  for(const key of list){const t=TRANSFORM_BTN[key];if(!t)continue;
+  for(const key of list){const t=TRANSFORM_BTN[key];
     const b=document.createElement('button');b.className='tbtn';b.textContent=t.g;b.title=t.t;
     b.addEventListener('click',()=>{if(view.busy)return;const steps=t.run();renderDefinition();runSteps(steps);});
     host.appendChild(b);}
@@ -657,7 +666,7 @@ stage.addEventListener('pointerdown',e=>{
 // gravity — the headline: change the rule, watch the board re-settle
 document.querySelectorAll('.gbtn').forEach(b=>b.addEventListener('click',()=>{
   if(view.busy)return;const dir=b.dataset.grav;if(dir===engine.gravityDir)return;
-  const steps=engine.setGravity(dir);renderDefinition();runSteps(steps);
+  const steps=engine.setGravity(dir);renderDefinition();renderTransformControls();runSteps(steps);
 }));
 // game selector — rules; shape selector — mask template
 const sel=document.getElementById('game-select');
