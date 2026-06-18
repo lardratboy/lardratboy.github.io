@@ -8,7 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.min.js"></script>
 <style>
   :root{
-    --ink:#0a0d14; --panel:#10151f; --panel-2:#0d1219; --hair:#1d2737;
+    --ink:#000033; --panel:#10151f; --panel-2:#0d1219; --hair:#1d2737;
     --text:#cdd8ea; --muted:#5f6f87; --muted-2:#46566e;
     --signal:#f0a838; --signal-dim:#7a5a25; --good:#5bd97a; --bad:#ff6b6b;
     --mono:ui-monospace,"SF Mono",Menlo,"Cascadia Code",Consolas,monospace;
@@ -313,8 +313,8 @@ class RulesEngine{
 }
 
 // ████ DEFINITIONS — each game is just a rules object over the same engine (§10) ████
-const PALETTE=[{id:'sphere',color:0xff5b5b},{id:'cube',color:0x5bd97a},{id:'tetra',color:0x5b9dff},
-               {id:'octa',color:0xffd24a},{id:'icosa',color:0xff5bff},{id:'dodeca',color:0xe8eef7}];
+const PALETTE=[{id:'sphere',color:0xff0000},{id:'cube',color:0x00ff00},{id:'tetra',color:0x0080ff},
+               {id:'octa',color:0xffff00},{id:'icosa',color:0xff00ff},{id:'dodeca',color:0xffffff}];
 function baseDef(name,rows,cols,prizeCells,over){
   const d={
     name, format:'lattice-game/1',
@@ -357,7 +357,7 @@ const TEMPLATES={
   diamond:(r,c)=>{const mr=(r-1)/2,mc=(c-1)/2,maxD=Math.min(mr,mc);
     return grid(r,c,(i,j)=>Math.abs(i-mr)+Math.abs(j-mc)<=maxD+1e-9);},
   cross:(r,c)=>{const mr=(r-1)/2,mc=(c-1)/2,arm=Math.max(0,Math.floor(Math.min(r,c)/5));
-    return grid(r,c,(i,j)=>Math.abs(i-mr)<=arm+0.5||Math.abs(j-mc)<=arm+0.5);},
+    return grid(r,c,(i,j)=>Math.abs(i-mr)<=arm+0.5||j===mc);}, // slightly simpler cross
   diagonal:(r,c)=>grid(r,c,(i,j)=> j/Math.max(1,c-1) <= i/Math.max(1,r-1)+1e-9),
 };
 const TEMPLATE_LABELS={rectangle:'Rectangle',diamond:'Diamond',cross:'Cross',diagonal:'Diagonal'};
@@ -374,22 +374,65 @@ const PIECE_GEOM={
 };
 const SPACING=1.12, PIECE=0.5;
 
-class View{
+// Tube connection visualization helper
+class TubeConnection {
+  constructor(startMesh, endMesh, color, scene) {
+    this.startMesh = startMesh;
+    this.endMesh = endMesh;
+    this.scene = scene;
+    this.color = color;
+    this.create();
+  }
+  create() {
+    const startPos = this.startMesh.position;
+    const endPos = this.endMesh.position;
+    const distance = startPos.distanceTo(endPos);
+    const tubeRadius = PIECE * 0.15;
+    const geometry = new THREE.CylinderGeometry(tubeRadius, tubeRadius, distance, 8, 1, false);
+    const material = new THREE.MeshPhongMaterial({
+      color: this.color,
+      transparent: true, opacity: 0.7,
+      shininess: 80,
+      emissive: this.color,
+      emissiveIntensity: 0.4
+    });
+    this.mesh = new THREE.Mesh(geometry, material);
+    this.mesh.position.lerpVectors(startPos, endPos, 0.5);
+    const direction = new THREE.Vector3().subVectors(endPos, startPos).normalize();
+    const quaternion = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+    this.mesh.setRotationFromQuaternion(quaternion);
+    this.scene.add(this.mesh);
+  }
+  remove() {
+    if (this.mesh) {
+      this.scene.remove(this.mesh);
+      this.mesh.geometry.dispose();
+      this.mesh.material.dispose();
+      this.mesh = null;
+    }
+  }
+}
+
+class View {
   constructor(stage){
     this.scene=new THREE.Scene();
-    this.scene.background=new THREE.Color(0x0a0d14);
-    this.scene.fog=new THREE.Fog(0x0a0d14,16,34);
+    this.scene.background=new THREE.Color(0x000033);
+    this.scene.fog=new THREE.Fog(0x000033,16,34);
     this.camera=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.1,100);
     this.renderer=new THREE.WebGLRenderer({antialias:true});
     this.renderer.setPixelRatio(Math.min(devicePixelRatio,2));
     this.renderer.setSize(innerWidth,innerHeight);
     stage.appendChild(this.renderer.domElement);
-    this.scene.add(new THREE.AmbientLight(0xffffff,0.55));
-    const key=new THREE.DirectionalLight(0xffffff,0.9);key.position.set(4,8,7);this.scene.add(key);
-    const rim=new THREE.DirectionalLight(0x6b9dff,0.35);rim.position.set(-6,-3,4);this.scene.add(rim);
+    
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+    dl.position.set(5, 10, 7.5);
+    this.scene.add(dl);
+
     this.raycaster=new THREE.Raycaster();this.pointer=new THREE.Vector2();
     this.meshes=new Map();           // id -> THREE.Mesh
     this.maskMarkers=[];             // dim tiles marking masked-off cells (floors)
+    this.tubeConnections=[];         // visual connection lines between hovering group
     this.dims={rows:0,cols:0};
     this.busy=false;this.hoverGroup=new Set();
   }
@@ -405,6 +448,7 @@ class View{
     this.camera.lookAt(0,0,0);
   }
   build(engine){
+    this.clearTubeConnections();
     for(const m of this.meshes.values()){this.scene.remove(m);m.geometry.dispose();m.material.dispose();
       if(m.userData.ring){m.userData.ring.geometry.dispose();m.userData.ring.material.dispose();}}
     this.meshes.clear();
@@ -444,9 +488,14 @@ class View{
     if(p.id!=='sphere')mesh.rotation.set(Math.random()*6,Math.random()*6,Math.random()*6);
     mesh.userData={id,baseColor:p.color,spin:(Math.random()-0.5)*0.004,isSphere:p.id==='sphere'};
     if(pd.prize){
-      const ring=new THREE.Mesh(new THREE.TorusGeometry(PIECE*1.18,PIECE*0.12,10,40),
-        new THREE.MeshPhongMaterial({color:0xffd24a,emissive:0xffd24a,emissiveIntensity:0.5,shininess:90}));
-      ring.position.z=PIECE*0.55;mesh.add(ring);mesh.userData.ring=ring;
+      const ringSize = PIECE * 1.2;
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(ringSize, ringSize / 4, 8, 50),
+        new THREE.MeshPhongMaterial({color: 0xffd700, shininess: 100, specular: 0xffffff})
+      );
+      ring.position.set(0, 0, 0.1);
+      mesh.add(ring);
+      mesh.userData.ring = ring;
     }
     this.scene.add(mesh);this.meshes.set(id,mesh);
     if(pop){mesh.scale.setScalar(0.01);
@@ -505,8 +554,61 @@ class View{
       });
     });
   }
+  clearTubeConnections(){
+    this.tubeConnections.forEach(t => t.remove());
+    this.tubeConnections = [];
+  }
+  createTubes(engine, grp){
+    const memo = new Set(grp.map(g => g.r + ',' + g.c));
+    const connections = new Set();
+    const offs = ADJACENCY[engine.def.rules.matchAdjacency] || ADJACENCY.moore;
+
+    grp.forEach(({r, c}) => {
+      const id = engine.grid[r][c];
+      const m = this.meshes.get(id);
+      if (!m) return;
+
+      const paletteIdx = engine.pieceData.get(id).palette;
+      const color = engine.def.palette[paletteIdx].color;
+
+      for (const [dr, dc] of offs) {
+        let nr = r + dr;
+        let nc = c + dc;
+        let isWrapped = false;
+
+        if (engine.def.rules.wrapMatch) {
+          const wrapR = (nr + engine.rows) % engine.rows;
+          const wrapC = (nc + engine.cols) % engine.cols;
+          if (wrapR !== nr || wrapC !== nc) {
+            isWrapped = true;
+          }
+          nr = wrapR;
+          nc = wrapC;
+        }
+
+        if (memo.has(nr + ',' + nc)) {
+          // Skip tube drawing across physical wrapped borders to prevent visual lines crossing the board layout
+          if (isWrapped) continue;
+
+          const neighborId = engine.grid[nr][nc];
+          const neighborMesh = this.meshes.get(neighborId);
+          if (!neighborMesh) continue;
+
+          const keyA = r + ',' + c;
+          const keyB = nr + ',' + nc;
+          const connId = keyA < keyB ? keyA + '|' + keyB : keyB + '|' + keyA;
+
+          if (!connections.has(connId)) {
+            connections.add(connId);
+            this.tubeConnections.push(new TubeConnection(m, neighborMesh, color, this.scene));
+          }
+        }
+      }
+    });
+  }
   setHover(engine,r,c){
     if(this.busy)return;
+    this.clearTubeConnections();
     const grp=(r==null)?[]:engine.findGroup(r,c);
     const clearable=grp.length>=engine.def.rules.minGroupSize;
     const next=new Set(clearable?grp.map(g=>engine.grid[g.r][g.c]):[]);
@@ -516,10 +618,17 @@ class View{
       if(m)new TWEEN.Tween(m.material).to({emissiveIntensity:0.4},150).start();}
     this.hoverGroup=next;
     document.body.style.cursor=clearable?'pointer':'default';
+
+    if (clearable && grp.length > 0) {
+      this.createTubes(engine, grp);
+    }
   }
-  clearHover(){for(const id of this.hoverGroup){const m=this.meshes.get(id);
-    if(m)new TWEEN.Tween(m.material).to({emissiveIntensity:0},120).start();}this.hoverGroup.clear();
-    document.body.style.cursor='default';}
+  clearHover(){
+    this.clearTubeConnections();
+    for(const id of this.hoverGroup){const m=this.meshes.get(id);
+      if(m)new TWEEN.Tween(m.material).to({emissiveIntensity:0},120).start();}this.hoverGroup.clear();
+    document.body.style.cursor='default';
+  }
   pick(engine,cx,cy){
     this.pointer.x=(cx/innerWidth)*2-1;this.pointer.y=-(cy/innerHeight)*2+1;
     this.raycaster.setFromCamera(this.pointer,this.camera);
@@ -531,7 +640,13 @@ class View{
     return null;
   }
   render(){
-    for(const m of this.meshes.values()) if(!m.userData.isSphere) m.rotation.y+=m.userData.spin;
+    for(const m of this.meshes.values()) {
+      if(!m.userData.isSphere) m.rotation.y+=m.userData.spin;
+      if(m.userData.ring) {
+        m.userData.ring.rotation.y += 0.02;
+        m.userData.ring.rotation.x += 0.01;
+      }
+    }
     this.renderer.render(this.scene,this.camera);
   }
   resize(){this.camera.aspect=innerWidth/innerHeight;this.camera.updateProjectionMatrix();
@@ -556,7 +671,7 @@ function pickPrizeCells(def,n){
   const m=def.layers.mask.grid, R=def.lattice.rows, C=def.lattice.cols, cand=[];
   for(let r=0;r<R;r++)for(let c=0;c<C;c++){
     if(!m[r][c])continue; let nb=false;
-    for(let dr=-1;dr<=1&&!nb;dr++)for(let dc=-1;dc<=1;dc++){if(!dr&&!dc)continue;
+    for(let dr=-1;dr<=1;dr++)for(let dc=-1;dc<=1;dc++){if(!dr&&!dc)continue;
       const nr=r+dr,nc=c+dc; if(nr>=0&&nr<R&&nc>=0&&nc<C&&m[nr][nc]){nb=true;break;}}
     if(nb)cand.push([r,c]);
   }
