@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Lattice with Timeline</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.min.js"></script>
 <style>
   :root{
     --ink:#000033; --panel:#10151f; --panel-2:#0d1219; --hair:#1d2737;
@@ -90,12 +89,12 @@
   .overlay.show{display:flex;}
   .card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--hair);
     border-radius:16px;padding:30px 34px;text-align:center;max-width:340px;
-    box-shadow:0 24px 80px rgba(0,0,0,.6);}
+    box-shadow:0 24px 80px rgba(0,0,0,.6);display:flex;flex-direction:column;gap:8px;}
   .card .tag{font-family:var(--mono);font-size:10px;letter-spacing:.26em;text-transform:uppercase;
-    color:var(--muted);}
-  .card h2{font-family:var(--mono);font-weight:600;margin:8px 0 6px;font-size:26px;}
+    color:var(--muted);margin-bottom:4px;}
+  .card h2{font-family:var(--mono);font-weight:600;margin:0;font-size:26px;}
   .card.win h2{color:var(--good);} .card.lose h2{color:var(--bad);}
-  .card p{color:var(--muted);font-size:13px;margin:0 0 20px;line-height:1.6;}
+  .card p{color:var(--muted);font-size:13px;margin:0 0 12px;line-height:1.6;}
   .card .txt{width:100%;justify-content:center;display:flex;align-items:center;}
 
   /* ── replay / timeline bar ── */
@@ -163,6 +162,7 @@
       </div>
       <div class="divider"></div>
       <div class="grp">
+        <button class="txt" id="speed-toggle" title="Cycle play speed">Speed: 0.5×</button>
         <button class="txt" id="replay-enter" title="Replay the timeline (R)">⏮ Replay</button>
       </div>
     </div>
@@ -178,7 +178,7 @@
       <button class="tbtn" id="rp-last"  title="Latest frame">⏭</button>
       <button class="tbtn" id="rp-dir"   title="Playback direction">⇄</button>
       <input type="range" id="rp-slider" min="0" max="0" step="0.001" value="0">
-      <button class="txt"  id="rp-speed" title="Playback speed">1×</button>
+      <button class="txt"  id="rp-speed" title="Playback speed">0.5×</button>
       <span class="rp-label" id="rp-label">0 / 0 · start</span>
       <button class="tbtn" id="rp-exit" title="Exit replay (R)">✕</button>
     </div>
@@ -188,23 +188,53 @@
     <div class="tag">win · collectAllPrizes</div><h2>Cleared</h2>
     <p>Every prize collected. The win condition came straight from the definition.</p>
     <button class="txt primary" id="win-again">Play again</button>
+    <button class="txt" id="win-review">Review session</button>
   </div></div>
   <div class="overlay" id="ov-lose"><div class="card lose">
     <div class="tag">lose · noValidMoves</div><h2>Stuck</h2>
     <p>No group of two-or-more like neighbors remains. Rotate or shift gravity next time to keep options open.</p>
     <button class="txt primary" id="lose-again">New board</button>
+    <button class="txt" id="lose-review">Review session</button>
   </div></div>
 
 <script>
 "use strict";
-// ████ ENGINE — pure rules, no DOM, no THREE. (Verified headless before wiring.) ████
+
+// ████ MATH EASING CURVES — intrinsically invertible pure functions ████
+const EASE = {
+  cubicInOut: t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+  cubicOut: t => 1 - Math.pow(1 - t, 3),
+  backOut: t => {
+    const c1 = 1.70158;
+    const c3 = c1 + 1;
+    return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+  },
+  bounceOut: t => {
+    const n1 = 7.5625;
+    const d1 = 2.75;
+    if (t < 1 / d1) {
+      return n1 * t * t;
+    } else if (t < 2 / d1) {
+      let t2 = t - 1.5 / d1;
+      return n1 * t2 * t2 + 0.75;
+    } else if (t < 2.5 / d1) {
+      let t2 = t - 2.25 / d1;
+      return n1 * t2 * t2 + 0.9375;
+    } else {
+      let t2 = t - 2.625 / d1;
+      return n1 * t2 * t2 + 0.984375;
+    }
+  }
+};
+
+// ████ ENGINE — pure rules, no DOM, no THREE. ████
 const GRAVITY={down:{dr:1,dc:0},up:{dr:-1,dc:0},right:{dr:0,dc:1},left:{dr:0,dc:-1},none:{dr:0,dc:0}};
 const ADJACENCY={moore:[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]],
                  vonNeumann:[[-1,0],[1,0],[0,-1],[0,1]]};
 function grid(r,c,fn){return Array.from({length:r},(_,i)=>Array.from({length:c},(_,j)=>fn(i,j)));}
 
 class RulesEngine{
-  constructor(def,rng=Math.random){this.def=def;this.rng=rng;this._nextId=1;this.reset();}
+  constructor(def,rng){this.def=def;this.rng=rng;this._nextId=1;this.reset();}
   reset(){
     const L=this.def.lattice;
     this.rows=L.rows;this.cols=L.cols;this.topology=L.topology||'plane';
@@ -221,7 +251,7 @@ class RulesEngine{
     for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){
       if(!this.mask[r][c])continue;
       let pal=fill[r][c];
-      if(pal===null&&rfill&&rfill[r][c])pal=Math.floor(this.rng()*this.def.palette.length);
+      if(pal===null&&rfill&&rfill[r][c])pal=Math.floor(this.rng.next()*this.def.palette.length);
       if(pal===null||pal===undefined)continue;
       const prize=prizeCells.has(r+','+c); if(prize)this.totalPrizes++;
       this.grid[r][c]=this._spawn(pal,prize);
@@ -245,7 +275,6 @@ class RulesEngine{
         if(this.palAt(nr,nc)===target){seen.add(k);out.push({r:nr,c:nc});st.push({r:nr,c:nc});}}}
     return out;
   }
-  // per-cell gravity + emergent walls; relax to fixpoint; return net moves
   settle(){
     const origin=new Map();
     for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++)if(this.grid[r][c]!=null)origin.set(this.grid[r][c],{r,c});
@@ -256,7 +285,7 @@ class RulesEngine{
         const g=this.effGravity(r,c);if(g.dr===0&&g.dc===0)continue;
         const nr=r+g.dr,nc=c+g.dc;
         if(!this.inBounds(nr,nc)||!this.mask[nr][nc]||this.grid[nr][nc]!=null)continue;
-        const ng=this.effGravity(nr,nc);if(ng.dr!==g.dr||ng.dc!==g.dc)continue; // emergent wall
+        const ng=this.effGravity(nr,nc);if(ng.dr!==g.dr||ng.dc!==g.dc)continue;
         this.grid[nr][nc]=id;this.grid[r][c]=null;moved=true;}}
     const moves=[];
     for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){const id=this.grid[r][c];if(id==null)continue;
@@ -321,8 +350,6 @@ class RulesEngine{
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
     const cm=this.collapse();if(cm)steps.push({kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm});
     steps.push({kind:'state',...this.checkState()});return steps;}
-  // Scroll inherently wraps (that's what distinguishes it from a destructive shift). All four cardinals.
-  // Availability is controlled by the transforms list + the full-rect-mask rule (§7), not by a topology flag.
   scroll(spec){
     let dr=0,dc=0;
     if(spec==='scrollC+')dc=1; else if(spec==='scrollC-')dc=-1;
@@ -346,9 +373,39 @@ class RulesEngine{
     if(!this.hasValidMoves())return{status:'lost'};
     return{status:'playing'};
   }
+  restoreFromFrame(frame,score,collected,rngState){
+    this.rows=frame.dims.rows;
+    this.cols=frame.dims.cols;
+    this.grid=grid(this.rows,this.cols,()=>null);
+    this.pieceData.clear();
+    let maxId=0;
+    for(const p of frame.placements){
+      this.grid[p.r][p.c]=p.id;
+      this.pieceData.set(p.id,{palette:p.palette,prize:p.prize});
+      if(p.id>maxId)maxId=p.id;
+    }
+    this._nextId=maxId+1;
+    this.score=score;
+    this.collected=collected;
+    this.rng.setState(rngState);
+    this.mask=grid(this.rows,this.cols,(r,c)=>{
+      if(this.def.layers.mask.grid[r]!==undefined&&this.def.layers.mask.grid[r][c]!==undefined){
+        return this.def.layers.mask.grid[r][c];
+      }
+      return true;
+    });
+    if(this.def.layers.gravityZones){
+      this.gravityField=grid(this.rows,this.cols,(r,c)=>{
+        if(this.def.layers.gravityZones.grid[r]!==undefined&&this.def.layers.gravityZones.grid[r][c]!==undefined){
+          return this.def.layers.gravityZones.grid[r][c];
+        }
+        return null;
+      });
+    }else{this.gravityField=null;}
+  }
 }
 
-// ████ DEFINITIONS — each game is just a rules object over the same engine (§10) ████
+// ████ DEFINITIONS — rules config mapping to rules engine ████
 const PALETTE=[{id:'sphere',color:0xff0000},{id:'cube',color:0x00ff00},{id:'tetra',color:0x0080ff},
                {id:'octa',color:0xffff00},{id:'icosa',color:0xff00ff},{id:'dodeca',color:0xffffff}];
 function baseDef(name,rows,cols,prizeCells,over){
@@ -368,7 +425,6 @@ function baseDef(name,rows,cols,prizeCells,over){
   };
   return over?over(d):d;
 }
-// The §10 sanity set — same engine, different switches. Each proves one generalization.
 const GAMES=[
   {key:'eight', label:'Eight Neighbors',
     build:(r,c,pz)=>baseDef('Eight Neighbors',r,c,pz)},
@@ -381,13 +437,11 @@ const GAMES=[
       d.rules.transforms=['scrollC-','scrollC+','scrollR-','scrollR+'];return d;})},
   {key:'twozone', label:'Two-zone gravity',
     build:(r,c,pz)=>baseDef('Two-zone gravity',r,c,pz,d=>{
-      // right half locked to 'right'; left half null → follows the global gravity buttons
       d.layers.gravityZones={binding:'field',anchored:true,
         grid:grid(r,c,(rr,cc)=> cc>=Math.floor(c/2)?'right':null)};
       return d;})},
 ];
 
-// Board-shape templates — mask generators, independent of rules. Work for any rows×cols (odd/even/rect).
 const TEMPLATES={
   rectangle:(r,c)=>grid(r,c,()=>true),
   diamond:(r,c)=>{const mr=(r-1)/2,mc=(c-1)/2,maxD=Math.min(mr,mc);
@@ -399,7 +453,7 @@ const TEMPLATES={
 const TEMPLATE_LABELS={rectangle:'Rectangle',diamond:'Diamond',cross:'Cross',diagonal:'Diagonal'};
 
 
-// ████ VIEW — THREE.js. Consumes engine state + animates the engine's step list. ████
+// ████ VIEW — THREE.js rendering ████
 const PIECE_GEOM={
   sphere:s=>new THREE.SphereGeometry(s*0.92,20,16),
   cube:s=>new THREE.BoxGeometry(s*1.4,s*1.4,s*1.4),
@@ -410,7 +464,6 @@ const PIECE_GEOM={
 };
 const SPACING=1.12, PIECE=0.5;
 
-// Tube connection visualization helper
 class TubeConnection {
   constructor(startMesh, endMesh, color, scene) {
     this.startMesh = startMesh;
@@ -466,30 +519,28 @@ class View {
     this.scene.add(dl);
 
     this.raycaster=new THREE.Raycaster();this.pointer=new THREE.Vector2();
-    this.meshes=new Map();           // id -> THREE.Mesh
-    this.maskMarkers=[];             // dim tiles marking masked-off cells (floors)
-    this.tubeConnections=[];         // visual connection lines between hovering group
+    this.meshes=new Map();
+    this.maskMarkers=[];
+    this.tubeConnections=[];
     this.dims={rows:0,cols:0};
-    this.busy=false;this.hoverGroup=new Set();
+    this.hoverGroup=new Set();
+    this.cameraTargetZ=20;
   }
   cellToWorld(r,c,dims){
     const D=dims||this.dims;
     return {x:(c-(D.cols-1)/2)*SPACING, y:((D.rows-1)/2-r)*SPACING};
   }
-  // distance the camera needs for a board of given dims (no tween — used while scrubbing)
   setCameraForDims(rows,cols){
     const w=cols*SPACING, h=rows*SPACING;
     const fov=THREE.MathUtils.degToRad(this.camera.fov);
     const dH=(h/2)/Math.tan(fov/2), dW=(w/2)/(Math.tan(fov/2)*this.camera.aspect);
-    this.camera.position.z=Math.max(dH,dW)*1.18; this.camera.lookAt(0,0,0);
+    this.cameraTargetZ=Math.max(dH,dW)*1.18;
   }
   frameCamera(){
     const w=this.dims.cols*SPACING, h=this.dims.rows*SPACING;
     const fov=THREE.MathUtils.degToRad(this.camera.fov);
     const dH=(h/2)/Math.tan(fov/2), dW=(w/2)/(Math.tan(fov/2)*this.camera.aspect);
-    const target=Math.max(dH,dW)*1.18;
-    new TWEEN.Tween(this.camera.position).to({z:target},420).easing(TWEEN.Easing.Cubic.Out).start();
-    this.camera.lookAt(0,0,0);
+    this.cameraTargetZ=Math.max(dH,dW)*1.18;
   }
   build(engine){
     this.clearTubeConnections();
@@ -499,7 +550,7 @@ class View {
     this.dims={rows:engine.rows,cols:engine.cols};this.palette=engine.def.palette;
     for(let r=0;r<engine.rows;r++)for(let c=0;c<engine.cols;c++){
       const id=engine.grid[r][c];if(id==null)continue;
-      this._mesh(id,engine.pieceData.get(id),r,c,true);
+      this._mesh(id,engine.pieceData.get(id),r,c);
     }
     this.frameCamera();
     this.syncMaskMarkers(engine);
@@ -510,7 +561,7 @@ class View {
     this.dims={rows:engine.rows,cols:engine.cols};
     const s=SPACING*0.72;
     for(let r=0;r<engine.rows;r++)for(let c=0;c<engine.cols;c++){
-      if(engine.mask[r][c])continue;                 // only mark masked-OFF cells
+      if(engine.mask[r][c])continue;
       const {x,y}=this.cellToWorld(r,c);
       const tile=new THREE.Mesh(new THREE.PlaneGeometry(s,s),
         new THREE.MeshBasicMaterial({color:0x161d29,transparent:true,opacity:0.55}));
@@ -522,8 +573,6 @@ class View {
       this.scene.add(edge);this.maskMarkers.push(edge);
     }
   }
-  // build a mesh for a piece — no positioning, no scene insertion. Deterministic per id so a
-  // piece re-created during reverse-scrub looks identical to its live self (no rotation flicker).
   makeMesh(id,pd){
     const p=this.palette[pd.palette];
     const geom=PIECE_GEOM[p.id](PIECE);
@@ -544,7 +593,6 @@ class View {
     }
     return mesh;
   }
-  // get the mesh for a placement {id,palette,prize}, creating + inserting it if absent
   ensureMesh(pl){
     let m=this.meshes.get(pl.id);
     if(m)return m;
@@ -556,46 +604,87 @@ class View {
     this.scene.remove(m);m.geometry.dispose();m.material.dispose();
     if(m.userData.ring){m.userData.ring.geometry.dispose();m.userData.ring.material.dispose();}
   }
-  _mesh(id,pd,r,c,pop){
+  _mesh(id,pd,r,c){
     const mesh=this.makeMesh(id,pd);
     const {x,y}=this.cellToWorld(r,c);mesh.position.set(x,y,0);
     this.scene.add(mesh);this.meshes.set(id,mesh);
-    if(pop){mesh.scale.setScalar(0.01);
-      new TWEEN.Tween(mesh.scale).to({x:1,y:1,z:1},460).delay((r+c)*16)
-        .easing(TWEEN.Easing.Elastic.Out).start();}
     return mesh;
   }
   hideMarkers(){for(const o of this.maskMarkers)o.visible=false;}
   showMarkers(){for(const o of this.maskMarkers)o.visible=true;}
-  clearHoverNow(){ // instant (no tween) — used when freezing live play to enter replay
+  clearHoverNow(){
     this.clearTubeConnections();
-    for(const id of this.hoverGroup){const m=this.meshes.get(id);if(m)m.material.emissiveIntensity=0;}
-    this.hoverGroup.clear();document.body.style.cursor='default';
+    this.hoverGroup.clear();
+    for(const m of this.meshes.values()) {
+      m.material.emissiveIntensity = 0;
+    }
+    document.body.style.cursor='default';
   }
-  // ████ the heart of reversible playback ████
-  // Render any frame-to-frame transition at progress f∈[0,1]. Pure in (frameA,frameB,f),
-  // so forward and reverse are the same call. Interpolates WORLD positions (not cells), so a
-  // dimension change (rotate/collapse) is just two well-defined endpoints to glide between.
-  renderInterpolated(frameA,frameB,f){
-    const A=new Map(frameA.placements.map(p=>[p.id,p]));
-    const B=new Map(frameB.placements.map(p=>[p.id,p]));
-    const seen=new Set();
-    const ids=new Set([...A.keys(),...B.keys()]);
+  renderInterpolated(frameA,frameB,f,step){
+    const A = new Map(frameA.placements.map(p=>[p.id,p]));
+    const B = new Map(frameB.placements.map(p=>[p.id,p]));
+    const seen = new Set();
+    const ids = new Set([...A.keys(),...B.keys()]);
+    
+    const kind = step ? step.kind : 'linear';
+    
+    // Choose specific easing functions depending on the transformation kind
+    let posF = f;
+    if (kind === 'settle') {
+      posF = EASE.bounceOut(f);
+    } else if (kind === 'rotate') {
+      posF = EASE.cubicInOut(f);
+    } else if (kind === 'scroll') {
+      posF = EASE.backOut(f);
+    } else if (kind === 'collapse') {
+      posF = EASE.cubicOut(f);
+    }
+    
     for(const id of ids){
       const a=A.get(id),b=B.get(id),pl=b||a;
       const m=this.ensureMesh(pl);seen.add(id);
       if(a&&b){
         const wa=this.cellToWorld(a.r,a.c,frameA.dims),wb=this.cellToWorld(b.r,b.c,frameB.dims);
-        m.position.set(wa.x+(wb.x-wa.x)*f, wa.y+(wb.y-wa.y)*f, 0);
-        m.scale.setScalar(1);m.material.emissiveIntensity=0;
-      }else if(a){            // present in A, gone in B → clears as f→1 (un-clears as f→0)
+        m.position.set(wa.x+(wb.x-wa.x)*posF, wa.y+(wb.y-wa.y)*posF, 0);
+        m.scale.setScalar(1);
+        m.material.emissiveIntensity = 0;
+        
+        // Secondary flair additions
+        if (kind === 'rotate') {
+          m.rotation.z = posF * Math.PI * 2;
+        } else if (kind === 'scroll') {
+          m.rotation.z = Math.sin(f * Math.PI) * 0.4;
+        } else {
+          m.rotation.z = 0;
+        }
+      }else if(a){
+        // Clear Pop / Scale-out
         const wa=this.cellToWorld(a.r,a.c,frameA.dims);
         m.position.set(wa.x,wa.y,0);
-        m.scale.setScalar(Math.max(0.001,1-f));m.material.emissiveIntensity=0.9*f;
-      }else{                  // absent in A, present in B → appears as f→1
+        
+        let scaleF;
+        if (f < 0.25) {
+          scaleF = 1 + (f / 0.25) * 0.25; // pop swell
+        } else {
+          scaleF = 1.25 * (1 - (f - 0.25) / 0.75); // contract
+        }
+        m.scale.setScalar(Math.max(0.001, scaleF));
+        m.material.emissiveIntensity = f * 0.95;
+        m.rotation.z = f * Math.PI * 3;
+      }else{
+        // Un-clear pop back in (reversible pop)
         const wb=this.cellToWorld(b.r,b.c,frameB.dims);
         m.position.set(wb.x,wb.y,0);
-        m.scale.setScalar(Math.max(0.001,f));m.material.emissiveIntensity=0.9*(1-f);
+        
+        let scaleF;
+        if (f > 0.75) {
+          scaleF = ( (1 - f) / 0.25 ) * 0.25 + 1;
+        } else {
+          scaleF = 1.25 * (f / 0.75);
+        }
+        m.scale.setScalar(Math.max(0.001, scaleF));
+        m.material.emissiveIntensity = (1 - f) * 0.95;
+        m.rotation.z = (1 - f) * Math.PI * 3;
       }
     }
     for(const [id,m] of [...this.meshes.entries()]) if(!seen.has(id)){this._disposeMesh(m);this.meshes.delete(id);}
@@ -603,58 +692,7 @@ class View {
     const ic=frameA.dims.cols+(frameB.dims.cols-frameA.dims.cols)*f;
     this.setCameraForDims(ir,ic);this.dims={rows:Math.round(ir),cols:Math.round(ic)};
   }
-  reconcileToFrame(frame){this.renderInterpolated(frame,frame,0);}
-  // play the engine's ordered step list; resolves when all animation completes
-  async playSteps(steps){
-    this.busy=true;this.clearHover();
-    for(const step of steps){
-      if(step.kind==='clear') await this._animClear(step);
-      else if(step.kind==='settle') await this._animMoves(step.moves,'bounce');
-      else if(step.kind==='scroll') await this._animMoves(step.moves,'slide');
-      else if(step.kind==='collapse'){this.dims=step.dims;this.frameCamera();await this._animMoves(step.moves,'slide');}
-      else if(step.kind==='rotate'){this.dims=step.dims;this.frameCamera();await this._animMoves(step.moves,'spin');}
-    }
-    this.busy=false;
-    this.syncMaskMarkers(engine);
-  }
-  _animClear(step){
-    return new Promise(res=>{
-      let pending=step.cells.length||1;const done=()=>{if(--pending<=0)res();};
-      const sorted=[...step.cells].sort((a,b)=>
-        (Math.max(Math.abs(a.r-step.center.r),Math.abs(a.c-step.center.c)))-
-        (Math.max(Math.abs(b.r-step.center.r),Math.abs(b.c-step.center.c))));
-      sorted.forEach((cell,i)=>{
-        const m=this.meshes.get(cell.id);if(!m){done();return;}
-        const delay=i*22;
-        if(m.userData.ring)new TWEEN.Tween(m.userData.ring.position).to({z:6},460).delay(delay)
-          .easing(TWEEN.Easing.Cubic.In).start();
-        new TWEEN.Tween(m.material).to({emissiveIntensity:0.9},120).delay(delay).start();
-        new TWEEN.Tween(m.scale).to({x:1.45,y:1.45,z:1.45},150).delay(delay)
-          .easing(TWEEN.Easing.Quadratic.Out)
-          .chain(new TWEEN.Tween(m.scale).to({x:0.01,y:0.01,z:0.01},260).easing(TWEEN.Easing.Back.In)
-            .onComplete(()=>{this.scene.remove(m);m.geometry.dispose();m.material.dispose();
-              if(m.userData.ring){m.userData.ring.geometry.dispose();m.userData.ring.material.dispose();}
-              this.meshes.delete(cell.id);done();})).start();
-      });
-      if(!step.cells.length)res();
-    });
-  }
-  _animMoves(moves,style){
-    return new Promise(res=>{
-      if(!moves||!moves.length)return res();
-      let pending=moves.length;const done=()=>{if(--pending<=0)res();};
-      moves.forEach(({id,toR,toC})=>{
-        const m=this.meshes.get(id);if(!m){done();return;}
-        const {x,y}=this.cellToWorld(toR,toC);
-        const ease=style==='bounce'?TWEEN.Easing.Bounce.Out
-                  :style==='spin'?TWEEN.Easing.Quadratic.InOut:TWEEN.Easing.Cubic.Out;
-        const dur=style==='spin'?620:style==='slide'?420:520;
-        new TWEEN.Tween(m.position).to({x,y},dur).easing(ease).onComplete(done).start();
-        if(style==='spin')new TWEEN.Tween(m.rotation).to({z:m.rotation.z+Math.PI/2},dur)
-          .easing(TWEEN.Easing.Quadratic.InOut).start();
-      });
-    });
-  }
+  reconcileToFrame(frame){this.renderInterpolated(frame,frame,0,null);}
   clearTubeConnections(){
     this.tubeConnections.forEach(t => t.remove());
     this.tubeConnections = [];
@@ -688,7 +726,6 @@ class View {
         }
 
         if (memo.has(nr + ',' + nc)) {
-          // Skip tube drawing across physical wrapped borders to prevent visual lines crossing the board layout
           if (isWrapped) continue;
 
           const neighborId = engine.grid[nr][nc];
@@ -708,16 +745,12 @@ class View {
     });
   }
   setHover(engine,r,c){
-    if(this.busy)return;
+    if(liveAnim.active)return;
     this.clearTubeConnections();
     const grp=(r==null)?[]:engine.findGroup(r,c);
     const clearable=grp.length>=engine.def.rules.minGroupSize;
-    const next=new Set(clearable?grp.map(g=>engine.grid[g.r][g.c]):[]);
-    for(const id of this.hoverGroup) if(!next.has(id)){const m=this.meshes.get(id);
-      if(m)new TWEEN.Tween(m.material).to({emissiveIntensity:0},150).start();}
-    for(const id of next) if(!this.hoverGroup.has(id)){const m=this.meshes.get(id);
-      if(m)new TWEEN.Tween(m.material).to({emissiveIntensity:0.4},150).start();}
-    this.hoverGroup=next;
+    const next=new Set(clearable?grp.map(g=>engine.grid[g.r][g.c]) : []);
+    this.hoverGroup = next;
     document.body.style.cursor=clearable?'pointer':'default';
 
     if (clearable && grp.length > 0) {
@@ -726,8 +759,7 @@ class View {
   }
   clearHover(){
     this.clearTubeConnections();
-    for(const id of this.hoverGroup){const m=this.meshes.get(id);
-      if(m)new TWEEN.Tween(m.material).to({emissiveIntensity:0},120).start();}this.hoverGroup.clear();
+    this.hoverGroup.clear();
     document.body.style.cursor='default';
   }
   pick(engine,cx,cy){
@@ -741,7 +773,14 @@ class View {
     return null;
   }
   render(){
-    for(const m of this.meshes.values()) {
+    if (this.cameraTargetZ) {
+      this.camera.position.z += (this.cameraTargetZ - this.camera.position.z) * 0.15;
+      this.camera.lookAt(0, 0, 0);
+    }
+    for(const [id, m] of this.meshes.entries()) {
+      const targetEmissive = this.hoverGroup.has(id) ? 0.4 : 0;
+      m.material.emissiveIntensity += (targetEmissive - m.material.emissiveIntensity) * 0.2;
+      
       if(!m.userData.isSphere) m.rotation.y+=m.userData.spin;
       if(m.userData.ring) {
         m.userData.ring.rotation.y += 0.02;
@@ -755,17 +794,25 @@ class View {
 }
 
 // ████ GAME — wires definition → engine → view, and the HUD ████
-const ROWS=11, COLS=11;
 const stage=document.getElementById('stage');
 const view=new View(stage);
 let engine=null;
 
-// ── determinism: a seeded PRNG so randomFill is reproducible (sets up future replay-from-seed) ──
-function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
-  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function createSeededRNG(initialSeed) {
+  let state = initialSeed;
+  return {
+    next() {
+      state |= 0;
+      state = state + 0x6D2B79F5 | 0;
+      let t = Math.imul(state ^ state >>> 15, 1 | state);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    },
+    getState() { return state; },
+    setState(s) { state = s; }
+  };
+}
 
-// ── the Timeline: an ordered list of frames + the input that produced each (timeplan §4) ──
-// A frame is everything needed to draw the board statically at a settled moment.
 function captureFrame(eng){
   const placements=[];
   for(let r=0;r<eng.rows;r++)for(let c=0;c<eng.cols;c++){
@@ -775,23 +822,131 @@ function captureFrame(eng){
   }
   return {dims:{rows:eng.rows,cols:eng.cols},placements};
 }
+
+function generateSubFrames(startFrame, steps) {
+  const frames = [startFrame];
+  let current = startFrame;
+  
+  for (const step of steps) {
+    if (step.kind === 'state') continue;
+    
+    let nextDims = { ...current.dims };
+    let nextPlacements = [];
+    
+    if (step.kind === 'clear') {
+      const clearedIds = new Set(step.cells.map(c => c.id));
+      nextPlacements = current.placements.filter(p => !clearedIds.has(p.id));
+    } else if (step.kind === 'settle' || step.kind === 'scroll') {
+      const moveMap = new Map(step.moves.map(m => [m.id, m]));
+      nextPlacements = current.placements.map(p => {
+        const mv = moveMap.get(p.id);
+        return mv ? { ...p, r: mv.toR, c: mv.toC } : p;
+      });
+    } else if (step.kind === 'collapse' || step.kind === 'rotate') {
+      nextDims = { ...step.dims };
+      const moveMap = new Map(step.moves.map(m => [m.id, m]));
+      nextPlacements = current.placements.map(p => {
+        const mv = moveMap.get(p.id);
+        return mv ? { ...p, r: mv.toR, c: mv.toC } : p;
+      });
+    }
+    
+    current = { dims: nextDims, placements: nextPlacements };
+    frames.push(current);
+  }
+  return frames;
+}
+
 const timeline={seed:0,entries:[]};
-function timelineReset(seed){timeline.seed=seed;timeline.entries=[{input:null,steps:null,frame:captureFrame(engine)}];}
-function timelinePush(input,steps){timeline.entries.push({input,steps,frame:captureFrame(engine)});}
+function timelineReset(seed){
+  timeline.seed=seed;
+  const initialFrame = captureFrame(engine);
+  timeline.entries=[{
+    input:null,
+    steps:null,
+    subFrames:[initialFrame],
+    rngState:seed,
+    score:0,
+    collected:0
+  }];
+  replay.T=0;
+}
+function timelinePush(input,steps){
+  const prevEntry = timeline.entries[timeline.entries.length - 1];
+  const startFrame = prevEntry.subFrames[prevEntry.subFrames.length - 1];
+  const subFrames = generateSubFrames(startFrame, steps);
+  
+  timeline.entries.push({
+    input,
+    steps,
+    subFrames,
+    rngState:engine.rng.getState(),
+    score:engine.score,
+    collected:engine.collected
+  });
+}
 function lastT(){return Math.max(0,timeline.entries.length-1);}
 
-// ── the playhead: a signed real number in segment-units. integer = frame, fraction = progress ──
-const replay={active:false,playing:false,dir:1,speed:1,T:0};
-const SEGMENT_MS=560;  // nominal duration of one segment during auto-play
+const replay={active:false,playing:false,dir:1,T:0};
+const SEGMENT_MS=560;
+
+// Shared Speed Multipliers (Including high-granularity slow motion)
+const speeds = [0.25, 0.5, 1, 2, 4];
+let speedIdx = 3; // Index representing default 0.5x speed
+const speedSetting = { current: 0.5 };
+
+function cycleSpeed() {
+  speedIdx = (speedIdx + 1) % speeds.length;
+  const speed = speeds[speedIdx];
+  speedSetting.current = speed;
+  
+  document.getElementById('speed-toggle').textContent = `Speed: ${speed}×`;
+  byId('rp-speed').textContent = `${speed}×`;
+  refreshReplayUI();
+}
+
+const liveAnim={
+  active:false,
+  startT:0,
+  targetT:0,
+  elapsed:0,
+  duration:380
+};
+
+function triggerLiveAnimation(fromT,toT){
+  liveAnim.active=true;
+  liveAnim.startT=fromT;
+  liveAnim.targetT=toT;
+  liveAnim.elapsed=0;
+  replay.T=fromT;
+  view.clearHover();
+  
+  const entry = timeline.entries[toT];
+  const M = entry.subFrames.length - 1;
+  // Scaled play duration depending on global speed
+  liveAnim.duration = (Math.max(1, M) * 320) / speedSetting.current;
+}
+
+function maybeFork(){
+  if(!replay.active)return;
+  const K=Math.floor(replay.T);
+  const entry=timeline.entries[K];
+  const settledFrame = entry.subFrames[entry.subFrames.length - 1];
+  engine.restoreFromFrame(settledFrame, entry.score, entry.collected, entry.rngState);
+  timeline.entries=timeline.entries.slice(0,K+1);
+  replay.active=false;
+  replay.playing=false;
+  showReplayBar(false);
+  view.showMarkers();
+  view.syncMaskMarkers(engine);
+}
 
 function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
-// Floors modifier: flip ~frac of mask cells to false (they become walls/floors). Composes with any game.
 function randomizeMask(def,frac){
   const m=def.layers.mask.grid;
   for(let r=0;r<def.lattice.rows;r++)for(let c=0;c<def.lattice.cols;c++) if(Math.random()<frac) m[r][c]=false;
 }
 function maskIsFull(def){ for(const row of def.layers.mask.grid) for(const v of row) if(!v) return false; return true; }
-// Prizes only on ACTIVE cells that have at least one active neighbor (avoid stranding a prize on an island)
 function pickPrizeCells(def,n){
   const m=def.layers.mask.grid, R=def.lattice.rows, C=def.lattice.cols, cand=[];
   for(let r=0;r<R;r++)for(let c=0;c<C;c++){
@@ -806,31 +961,31 @@ function countActive(def){let n=0;for(const row of def.layers.mask.grid)for(cons
 let currentGame=GAMES[0], currentTemplate='rectangle';
 function chosenSize(){
   if(!document.getElementById('size-check').checked) return {rows:11,cols:11};
-  const rnd=()=>5+Math.floor(Math.random()*11);  // 5..15, independent per axis
+  const rnd=()=>5+Math.floor(Math.random()*11);
   return {rows:rnd(), cols:rnd()};
 }
 function newBoard(){
-  if(replay.active) exitReplay(true);                      // leave replay without re-syncing old board
+  if(replay.active) exitReplay(true);
   const floors=document.getElementById('floors-check').checked;
   let tries=0, ok=false, seed=0;
   do{
-    const {rows,cols}=chosenSize();                       // size each try (re-roll if a size fails)
-    const def=currentGame.build(rows,cols,[]);            // rules + full-size layers
-    def.layers.mask.grid=TEMPLATES[currentTemplate](rows,cols); // shape the mask
-    if(floors) randomizeMask(def,0.16);                   // optionally punch holes
-    if(!maskIsFull(def))                                  // §7/§12: scroll needs a full-rect mask
+    const {rows,cols}=chosenSize();
+    const def=currentGame.build(rows,cols,[]);
+    def.layers.mask.grid=TEMPLATES[currentTemplate](rows,cols);
+    if(floors) randomizeMask(def,0.16);
+    if(!maskIsFull(def))
       def.rules.transforms=def.rules.transforms.filter(t=>!t.startsWith('scroll'));
     const active=countActive(def);
     const prizeN=Math.max(3,Math.min(10,Math.floor(active/14)));
-    def.layers.prizes.cells=pickPrizeCells(def,prizeN);   // prizes on active, non-isolated cells
-    seed=(Math.random()*4294967296)>>>0;                  // randomFill flows through this seed
-    engine=new RulesEngine(def, mulberry32(seed));
+    def.layers.prizes.cells=pickPrizeCells(def,prizeN);
+    seed=(Math.random()*4294967296)>>>0;
+    engine=new RulesEngine(def, createSeededRNG(seed));
     ok = engine.hasValidMoves() &&
          (engine.def.win.type!=='collectAllPrizes' || engine.totalPrizes>0);
     tries++;
   } while(!ok && tries<160);
   view.build(engine);
-  timelineReset(seed);                                     // frame[0] = the freshly dealt board
+  timelineReset(seed);
   syncHUD(); renderDefinition(); renderTransformControls();
   hide('ov-win'); hide('ov-lose');
 }
@@ -852,7 +1007,7 @@ function renderDefinition(){
   document.getElementById('def-rows').innerHTML=rows.map(([k,v,acc])=>
     `<div class="row"><span class="k">${k}</span><span class="val${acc?' accent':''}">${v}</span></div>`).join('');
 }
-// transform buttons are driven by the definition's rules.transforms list
+
 const TRANSFORM_BTN={
   rotateCCW:{g:'↺',t:'Rotate counter-clockwise',run:()=>engine.rotateBoard('ccw')},
   rotateCW:{g:'↻',t:'Rotate clockwise',run:()=>engine.rotateBoard('cw')},
@@ -861,11 +1016,10 @@ const TRANSFORM_BTN={
   'scrollR-':{g:'⇡',t:'Scroll rows up (wrap)',run:()=>engine.scrollBoard('scrollR-')},
   'scrollR+':{g:'⇣',t:'Scroll rows down (wrap)',run:()=>engine.scrollBoard('scrollR+')},
 };
-// scroll is only useful perpendicular to gravity (a parallel scroll is undone by settle); all four when none
 function scrollAxisOK(key){
   const g=GRAVITY[engine.gravityDir];
-  if(g.dr===0&&g.dc===0) return true;                 // gravity none → every scroll matters
-  return key.startsWith('scrollC') ? g.dr!==0 : g.dc!==0;  // horizontal scroll ⟂ vertical gravity, & vice versa
+  if(g.dr===0&&g.dc===0) return true;
+  return key.startsWith('scrollC') ? g.dr!==0 : g.dc!==0;
 }
 function renderTransformControls(){
   const list=(engine.def.rules.transforms||[]).filter(k=>{
@@ -878,19 +1032,20 @@ function renderTransformControls(){
   grp.style.display=show?'':'none'; div.style.display=show?'':'none';
   for(const key of list){const t=TRANSFORM_BTN[key];
     const b=document.createElement('button');b.className='tbtn';b.textContent=t.g;b.title=t.t;
-    b.addEventListener('click',()=>{if(view.busy||replay.active)return;const steps=t.run();renderDefinition();runSteps(steps,{type:key});});
+    b.addEventListener('click',()=>{
+      if(liveAnim.active)return;
+      if(replay.active) maybeFork();
+      const steps=t.run();
+      renderDefinition();
+      runSteps(steps,{type:key});
+    });
     host.appendChild(b);}
 }
-async function runSteps(steps,input){
-  await view.playSteps(steps);
-  syncHUD();
-  timelinePush(input,steps);          // engine is already at its settled post-action state
-  refreshReplayUI();
-  const final=steps[steps.length-1];
-  if(final&&final.kind==='state'){
-    if(final.status==='won') show('ov-win');
-    else if(final.status==='lost') show('ov-lose');
-  }
+function runSteps(steps,input){
+  const fromT=lastT();
+  timelinePush(input,steps);
+  const toT=lastT();
+  triggerLiveAnimation(fromT,toT);
 }
 function show(id){document.getElementById(id).classList.add('show');}
 function hide(id){document.getElementById(id).classList.remove('show');}
@@ -898,23 +1053,26 @@ function hide(id){document.getElementById(id).classList.remove('show');}
 // input
 let hoverRAF=null;
 stage.addEventListener('pointermove',e=>{
-  if(view.busy||replay.active)return;
+  if(replay.active || liveAnim.active)return;
   if(hoverRAF)cancelAnimationFrame(hoverRAF);
   hoverRAF=requestAnimationFrame(()=>{const cell=view.pick(engine,e.clientX,e.clientY);
     view.setHover(engine,cell?cell.r:null,cell?cell.c:null);});
 });
 stage.addEventListener('pointerdown',e=>{
-  if(view.busy||replay.active)return;
+  if(liveAnim.active)return;
   const cell=view.pick(engine,e.clientX,e.clientY);if(!cell)return;
+  if(replay.active) maybeFork();
   const steps=engine.tapAt(cell.r,cell.c);if(steps)runSteps(steps,{type:'tap',args:{r:cell.r,c:cell.c}});
 });
-// gravity — the headline: change the rule, watch the board re-settle
+
 document.querySelectorAll('.gbtn').forEach(b=>b.addEventListener('click',()=>{
-  if(view.busy||replay.active)return;const dir=b.dataset.grav;if(dir===engine.gravityDir)return;
+  if(liveAnim.active)return;
+  const dir=b.dataset.grav;if(dir===engine.gravityDir && !replay.active)return;
+  if(replay.active) maybeFork();
   const steps=engine.setGravity(dir);renderDefinition();renderTransformControls();
   runSteps(steps,{type:'gravity·'+dir});
 }));
-// game selector — rules; shape selector — mask template
+
 const sel=document.getElementById('game-select');
 GAMES.forEach(g=>{const o=document.createElement('option');o.value=g.key;o.textContent=g.label;sel.appendChild(o);});
 sel.addEventListener('change',()=>{
@@ -929,9 +1087,14 @@ document.getElementById('size-check').addEventListener('change',newBoard);
 document.getElementById('new-board').addEventListener('click',newBoard);
 document.getElementById('win-again').addEventListener('click',newBoard);
 document.getElementById('lose-again').addEventListener('click',newBoard);
+
+// Wire Review Buttons in Overlays
+document.getElementById('win-review').addEventListener('click', () => { hide('ov-win'); enterReplay(); });
+document.getElementById('lose-review').addEventListener('click', () => { hide('ov-lose'); enterReplay(); });
+
 addEventListener('resize',()=>view.resize());
 
-// ████ REPLAY — drive the signed playhead; render via frame interpolation (timeplan §5,§7) ████
+// ████ REPLAY — playhead navigation ████
 const byId=id=>document.getElementById(id);
 const rp={slider:byId('rp-slider'),play:byId('rp-play'),dir:byId('rp-dir'),speed:byId('rp-speed'),label:byId('rp-label')};
 function showReplayBar(on){byId('replay-bar').classList.toggle('show',on);byId('console').style.display=on?'none':'';}
@@ -943,12 +1106,12 @@ function refreshReplayUI(){
   rp.label.textContent=`${idx} / ${last} · ${inp?inp.type:'start'}`;
   rp.play.classList.toggle('playing',replay.playing);rp.play.textContent=replay.playing?'❚❚':'▶';
   rp.dir.classList.toggle('rev',replay.dir<0);
-  rp.speed.textContent=replay.speed+'×';
+  rp.speed.textContent=speedSetting.current+'×';
 }
 function setT(t){replay.T=Math.min(lastT(),Math.max(0,t));refreshReplayUI();}
 function enterReplay(){
-  if(view.busy)return;
-  if(timeline.entries.length<2){console.log('[timeline] no moves recorded yet — play a move first');return;}
+  if(liveAnim.active)return;
+  if(timeline.entries.length<2){return;}
   replay.active=true;replay.playing=false;replay.dir=1;replay.T=lastT();
   view.clearHoverNow();view.hideMarkers();
   hide('ov-win');hide('ov-lose');
@@ -956,16 +1119,35 @@ function enterReplay(){
 }
 function exitReplay(skipResync){
   replay.active=false;replay.playing=false;
-  if(!skipResync){view.reconcileToFrame(timeline.entries[lastT()].frame);view.showMarkers();view.syncMaskMarkers(engine);}
+  if(!skipResync){
+    const lastEntry = timeline.entries[lastT()];
+    view.reconcileToFrame(lastEntry.subFrames[lastEntry.subFrames.length - 1]);
+    view.showMarkers();view.syncMaskMarkers(engine);
+  }
   showReplayBar(false);
 }
 function renderReplayFrame(){
   const last=lastT();if(last===0)return;
   const s=Math.min(last-1,Math.max(0,Math.floor(replay.T)));
   const f=replay.T-s;
-  view.renderInterpolated(timeline.entries[s].frame, timeline.entries[s+1].frame, f);
+  
+  const entry = timeline.entries[s + 1];
+  const subFrames = entry.subFrames;
+  const M = subFrames.length - 1;
+  
+  if (M <= 0) {
+    view.reconcileToFrame(subFrames[0]);
+    return;
+  }
+  
+  const lf = f * M;
+  const idx = Math.min(M - 1, Math.floor(lf));
+  const localF = lf - idx;
+  
+  const step = entry.steps ? entry.steps[idx] : null;
+  view.renderInterpolated(subFrames[idx], subFrames[idx + 1], localF, step);
 }
-// wiring
+
 byId('replay-enter').addEventListener('click',enterReplay);
 byId('rp-exit').addEventListener('click',()=>exitReplay(false));
 byId('rp-first').addEventListener('click',()=>{replay.playing=false;setT(0);});
@@ -973,10 +1155,14 @@ byId('rp-last').addEventListener('click',()=>{replay.playing=false;setT(lastT())
 byId('rp-back').addEventListener('click',()=>{replay.playing=false;setT(Math.round(replay.T)-1);});
 byId('rp-fwd').addEventListener('click',()=>{replay.playing=false;setT(Math.round(replay.T)+1);});
 byId('rp-dir').addEventListener('click',()=>{replay.dir*=-1;refreshReplayUI();});
-byId('rp-speed').addEventListener('click',()=>{replay.speed=replay.speed>=4?1:replay.speed*2;refreshReplayUI();});
+
+// Wire up combined speed setting
+document.getElementById('speed-toggle').addEventListener('click', cycleSpeed);
+byId('rp-speed').addEventListener('click', cycleSpeed);
+
 rp.play.addEventListener('click',()=>{
   if(replay.playing){replay.playing=false;}
-  else{ // auto-rewind to the far end if we're already parked there, so Play always plays
+  else{
     if(replay.dir>0&&replay.T>=lastT())replay.T=0;
     if(replay.dir<0&&replay.T<=0)replay.T=lastT();
     replay.playing=true;
@@ -986,6 +1172,7 @@ rp.play.addEventListener('click',()=>{
 rp.slider.addEventListener('input',()=>{replay.playing=false;setT(parseFloat(rp.slider.value));});
 addEventListener('keydown',e=>{
   if(e.key==='r'||e.key==='R'){if(replay.active)exitReplay(false);else enterReplay();return;}
+  if(liveAnim.active)return;
   if(!replay.active)return;
   if(e.key===' '){e.preventDefault();rp.play.click();}
   else if(e.key==='ArrowLeft'){replay.playing=false;setT(Math.round(replay.T)-1);}
@@ -993,21 +1180,47 @@ addEventListener('keydown',e=>{
   else if(e.key==='Escape'){exitReplay(false);}
 });
 
-// loop — live play uses TWEEN; replay scrubs the timeline by interpolation. Same render(), one playhead.
+// loop — core delta manager
 let prevTS=0;
 function loop(t){
   requestAnimationFrame(loop);
   const dt=prevTS?Math.min(64,t-prevTS):16; prevTS=t;
-  if(replay.active){
+
+  if (liveAnim.active) {
+    liveAnim.elapsed += dt;
+    const progress = Math.min(1, liveAnim.elapsed / liveAnim.duration);
+    const eased = progress < 0.5 
+      ? 4 * progress * progress * progress 
+      : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+    
+    replay.T = liveAnim.startT + (liveAnim.targetT - liveAnim.startT) * eased;
+    
+    if (progress >= 1) {
+      replay.T = liveAnim.targetT;
+      liveAnim.active = false;
+      syncHUD();
+      
+      const lastEntry = timeline.entries[timeline.entries.length - 1];
+      const finalStep = lastEntry.steps && lastEntry.steps[lastEntry.steps.length - 1];
+      if (finalStep && finalStep.kind === 'state') {
+        if (finalStep.status === 'won') show('ov-win');
+        else if (finalStep.status === 'lost') show('ov-lose');
+      }
+    }
+    renderReplayFrame();
+  } else if(replay.active){
     if(replay.playing){
-      replay.T+=replay.dir*replay.speed*(dt/SEGMENT_MS);
+      replay.T+=replay.dir*speedSetting.current*(dt/SEGMENT_MS);
       if(replay.T>=lastT()){replay.T=lastT();replay.playing=false;}
       else if(replay.T<=0){replay.T=0;replay.playing=false;}
       refreshReplayUI();
     }
     renderReplayFrame();
   }else{
-    TWEEN.update(t);
+    if (timeline.entries.length > 0) {
+      const lastEntry = timeline.entries[lastT()];
+      view.reconcileToFrame(lastEntry.subFrames[lastEntry.subFrames.length - 1]);
+    }
   }
   view.render();
 }
