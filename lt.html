@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>The Neighborhood — games expressed as rules for an engine</title>
+<title>Lattice with Timeline</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.min.js"></script>
 <style>
@@ -97,6 +97,22 @@
   .card.win h2{color:var(--good);} .card.lose h2{color:var(--bad);}
   .card p{color:var(--muted);font-size:13px;margin:0 0 20px;line-height:1.6;}
   .card .txt{width:100%;justify-content:center;display:flex;align-items:center;}
+
+  /* ── replay / timeline bar ── */
+  #replay-bar{position:absolute;left:0;right:0;bottom:0;z-index:60;display:none;
+    justify-content:center;padding:0 14px 16px;pointer-events:none;}
+  #replay-bar.show{display:flex;}
+  .replay-inner{pointer-events:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+    justify-content:center;background:linear-gradient(180deg,rgba(16,21,31,.92),rgba(13,18,25,.97));
+    border:1px solid var(--signal-dim);border-radius:14px;padding:10px 13px;backdrop-filter:blur(8px);
+    box-shadow:0 12px 40px rgba(0,0,0,.55);}
+  #rp-slider{width:min(42vw,280px);accent-color:var(--signal);cursor:pointer;height:38px;}
+  .rp-label{font-family:var(--mono);font-size:11px;color:var(--muted);min-width:104px;text-align:center;
+    letter-spacing:.03em;white-space:nowrap;}
+  #rp-play.playing{background:var(--signal);border-color:var(--signal);color:#1a1206;
+    box-shadow:0 0 14px rgba(240,168,56,.45);}
+  #rp-dir.rev{background:#1c2433;border-color:var(--signal-dim);color:var(--signal);}
+  #rp-speed{min-width:46px;text-align:center;}
 </style>
 </head>
 <body>
@@ -145,6 +161,26 @@
         </label>
         <button class="txt primary" id="new-board">New board</button>
       </div>
+      <div class="divider"></div>
+      <div class="grp">
+        <button class="txt" id="replay-enter" title="Replay the timeline (R)">⏮ Replay</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- timeline scrubber: a signed playhead over the deterministic step-list -->
+  <div id="replay-bar">
+    <div class="replay-inner">
+      <button class="tbtn" id="rp-first" title="First frame">⏮</button>
+      <button class="tbtn" id="rp-back"  title="Step back">◁</button>
+      <button class="tbtn" id="rp-play"  title="Play / pause (Space)">▶</button>
+      <button class="tbtn" id="rp-fwd"   title="Step forward">▷</button>
+      <button class="tbtn" id="rp-last"  title="Latest frame">⏭</button>
+      <button class="tbtn" id="rp-dir"   title="Playback direction">⇄</button>
+      <input type="range" id="rp-slider" min="0" max="0" step="0.001" value="0">
+      <button class="txt"  id="rp-speed" title="Playback speed">1×</button>
+      <span class="rp-label" id="rp-label">0 / 0 · start</span>
+      <button class="tbtn" id="rp-exit" title="Exit replay (R)">✕</button>
     </div>
   </div>
 
@@ -436,8 +472,16 @@ class View {
     this.dims={rows:0,cols:0};
     this.busy=false;this.hoverGroup=new Set();
   }
-  cellToWorld(r,c){
-    return {x:(c-(this.dims.cols-1)/2)*SPACING, y:((this.dims.rows-1)/2-r)*SPACING};
+  cellToWorld(r,c,dims){
+    const D=dims||this.dims;
+    return {x:(c-(D.cols-1)/2)*SPACING, y:((D.rows-1)/2-r)*SPACING};
+  }
+  // distance the camera needs for a board of given dims (no tween — used while scrubbing)
+  setCameraForDims(rows,cols){
+    const w=cols*SPACING, h=rows*SPACING;
+    const fov=THREE.MathUtils.degToRad(this.camera.fov);
+    const dH=(h/2)/Math.tan(fov/2), dW=(w/2)/(Math.tan(fov/2)*this.camera.aspect);
+    this.camera.position.z=Math.max(dH,dW)*1.18; this.camera.lookAt(0,0,0);
   }
   frameCamera(){
     const w=this.dims.cols*SPACING, h=this.dims.rows*SPACING;
@@ -478,15 +522,16 @@ class View {
       this.scene.add(edge);this.maskMarkers.push(edge);
     }
   }
-  _mesh(id,pd,r,c,pop){
+  // build a mesh for a piece — no positioning, no scene insertion. Deterministic per id so a
+  // piece re-created during reverse-scrub looks identical to its live self (no rotation flicker).
+  makeMesh(id,pd){
     const p=this.palette[pd.palette];
     const geom=PIECE_GEOM[p.id](PIECE);
     const mat=new THREE.MeshPhongMaterial({color:p.color,shininess:42,specular:0x333333,
       emissive:p.color,emissiveIntensity:0});
     const mesh=new THREE.Mesh(geom,mat);
-    const {x,y}=this.cellToWorld(r,c);mesh.position.set(x,y,0);
-    if(p.id!=='sphere')mesh.rotation.set(Math.random()*6,Math.random()*6,Math.random()*6);
-    mesh.userData={id,baseColor:p.color,spin:(Math.random()-0.5)*0.004,isSphere:p.id==='sphere'};
+    if(p.id!=='sphere'){const a=id*1.2345;mesh.rotation.set(a%6.283,(a*1.7)%6.283,(a*2.3)%6.283);}
+    mesh.userData={id,baseColor:p.color,spin:(((id*97)%100)/100-0.5)*0.004,isSphere:p.id==='sphere'};
     if(pd.prize){
       const ringSize = PIECE * 1.2;
       const ring = new THREE.Mesh(
@@ -497,12 +542,68 @@ class View {
       mesh.add(ring);
       mesh.userData.ring = ring;
     }
+    return mesh;
+  }
+  // get the mesh for a placement {id,palette,prize}, creating + inserting it if absent
+  ensureMesh(pl){
+    let m=this.meshes.get(pl.id);
+    if(m)return m;
+    m=this.makeMesh(pl.id,{palette:pl.palette,prize:pl.prize});
+    this.scene.add(m);this.meshes.set(pl.id,m);
+    return m;
+  }
+  _disposeMesh(m){
+    this.scene.remove(m);m.geometry.dispose();m.material.dispose();
+    if(m.userData.ring){m.userData.ring.geometry.dispose();m.userData.ring.material.dispose();}
+  }
+  _mesh(id,pd,r,c,pop){
+    const mesh=this.makeMesh(id,pd);
+    const {x,y}=this.cellToWorld(r,c);mesh.position.set(x,y,0);
     this.scene.add(mesh);this.meshes.set(id,mesh);
     if(pop){mesh.scale.setScalar(0.01);
       new TWEEN.Tween(mesh.scale).to({x:1,y:1,z:1},460).delay((r+c)*16)
         .easing(TWEEN.Easing.Elastic.Out).start();}
     return mesh;
   }
+  hideMarkers(){for(const o of this.maskMarkers)o.visible=false;}
+  showMarkers(){for(const o of this.maskMarkers)o.visible=true;}
+  clearHoverNow(){ // instant (no tween) — used when freezing live play to enter replay
+    this.clearTubeConnections();
+    for(const id of this.hoverGroup){const m=this.meshes.get(id);if(m)m.material.emissiveIntensity=0;}
+    this.hoverGroup.clear();document.body.style.cursor='default';
+  }
+  // ████ the heart of reversible playback ████
+  // Render any frame-to-frame transition at progress f∈[0,1]. Pure in (frameA,frameB,f),
+  // so forward and reverse are the same call. Interpolates WORLD positions (not cells), so a
+  // dimension change (rotate/collapse) is just two well-defined endpoints to glide between.
+  renderInterpolated(frameA,frameB,f){
+    const A=new Map(frameA.placements.map(p=>[p.id,p]));
+    const B=new Map(frameB.placements.map(p=>[p.id,p]));
+    const seen=new Set();
+    const ids=new Set([...A.keys(),...B.keys()]);
+    for(const id of ids){
+      const a=A.get(id),b=B.get(id),pl=b||a;
+      const m=this.ensureMesh(pl);seen.add(id);
+      if(a&&b){
+        const wa=this.cellToWorld(a.r,a.c,frameA.dims),wb=this.cellToWorld(b.r,b.c,frameB.dims);
+        m.position.set(wa.x+(wb.x-wa.x)*f, wa.y+(wb.y-wa.y)*f, 0);
+        m.scale.setScalar(1);m.material.emissiveIntensity=0;
+      }else if(a){            // present in A, gone in B → clears as f→1 (un-clears as f→0)
+        const wa=this.cellToWorld(a.r,a.c,frameA.dims);
+        m.position.set(wa.x,wa.y,0);
+        m.scale.setScalar(Math.max(0.001,1-f));m.material.emissiveIntensity=0.9*f;
+      }else{                  // absent in A, present in B → appears as f→1
+        const wb=this.cellToWorld(b.r,b.c,frameB.dims);
+        m.position.set(wb.x,wb.y,0);
+        m.scale.setScalar(Math.max(0.001,f));m.material.emissiveIntensity=0.9*(1-f);
+      }
+    }
+    for(const [id,m] of [...this.meshes.entries()]) if(!seen.has(id)){this._disposeMesh(m);this.meshes.delete(id);}
+    const ir=frameA.dims.rows+(frameB.dims.rows-frameA.dims.rows)*f;
+    const ic=frameA.dims.cols+(frameB.dims.cols-frameA.dims.cols)*f;
+    this.setCameraForDims(ir,ic);this.dims={rows:Math.round(ir),cols:Math.round(ic)};
+  }
+  reconcileToFrame(frame){this.renderInterpolated(frame,frame,0);}
   // play the engine's ordered step list; resolves when all animation completes
   async playSteps(steps){
     this.busy=true;this.clearHover();
@@ -659,6 +760,30 @@ const stage=document.getElementById('stage');
 const view=new View(stage);
 let engine=null;
 
+// ── determinism: a seeded PRNG so randomFill is reproducible (sets up future replay-from-seed) ──
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+
+// ── the Timeline: an ordered list of frames + the input that produced each (timeplan §4) ──
+// A frame is everything needed to draw the board statically at a settled moment.
+function captureFrame(eng){
+  const placements=[];
+  for(let r=0;r<eng.rows;r++)for(let c=0;c<eng.cols;c++){
+    const id=eng.grid[r][c];if(id==null)continue;
+    const pd=eng.pieceData.get(id);
+    placements.push({id,r,c,palette:pd.palette,prize:pd.prize});
+  }
+  return {dims:{rows:eng.rows,cols:eng.cols},placements};
+}
+const timeline={seed:0,entries:[]};
+function timelineReset(seed){timeline.seed=seed;timeline.entries=[{input:null,steps:null,frame:captureFrame(engine)}];}
+function timelinePush(input,steps){timeline.entries.push({input,steps,frame:captureFrame(engine)});}
+function lastT(){return Math.max(0,timeline.entries.length-1);}
+
+// ── the playhead: a signed real number in segment-units. integer = frame, fraction = progress ──
+const replay={active:false,playing:false,dir:1,speed:1,T:0};
+const SEGMENT_MS=560;  // nominal duration of one segment during auto-play
+
 function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
 // Floors modifier: flip ~frac of mask cells to false (they become walls/floors). Composes with any game.
 function randomizeMask(def,frac){
@@ -685,8 +810,9 @@ function chosenSize(){
   return {rows:rnd(), cols:rnd()};
 }
 function newBoard(){
+  if(replay.active) exitReplay(true);                      // leave replay without re-syncing old board
   const floors=document.getElementById('floors-check').checked;
-  let tries=0, ok=false;
+  let tries=0, ok=false, seed=0;
   do{
     const {rows,cols}=chosenSize();                       // size each try (re-roll if a size fails)
     const def=currentGame.build(rows,cols,[]);            // rules + full-size layers
@@ -697,12 +823,14 @@ function newBoard(){
     const active=countActive(def);
     const prizeN=Math.max(3,Math.min(10,Math.floor(active/14)));
     def.layers.prizes.cells=pickPrizeCells(def,prizeN);   // prizes on active, non-isolated cells
-    engine=new RulesEngine(def);
+    seed=(Math.random()*4294967296)>>>0;                  // randomFill flows through this seed
+    engine=new RulesEngine(def, mulberry32(seed));
     ok = engine.hasValidMoves() &&
          (engine.def.win.type!=='collectAllPrizes' || engine.totalPrizes>0);
     tries++;
   } while(!ok && tries<160);
   view.build(engine);
+  timelineReset(seed);                                     // frame[0] = the freshly dealt board
   syncHUD(); renderDefinition(); renderTransformControls();
   hide('ov-win'); hide('ov-lose');
 }
@@ -750,12 +878,14 @@ function renderTransformControls(){
   grp.style.display=show?'':'none'; div.style.display=show?'':'none';
   for(const key of list){const t=TRANSFORM_BTN[key];
     const b=document.createElement('button');b.className='tbtn';b.textContent=t.g;b.title=t.t;
-    b.addEventListener('click',()=>{if(view.busy)return;const steps=t.run();renderDefinition();runSteps(steps);});
+    b.addEventListener('click',()=>{if(view.busy||replay.active)return;const steps=t.run();renderDefinition();runSteps(steps,{type:key});});
     host.appendChild(b);}
 }
-async function runSteps(steps){
+async function runSteps(steps,input){
   await view.playSteps(steps);
   syncHUD();
+  timelinePush(input,steps);          // engine is already at its settled post-action state
+  refreshReplayUI();
   const final=steps[steps.length-1];
   if(final&&final.kind==='state'){
     if(final.status==='won') show('ov-win');
@@ -768,20 +898,21 @@ function hide(id){document.getElementById(id).classList.remove('show');}
 // input
 let hoverRAF=null;
 stage.addEventListener('pointermove',e=>{
-  if(view.busy)return;
+  if(view.busy||replay.active)return;
   if(hoverRAF)cancelAnimationFrame(hoverRAF);
   hoverRAF=requestAnimationFrame(()=>{const cell=view.pick(engine,e.clientX,e.clientY);
     view.setHover(engine,cell?cell.r:null,cell?cell.c:null);});
 });
 stage.addEventListener('pointerdown',e=>{
-  if(view.busy)return;
+  if(view.busy||replay.active)return;
   const cell=view.pick(engine,e.clientX,e.clientY);if(!cell)return;
-  const steps=engine.tapAt(cell.r,cell.c);if(steps)runSteps(steps);
+  const steps=engine.tapAt(cell.r,cell.c);if(steps)runSteps(steps,{type:'tap',args:{r:cell.r,c:cell.c}});
 });
 // gravity — the headline: change the rule, watch the board re-settle
 document.querySelectorAll('.gbtn').forEach(b=>b.addEventListener('click',()=>{
-  if(view.busy)return;const dir=b.dataset.grav;if(dir===engine.gravityDir)return;
-  const steps=engine.setGravity(dir);renderDefinition();renderTransformControls();runSteps(steps);
+  if(view.busy||replay.active)return;const dir=b.dataset.grav;if(dir===engine.gravityDir)return;
+  const steps=engine.setGravity(dir);renderDefinition();renderTransformControls();
+  runSteps(steps,{type:'gravity·'+dir});
 }));
 // game selector — rules; shape selector — mask template
 const sel=document.getElementById('game-select');
@@ -800,8 +931,86 @@ document.getElementById('win-again').addEventListener('click',newBoard);
 document.getElementById('lose-again').addEventListener('click',newBoard);
 addEventListener('resize',()=>view.resize());
 
-// loop
-function loop(t){requestAnimationFrame(loop);TWEEN.update(t);view.render();}
+// ████ REPLAY — drive the signed playhead; render via frame interpolation (timeplan §5,§7) ████
+const byId=id=>document.getElementById(id);
+const rp={slider:byId('rp-slider'),play:byId('rp-play'),dir:byId('rp-dir'),speed:byId('rp-speed'),label:byId('rp-label')};
+function showReplayBar(on){byId('replay-bar').classList.toggle('show',on);byId('console').style.display=on?'none':'';}
+function refreshReplayUI(){
+  const last=lastT();
+  rp.slider.max=last; if(Math.abs(parseFloat(rp.slider.value)-replay.T)>1e-4)rp.slider.value=replay.T;
+  const idx=Math.max(0,Math.min(last,Math.round(replay.T)));
+  const inp=timeline.entries[idx]&&timeline.entries[idx].input;
+  rp.label.textContent=`${idx} / ${last} · ${inp?inp.type:'start'}`;
+  rp.play.classList.toggle('playing',replay.playing);rp.play.textContent=replay.playing?'❚❚':'▶';
+  rp.dir.classList.toggle('rev',replay.dir<0);
+  rp.speed.textContent=replay.speed+'×';
+}
+function setT(t){replay.T=Math.min(lastT(),Math.max(0,t));refreshReplayUI();}
+function enterReplay(){
+  if(view.busy)return;
+  if(timeline.entries.length<2){console.log('[timeline] no moves recorded yet — play a move first');return;}
+  replay.active=true;replay.playing=false;replay.dir=1;replay.T=lastT();
+  view.clearHoverNow();view.hideMarkers();
+  hide('ov-win');hide('ov-lose');
+  showReplayBar(true);refreshReplayUI();
+}
+function exitReplay(skipResync){
+  replay.active=false;replay.playing=false;
+  if(!skipResync){view.reconcileToFrame(timeline.entries[lastT()].frame);view.showMarkers();view.syncMaskMarkers(engine);}
+  showReplayBar(false);
+}
+function renderReplayFrame(){
+  const last=lastT();if(last===0)return;
+  const s=Math.min(last-1,Math.max(0,Math.floor(replay.T)));
+  const f=replay.T-s;
+  view.renderInterpolated(timeline.entries[s].frame, timeline.entries[s+1].frame, f);
+}
+// wiring
+byId('replay-enter').addEventListener('click',enterReplay);
+byId('rp-exit').addEventListener('click',()=>exitReplay(false));
+byId('rp-first').addEventListener('click',()=>{replay.playing=false;setT(0);});
+byId('rp-last').addEventListener('click',()=>{replay.playing=false;setT(lastT());});
+byId('rp-back').addEventListener('click',()=>{replay.playing=false;setT(Math.round(replay.T)-1);});
+byId('rp-fwd').addEventListener('click',()=>{replay.playing=false;setT(Math.round(replay.T)+1);});
+byId('rp-dir').addEventListener('click',()=>{replay.dir*=-1;refreshReplayUI();});
+byId('rp-speed').addEventListener('click',()=>{replay.speed=replay.speed>=4?1:replay.speed*2;refreshReplayUI();});
+rp.play.addEventListener('click',()=>{
+  if(replay.playing){replay.playing=false;}
+  else{ // auto-rewind to the far end if we're already parked there, so Play always plays
+    if(replay.dir>0&&replay.T>=lastT())replay.T=0;
+    if(replay.dir<0&&replay.T<=0)replay.T=lastT();
+    replay.playing=true;
+  }
+  refreshReplayUI();
+});
+rp.slider.addEventListener('input',()=>{replay.playing=false;setT(parseFloat(rp.slider.value));});
+addEventListener('keydown',e=>{
+  if(e.key==='r'||e.key==='R'){if(replay.active)exitReplay(false);else enterReplay();return;}
+  if(!replay.active)return;
+  if(e.key===' '){e.preventDefault();rp.play.click();}
+  else if(e.key==='ArrowLeft'){replay.playing=false;setT(Math.round(replay.T)-1);}
+  else if(e.key==='ArrowRight'){replay.playing=false;setT(Math.round(replay.T)+1);}
+  else if(e.key==='Escape'){exitReplay(false);}
+});
+
+// loop — live play uses TWEEN; replay scrubs the timeline by interpolation. Same render(), one playhead.
+let prevTS=0;
+function loop(t){
+  requestAnimationFrame(loop);
+  const dt=prevTS?Math.min(64,t-prevTS):16; prevTS=t;
+  if(replay.active){
+    if(replay.playing){
+      replay.T+=replay.dir*replay.speed*(dt/SEGMENT_MS);
+      if(replay.T>=lastT()){replay.T=lastT();replay.playing=false;}
+      else if(replay.T<=0){replay.T=0;replay.playing=false;}
+      refreshReplayUI();
+    }
+    renderReplayFrame();
+  }else{
+    TWEEN.update(t);
+  }
+  view.render();
+}
 newBoard();
 requestAnimationFrame(loop);
 </script>
