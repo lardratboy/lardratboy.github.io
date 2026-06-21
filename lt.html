@@ -325,6 +325,9 @@ class RulesEngine{
     this.rows=nR;this.cols=nC;this.mask=nm;this.grid=ng;this.gravityField=nf;
   }
   _snapshotMoves(){const m=[];for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){const id=this.grid[r][c];if(id!=null)m.push({id,toR:r,toC:c});}return m;}
+  maskCopy(){return this.mask.map(row=>row.slice());}
+  // a collapse step also carries the post-collapse mask, since collapse reshapes the wall pattern
+  _collapseStep(){const cm=this.collapse();return cm?{kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm,mask:this.maskCopy()}:null;}
 
   tapAt(r,c){
     const group=this.findGroup(r,c);
@@ -337,18 +340,18 @@ class RulesEngine{
     this.score+=group.length*10;
     steps.push({kind:'clear',cells:cleared,center:{r,c}});
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
-    const cm=this.collapse();if(cm)steps.push({kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm});
+    const cs=this._collapseStep();if(cs)steps.push(cs);
     steps.push({kind:'state',...this.checkState()});
     return steps;
   }
   setGravity(dir){this.gravityDir=dir;const steps=[];
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
-    const cm=this.collapse();if(cm)steps.push({kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm});
+    const cs=this._collapseStep();if(cs)steps.push(cs);
     steps.push({kind:'state',...this.checkState()});return steps;}
   rotateBoard(dir){const rm=this.rotate(dir);
-    const steps=[{kind:'rotate',dir,dims:{rows:this.rows,cols:this.cols},moves:rm}];
+    const steps=[{kind:'rotate',dir,dims:{rows:this.rows,cols:this.cols},moves:rm,mask:this.maskCopy()}];
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
-    const cm=this.collapse();if(cm)steps.push({kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm});
+    const cs=this._collapseStep();if(cs)steps.push(cs);
     steps.push({kind:'state',...this.checkState()});return steps;}
   scroll(spec){
     let dr=0,dc=0;
@@ -363,7 +366,7 @@ class RulesEngine{
     const sm0=this.scroll(spec); if(!sm0)return[{kind:'state',...this.checkState()}];
     const steps=[{kind:'scroll',moves:sm0}];
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
-    const cm=this.collapse();if(cm)steps.push({kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm});
+    const cs=this._collapseStep();if(cs)steps.push(cs);
     steps.push({kind:'state',...this.checkState()});return steps;}
   hasValidMoves(){for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++)
     if(this.grid[r][c]!=null&&this.findGroup(r,c).length>=this.def.rules.minGroupSize)return true;return false;}
@@ -388,12 +391,17 @@ class RulesEngine{
     this.score=score;
     this.collected=collected;
     this.rng.setState(rngState);
-    this.mask=grid(this.rows,this.cols,(r,c)=>{
-      if(this.def.layers.mask.grid[r]!==undefined&&this.def.layers.mask.grid[r][c]!==undefined){
-        return this.def.layers.mask.grid[r][c];
-      }
-      return true;
-    });
+    // mask now travels in the frame, so restore is exact even after a rotate/collapse changed dims
+    if(frame.mask){
+      this.mask=frame.mask.map(row=>row.slice());
+    }else{
+      this.mask=grid(this.rows,this.cols,(r,c)=>{
+        if(this.def.layers.mask.grid[r]!==undefined&&this.def.layers.mask.grid[r][c]!==undefined){
+          return this.def.layers.mask.grid[r][c];
+        }
+        return true;
+      });
+    }
     if(this.def.layers.gravityZones){
       this.gravityField=grid(this.rows,this.cols,(r,c)=>{
         if(this.def.layers.gravityZones.grid[r]!==undefined&&this.def.layers.gravityZones.grid[r][c]!==undefined){
@@ -520,7 +528,7 @@ class View {
 
     this.raycaster=new THREE.Raycaster();this.pointer=new THREE.Vector2();
     this.meshes=new Map();
-    this.maskMarkers=[];
+    this._mk={a:{sig:null,objs:[]},b:{sig:null,objs:[]}};  // two marker slots (cross-fade on mask/dims change)
     this.tubeConnections=[];
     this.dims={rows:0,cols:0};
     this.hoverGroup=new Set();
@@ -553,24 +561,50 @@ class View {
       this._mesh(id,engine.pieceData.get(id),r,c);
     }
     this.frameCamera();
-    this.syncMaskMarkers(engine);
   }
-  syncMaskMarkers(engine){
-    for(const o of this.maskMarkers){this.scene.remove(o);o.geometry.dispose();o.material.dispose();}
-    this.maskMarkers=[];
-    this.dims={rows:engine.rows,cols:engine.cols};
-    const s=SPACING*0.72;
-    for(let r=0;r<engine.rows;r++)for(let c=0;c<engine.cols;c++){
-      if(engine.mask[r][c])continue;
-      const {x,y}=this.cellToWorld(r,c);
+  // ── mask markers, frame-driven ──────────────────────────────────────────────
+  // Markers (floor tiles) now follow the timeline like pieces: built from a frame's mask,
+  // cross-faded when the mask/dims change (rotate/collapse, or an editor paint later).
+  _maskSig(mask,dims){
+    if(!mask)return dims.rows+'x'+dims.cols+':full';
+    let s=dims.rows+'x'+dims.cols+':';
+    for(const row of mask)for(const v of row)s+=v?'1':'0';
+    return s;
+  }
+  _buildMarkerSet(mask,dims){
+    const objs=[],s=SPACING*0.72;
+    if(mask)for(let r=0;r<dims.rows;r++)for(let c=0;c<dims.cols;c++){
+      if(mask[r]&&mask[r][c])continue;          // only mark masked-OFF cells
+      const {x,y}=this.cellToWorld(r,c,dims);
       const tile=new THREE.Mesh(new THREE.PlaneGeometry(s,s),
         new THREE.MeshBasicMaterial({color:0x161d29,transparent:true,opacity:0.55}));
-      tile.position.set(x,y,-0.35);
-      this.scene.add(tile);this.maskMarkers.push(tile);
+      tile.position.set(x,y,-0.35);tile.userData.baseOp=0.55;
+      this.scene.add(tile);objs.push(tile);
       const edge=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(s,s)),
         new THREE.LineBasicMaterial({color:0x2a3850,transparent:true,opacity:0.6}));
-      edge.position.set(x,y,-0.34);
-      this.scene.add(edge);this.maskMarkers.push(edge);
+      edge.position.set(x,y,-0.34);edge.userData.baseOp=0.6;
+      this.scene.add(edge);objs.push(edge);
+    }
+    return objs;
+  }
+  _ensureMarkerSlot(slot,mask,dims){
+    const sig=this._maskSig(mask,dims);
+    if(slot.sig===sig)return slot.objs;
+    for(const o of slot.objs){this.scene.remove(o);o.geometry.dispose();o.material.dispose();}
+    slot.objs=this._buildMarkerSet(mask,dims);slot.sig=sig;
+    return slot.objs;
+  }
+  _setMarkerOpacity(objs,k){
+    for(const o of objs){o.visible=k>0.004;o.material.opacity=o.userData.baseOp*k;}
+  }
+  renderMaskMarkers(frameA,frameB,f){
+    const sigA=this._maskSig(frameA.mask,frameA.dims), sigB=this._maskSig(frameB.mask,frameB.dims);
+    if(sigA===sigB){                              // mask unchanged across this sub-step → one static set
+      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.a,frameA.mask,frameA.dims),1);
+      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.b,null,frameB.dims),0);
+    }else{                                        // mask changed (rotate/collapse/edit) → dissolve A→B
+      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.a,frameA.mask,frameA.dims),1-f);
+      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.b,frameB.mask,frameB.dims),f);
     }
   }
   makeMesh(id,pd){
@@ -610,8 +644,6 @@ class View {
     this.scene.add(mesh);this.meshes.set(id,mesh);
     return mesh;
   }
-  hideMarkers(){for(const o of this.maskMarkers)o.visible=false;}
-  showMarkers(){for(const o of this.maskMarkers)o.visible=true;}
   clearHoverNow(){
     this.clearTubeConnections();
     this.hoverGroup.clear();
@@ -691,6 +723,7 @@ class View {
     const ir=frameA.dims.rows+(frameB.dims.rows-frameA.dims.rows)*f;
     const ic=frameA.dims.cols+(frameB.dims.cols-frameA.dims.cols)*f;
     this.setCameraForDims(ir,ic);this.dims={rows:Math.round(ir),cols:Math.round(ic)};
+    this.renderMaskMarkers(frameA,frameB,f);
   }
   reconcileToFrame(frame){this.renderInterpolated(frame,frame,0,null);}
   clearTubeConnections(){
@@ -820,7 +853,7 @@ function captureFrame(eng){
     const pd=eng.pieceData.get(id);
     placements.push({id,r,c,palette:pd.palette,prize:pd.prize});
   }
-  return {dims:{rows:eng.rows,cols:eng.cols},placements};
+  return {dims:{rows:eng.rows,cols:eng.cols},mask:eng.mask.map(row=>row.slice()),placements};
 }
 
 function generateSubFrames(startFrame, steps) {
@@ -831,6 +864,7 @@ function generateSubFrames(startFrame, steps) {
     if (step.kind === 'state') continue;
     
     let nextDims = { ...current.dims };
+    let nextMask = current.mask;           // mask unchanged unless the step reshapes the board
     let nextPlacements = [];
     
     if (step.kind === 'clear') {
@@ -844,6 +878,7 @@ function generateSubFrames(startFrame, steps) {
       });
     } else if (step.kind === 'collapse' || step.kind === 'rotate') {
       nextDims = { ...step.dims };
+      nextMask = step.mask || current.mask;   // rotate/collapse carry the reshaped wall pattern
       const moveMap = new Map(step.moves.map(m => [m.id, m]));
       nextPlacements = current.placements.map(p => {
         const mv = moveMap.get(p.id);
@@ -851,7 +886,7 @@ function generateSubFrames(startFrame, steps) {
       });
     }
     
-    current = { dims: nextDims, placements: nextPlacements };
+    current = { dims: nextDims, mask: nextMask, placements: nextPlacements };
     frames.push(current);
   }
   return frames;
@@ -937,8 +972,6 @@ function maybeFork(){
   replay.active=false;
   replay.playing=false;
   showReplayBar(false);
-  view.showMarkers();
-  view.syncMaskMarkers(engine);
 }
 
 function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
@@ -1113,7 +1146,7 @@ function enterReplay(){
   if(liveAnim.active)return;
   if(timeline.entries.length<2){return;}
   replay.active=true;replay.playing=false;replay.dir=1;replay.T=lastT();
-  view.clearHoverNow();view.hideMarkers();
+  view.clearHoverNow();
   hide('ov-win');hide('ov-lose');
   showReplayBar(true);refreshReplayUI();
 }
@@ -1122,7 +1155,6 @@ function exitReplay(skipResync){
   if(!skipResync){
     const lastEntry = timeline.entries[lastT()];
     view.reconcileToFrame(lastEntry.subFrames[lastEntry.subFrames.length - 1]);
-    view.showMarkers();view.syncMaskMarkers(engine);
   }
   showReplayBar(false);
 }
