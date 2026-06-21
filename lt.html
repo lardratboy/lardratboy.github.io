@@ -124,6 +124,10 @@
   #dz-title{color:var(--good);min-width:0;}
   .dz-num{font-family:var(--mono);font-size:14px;color:var(--text);min-width:24px;text-align:center;}
   .design-inner .tbtn{width:34px;height:34px;}
+  .design-inner .tbtn.on{background:var(--good);border-color:var(--good);color:#06210f;
+    box-shadow:0 0 12px rgba(91,217,122,.45);}
+  .swatch{width:28px;height:28px;border-radius:7px;border:2px solid var(--hair);padding:0;}
+  .swatch.on{border-color:#fff;box-shadow:0 0 12px rgba(255,255,255,.5);}
 </style>
 </head>
 <body>
@@ -213,6 +217,14 @@
         <button class="tbtn" id="dz-col-dn" title="Fewer columns">−</button>
         <span class="dz-num" id="dz-cols">8</span>
         <button class="tbtn" id="dz-col-up" title="More columns">+</button>
+      </div>
+      <div class="divider"></div>
+      <div class="grp">
+        <span class="label">Brush</span>
+        <button class="tbtn" id="br-mask"  title="Wall — toggle cell in/out of play">▦</button>
+        <button class="tbtn" id="br-erase" title="Erase piece">⌫</button>
+        <button class="tbtn" id="br-prize" title="Prize — toggle on the piece">◎</button>
+        <span id="br-palette" style="display:flex;gap:4px;"></span>
       </div>
       <div class="divider"></div>
       <button class="tbtn" id="dz-undo" title="Undo (←)">↶</button>
@@ -662,7 +674,7 @@ class View {
       emissive:p.color,emissiveIntensity:0});
     const mesh=new THREE.Mesh(geom,mat);
     if(p.id!=='sphere'){const a=id*1.2345;mesh.rotation.set(a%6.283,(a*1.7)%6.283,(a*2.3)%6.283);}
-    mesh.userData={id,baseColor:p.color,spin:(((id*97)%100)/100-0.5)*0.004,isSphere:p.id==='sphere'};
+    mesh.userData={id,baseColor:p.color,spin:(((id*97)%100)/100-0.5)*0.004,isSphere:p.id==='sphere',prize:!!pd.prize};
     if(pd.prize){
       const ringSize = PIECE * 1.2;
       const ring = new THREE.Mesh(
@@ -724,8 +736,11 @@ class View {
     
     for(const id of ids){
       const a=A.get(id),b=B.get(id),pl=b||a;
-      const m=this.ensureMesh(pl);seen.add(id);
+      let m=this.ensureMesh(pl);seen.add(id);
       if(a&&b){
+        if(m.userData.prize!==!!b.prize){           // prize toggled in the editor → rebuild with/without ring
+          this._disposeMesh(m);this.meshes.delete(id);m=this.ensureMesh(b);
+        }
         const wa=this.cellToWorld(a.r,a.c,frameA.dims),wb=this.cellToWorld(b.r,b.c,frameB.dims);
         m.position.set(wa.x+(wb.x-wa.x)*posF, wa.y+(wb.y-wa.y)*posF, 0);
         m.scale.setScalar(1);
@@ -776,6 +791,18 @@ class View {
     this.renderMaskMarkers(frameA,frameB,f);
   }
   reconcileToFrame(frame){this.renderInterpolated(frame,frame,0,null);}
+  // pick a lattice cell from a screen point by projecting onto the board plane (z=0).
+  // Unlike pick(), this works on empty cells — needed for painting.
+  pickCell(cx,cy,dims){
+    this.pointer.x=(cx/innerWidth)*2-1;this.pointer.y=-(cy/innerHeight)*2+1;
+    this.raycaster.setFromCamera(this.pointer,this.camera);
+    const plane=new THREE.Plane(new THREE.Vector3(0,0,1),0), pt=new THREE.Vector3();
+    if(!this.raycaster.ray.intersectPlane(plane,pt))return null;
+    const c=Math.round(pt.x/SPACING+(dims.cols-1)/2);
+    const r=Math.round((dims.rows-1)/2 - pt.y/SPACING);
+    if(r<0||r>=dims.rows||c<0||c>=dims.cols)return null;
+    return {r,c};
+  }
   clearTubeConnections(){
     this.tubeConnections.forEach(t => t.remove());
     this.tubeConnections = [];
@@ -934,7 +961,7 @@ function generateSubFrames(startFrame, steps) {
         const mv = moveMap.get(p.id);
         return mv ? { ...p, r: mv.toR, c: mv.toC } : p;
       });
-    } else if (step.kind === 'resize') {        // editor action: new lattice, mask, placements
+    } else if (step.kind === 'resize' || step.kind === 'edit') {  // editor: adopt new lattice/mask/placements
       nextDims = { ...step.dims };
       nextMask = step.mask;
       nextPlacements = step.placements;
@@ -1069,7 +1096,7 @@ function enterDesign(){
   hide('ov-win');hide('ov-lose');
   byId('console').style.display='none'; byId('definition').style.display='none';
   byId('design-bar').classList.add('show');
-  refreshDesignUI();
+  refreshDesignUI(); refreshBrushUI();
 }
 function exitDesign(){
   designMode=false; timeline=playTimeline; replay.T=lastT();
@@ -1084,16 +1111,67 @@ function refreshDesignUI(){
   byId('dz-undo').disabled = designIdx<=0;
   byId('dz-redo').disabled = designIdx>=editTimeline.entries.length-1;
 }
+function finalizeLiveAnim(){ if(liveAnim.active){liveAnim.active=false;replay.T=liveAnim.targetT;} }
+function triggerDesignAnim(from,to){ triggerLiveAnimation(from,to); liveAnim.duration=240; } // snappy, speed-independent
 function commitEdit(input,step,newState){
-  if(liveAnim.active)return;
+  finalizeLiveAnim();                                // stay responsive under rapid painting
   const cur=designIdx;
   if(cur < editTimeline.entries.length-1)            // acted after undo → fork (drop the redo tail)
     editTimeline.entries=editTimeline.entries.slice(0,cur+1);
   timelinePush(input,[step]);                        // operates on the active (edit) timeline
   editState=newState;
   designIdx=editTimeline.entries.length-1;
-  triggerLiveAnimation(cur,designIdx);
+  triggerDesignAnim(cur,designIdx);
   refreshDesignUI();
+}
+// the spatial brushes: each clones editState, mutates, and commits one undoable edit-frame.
+let editNextId=1;
+function cloneEditState(){return {dims:{...editState.dims},mask:editState.mask.map(r=>r.slice()),placements:editState.placements.map(p=>({...p}))};}
+function placementAt(s,r,c){return s.placements.find(p=>p.r===r&&p.c===c);}
+function editMaskToggle(r,c){
+  const s=cloneEditState(); const on=!s.mask[r][c]; s.mask[r][c]=on;
+  if(!on) s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c));   // a wall can't hold a piece
+  commitEdit({type:on?'mask·on':'mask·off'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements},s);
+}
+function editPaintPiece(r,c,pal){
+  const s=cloneEditState();
+  s.mask[r][c]=true;                                                  // painting a piece implies a playable cell
+  s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c));
+  s.placements.push({id:editNextId++,r,c,palette:pal,prize:false});
+  commitEdit({type:'piece·'+pal},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements},s);
+}
+function editErase(r,c){
+  if(!placementAt(editState,r,c))return;                              // nothing to erase
+  const s=cloneEditState(); s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c));
+  commitEdit({type:'erase'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements},s);
+}
+function editTogglePrize(r,c){
+  if(!placementAt(editState,r,c)){console.log('[design] prize needs a piece beneath it (riders, freshdesign §5)');return;}
+  const s=cloneEditState(); const p=placementAt(s,r,c); p.prize=!p.prize;
+  commitEdit({type:p.prize?'prize·on':'prize·off'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements},s);
+}
+let currentBrush={mode:'piece',pal:0};
+function applyBrush(r,c){
+  if(currentBrush.mode==='mask') editMaskToggle(r,c);
+  else if(currentBrush.mode==='erase') editErase(r,c);
+  else if(currentBrush.mode==='prize') editTogglePrize(r,c);
+  else editPaintPiece(r,c,currentBrush.pal);
+}
+function setBrush(mode,pal){currentBrush.mode=mode;if(pal!=null)currentBrush.pal=pal;refreshBrushUI();}
+function refreshBrushUI(){
+  byId('br-mask').classList.toggle('on',currentBrush.mode==='mask');
+  byId('br-erase').classList.toggle('on',currentBrush.mode==='erase');
+  byId('br-prize').classList.toggle('on',currentBrush.mode==='prize');
+  [...byId('br-palette').children].forEach((b,i)=>b.classList.toggle('on',currentBrush.mode==='piece'&&currentBrush.pal===i));
+}
+function buildPaletteSwatches(){
+  const host=byId('br-palette'); host.innerHTML='';
+  PALETTE.forEach((p,i)=>{
+    const b=document.createElement('button'); b.className='swatch';
+    b.style.background='#'+p.color.toString(16).padStart(6,'0');
+    b.title='Paint '+p.id; b.addEventListener('click',()=>setBrush('piece',i));
+    host.appendChild(b);
+  });
 }
 function editResize(rows,cols){
   rows=Math.max(DZ_MIN,Math.min(DZ_MAX,rows));
@@ -1107,17 +1185,17 @@ function editResize(rows,cols){
 }
 function editStepSize(dr,dc){editResize(editState.dims.rows+dr,editState.dims.cols+dc);}
 function undoEdit(){
-  if(liveAnim.active||designIdx<=0)return;
+  if(designIdx<=0)return; finalizeLiveAnim();
   const from=designIdx; designIdx=from-1;
   frameToEditState(stateFrameAt(designIdx));
-  triggerLiveAnimation(from,designIdx);
+  triggerDesignAnim(from,designIdx);
   refreshDesignUI();
 }
 function redoEdit(){
-  if(liveAnim.active||designIdx>=editTimeline.entries.length-1)return;
+  if(designIdx>=editTimeline.entries.length-1)return; finalizeLiveAnim();
   const from=designIdx; designIdx=from+1;
   frameToEditState(stateFrameAt(designIdx));
-  triggerLiveAnimation(from,designIdx);
+  triggerDesignAnim(from,designIdx);
   refreshDesignUI();
 }
 
@@ -1239,7 +1317,12 @@ stage.addEventListener('pointermove',e=>{
     view.setHover(engine,cell?cell.r:null,cell?cell.c:null);});
 });
 stage.addEventListener('pointerdown',e=>{
-  if(designMode || liveAnim.active)return;
+  if(designMode){
+    const cell=view.pickCell(e.clientX,e.clientY,editState.dims);
+    if(cell) applyBrush(cell.r,cell.c);
+    return;
+  }
+  if(liveAnim.active)return;
   const cell=view.pick(engine,e.clientX,e.clientY);if(!cell)return;
   if(replay.active) maybeFork();
   const steps=engine.tapAt(cell.r,cell.c);if(steps)runSteps(steps,{type:'tap',args:{r:cell.r,c:cell.c}});
@@ -1336,6 +1419,10 @@ byId('dz-col-up').addEventListener('click',()=>editStepSize(0,1));
 byId('dz-col-dn').addEventListener('click',()=>editStepSize(0,-1));
 byId('dz-undo').addEventListener('click',undoEdit);
 byId('dz-redo').addEventListener('click',redoEdit);
+byId('br-mask').addEventListener('click',()=>setBrush('mask'));
+byId('br-erase').addEventListener('click',()=>setBrush('erase'));
+byId('br-prize').addEventListener('click',()=>setBrush('prize'));
+buildPaletteSwatches();
 byId('rp-exit').addEventListener('click',()=>exitReplay(false));
 byId('rp-first').addEventListener('click',()=>{replay.playing=false;setT(0);});
 byId('rp-last').addEventListener('click',()=>{replay.playing=false;setT(lastT());});
