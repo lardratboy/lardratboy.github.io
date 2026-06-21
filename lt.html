@@ -112,6 +112,18 @@
     box-shadow:0 0 14px rgba(240,168,56,.45);}
   #rp-dir.rev{background:#1c2433;border-color:var(--signal-dim);color:var(--signal);}
   #rp-speed{min-width:46px;text-align:center;}
+
+  /* ── design surface bar ── */
+  #design-bar{position:absolute;left:0;right:0;bottom:0;z-index:60;display:none;
+    justify-content:center;padding:0 14px 16px;pointer-events:none;}
+  #design-bar.show{display:flex;}
+  .design-inner{pointer-events:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+    justify-content:center;background:linear-gradient(180deg,rgba(16,21,31,.92),rgba(13,18,25,.97));
+    border:1px solid var(--good);border-radius:14px;padding:10px 13px;backdrop-filter:blur(8px);
+    box-shadow:0 12px 40px rgba(0,0,0,.55);}
+  #dz-title{color:var(--good);min-width:0;}
+  .dz-num{font-family:var(--mono);font-size:14px;color:var(--text);min-width:24px;text-align:center;}
+  .design-inner .tbtn{width:34px;height:34px;}
 </style>
 </head>
 <body>
@@ -164,6 +176,7 @@
       <div class="grp">
         <button class="txt" id="speed-toggle" title="Cycle play speed">Speed: 0.5×</button>
         <button class="txt" id="replay-enter" title="Replay the timeline (R)">⏮ Replay</button>
+        <button class="txt" id="design-enter" title="Open the design surface (D)">✎ Design</button>
       </div>
     </div>
   </div>
@@ -181,6 +194,32 @@
       <button class="txt"  id="rp-speed" title="Playback speed">0.5×</button>
       <span class="rp-label" id="rp-label">0 / 0 · start</span>
       <button class="tbtn" id="rp-exit" title="Exit replay (R)">✕</button>
+    </div>
+  </div>
+
+  <!-- design surface: authoring on its own edit-timeline (step 2: resize the lattice) -->
+  <div id="design-bar">
+    <div class="design-inner">
+      <span class="rp-label" id="dz-title">Design · empty lattice</span>
+      <div class="divider"></div>
+      <div class="grp">
+        <span class="label">Rows</span>
+        <button class="tbtn" id="dz-row-dn" title="Fewer rows">−</button>
+        <span class="dz-num" id="dz-rows">8</span>
+        <button class="tbtn" id="dz-row-up" title="More rows">+</button>
+      </div>
+      <div class="grp">
+        <span class="label">Cols</span>
+        <button class="tbtn" id="dz-col-dn" title="Fewer columns">−</button>
+        <span class="dz-num" id="dz-cols">8</span>
+        <button class="tbtn" id="dz-col-up" title="More columns">+</button>
+      </div>
+      <div class="divider"></div>
+      <button class="tbtn" id="dz-undo" title="Undo (←)">↶</button>
+      <button class="tbtn" id="dz-redo" title="Redo (→)">↷</button>
+      <span class="rp-label" id="dz-hist">edit 0 / 0</span>
+      <div class="divider"></div>
+      <button class="txt primary" id="dz-exit" title="Back to the game (D)">▶ Back to game</button>
     </div>
   </div>
 
@@ -529,6 +568,7 @@ class View {
     this.raycaster=new THREE.Raycaster();this.pointer=new THREE.Vector2();
     this.meshes=new Map();
     this._mk={a:{sig:null,objs:[]},b:{sig:null,objs:[]}};  // two marker slots (cross-fade on mask/dims change)
+    this._designGrid=false;                                 // when true, also outline playable cells (design)
     this.tubeConnections=[];
     this.dims={rows:0,cols:0};
     this.hoverGroup=new Set();
@@ -566,24 +606,32 @@ class View {
   // Markers (floor tiles) now follow the timeline like pieces: built from a frame's mask,
   // cross-faded when the mask/dims change (rotate/collapse, or an editor paint later).
   _maskSig(mask,dims){
-    if(!mask)return dims.rows+'x'+dims.cols+':full';
-    let s=dims.rows+'x'+dims.cols+':';
+    const g=this._designGrid?'D':'P';
+    if(!mask)return g+dims.rows+'x'+dims.cols+':full';
+    let s=g+dims.rows+'x'+dims.cols+':';
     for(const row of mask)for(const v of row)s+=v?'1':'0';
     return s;
   }
   _buildMarkerSet(mask,dims){
     const objs=[],s=SPACING*0.72;
     if(mask)for(let r=0;r<dims.rows;r++)for(let c=0;c<dims.cols;c++){
-      if(mask[r]&&mask[r][c])continue;          // only mark masked-OFF cells
+      const off=!(mask[r]&&mask[r][c]);
       const {x,y}=this.cellToWorld(r,c,dims);
-      const tile=new THREE.Mesh(new THREE.PlaneGeometry(s,s),
-        new THREE.MeshBasicMaterial({color:0x161d29,transparent:true,opacity:0.55}));
-      tile.position.set(x,y,-0.35);tile.userData.baseOp=0.55;
-      this.scene.add(tile);objs.push(tile);
-      const edge=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(s,s)),
-        new THREE.LineBasicMaterial({color:0x2a3850,transparent:true,opacity:0.6}));
-      edge.position.set(x,y,-0.34);edge.userData.baseOp=0.6;
-      this.scene.add(edge);objs.push(edge);
+      if(off){                                  // masked-OFF cell → solid floor tile
+        const tile=new THREE.Mesh(new THREE.PlaneGeometry(s,s),
+          new THREE.MeshBasicMaterial({color:0x161d29,transparent:true,opacity:0.55}));
+        tile.position.set(x,y,-0.35);tile.userData.baseOp=0.55;
+        this.scene.add(tile);objs.push(tile);
+        const edge=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(s,s)),
+          new THREE.LineBasicMaterial({color:0x2a3850,transparent:true,opacity:0.6}));
+        edge.position.set(x,y,-0.34);edge.userData.baseOp=0.6;
+        this.scene.add(edge);objs.push(edge);
+      }else if(this._designGrid){               // playable cell, design mode → faint outline only
+        const edge=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(s,s)),
+          new THREE.LineBasicMaterial({color:0x3a4a64,transparent:true,opacity:0.22}));
+        edge.position.set(x,y,-0.34);edge.userData.baseOp=0.22;
+        this.scene.add(edge);objs.push(edge);
+      }
     }
     return objs;
   }
@@ -670,6 +718,8 @@ class View {
       posF = EASE.backOut(f);
     } else if (kind === 'collapse') {
       posF = EASE.cubicOut(f);
+    } else if (kind === 'resize') {
+      posF = EASE.cubicInOut(f);
     }
     
     for(const id of ids){
@@ -884,6 +934,10 @@ function generateSubFrames(startFrame, steps) {
         const mv = moveMap.get(p.id);
         return mv ? { ...p, r: mv.toR, c: mv.toC } : p;
       });
+    } else if (step.kind === 'resize') {        // editor action: new lattice, mask, placements
+      nextDims = { ...step.dims };
+      nextMask = step.mask;
+      nextPlacements = step.placements;
     }
     
     current = { dims: nextDims, mask: nextMask, placements: nextPlacements };
@@ -892,7 +946,13 @@ function generateSubFrames(startFrame, steps) {
   return frames;
 }
 
-const timeline={seed:0,entries:[]};
+// One Timeline *type*, two *instances* (neweditor §3): play holds board-frames, edit holds
+// definition-frames. `timeline` points at whichever is active; the shared machinery below
+// (push, sub-frames, playhead, fork) operates on the active one.
+let playTimeline={seed:0,entries:[]};
+let editTimeline={seed:0,entries:[]};
+let timeline=playTimeline;
+let designMode=false;
 function timelineReset(seed){
   timeline.seed=seed;
   const initialFrame = captureFrame(engine);
@@ -915,9 +975,9 @@ function timelinePush(input,steps){
     input,
     steps,
     subFrames,
-    rngState:engine.rng.getState(),
-    score:engine.score,
-    collected:engine.collected
+    rngState: designMode ? null : engine.rng.getState(),
+    score: designMode ? 0 : engine.score,
+    collected: designMode ? 0 : engine.collected
   });
 }
 function lastT(){return Math.max(0,timeline.entries.length-1);}
@@ -956,9 +1016,10 @@ function triggerLiveAnimation(fromT,toT){
   replay.T=fromT;
   view.clearHover();
   
-  const entry = timeline.entries[toT];
-  const M = entry.subFrames.length - 1;
-  // Scaled play duration depending on global speed
+  // the traversed segment lives in entries[max] (entry[i].subFrames is the transition INTO i),
+  // so this is correct whether we step forward (a move) or backward (an undo)
+  const seg = timeline.entries[Math.max(fromT,toT)];
+  const M = seg.subFrames.length - 1;
   liveAnim.duration = (Math.max(1, M) * 320) / speedSetting.current;
 }
 
@@ -972,6 +1033,92 @@ function maybeFork(){
   replay.active=false;
   replay.playing=false;
   showReplayBar(false);
+}
+
+// ████ DESIGN SURFACE — authoring on the edit timeline (neweditor step 2) ████
+// Reuses the same Timeline machinery as play: edits push frames, undo/redo is scrub+fork.
+// Step 2's only action is resize; brushes (mask/piece/prize/gravity) arrive in later steps.
+const DZ_MIN=2, DZ_MAX=15;
+let editState=null;     // the authored board: {dims, mask, placements} (the workingDefinition, in memory)
+let designIdx=0;        // logical playhead on the edit timeline (survives the animation)
+function fullMask(rows,cols){return grid(rows,cols,()=>true);}
+function captureEditFrame(){
+  return {dims:{rows:editState.dims.rows,cols:editState.dims.cols},
+          mask:editState.mask.map(row=>row.slice()),
+          placements:editState.placements.map(p=>({...p}))};
+}
+function frameToEditState(frame){
+  editState={dims:{rows:frame.dims.rows,cols:frame.dims.cols},
+             mask:frame.mask.map(row=>row.slice()),
+             placements:frame.placements.map(p=>({...p}))};
+}
+function initEditState(){
+  if(editState)return;
+  editState={dims:{rows:8,cols:8},mask:fullMask(8,8),placements:[]};
+  editTimeline.seed=0;
+  editTimeline.entries=[{input:null,steps:null,subFrames:[captureEditFrame()],rngState:null,score:0,collected:0}];
+  designIdx=0;
+}
+function stateFrameAt(i){const e=editTimeline.entries[i];return e.subFrames[e.subFrames.length-1];}
+function enterDesign(){
+  if(liveAnim.active||replay.active)return;
+  initEditState();
+  designMode=true; timeline=editTimeline; replay.T=designIdx;
+  view._designGrid=true;
+  view.clearHoverNow();
+  hide('ov-win');hide('ov-lose');
+  byId('console').style.display='none'; byId('definition').style.display='none';
+  byId('design-bar').classList.add('show');
+  refreshDesignUI();
+}
+function exitDesign(){
+  designMode=false; timeline=playTimeline; replay.T=lastT();
+  view._designGrid=false;
+  byId('design-bar').classList.remove('show');
+  byId('console').style.display=''; byId('definition').style.display='';
+}
+function refreshDesignUI(){
+  byId('dz-rows').textContent=editState.dims.rows;
+  byId('dz-cols').textContent=editState.dims.cols;
+  byId('dz-hist').textContent=`edit ${designIdx} / ${editTimeline.entries.length-1}`;
+  byId('dz-undo').disabled = designIdx<=0;
+  byId('dz-redo').disabled = designIdx>=editTimeline.entries.length-1;
+}
+function commitEdit(input,step,newState){
+  if(liveAnim.active)return;
+  const cur=designIdx;
+  if(cur < editTimeline.entries.length-1)            // acted after undo → fork (drop the redo tail)
+    editTimeline.entries=editTimeline.entries.slice(0,cur+1);
+  timelinePush(input,[step]);                        // operates on the active (edit) timeline
+  editState=newState;
+  designIdx=editTimeline.entries.length-1;
+  triggerLiveAnimation(cur,designIdx);
+  refreshDesignUI();
+}
+function editResize(rows,cols){
+  rows=Math.max(DZ_MIN,Math.min(DZ_MAX,rows));
+  cols=Math.max(DZ_MIN,Math.min(DZ_MAX,cols));
+  if(rows===editState.dims.rows&&cols===editState.dims.cols)return;
+  const om=editState.mask, oR=editState.dims.rows, oC=editState.dims.cols;
+  const newMask=grid(rows,cols,(r,c)=> (r<oR&&c<oC) ? om[r][c] : true);   // grow→playable, shrink→clip
+  const newPlacements=editState.placements.filter(p=>p.r<rows&&p.c<cols).map(p=>({...p}));
+  const step={kind:'resize',dims:{rows,cols},mask:newMask,placements:newPlacements};
+  commitEdit({type:`resize·${rows}×${cols}`},step,{dims:{rows,cols},mask:newMask,placements:newPlacements});
+}
+function editStepSize(dr,dc){editResize(editState.dims.rows+dr,editState.dims.cols+dc);}
+function undoEdit(){
+  if(liveAnim.active||designIdx<=0)return;
+  const from=designIdx; designIdx=from-1;
+  frameToEditState(stateFrameAt(designIdx));
+  triggerLiveAnimation(from,designIdx);
+  refreshDesignUI();
+}
+function redoEdit(){
+  if(liveAnim.active||designIdx>=editTimeline.entries.length-1)return;
+  const from=designIdx; designIdx=from+1;
+  frameToEditState(stateFrameAt(designIdx));
+  triggerLiveAnimation(from,designIdx);
+  refreshDesignUI();
 }
 
 function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
@@ -1066,7 +1213,7 @@ function renderTransformControls(){
   for(const key of list){const t=TRANSFORM_BTN[key];
     const b=document.createElement('button');b.className='tbtn';b.textContent=t.g;b.title=t.t;
     b.addEventListener('click',()=>{
-      if(liveAnim.active)return;
+      if(designMode || liveAnim.active)return;
       if(replay.active) maybeFork();
       const steps=t.run();
       renderDefinition();
@@ -1086,20 +1233,20 @@ function hide(id){document.getElementById(id).classList.remove('show');}
 // input
 let hoverRAF=null;
 stage.addEventListener('pointermove',e=>{
-  if(replay.active || liveAnim.active)return;
+  if(designMode || replay.active || liveAnim.active)return;
   if(hoverRAF)cancelAnimationFrame(hoverRAF);
   hoverRAF=requestAnimationFrame(()=>{const cell=view.pick(engine,e.clientX,e.clientY);
     view.setHover(engine,cell?cell.r:null,cell?cell.c:null);});
 });
 stage.addEventListener('pointerdown',e=>{
-  if(liveAnim.active)return;
+  if(designMode || liveAnim.active)return;
   const cell=view.pick(engine,e.clientX,e.clientY);if(!cell)return;
   if(replay.active) maybeFork();
   const steps=engine.tapAt(cell.r,cell.c);if(steps)runSteps(steps,{type:'tap',args:{r:cell.r,c:cell.c}});
 });
 
 document.querySelectorAll('.gbtn').forEach(b=>b.addEventListener('click',()=>{
-  if(liveAnim.active)return;
+  if(designMode || liveAnim.active)return;
   const dir=b.dataset.grav;if(dir===engine.gravityDir && !replay.active)return;
   if(replay.active) maybeFork();
   const steps=engine.setGravity(dir);renderDefinition();renderTransformControls();
@@ -1143,7 +1290,7 @@ function refreshReplayUI(){
 }
 function setT(t){replay.T=Math.min(lastT(),Math.max(0,t));refreshReplayUI();}
 function enterReplay(){
-  if(liveAnim.active)return;
+  if(liveAnim.active||designMode)return;
   if(timeline.entries.length<2){return;}
   replay.active=true;replay.playing=false;replay.dir=1;replay.T=lastT();
   view.clearHoverNow();
@@ -1181,6 +1328,14 @@ function renderReplayFrame(){
 }
 
 byId('replay-enter').addEventListener('click',enterReplay);
+byId('design-enter').addEventListener('click',enterDesign);
+byId('dz-exit').addEventListener('click',exitDesign);
+byId('dz-row-up').addEventListener('click',()=>editStepSize(1,0));
+byId('dz-row-dn').addEventListener('click',()=>editStepSize(-1,0));
+byId('dz-col-up').addEventListener('click',()=>editStepSize(0,1));
+byId('dz-col-dn').addEventListener('click',()=>editStepSize(0,-1));
+byId('dz-undo').addEventListener('click',undoEdit);
+byId('dz-redo').addEventListener('click',redoEdit);
 byId('rp-exit').addEventListener('click',()=>exitReplay(false));
 byId('rp-first').addEventListener('click',()=>{replay.playing=false;setT(0);});
 byId('rp-last').addEventListener('click',()=>{replay.playing=false;setT(lastT());});
@@ -1203,6 +1358,14 @@ rp.play.addEventListener('click',()=>{
 });
 rp.slider.addEventListener('input',()=>{replay.playing=false;setT(parseFloat(rp.slider.value));});
 addEventListener('keydown',e=>{
+  if(e.key==='d'||e.key==='D'){if(designMode)exitDesign();else enterDesign();return;}
+  if(designMode){
+    if(liveAnim.active)return;
+    if(e.key==='ArrowLeft')undoEdit();
+    else if(e.key==='ArrowRight')redoEdit();
+    else if(e.key==='Escape')exitDesign();
+    return;
+  }
   if(e.key==='r'||e.key==='R'){if(replay.active)exitReplay(false);else enterReplay();return;}
   if(liveAnim.active)return;
   if(!replay.active)return;
@@ -1230,13 +1393,14 @@ function loop(t){
     if (progress >= 1) {
       replay.T = liveAnim.targetT;
       liveAnim.active = false;
-      syncHUD();
-      
-      const lastEntry = timeline.entries[timeline.entries.length - 1];
-      const finalStep = lastEntry.steps && lastEntry.steps[lastEntry.steps.length - 1];
-      if (finalStep && finalStep.kind === 'state') {
-        if (finalStep.status === 'won') show('ov-win');
-        else if (finalStep.status === 'lost') show('ov-lose');
+      if(!designMode){
+        syncHUD();
+        const lastEntry = timeline.entries[timeline.entries.length - 1];
+        const finalStep = lastEntry.steps && lastEntry.steps[lastEntry.steps.length - 1];
+        if (finalStep && finalStep.kind === 'state') {
+          if (finalStep.status === 'won') show('ov-win');
+          else if (finalStep.status === 'lost') show('ov-lose');
+        }
       }
     }
     renderReplayFrame();
@@ -1249,9 +1413,10 @@ function loop(t){
     }
     renderReplayFrame();
   }else{
-    if (timeline.entries.length > 0) {
-      const lastEntry = timeline.entries[lastT()];
-      view.reconcileToFrame(lastEntry.subFrames[lastEntry.subFrames.length - 1]);
+    if (timeline.entries.length > 0) {            // idle: render the frame at the playhead (respects undo)
+      const idx=Math.max(0,Math.min(lastT(),Math.round(replay.T)));
+      const e=timeline.entries[idx];
+      view.reconcileToFrame(e.subFrames[e.subFrames.length - 1]);
     }
   }
   view.render();
