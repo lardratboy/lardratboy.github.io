@@ -87,6 +87,18 @@
   .floors-toggle input{accent-color:var(--signal);width:14px;height:14px;cursor:pointer;}
   .floors-toggle:has(input:checked){color:var(--signal);border-color:var(--signal-dim);}
 
+  /* ── per-layer visibility strip (debug, both modes) ── */
+  #layer-toggles{position:absolute;left:14px;bottom:14px;z-index:40;display:flex;align-items:center;gap:5px;
+    background:linear-gradient(180deg,rgba(16,21,31,.88),rgba(13,18,25,.94));border:1px solid var(--hair);
+    border-radius:11px;padding:6px 9px;backdrop-filter:blur(8px);box-shadow:0 8px 28px rgba(0,0,0,.5);
+    flex-wrap:wrap;max-width:46vw;}
+  #layer-toggles .lt-title{font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.14em;
+    color:var(--muted);margin-right:2px;}
+  .lt-btn{font-family:var(--mono);font-size:10px;padding:4px 9px;border-radius:7px;cursor:pointer;
+    background:#161d29;border:1px solid var(--hair);color:var(--muted-2);transition:all .12s;}
+  .lt-btn.on{background:#1c2738;border-color:var(--signal-dim);color:var(--text);}
+  .lt-btn:not(.on){opacity:.5;text-decoration:line-through;}
+
   /* ── overlays ── */
   .overlay{position:absolute;inset:0;z-index:50;display:none;align-items:center;justify-content:center;
     background:rgba(6,9,14,.82);backdrop-filter:blur(3px);}
@@ -381,6 +393,17 @@
         <button class="txt" id="rule-cancel" style="flex: 1;">Cancel</button>
       </div>
     </div>
+  </div>
+
+  <!-- per-layer visibility (debug tool, both play and design) -->
+  <div id="layer-toggles">
+    <span class="lt-title">Layers</span>
+    <button class="lt-btn on" data-layer="pieces">Pieces</button>
+    <button class="lt-btn on" data-layer="walls">Walls</button>
+    <button class="lt-btn on" data-layer="gravity">Gravity</button>
+    <button class="lt-btn on" data-layer="prizes">Prizes</button>
+    <button class="lt-btn on" data-layer="grid">Grid</button>
+    <button class="lt-btn on" data-layer="rand">Rand</button>
   </div>
 
   <div class="overlay" id="ov-win"><div class="card win">
@@ -730,6 +753,8 @@ class View {
     this.meshes=new Map();
     this._mk={a:{sig:null,objs:[]},b:{sig:null,objs:[]}};  // two marker slots (cross-fade on mask/dims/gravity change)
     this._designGrid=false;                                 // when true, also outline playable cells (design)
+    this._defaultGravity='down';                            // current board default (effective-gravity legibility)
+    this.layerVisible={pieces:true,walls:true,grid:true,gravity:true,rand:true,prizes:true};
     this.tubeConnections=[];
     this.dims={rows:0,cols:0};
     this.hoverGroup=new Set();
@@ -768,8 +793,9 @@ class View {
   // cross-faded when the mask/dims/gravityField change.
   _maskSig(mask,dims,gravityField,randomFill){
     const g=this._designGrid?'D':'P';
-    if(!mask)return g+dims.rows+'x'+dims.cols+':full';
-    let s=g+dims.rows+'x'+dims.cols+':';
+    let s=g+(this._defaultGravity||'x')+':';
+    if(!mask)return s+dims.rows+'x'+dims.cols+':full';
+    s+=dims.rows+'x'+dims.cols+':';
     for(const row of mask)for(const v of row)s+=v?'1':'0';
     if(gravityField){
       s+='|G:';
@@ -783,49 +809,69 @@ class View {
   }
   _buildMarkerSet(mask,dims,gravityField,randomFill){
     const objs=[],s=SPACING*0.72;
+    const eff=(r,c)=>{ // effective gravity at a playable cell: override, else board default
+      const o=gravityField&&gravityField[r]&&gravityField[r][c];
+      return o || this._defaultGravity || null;
+    };
+    const mkArrow=(x,y,dir,op)=>{
+      const arrowGeom=new THREE.ConeGeometry(s*0.12,s*0.32,4); arrowGeom.rotateX(Math.PI/2);
+      const arrow=new THREE.Mesh(arrowGeom,new THREE.MeshBasicMaterial({color:0x5bd97a,transparent:true,opacity:op}));
+      arrow.position.set(x,y,-0.3); arrow.userData={baseOp:op,layer:'gravity'};
+      if(dir==='down')arrow.rotation.z=Math.PI; else if(dir==='up')arrow.rotation.z=0;
+      else if(dir==='left')arrow.rotation.z=Math.PI/2; else if(dir==='right')arrow.rotation.z=-Math.PI/2;
+      this.scene.add(arrow); objs.push(arrow);
+    };
     for(let r=0;r<dims.rows;r++)for(let c=0;c<dims.cols;c++){
       const off=!(mask&&mask[r]&&mask[r][c]);
       const {x,y}=this.cellToWorld(r,c,dims);
       if(off){                                  // masked-OFF cell → solid floor tile
         const tile=new THREE.Mesh(new THREE.PlaneGeometry(s,s),
           new THREE.MeshBasicMaterial({color:0x161d29,transparent:true,opacity:0.55}));
-        tile.position.set(x,y,-0.35);tile.userData.baseOp=0.55;
+        tile.position.set(x,y,-0.35);tile.userData={baseOp:0.55,layer:'walls'};
         this.scene.add(tile);objs.push(tile);
         const edge=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(s,s)),
           new THREE.LineBasicMaterial({color:0x2a3850,transparent:true,opacity:0.6}));
-        edge.position.set(x,y,-0.34);edge.userData.baseOp=0.6;
+        edge.position.set(x,y,-0.34);edge.userData={baseOp:0.6,layer:'walls'};
         this.scene.add(edge);objs.push(edge);
       }else{
-        if(this._designGrid){               // playable cell, design mode → faint outline only
+        if(this._designGrid){               // playable cell, design mode → faint outline
           const edge=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(s,s)),
             new THREE.LineBasicMaterial({color:0x3a4a64,transparent:true,opacity:0.22}));
-          edge.position.set(x,y,-0.34);edge.userData.baseOp=0.22;
+          edge.position.set(x,y,-0.34);edge.userData={baseOp:0.22,layer:'grid'};
           this.scene.add(edge);objs.push(edge);
         }
-        // Custom gravity zone arrow indicator
-        if(gravityField && gravityField[r] && gravityField[r][c]){
-          const dir = gravityField[r][c];
-          const arrowGeom = new THREE.ConeGeometry(s * 0.12, s * 0.32, 4);
-          arrowGeom.rotateX(Math.PI / 2); // align flat
-          const arrowMat = new THREE.MeshBasicMaterial({color: 0x5bd97a, transparent: true, opacity: 0.65});
-          const arrow = new THREE.Mesh(arrowGeom, arrowMat);
-          arrow.position.set(x,y,-0.3);arrow.userData.baseOp=0.65;
-          
-          if (dir === 'down') arrow.rotation.z = Math.PI;
-          else if (dir === 'up') arrow.rotation.z = 0;
-          else if (dir === 'left') arrow.rotation.z = Math.PI / 2;
-          else if (dir === 'right') arrow.rotation.z = -Math.PI / 2;
-          
-          this.scene.add(arrow);objs.push(arrow);
+        const override = gravityField && gravityField[r] && gravityField[r][c];
+        if(override){                        // bold arrow for an explicit override (both modes)
+          mkArrow(x,y,override,0.65);
+        }else if(this._designGrid && this._defaultGravity && this._defaultGravity!=='none'){
+          mkArrow(x,y,this._defaultGravity,0.18);   // faint inherited-default arrow (design only)
         }
-        // Render flat block indicator for randomFill cells (editor layout preview)
         if(this._designGrid && randomFill && randomFill[r] && randomFill[r][c]){
-          const boxGeom = new THREE.BoxGeometry(s * 0.28, s * 0.28, s * 0.28);
-          const boxMat = new THREE.MeshBasicMaterial({color: 0xf0a838, transparent: true, opacity: 0.65});
-          const box = new THREE.Mesh(boxGeom, boxMat);
-          box.position.set(x, y, -0.25);box.userData.baseOp=0.65;
-          this.scene.add(box); objs.push(box);
+          const box=new THREE.Mesh(new THREE.BoxGeometry(s*0.28,s*0.28,s*0.28),
+            new THREE.MeshBasicMaterial({color:0xf0a838,transparent:true,opacity:0.65}));
+          box.position.set(x,y,-0.25);box.userData={baseOp:0.65,layer:'rand'};
+          this.scene.add(box);objs.push(box);
         }
+      }
+    }
+    // emergent-wall edges: a line where two playable neighbours disagree on effective direction (freshdesign §8.4)
+    const playable=(r,c)=>mask&&mask[r]&&mask[r][c];
+    const mkWall=(x,y,vertical)=>{
+      const w=vertical?s*0.07:s*0.9, h=vertical?s*0.9:s*0.07;
+      const wall=new THREE.Mesh(new THREE.PlaneGeometry(w,h),
+        new THREE.MeshBasicMaterial({color:0xf07a38,transparent:true,opacity:0.6}));
+      wall.position.set(x,y,-0.28);wall.userData={baseOp:0.6,layer:'gravity'};
+      this.scene.add(wall);objs.push(wall);
+    };
+    for(let r=0;r<dims.rows;r++)for(let c=0;c<dims.cols;c++){
+      if(!playable(r,c))continue; const d=eff(r,c); if(!d)continue;
+      if(c+1<dims.cols&&playable(r,c+1)&&eff(r,c+1)!==d){
+        const a=this.cellToWorld(r,c,dims),b=this.cellToWorld(r,c+1,dims);
+        mkWall((a.x+b.x)/2,a.y,true);
+      }
+      if(r+1<dims.rows&&playable(r+1,c)&&eff(r+1,c)!==d){
+        const a=this.cellToWorld(r,c,dims),b=this.cellToWorld(r+1,c,dims);
+        mkWall(a.x,(a.y+b.y)/2,false);
       }
     }
     return objs;
@@ -838,7 +884,11 @@ class View {
     return slot.objs;
   }
   _setMarkerOpacity(objs,k){
-    for(const o of objs){o.visible=k>0.004;o.material.opacity=o.userData.baseOp*k;}
+    for(const o of objs){
+      const layerOn=this.layerVisible[o.userData.layer]!==false;
+      o.visible=k>0.004 && layerOn;
+      o.material.opacity=o.userData.baseOp*k;
+    }
   }
   renderMaskMarkers(frameA,frameB,f){
     const sigA=this._maskSig(frameA.mask,frameA.dims,frameA.gravityField,frameA.randomFill);
@@ -1096,6 +1146,8 @@ class View {
       this.camera.lookAt(0, 0, 0);
     }
     for(const [id, m] of this.meshes.entries()) {
+      m.visible = this.layerVisible.pieces;
+      if(m.userData.ring) m.userData.ring.visible = this.layerVisible.prizes;
       const targetEmissive = this.hoverGroup.has(id) ? 0.4 : 0;
       m.material.emissiveIntensity += (targetEmissive - m.material.emissiveIntensity) * 0.2;
       
@@ -1382,6 +1434,7 @@ function enterDesign(){
   initEditState();
   designMode=true; timeline=editTimeline; replay.T=designIdx;
   view._designGrid=true;
+  view._defaultGravity = editState.meta.gravity;
   view.clearMeshes();
   view.clearHoverNow();
   hide('ov-win');hide('ov-lose');
@@ -1394,6 +1447,7 @@ function exitDesign(){
 
   designMode=false;
   view._designGrid=false;
+  view._defaultGravity = (frame.meta && frame.meta.gravity) || 'down';
   
   const frame = stateFrameAt(designIdx);
   
@@ -1492,7 +1546,7 @@ function refreshDesignUI(){
 }
 function finalizeLiveAnim(){ if(liveAnim.active){liveAnim.active=false;replay.T=liveAnim.targetT;} }
 function triggerDesignAnim(from,to){ triggerLiveAnimation(from,to); liveAnim.duration=240; } // snappy, speed-independent
-function commitEdit(input,step,newState){
+function commitEdit(input,step,newState,animate=true){
   finalizeLiveAnim();                                // stay responsive under rapid painting
   const cur=designIdx;
   if(cur < editTimeline.entries.length-1)            // acted after undo → fork (drop the redo tail)
@@ -1500,7 +1554,8 @@ function commitEdit(input,step,newState){
   timelinePush(input,[step]);                        // operates on the active (edit) timeline
   editState=newState;
   designIdx=editTimeline.entries.length-1;
-  triggerDesignAnim(cur,designIdx);
+  if(animate) triggerDesignAnim(cur,designIdx);
+  else replay.T=designIdx;                            // instant: the view already reflects it (drag stroke)
   refreshDesignUI();
 }
 // the spatial brushes: each clones editState, mutates, and commits one undoable edit-frame.
@@ -1756,6 +1811,68 @@ function buildPaletteSwatches(){
     host.appendChild(b);
   });
 }
+
+// ── drag-paint: a stroke is one undoable edit, rendered live, committed instant on release ──
+let strokeActive=false, strokeState=null, strokeFrame=null, strokePainted=null, strokeOp=null;
+function frameFromState(s){
+  return {dims:{...s.dims}, mask:s.mask.map(r=>r.slice()),
+    gravityField:s.gravityField?s.gravityField.map(r=>r.slice()):null,
+    randomFill:s.randomFill?s.randomFill.map(r=>r.slice()):null,
+    placements:s.placements.map(p=>({...p})), meta:{...s.meta}};
+}
+function computeStrokeOp(r,c){ // toggle brushes resolve their target from the first cell, then paint uniformly
+  const m=currentBrush.mode;
+  if(m==='mask') return {set:!editState.mask[r][c]};
+  if(m==='randomFill') return {set:!editState.randomFill[r][c]};
+  if(m==='prize'){ const p=editState.placements.find(p=>p.r===r&&p.c===c); return {set:p?!p.prize:true}; }
+  return {set:true}; // piece / erase / gravity are inherently "set"
+}
+function paintCellInto(s,r,c,op){
+  const m=currentBrush.mode;
+  if(m==='mask'){
+    s.mask[r][c]=op.set;
+    if(!op.set){ s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c)); s.randomFill[r][c]=false; }
+  } else if(m==='erase'){
+    s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c)); s.randomFill[r][c]=false;
+  } else if(m==='prize'){
+    const p=s.placements.find(p=>p.r===r&&p.c===c); if(p) p.prize=op.set;
+  } else if(m==='gravity'){
+    s.gravityField[r][c]=currentBrush.gravDir;
+  } else if(m==='randomFill'){
+    s.randomFill[r][c]=op.set;
+    if(op.set){ s.mask[r][c]=true; s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c)); }
+  } else { // piece
+    s.mask[r][c]=true; s.randomFill[r][c]=false;
+    s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c));
+    s.placements.push({id:nextEditId(s),r,c,palette:currentBrush.pal,prize:false});
+  }
+}
+function strokePaintCell(r,c){
+  const key=r+','+c; if(strokePainted.has(key))return;
+  if(currentBrush.mode==='prize' && !strokeState.placements.find(p=>p.r===r&&p.c===c)) return; // rider rule
+  strokePainted.add(key);
+  paintCellInto(strokeState,r,c,strokeOp);
+  strokeFrame=frameFromState(strokeState);
+}
+function beginStroke(r,c){
+  if(peekActive)return;
+  finalizeLiveAnim();
+  strokeActive=true; strokeState=cloneEditState(); strokePainted=new Set();
+  strokeOp=computeStrokeOp(r,c);
+  strokePaintCell(r,c);
+}
+function continueStroke(r,c){ if(strokeActive) strokePaintCell(r,c); }
+function endStroke(){
+  if(!strokeActive)return;
+  strokeActive=false;
+  const painted=strokePainted.size>0, s=strokeState;
+  strokeState=null; strokeFrame=null;
+  if(painted){
+    commitEdit({type:'stroke·'+currentBrush.mode},
+      {kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,meta:{...s.meta}},
+      s, false);  // already rendered live during the drag → commit instant
+  }
+}
 function editResize(rows,cols){
   rows=Math.max(DZ_MIN,Math.min(DZ_MAX,rows));
   cols=Math.max(DZ_MIN,Math.min(DZ_MAX,cols));
@@ -1885,6 +2002,7 @@ function newBoard(){
     tries++;
   } while(!ok && tries<160);
   view.build(engine);
+  view._defaultGravity = engine.gravityDir;
   timelineReset(seed);
   syncHUD(); renderDefinition(); renderTransformControls();
   hide('ov-win'); hide('ov-lose');
@@ -1953,15 +2071,20 @@ function hide(id){document.getElementById(id).classList.remove('show');}
 // input
 let hoverRAF=null;
 stage.addEventListener('pointermove',e=>{
-  if(designMode || replay.active || liveAnim.active)return;
+  if(designMode){
+    if(strokeActive){ const cell=view.pickCell(e.clientX,e.clientY,editState.dims); if(cell) continueStroke(cell.r,cell.c); }
+    return;
+  }
+  if(replay.active || liveAnim.active)return;
   if(hoverRAF)cancelAnimationFrame(hoverRAF);
   hoverRAF=requestAnimationFrame(()=>{const cell=view.pick(engine,e.clientX,e.clientY);
     view.setHover(engine,cell?cell.r:null,cell?cell.c:null);});
 });
 stage.addEventListener('pointerdown',e=>{
   if(designMode){
+    if(peekActive)return;
     const cell=view.pickCell(e.clientX,e.clientY,editState.dims);
-    if(cell) applyBrush(cell.r,cell.c);
+    if(cell) beginStroke(cell.r,cell.c);
     return;
   }
   if(liveAnim.active)return;
@@ -1969,11 +2092,14 @@ stage.addEventListener('pointerdown',e=>{
   if(replay.active) maybeFork();
   const steps=engine.tapAt(cell.r,cell.c);if(steps)runSteps(steps,{type:'tap',args:{r:cell.r,c:cell.c}});
 });
+addEventListener('pointerup',()=>{ if(strokeActive) endStroke(); });
+addEventListener('pointercancel',()=>{ if(strokeActive) endStroke(); });
 
 document.querySelectorAll('.gbtn').forEach(b=>b.addEventListener('click',()=>{
   if(designMode || liveAnim.active)return;
   const dir=b.dataset.grav;if(dir===engine.gravityDir && !replay.active)return;
   if(replay.active) maybeFork();
+  view._defaultGravity = dir;
   const steps=engine.setGravity(dir);renderDefinition();renderTransformControls();
   runSteps(steps,{type:'gravity·'+dir});
 }));
@@ -2103,6 +2229,7 @@ byId('rule-save').addEventListener('click', () => {
   };
   const s = cloneEditState();
   s.meta = newMeta;
+  view._defaultGravity = newMeta.gravity;
   commitEdit(
     {type: 'ruleSet'},
     {kind:'edit', dims:{...s.dims}, mask:s.mask, placements:s.placements, gravityField:s.gravityField, randomFill:s.randomFill, meta:s.meta},
@@ -2112,6 +2239,14 @@ byId('rule-save').addEventListener('click', () => {
 });
 
 buildPaletteSwatches();
+// per-layer visibility toggles — pure view state, no timeline (both play and design)
+document.querySelectorAll('#layer-toggles .lt-btn').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const layer=btn.dataset.layer;
+    view.layerVisible[layer]=!view.layerVisible[layer];
+    btn.classList.toggle('on',view.layerVisible[layer]);
+  });
+});
 byId('rp-exit').addEventListener('click',()=>exitReplay(false));
 byId('rp-first').addEventListener('click',()=>{replay.playing=false;setT(0);});
 byId('rp-last').addEventListener('click',()=>{replay.playing=false;setT(lastT());});
@@ -2193,7 +2328,9 @@ function loop(t){
     }
     renderReplayFrame();
   }else{
-    if (timeline.entries.length > 0) {            // idle: render the frame at the playhead (respects undo)
+    if(strokeActive && strokeFrame){              // drag in progress: show the live (uncommitted) stroke
+      view.reconcileToFrame(strokeFrame);
+    } else if (timeline.entries.length > 0) {      // idle: render the frame at the playhead (respects undo)
       const idx=Math.max(0,Math.min(lastT(),Math.round(replay.T)));
       const e=timeline.entries[idx];
       view.reconcileToFrame(e.subFrames[e.subFrames.length - 1]);
