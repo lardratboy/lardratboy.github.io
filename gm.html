@@ -590,6 +590,12 @@
             { type: 5, color: 0xe5e5e5, name: "Sphere" }       // Porcelain White
         ];
 
+        // ============================================================
+        //  LOW-POLY SPACE BACKGROUND
+        //  Faceted nebula asteroid fields, sparkle starfield, a ringed
+        //  gas giant, low-poly ship traffic and a drifting satellite.
+        //  Palette + silhouettes tuned to the reference art board.
+        // ============================================================
         class SpaceBackground {
             constructor(scene) {
                 this.scene = scene;
@@ -600,19 +606,153 @@
                 this.stars = [];
                 this.clouds = [];
                 this.ships = [];
+                this.glows = [];
                 this.planet = null;
+                this.satellite = null;
 
+                // Shared procedural textures (built once)
+                this.texGlow = this.makeGlowTexture();
+                this.texGrid = this.makeGridTexture();
+                this.texPanel = this.makePanelTexture();
+
+                this.buildBackdrop();
+                this.buildAtmosphere();
                 this.buildStars();
-                this.buildClouds();
+                this.buildNebulaClouds();
                 this.buildPlanet();
                 this.buildShips();
+                this.buildSatellite();
             }
+
+            /* ---------- procedural textures ---------- */
+
+            makeGlowTexture() {
+                const c = document.createElement('canvas');
+                c.width = c.height = 128;
+                const ctx = c.getContext('2d');
+                const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+                g.addColorStop(0.0, 'rgba(255,255,255,1)');
+                g.addColorStop(0.22, 'rgba(255,255,255,0.55)');
+                g.addColorStop(0.55, 'rgba(255,255,255,0.12)');
+                g.addColorStop(1.0, 'rgba(255,255,255,0)');
+                ctx.fillStyle = g;
+                ctx.fillRect(0, 0, 128, 128);
+                const tex = new THREE.CanvasTexture(c);
+                return tex;
+            }
+
+            makeGridTexture() {
+                const S = 1024;
+                const c = document.createElement('canvas');
+                c.width = c.height = S;
+                const ctx = c.getContext('2d');
+                ctx.clearRect(0, 0, S, S);
+
+                // soft central glow gives the scene a luminous core like the ref
+                const g = ctx.createRadialGradient(S * 0.5, S * 0.52, 0, S * 0.5, S * 0.52, S * 0.62);
+                g.addColorStop(0.0, 'rgba(46,104,120,0.30)');
+                g.addColorStop(0.45, 'rgba(24,52,82,0.12)');
+                g.addColorStop(1.0, 'rgba(8,10,21,0)');
+                ctx.fillStyle = g;
+                ctx.fillRect(0, 0, S, S);
+
+                // faint triangular tessellation
+                ctx.strokeStyle = 'rgba(126,158,190,0.045)';
+                ctx.lineWidth = 1;
+                const step = 74;
+                const h = step * Math.sqrt(3) / 2;
+                for (let row = 0, y = 0; y <= S + h; y += h, row++) {
+                    const xo = (row % 2) ? step / 2 : 0;
+                    for (let x = -step; x <= S + step; x += step) {
+                        ctx.beginPath();
+                        ctx.moveTo(x + xo, y);
+                        ctx.lineTo(x + xo + step / 2, y + h);
+                        ctx.lineTo(x + xo - step / 2, y + h);
+                        ctx.closePath();
+                        ctx.stroke();
+                    }
+                }
+                return new THREE.CanvasTexture(c);
+            }
+
+            makePanelTexture() {
+                const W = 256, H = 128;
+                const c = document.createElement('canvas');
+                c.width = W; c.height = H;
+                const ctx = c.getContext('2d');
+                ctx.fillStyle = '#16224f';
+                ctx.fillRect(0, 0, W, H);
+                // cell grid
+                ctx.strokeStyle = '#3a55a8';
+                ctx.lineWidth = 3;
+                const cols = 8, rows = 4;
+                for (let i = 0; i <= cols; i++) {
+                    const x = (i / cols) * W;
+                    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+                }
+                for (let j = 0; j <= rows; j++) {
+                    const y = (j / rows) * H;
+                    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+                }
+                // subtle highlight glints on a few cells
+                ctx.fillStyle = 'rgba(120,160,255,0.18)';
+                for (let k = 0; k < 6; k++) {
+                    const cx = Math.floor(Math.random() * cols) * (W / cols);
+                    const cy = Math.floor(Math.random() * rows) * (H / rows);
+                    ctx.fillRect(cx + 2, cy + 2, W / cols - 4, H / rows - 4);
+                }
+                return new THREE.CanvasTexture(c);
+            }
+
+            /* ---------- backdrop & atmosphere ---------- */
+
+            buildBackdrop() {
+                const geo = new THREE.PlaneGeometry(150, 95);
+                const mat = new THREE.MeshBasicMaterial({
+                    map: this.texGrid,
+                    transparent: true,
+                    depthWrite: false,
+                    opacity: 0.9
+                });
+                const plane = new THREE.Mesh(geo, mat);
+                plane.position.set(0, 0, -46);
+                this.group.add(plane);
+            }
+
+            addGlowSprite(color, x, y, z, size, opacity) {
+                const mat = new THREE.SpriteMaterial({
+                    map: this.texGlow,
+                    color: color,
+                    transparent: true,
+                    opacity: opacity,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false
+                });
+                const s = new THREE.Sprite(mat);
+                s.position.set(x, y, z);
+                s.scale.set(size, size, 1);
+                this.group.add(s);
+                return s;
+            }
+
+            buildAtmosphere() {
+                // coloured nebula haze sitting behind the rock fields
+                const teal = this.addGlowSprite(0x2f8fa0, -2, 1, -34, 46, 0.42);
+                const purple = this.addGlowSprite(0x6b3d8f, -16, 7, -30, 30, 0.34);
+                const teal2 = this.addGlowSprite(0x2a9c86, 17, -7, -30, 30, 0.30);
+                this.glows.push(
+                    { sprite: teal, base: 0.42, speed: 0.0006, off: 0 },
+                    { sprite: purple, base: 0.34, speed: 0.0009, off: 2 },
+                    { sprite: teal2, base: 0.30, speed: 0.0008, off: 4 }
+                );
+            }
+
+            /* ---------- starfield ---------- */
 
             getRandomHemispherePoint(R) {
                 const theta = Math.random() * Math.PI * 2;
-                const cosPhi = -Math.random(); // Back hemisphere only (Z is always negative)
+                const cosPhi = -Math.random();
                 const sinPhi = Math.sqrt(1 - cosPhi * cosPhi);
-
                 return new THREE.Vector3(
                     R * sinPhi * Math.cos(theta),
                     R * sinPhi * Math.sin(theta),
@@ -620,234 +760,472 @@
                 );
             }
 
+            makeSparkleGeometry() {
+                // four-pointed sparkle, concave sides
+                const shape = new THREE.Shape();
+                const outer = 1.0, inner = 0.16;
+                for (let i = 0; i < 8; i++) {
+                    const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
+                    const r = (i % 2 === 0) ? outer : inner;
+                    const x = Math.cos(a) * r, y = Math.sin(a) * r;
+                    if (i === 0) shape.moveTo(x, y); else shape.lineTo(x, y);
+                }
+                shape.closePath();
+                const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.05, bevelEnabled: false });
+                geo.center();
+                return geo;
+            }
+
             buildStars() {
-                // Distribute stars on a perfect outer celestial sphere shell
-                const R_stars = 32;
-                const starGeo = new THREE.OctahedronGeometry(1, 0);
-                const starMat = new THREE.MeshBasicMaterial({
-                    color: 0xfffbe3,
-                    transparent: true,
-                    opacity: 0.8
+                const camPos = new THREE.Vector3(0, 0, 15);
+
+                // big four-pointed sparkles
+                const sparkleGeo = this.makeSparkleGeometry();
+                const sparkleMat = new THREE.MeshBasicMaterial({
+                    color: 0xfff2cf, transparent: true, opacity: 0.9, side: THREE.DoubleSide
                 });
-
-                for (let i = 0; i < 65; i++) {
-                    const star = new THREE.Mesh(starGeo, starMat.clone());
-                    
-                    const pos = this.getRandomHemispherePoint(R_stars);
-                    star.position.copy(pos);
-
-                    // Stylize some stars as 4-pointed thin stars, some as standard octahedrons
-                    const scaleX = 0.08 + Math.random() * 0.12;
-                    const scaleY = 0.35 + Math.random() * 0.55;
-                    const scaleZ = 0.08 + Math.random() * 0.12;
-
-                    if (Math.random() > 0.45) {
-                        star.scale.set(scaleX, scaleY, scaleZ);
-                        star.rotation.z = Math.random() * Math.PI;
-                    } else {
-                        const uniformScale = 0.12 + Math.random() * 0.18;
-                        star.scale.set(uniformScale, uniformScale, uniformScale);
-                    }
-
+                for (let i = 0; i < 34; i++) {
+                    const star = new THREE.Mesh(sparkleGeo, sparkleMat.clone());
+                    star.position.copy(this.getRandomHemispherePoint(30 + Math.random() * 4));
+                    const s = 0.16 + Math.random() * 0.26;
+                    star.scale.set(s, s, s);
+                    star.lookAt(camPos);
+                    star.rotation.z += (Math.random() - 0.5) * 0.4;
                     star.userData = {
-                        twinkleSpeed: 0.02 + Math.random() * 0.04,
-                        twinkleOffset: Math.random() * Math.PI * 2
+                        base: s,
+                        speed: 0.0012 + Math.random() * 0.0022,
+                        off: Math.random() * Math.PI * 2,
+                        sparkle: true
                     };
-
                     this.group.add(star);
                     this.stars.push(star);
                 }
+
+                // fine dust dots for density
+                const dotGeo = new THREE.SphereGeometry(1, 6, 6);
+                const dotMat = new THREE.MeshBasicMaterial({
+                    color: 0xdfe7ff, transparent: true, opacity: 0.5
+                });
+                for (let i = 0; i < 130; i++) {
+                    const dot = new THREE.Mesh(dotGeo, dotMat.clone());
+                    dot.position.copy(this.getRandomHemispherePoint(27 + Math.random() * 7));
+                    const s = 0.02 + Math.random() * 0.05;
+                    dot.scale.set(s, s, s);
+                    dot.material.opacity = 0.25 + Math.random() * 0.45;
+                    dot.userData = {
+                        base: dot.material.opacity,
+                        speed: 0.001 + Math.random() * 0.003,
+                        off: Math.random() * Math.PI * 2,
+                        sparkle: false
+                    };
+                    this.group.add(dot);
+                    this.stars.push(dot);
+                }
             }
 
-            buildClouds() {
-                // Place clouds on an inner concentric sphere wrapping around the sides
-                const R_clouds = 21;
+            /* ---------- nebula rock fields ---------- */
 
-                const cloudMatTeal = new THREE.MeshStandardMaterial({
-                    color: 0x144552, // Dark teal
-                    roughness: 0.9,
-                    metalness: 0.1,
+            // Build a single merged, vertex-coloured low-poly rock cluster.
+            makeRockCluster(cfg) {
+                const colTop = new THREE.Color(cfg.top);
+                const colBot = new THREE.Color(cfg.bottom);
+                const axis = new THREE.Vector3(cfg.axis ? cfg.axis[0] : 0.25,
+                                               cfg.axis ? cfg.axis[1] : 1.0,
+                                               0).normalize();
+                const spread = cfg.spread;
+                const count = cfg.count;
+
+                const chunks = [];
+                for (let i = 0; i < count; i++) {
+                    const r = cfg.sizeMin + Math.random() * (cfg.sizeMax - cfg.sizeMin);
+                    let geo;
+                    const pick = Math.random();
+                    // dodecahedrons read as rounded gas-cloud lumps (no sharp spikes)
+                    if (pick < 0.7) geo = new THREE.DodecahedronGeometry(r, 0);
+                    else if (pick < 0.9) geo = new THREE.DodecahedronGeometry(r, 1);
+                    else geo = new THREE.IcosahedronGeometry(r, 1); // occasional rounder icosphere
+
+                    if (geo.index !== null) geo = geo.toNonIndexed();
+
+                    // gentle non-uniform squash for organic variety (faces stay rounded)
+                    geo.scale(
+                        0.82 + Math.random() * 0.36,
+                        0.82 + Math.random() * 0.36,
+                        0.82 + Math.random() * 0.36
+                    );
+
+                    // pack chunks tightly so the cluster reads as one cohesive cloud
+                    const ox = (Math.random() - 0.5) * spread * 1.3;
+                    const oy = (Math.random() - 0.5) * spread * 1.0;
+                    const oz = (Math.random() - 0.5) * spread * 0.7;
+                    geo.translate(ox, oy, oz);
+                    chunks.push(geo);
+                }
+
+                // merge into flat arrays with per-facet gradient colouring
+                const positions = [];
+                const colors = [];
+                const c = new THREE.Color();
+                const denom = spread * 1.6;
+
+                chunks.forEach(geo => {
+                    const arr = geo.attributes.position.array;
+                    for (let f = 0; f < arr.length; f += 9) {
+                        const cx = (arr[f] + arr[f + 3] + arr[f + 6]) / 3;
+                        const cy = (arr[f + 1] + arr[f + 4] + arr[f + 7]) / 3;
+                        let t = (cx * axis.x + cy * axis.y) / denom + 0.5;
+                        t = Math.max(0, Math.min(1, t));
+                        c.copy(colBot).lerp(colTop, t);
+                        // per-facet brightness variation so facets read even in flat light
+                        const b = 0.86 + Math.random() * 0.30;
+                        c.multiplyScalar(b);
+                        for (let k = 0; k < 9; k++) positions.push(arr[f + k]);
+                        for (let k = 0; k < 3; k++) colors.push(c.r, c.g, c.b);
+                    }
+                });
+
+                const merged = new THREE.BufferGeometry();
+                merged.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                merged.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+                merged.computeVertexNormals();
+
+                const mat = new THREE.MeshStandardMaterial({
+                    vertexColors: true,
+                    roughness: 0.95,
+                    metalness: 0.0,
                     flatShading: true
                 });
 
-                const cloudMatPurple = new THREE.MeshStandardMaterial({
-                    color: 0x2d173d, // Dark purple
-                    roughness: 0.9,
-                    metalness: 0.1,
-                    flatShading: true
-                });
+                const mesh = new THREE.Mesh(merged, mat);
+                const cluster = new THREE.Group();
+                cluster.add(mesh);
+                return cluster;
+            }
 
-                const mats = [cloudMatTeal, cloudMatPurple];
+            buildNebulaClouds() {
+                // palette anchors lifted from the reference board
+                const PURPLE_HI = 0x6e3f8c, PURPLE_LO = 0x35215c;
+                const MAGENTA = 0x8a3a78, INDIGO = 0x2c357f;
+                const BLUE = 0x2f4ea8, TEAL_HI = 0x2fa389, TEAL_LO = 0x1c5e63;
 
-                // Direct vectors projected onto the concentric sphere R=21
-                const baseDirections = [
-                    new THREE.Vector3(-10, -7, -14), // Bottom-Left
-                    new THREE.Vector3(-12, 5, -15),  // Top-Left
-                    new THREE.Vector3(11, -6, -14),  // Bottom-Right
-                    new THREE.Vector3(12, 6, -15),   // Top-Right
-                    new THREE.Vector3(-15, 0, -10),  // Left-Wrap
-                    new THREE.Vector3(15, 0, -10)    // Right-Wrap
+                // hand-placed out on the left/right margins so the play grid
+                // (always ~±5.5 around centre) stays clear; top/bottom centre is
+                // left open because the grid fills the frame vertically.
+                const configs = [
+                    // LEFT — upper purple / indigo mass
+                    { x: -20, y: 5.5, z: -20, count: 12, spread: 3.2, sizeMin: 1.5, sizeMax: 2.7,
+                      top: PURPLE_HI, bottom: INDIGO, axis: [-0.25, 1] },
+                    // LEFT — lower blue / teal mass
+                    { x: -20, y: -6.5, z: -19, count: 12, spread: 3.2, sizeMin: 1.4, sizeMax: 2.6,
+                      top: BLUE, bottom: TEAL_LO, axis: [0.2, 1] },
+                    // RIGHT — upper magenta / purple mass
+                    { x: 20, y: 6.5, z: -21, count: 12, spread: 3.2, sizeMin: 1.4, sizeMax: 2.6,
+                      top: MAGENTA, bottom: PURPLE_LO, axis: [0.3, 1] },
+                    // RIGHT — lower big teal / green mass
+                    { x: 20.5, y: -5, z: -19, count: 14, spread: 3.6, sizeMin: 1.5, sizeMax: 2.8,
+                      top: TEAL_HI, bottom: INDIGO, axis: [0.25, 1] },
+                    // far side accents for depth (smaller, pushed further back/out)
+                    { x: -23.5, y: 0, z: -25, count: 6, spread: 2.4, sizeMin: 1.0, sizeMax: 1.8,
+                      top: INDIGO, bottom: PURPLE_LO, axis: [0.1, 1] },
+                    { x: 23.5, y: 1, z: -25, count: 6, spread: 2.4, sizeMin: 1.0, sizeMax: 1.8,
+                      top: TEAL_HI, bottom: BLUE, axis: [0.1, 1] }
                 ];
 
-                const clusterConfigs = baseDirections.map((dir, idx) => {
-                    dir.normalize().multiplyScalar(R_clouds);
-                    return {
-                        x: dir.x,
-                        y: dir.y,
-                        z: dir.z,
-                        size: 5.5 + Math.random() * 2.0,
-                        colorIdx: idx % 2
-                    };
-                });
-
-                clusterConfigs.forEach(cp => {
-                    const cluster = new THREE.Group();
-                    cluster.position.set(cp.x, cp.y, cp.z);
-
-                    const numSpheres = 7 + Math.floor(Math.random() * 6);
-                    const baseGeo = new THREE.IcosahedronGeometry(cp.size * 0.5, 1);
-
-                    for (let i = 0; i < numSpheres; i++) {
-                        const sphere = new THREE.Mesh(baseGeo, mats[cp.colorIdx]);
-                        
-                        const ox = (Math.random() - 0.5) * (cp.size * 0.65);
-                        const oy = (Math.random() - 0.5) * (cp.size * 0.65);
-                        const oz = (Math.random() - 0.5) * (cp.size * 0.45);
-                        sphere.position.set(ox, oy, oz);
-
-                        const s = 0.65 + Math.random() * 0.85;
-                        sphere.scale.set(s, s, s);
-                        
-                        sphere.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
-
-                        cluster.add(sphere);
-                    }
-
-                    // Slow idle rotation
+                configs.forEach(cfg => {
+                    const cluster = this.makeRockCluster(cfg);
+                    cluster.position.set(cfg.x, cfg.y, cfg.z);
+                    cluster.rotation.set(
+                        Math.random() * Math.PI,
+                        Math.random() * Math.PI,
+                        Math.random() * Math.PI
+                    );
                     cluster.userData = {
-                        rotSpeed: (Math.random() - 0.5) * 0.001,
-                        driftSpeed: (Math.random() - 0.5) * 0.002
+                        rotSpeed: (Math.random() - 0.5) * 0.0006,
+                        bobSpeed: 0.0003 + Math.random() * 0.0004,
+                        bobAmp: 0.25 + Math.random() * 0.4,
+                        baseY: cfg.y,
+                        off: Math.random() * Math.PI * 2
                     };
-
                     this.group.add(cluster);
                     this.clouds.push(cluster);
+
+                    // soft gaseous halo so the mass reads as glowing cloud, not bare rock
+                    const hc = new THREE.Color(cfg.top).lerp(new THREE.Color(cfg.bottom), 0.5);
+                    const halo = this.addGlowSprite(hc.getHex(), cfg.x, cfg.y, cfg.z - 4,
+                                                    cfg.spread * 4.4, 0.20);
+                    this.glows.push({
+                        sprite: halo, base: 0.20,
+                        speed: 0.0005 + Math.random() * 0.0005,
+                        off: Math.random() * Math.PI * 2
+                    });
                 });
             }
 
+            /* ---------- ringed gas giant ---------- */
+
             buildPlanet() {
-                // Saturn moved further back and scaled up to maintain size/visibility
                 const R_planet = 28;
                 this.planet = new THREE.Group();
-                
-                // Project base directional vector onto sphere of radius 28
                 const dir = new THREE.Vector3(6, 4.5, -10).normalize().multiplyScalar(R_planet);
                 this.planet.position.copy(dir);
 
-                // Planet body scale increased from 1.5 to 3.6
-                const planetGeo = new THREE.IcosahedronGeometry(3.6, 2);
-                const planetMat = new THREE.MeshStandardMaterial({
-                    color: 0xdfd3a8, // Cream beige
-                    roughness: 0.8,
-                    metalness: 0.1,
-                    flatShading: true
+                // body with soft latitudinal banding via vertex colours
+                let bodyGeo = new THREE.IcosahedronGeometry(3.6, 2);
+                if (bodyGeo.index !== null) bodyGeo = bodyGeo.toNonIndexed();
+                const pos = bodyGeo.attributes.position;
+                const cols = [];
+                const cA = new THREE.Color(0xe7dcb4); // light cream
+                const cB = new THREE.Color(0xc9b483); // tan band
+                const tmp = new THREE.Color();
+                for (let i = 0; i < pos.count; i += 3) {
+                    const yAvg = (pos.getY(i) + pos.getY(i + 1) + pos.getY(i + 2)) / 3;
+                    const band = 0.5 + 0.5 * Math.sin(yAvg * 2.1);
+                    tmp.copy(cB).lerp(cA, band);
+                    tmp.multiplyScalar(0.92 + Math.random() * 0.12);
+                    for (let k = 0; k < 3; k++) cols.push(tmp.r, tmp.g, tmp.b);
+                }
+                bodyGeo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+                bodyGeo.computeVertexNormals();
+                const bodyMat = new THREE.MeshStandardMaterial({
+                    vertexColors: true, roughness: 0.85, metalness: 0.05, flatShading: true
                 });
-                const bodyMesh = new THREE.Mesh(planetGeo, planetMat);
-                this.planet.add(bodyMesh);
+                this.planet.add(new THREE.Mesh(bodyGeo, bodyMat));
 
-                // Planet ring scale increased accordingly
-                const ringGeo = new THREE.RingGeometry(4.6, 7.8, 24);
-                ringGeo.rotateX(Math.PI / 2);
-                const ringMat = new THREE.MeshStandardMaterial({
-                    color: 0xcfc495,
-                    roughness: 0.9,
-                    metalness: 0.05,
-                    side: THREE.DoubleSide,
-                    flatShading: true
+                // two-tone ring with a thin gap
+                const ringMatInner = new THREE.MeshStandardMaterial({
+                    color: 0xd8cb9c, roughness: 0.9, metalness: 0.05,
+                    side: THREE.DoubleSide, flatShading: true
                 });
-                const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-                this.planet.add(ringMesh);
+                const ringMatOuter = new THREE.MeshStandardMaterial({
+                    color: 0xbfb084, roughness: 0.95, metalness: 0.05,
+                    side: THREE.DoubleSide, flatShading: true
+                });
+                const ringInner = new THREE.RingGeometry(4.5, 5.9, 48);
+                ringInner.rotateX(Math.PI / 2);
+                this.planet.add(new THREE.Mesh(ringInner, ringMatInner));
+                const ringOuter = new THREE.RingGeometry(6.2, 7.9, 48);
+                ringOuter.rotateX(Math.PI / 2);
+                this.planet.add(new THREE.Mesh(ringOuter, ringMatOuter));
 
-                // Tilt angle
-                this.planet.rotation.x = 0.4;
-                this.planet.rotation.z = -0.25;
-
+                this.planet.rotation.x = 0.42;
+                this.planet.rotation.z = -0.28;
                 this.group.add(this.planet);
             }
 
-            buildShips() {
-                const shipColors = [0xe5e5e5, 0x3b4cd4];
+            /* ---------- low-poly ship traffic ---------- */
 
-                const bodyMat = new THREE.MeshStandardMaterial({ color: shipColors[0], roughness: 0.5, flatShading: true });
-                const wingMat = new THREE.MeshStandardMaterial({ color: shipColors[1], roughness: 0.5, flatShading: true });
+            makeShip(hullColor, accentColor) {
+                const ship = new THREE.Group();
+                const hullMat = new THREE.MeshStandardMaterial({ color: hullColor, roughness: 0.55, metalness: 0.1, flatShading: true });
+                const accMat = new THREE.MeshStandardMaterial({ color: accentColor, roughness: 0.5, metalness: 0.15, flatShading: true });
+                const glassMat = new THREE.MeshStandardMaterial({ color: 0x1b2a66, roughness: 0.2, metalness: 0.3, flatShading: true, emissive: 0x101d4d, emissiveIntensity: 0.5 });
+
+                // nose cone (points +x = forward)
+                const nose = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.7, 8), hullMat);
+                nose.rotation.z = -Math.PI / 2;
+                nose.position.x = 0.5;
+                ship.add(nose);
+
+                // main fuselage
+                const body = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.2, 0.7, 8), hullMat);
+                body.rotation.z = Math.PI / 2;
+                ship.add(body);
+
+                // tail taper
+                const tail = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.35, 8), hullMat);
+                tail.rotation.z = Math.PI / 2;
+                tail.position.x = -0.5;
+                ship.add(tail);
+
+                // cockpit canopy
+                const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 8), glassMat);
+                canopy.scale.set(1.1, 0.6, 0.85);
+                canopy.position.set(0.12, 0.14, 0);
+                ship.add(canopy);
+
+                // delta wings (swept)
+                const wing = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.04, 1.25), accMat);
+                wing.position.set(-0.08, -0.02, 0);
+                wing.rotation.y = 0.32;
+                ship.add(wing);
+
+                // wing-tip accents
+                const tipGeo = new THREE.BoxGeometry(0.16, 0.06, 0.18);
+                const tipL = new THREE.Mesh(tipGeo, hullMat);
+                tipL.position.set(-0.34, 0, 0.62);
+                ship.add(tipL);
+                const tipR = new THREE.Mesh(tipGeo, hullMat);
+                tipR.position.set(-0.34, 0, -0.62);
+                ship.add(tipR);
+
+                // vertical stabiliser
+                const fin = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.28, 0.04), accMat);
+                fin.position.set(-0.42, 0.16, 0);
+                fin.rotation.z = 0.3;
+                ship.add(fin);
+
+                // engine nozzle + glow
+                const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.16, 0.16, 8), accMat);
+                nozzle.rotation.z = Math.PI / 2;
+                nozzle.position.x = -0.7;
+                ship.add(nozzle);
+
+                const glowMat = new THREE.SpriteMaterial({
+                    map: this.texGlow, color: 0x6fd8ff, transparent: true,
+                    opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false
+                });
+                const glow = new THREE.Sprite(glowMat);
+                glow.scale.set(0.7, 0.7, 1);
+                glow.position.set(-0.85, 0, 0);
+                ship.add(glow);
+                ship.userData.glow = glow;
+
+                return ship;
+            }
+
+            buildShips() {
+                const palettes = [
+                    { hull: 0xe9e9ee, accent: 0x3b4cd4 },  // white / royal blue
+                    { hull: 0xe7eeec, accent: 0x2aa39a }   // white / teal
+                ];
 
                 for (let i = 0; i < 2; i++) {
-                    const ship = new THREE.Group();
-                    
-                    // Hull
-                    const hullGeo = new THREE.BoxGeometry(0.5, 0.2, 0.2);
-                    const hull = new THREE.Mesh(hullGeo, bodyMat);
-                    ship.add(hull);
+                    const ship = this.makeShip(palettes[i].hull, palettes[i].accent);
+                    const lane = (i === 0) ? 3.2 : -3.6;
+                    const startX = -24 - Math.random() * 8;
+                    const z = -11 - Math.random() * 3;
+                    ship.position.set(startX, lane, z);
 
-                    // Wings
-                    const wingsGeo = new THREE.BoxGeometry(0.15, 0.05, 0.9);
-                    const wings = new THREE.Mesh(wingsGeo, wingMat);
-                    wings.position.set(-0.1, 0, 0);
-                    ship.add(wings);
+                    // 3/4 view tilt so we see top + side
+                    ship.rotation.set(0.12, -0.35, (Math.random() - 0.5) * 0.08);
 
-                    // Offset further out to look great over the larger sky background
-                    const startX = -22 - Math.random() * 10;
-                    const startY = (i === 0) ? -2.5 : 3.0;
-                    const startZ = -12 - Math.random() * 4;
-                    ship.position.set(startX, startY, startZ);
-
-                    ship.rotation.y = Math.PI / 2;
-                    ship.rotation.z = (Math.random() - 0.5) * 0.1;
-
-                    ship.userData = {
-                        speed: 0.015 + Math.random() * 0.015,
-                        startY: startY,
-                        oscSpeed: 0.01 + Math.random() * 0.02,
-                        oscOffset: Math.random() * Math.PI * 2
+                    ship.userData.flight = {
+                        speed: 0.022 + Math.random() * 0.016,
+                        baseY: lane,
+                        oscSpeed: 0.0009 + Math.random() * 0.0009,
+                        oscOff: Math.random() * Math.PI * 2,
+                        spin: ship.userData.glow ? ship.userData.glow : null
                     };
-
+                    ship.scale.setScalar(1.15);
                     this.group.add(ship);
                     this.ships.push(ship);
                 }
             }
 
-            update(time) {
-                // Twinkle stars
-                this.stars.forEach(star => {
-                    const twinkle = Math.sin(time * star.userData.twinkleSpeed + star.userData.twinkleOffset);
-                    if (star.scale.y > star.scale.x * 2) {
-                        star.scale.set(star.scale.x, star.scale.y, star.scale.z);
-                        star.material.opacity = 0.4 + (twinkle + 1) * 0.3;
-                    } else {
-                        star.material.opacity = 0.5 + (twinkle + 1) * 0.25;
-                    }
+            /* ---------- drifting satellite ---------- */
+
+            buildSatellite() {
+                const sat = new THREE.Group();
+                const goldMat = new THREE.MeshStandardMaterial({ color: 0xcaa94e, roughness: 0.6, metalness: 0.35, flatShading: true });
+                const foilMat = new THREE.MeshStandardMaterial({ color: 0xb9a25a, roughness: 0.4, metalness: 0.5, flatShading: true });
+                const greyMat = new THREE.MeshStandardMaterial({ color: 0xb6bcc7, roughness: 0.5, metalness: 0.4, flatShading: true, side: THREE.DoubleSide });
+                const panelMat = new THREE.MeshStandardMaterial({
+                    map: this.texPanel, roughness: 0.35, metalness: 0.45, flatShading: true,
+                    emissive: 0x1a2b66, emissiveIntensity: 0.35
                 });
 
-                // Rotate planet
-                if (this.planet) {
-                    this.planet.rotation.y += 0.0015;
+                // central bus (octagonal)
+                const bus = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.55, 8), foilMat);
+                bus.rotation.z = Math.PI / 2;
+                sat.add(bus);
+
+                // booms + solar wings
+                for (const side of [-1, 1]) {
+                    const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.5, 6), greyMat);
+                    boom.rotation.x = Math.PI / 2;
+                    boom.position.set(0, 0, side * 0.55);
+                    sat.add(boom);
+
+                    const panel = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.03, 1.0), panelMat);
+                    panel.position.set(0, 0, side * 1.3);
+                    sat.add(panel);
                 }
 
-                // Drift clouds
-                this.clouds.forEach(cloud => {
-                    cloud.rotation.z += cloud.userData.rotSpeed;
-                    cloud.position.y += Math.sin(time * 0.001) * cloud.userData.driftSpeed;
-                });
+                // dish antenna on a mast
+                const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.4, 6), greyMat);
+                mast.position.set(0, 0.4, 0);
+                sat.add(mast);
+                const dish = new THREE.Mesh(new THREE.ConeGeometry(0.26, 0.18, 14, 1, true), greyMat);
+                dish.position.set(0, 0.62, 0.05);
+                dish.rotation.x = -0.5;
+                sat.add(dish);
+                const feed = new THREE.Mesh(new THREE.SphereGeometry(0.04, 6, 6), goldMat);
+                feed.position.set(0, 0.74, 0.18);
+                sat.add(feed);
 
-                // Guide ships
-                this.ships.forEach(ship => {
-                    ship.position.x += ship.userData.speed;
-                    ship.position.y = ship.userData.startY + Math.sin(time * ship.userData.oscSpeed + ship.userData.oscOffset) * 0.15;
+                // a couple of antennae
+                const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.5, 4), greyMat);
+                antenna.position.set(0.3, -0.3, 0);
+                antenna.rotation.z = 0.5;
+                sat.add(antenna);
 
-                    if (ship.position.x > 22) {
-                        ship.position.x = -22;
-                        ship.userData.speed = 0.015 + Math.random() * 0.015;
+                sat.position.set(-10.5, -1.5, -15);
+                sat.scale.setScalar(1.3);
+                sat.userData = {
+                    spinX: 0.0011, spinY: 0.0016,
+                    baseX: -10.5, baseY: -1.5,
+                    driftSpeed: 0.00022, off: Math.random() * Math.PI * 2
+                };
+                this.satellite = sat;
+                this.group.add(sat);
+            }
+
+            /* ---------- per-frame animation ---------- */
+
+            update(time) {
+                // twinkle
+                this.stars.forEach(star => {
+                    const u = star.userData;
+                    const tw = Math.sin(time * u.speed + u.off);
+                    if (u.sparkle) {
+                        const s = u.base * (0.82 + (tw + 1) * 0.14);
+                        star.scale.set(s, s, s);
+                        star.material.opacity = 0.55 + (tw + 1) * 0.22;
+                    } else {
+                        star.material.opacity = Math.max(0.1, u.base * (0.6 + (tw + 1) * 0.35));
                     }
                 });
+
+                // breathing nebula haze
+                this.glows.forEach(g => {
+                    g.sprite.material.opacity = g.base * (0.78 + 0.22 * Math.sin(time * g.speed + g.off));
+                });
+
+                // gas giant slow spin
+                if (this.planet) this.planet.rotation.y += 0.0014;
+
+                // rock fields: slow tumble + gentle bob
+                this.clouds.forEach(cl => {
+                    const u = cl.userData;
+                    cl.rotation.y += u.rotSpeed;
+                    cl.rotation.z += u.rotSpeed * 0.5;
+                    cl.position.y = u.baseY + Math.sin(time * u.bobSpeed + u.off) * u.bobAmp;
+                });
+
+                // ship traffic
+                this.ships.forEach(ship => {
+                    const f = ship.userData.flight;
+                    ship.position.x += f.speed;
+                    ship.position.y = f.baseY + Math.sin(time * f.oscSpeed + f.oscOff) * 0.3;
+                    if (ship.userData.glow) {
+                        const pulse = 0.6 + 0.4 * Math.abs(Math.sin(time * 0.012 + f.oscOff));
+                        ship.userData.glow.scale.set(0.55 + pulse * 0.4, 0.55 + pulse * 0.4, 1);
+                        ship.userData.glow.material.opacity = 0.5 + pulse * 0.4;
+                    }
+                    if (ship.position.x > 25) {
+                        ship.position.x = -25 - Math.random() * 6;
+                        f.speed = 0.022 + Math.random() * 0.016;
+                    }
+                });
+
+                // satellite tumble + drift
+                if (this.satellite) {
+                    const u = this.satellite.userData;
+                    this.satellite.rotation.x += u.spinX;
+                    this.satellite.rotation.y += u.spinY;
+                    this.satellite.position.x = u.baseX + Math.sin(time * u.driftSpeed + u.off) * 1.2;
+                    this.satellite.position.y = u.baseY + Math.cos(time * u.driftSpeed * 0.8 + u.off) * 0.8;
+                }
             }
         }
 
