@@ -326,6 +326,11 @@
         .hud-left, .hud-right {
             pointer-events: auto;
         }
+        .hud-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
 
         .hud-panel {
             padding: 12px 25px;
@@ -442,6 +447,101 @@
             transition: transform 0.1s ease;
         }
 
+        /* ---- Space-mining energy FX ---- */
+        #fx-layer {
+            position: absolute;
+            inset: 0;
+            z-index: 12;
+            pointer-events: none;
+            overflow: hidden;
+        }
+
+        .energy-orb {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            margin: -10px 0 0 -10px;
+            border-radius: 50%;
+            background: radial-gradient(circle, var(--c) 0%, var(--c) 28%, rgba(255,255,255,0) 72%);
+            box-shadow: 0 0 14px var(--c), 0 0 28px var(--c);
+            opacity: 1;
+            will-change: transform, opacity;
+            transition: transform 0.72s cubic-bezier(0.45, 0, 0.18, 1), opacity 0.72s ease-in;
+        }
+
+        #energy-flash {
+            position: absolute;
+            inset: 0;
+            z-index: 11;
+            pointer-events: none;
+            opacity: 0;
+            background: radial-gradient(ellipse at center,
+                        rgba(120, 220, 255, 0) 45%,
+                        rgba(120, 220, 255, 0.22) 100%);
+            transition: opacity 0.5s ease;
+        }
+
+        .haul-popup {
+            position: absolute;
+            left: 50%;
+            top: 42%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            pointer-events: none;
+            white-space: nowrap;
+            animation: haulPop 1.15s cubic-bezier(0.18, 0.9, 0.3, 1.2) forwards;
+        }
+        .haul-popup .haul-name {
+            font-weight: 800;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            font-size: 2.4rem;
+            line-height: 1;
+            color: var(--c, #7fe7ff);
+            text-shadow: 0 0 18px var(--c, #7fe7ff), 0 2px 12px rgba(0,0,0,0.5);
+        }
+        .haul-popup .haul-sub {
+            margin-top: 8px;
+            font-weight: 700;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            font-size: 1rem;
+            color: #e9f6ff;
+            text-shadow: 0 0 10px rgba(120,220,255,0.6);
+        }
+        .haul-popup.small .haul-name { font-size: 1.5rem; letter-spacing: 2px; }
+        .haul-popup.mega .haul-name { font-size: 3rem; }
+
+        @keyframes haulPop {
+            0%   { opacity: 0; transform: translate(-50%, -40%) scale(0.6); }
+            18%  { opacity: 1; transform: translate(-50%, -50%) scale(1.08); }
+            34%  { transform: translate(-50%, -50%) scale(1.0); }
+            78%  { opacity: 1; transform: translate(-50%, -52%) scale(1.0); }
+            100% { opacity: 0; transform: translate(-50%, -64%) scale(0.96); }
+        }
+
+        .ring-count-mega {
+            color: #7fe7ff !important;
+            text-shadow: 0 0 16px rgba(127, 231, 255, 0.9) !important;
+            transform: scale(1.35) !important;
+            transition: transform 0.12s ease;
+        }
+
+        #sound-toggle {
+            padding: 12px 14px;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 1rem;
+            line-height: 1;
+            color: #1a1a24;
+            transition: all 0.2s ease;
+        }
+        #sound-toggle:hover {
+            background: rgba(0, 0, 0, 0.05);
+            border-color: rgba(0, 0, 0, 0.15);
+        }
+        #sound-toggle.muted { opacity: 0.55; }
+
         /* Loading Overlay Style */
         #loader {
             position: absolute;
@@ -542,6 +642,7 @@
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
                     Leave Level
                 </button>
+                <button class="glass-panel" id="sound-toggle" title="Toggle sound" aria-label="Toggle sound">&#128266;</button>
             </div>
             
             <div class="hud-right">
@@ -562,6 +663,10 @@
             </div>
         </div>
     </div>
+
+    <!-- Energy mining FX overlays -->
+    <div id="energy-flash"></div>
+    <div id="fx-layer"></div>
 
     <!-- Message Alert Area -->
     <div id="game-notifications"></div>
@@ -589,6 +694,79 @@
             { type: 4, color: 0xd05ad0, name: "Icosahedron" }, // Violet Purple
             { type: 5, color: 0xe5e5e5, name: "Sphere" }       // Porcelain White
         ];
+
+        // 0xRRGGBB -> "#rrggbb"
+        function hexToCss(hex) {
+            return '#' + (hex & 0xffffff).toString(16).padStart(6, '0');
+        }
+
+        // ============================================================
+        //  SOUND FX  — tiny WebAudio synth, no external assets.
+        //  Escalating "energy collect" tones; bigger hauls = more notes
+        //  plus sub-bass and shimmer. Lazily created and resumed on the
+        //  first user gesture so it respects browser autoplay rules.
+        // ============================================================
+        class SoundFX {
+            constructor() {
+                this.ctx = null;
+                this.master = null;
+                this.enabled = true;
+            }
+
+            ensure() {
+                if (!this.ctx) {
+                    const AC = window.AudioContext || window.webkitAudioContext;
+                    if (!AC) { console.log("WebAudio unavailable; sound disabled."); return; }
+                    this.ctx = new AC();
+                    this.master = this.ctx.createGain();
+                    this.master.gain.value = 0.5;
+                    this.master.connect(this.ctx.destination);
+                }
+                if (this.ctx.state === "suspended") this.ctx.resume();
+            }
+
+            blip(freq, start, dur, type, gain) {
+                const o = this.ctx.createOscillator();
+                const g = this.ctx.createGain();
+                o.type = type;
+                o.frequency.setValueAtTime(freq, start);
+                o.connect(g); g.connect(this.master);
+                g.gain.setValueAtTime(0.0001, start);
+                g.gain.exponentialRampToValueAtTime(gain, start + 0.012);
+                g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+                o.start(start);
+                o.stop(start + dur + 0.03);
+            }
+
+            // count = number of prizes mined simultaneously
+            collect(count) {
+                if (!this.enabled) return;
+                this.ensure();
+                if (!this.ctx) return;
+
+                const now = this.ctx.currentTime;
+                // major pentatonic, rising — feels like an ascending "payout"
+                const steps = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24];
+                const notes = Math.max(1, Math.min(count, steps.length));
+                const base = 392; // G4
+                for (let i = 0; i < notes; i++) {
+                    const f = base * Math.pow(2, steps[i] / 12);
+                    this.blip(f, now + i * 0.052, 0.20, "triangle", 0.09);
+                }
+                // sub-bass thump for a satisfying "strike" on multi-collects
+                if (count >= 2) this.blip(98, now, 0.34, "sine", 0.16);
+                if (count >= 4) this.blip(65, now + 0.02, 0.5, "sine", 0.18);
+                // high shimmer crowning a big haul
+                if (count >= 5) this.blip(1976, now + notes * 0.052, 0.6, "sine", 0.05);
+            }
+
+            toggle() {
+                this.enabled = !this.enabled;
+                if (this.enabled) this.ensure();
+                return this.enabled;
+            }
+        }
+
 
         // ============================================================
         //  LOW-POLY SPACE BACKGROUND
@@ -1285,7 +1463,156 @@
                 this.setupLights();
                 this.spaceBg = new SpaceBackground(this.scene);
                 this.setupResizeHandler();
+
+                // energy-mining feedback
+                this.audio = new SoundFX();
+                this.fxLayer = document.getElementById('fx-layer');
+                this.energyFlash = document.getElementById('energy-flash');
+                this._tmpVec = new THREE.Vector3();
+
                 this.animate();
+            }
+
+            /* ---------- space-mining energy feedback ---------- */
+
+            projectToScreen(x, y, z) {
+                this._tmpVec.set(x, y, z).project(this.camera);
+                return {
+                    x: (this._tmpVec.x * 0.5 + 0.5) * window.innerWidth,
+                    y: (-this._tmpVec.y * 0.5 + 0.5) * window.innerHeight
+                };
+            }
+
+            haulTier(count) {
+                if (count >= 6) return { name: "Mega Haul", color: "#ff9ff3", cls: "mega" };
+                if (count >= 4) return { name: "Motherlode", color: "#ffd76b", cls: "" };
+                if (count >= 2) return { name: "Rich Seam", color: "#7fe7ff", cls: "" };
+                return { name: "+1", color: "#9fe9ff", cls: "small" };
+            }
+
+            // haul: array of { x, y, css } in world coords (z≈0)
+            energyCollect(haul) {
+                const count = haul.length;
+                this.audio.collect(count);
+                this.flashScreen(count);
+
+                // HUD energy counter is the destination of the mined energy
+                const ratioEl = document.getElementById('hud-ring-ratio');
+                let tx = window.innerWidth - 80, ty = 60;
+                if (ratioEl) {
+                    const r = ratioEl.getBoundingClientRect();
+                    tx = r.left + r.width / 2;
+                    ty = r.top + r.height / 2;
+                }
+
+                let cx = 0, cy = 0;
+                haul.forEach((h, i) => {
+                    cx += h.x; cy += h.y;
+                    this.spawnWorldFlash(h.x, h.y, h.css, count >= 4 ? 2.0 : 1.3);
+                    const s = this.projectToScreen(h.x, h.y, 0);
+                    this.spawnOrb(s.x, s.y, tx, ty, h.css, i * 45);
+                });
+                cx /= count; cy /= count;
+
+                if (count >= 3) this.spawnShockwave(cx, cy, count);
+
+                if (count >= 2) this.showHaulPopup(this.haulTier(count), count);
+
+                const arrival = 60 + (count - 1) * 45 + 660;
+                setTimeout(() => this.pulseHudCounter(count), arrival);
+            }
+
+            spawnOrb(x0, y0, x1, y1, css, delay) {
+                if (!this.fxLayer) return;
+                const orb = document.createElement('div');
+                orb.className = 'energy-orb';
+                orb.style.left = x0 + 'px';
+                orb.style.top = y0 + 'px';
+                orb.style.setProperty('--c', css);
+                this.fxLayer.appendChild(orb);
+
+                // slight launch scatter, then home in on the HUD counter
+                const jx = (Math.random() - 0.5) * 40;
+                const jy = (Math.random() - 0.5) * 40;
+                requestAnimationFrame(() => {
+                    orb.style.transform = `translate(${jx}px, ${jy}px) scale(1.25)`;
+                    setTimeout(() => {
+                        orb.style.transform = `translate(${x1 - x0}px, ${y1 - y0}px) scale(0.35)`;
+                        orb.style.opacity = '0.15';
+                    }, 60 + delay);
+                });
+                setTimeout(() => orb.remove(), delay + 1100);
+            }
+
+            flashScreen(count) {
+                if (!this.energyFlash) return;
+                const peak = Math.min(0.12 + count * 0.06, 0.6);
+                this.energyFlash.style.opacity = String(peak);
+                setTimeout(() => { this.energyFlash.style.opacity = '0'; }, 130);
+            }
+
+            showHaulPopup(tier, count) {
+                if (!this.fxLayer) return;
+                const pop = document.createElement('div');
+                pop.className = 'haul-popup ' + (tier.cls || '');
+                pop.style.setProperty('--c', tier.color);
+                const sub = count > 1 ? `<div class="haul-sub">+${count} energy</div>` : '';
+                pop.innerHTML = `<div class="haul-name">${tier.name}</div>${sub}`;
+                this.fxLayer.appendChild(pop);
+                setTimeout(() => pop.remove(), 1250);
+            }
+
+            pulseHudCounter(count) {
+                const el = document.getElementById('hud-ring-ratio');
+                if (!el) return;
+                const cls = count >= 4 ? 'ring-count-mega' : 'ring-count-glow';
+                el.classList.add(cls);
+                setTimeout(() => el.classList.remove(cls), count >= 4 ? 320 : 220);
+            }
+
+            spawnWorldFlash(x, y, css, scale) {
+                if (!this.spaceBg || !this.spaceBg.texGlow) return;
+                const mat = new THREE.SpriteMaterial({
+                    map: this.spaceBg.texGlow, color: new THREE.Color(css),
+                    transparent: true, opacity: 0.95,
+                    blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false
+                });
+                const spr = new THREE.Sprite(mat);
+                spr.position.set(x, y, 0.5);
+                spr.scale.set(0.4, 0.4, 1);
+                this.scene.add(spr);
+                new TWEEN.Tween(spr.scale)
+                    .to({ x: scale * 2.4, y: scale * 2.4 }, 480)
+                    .easing(TWEEN.Easing.Cubic.Out).start();
+                new TWEEN.Tween(mat)
+                    .to({ opacity: 0 }, 480)
+                    .easing(TWEEN.Easing.Cubic.Out)
+                    .onComplete(() => { this.scene.remove(spr); mat.dispose(); })
+                    .start();
+                // guaranteed cleanup even if TWEEN.removeAll() fires (e.g. board reset)
+                setTimeout(() => { if (spr.parent) { this.scene.remove(spr); mat.dispose(); } }, 700);
+            }
+
+            spawnShockwave(x, y, count) {
+                const geo = new THREE.RingGeometry(0.25, 0.42, 40);
+                const mat = new THREE.MeshBasicMaterial({
+                    color: 0xbfeaff, transparent: true, opacity: 0.8,
+                    side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+                    depthWrite: false, depthTest: false
+                });
+                const ring = new THREE.Mesh(geo, mat);
+                ring.position.set(x, y, 0.4);
+                this.scene.add(ring);
+                const target = 2.2 + count * 0.5;
+                new TWEEN.Tween(ring.scale)
+                    .to({ x: target, y: target, z: target }, 620)
+                    .easing(TWEEN.Easing.Cubic.Out).start();
+                new TWEEN.Tween(mat)
+                    .to({ opacity: 0 }, 620)
+                    .easing(TWEEN.Easing.Cubic.Out)
+                    .onComplete(() => { this.scene.remove(ring); geo.dispose(); mat.dispose(); })
+                    .start();
+                setTimeout(() => { if (ring.parent) { this.scene.remove(ring); geo.dispose(); mat.dispose(); } }, 850);
             }
 
             setupLights() {
@@ -1612,6 +1939,7 @@
                 this.pointer = new THREE.Vector2();
 
                 this.onPointerDown = (event) => {
+                    if (this.engine && this.engine.audio) this.engine.audio.ensure();
                     if (this.interactionLocked) return;
 
                     const clientX = event.touches ? event.touches[0].clientX : event.clientX;
@@ -1775,18 +2103,31 @@
 
             resolveMatches(matches) {
                 let ringsFound = 0;
+                const haul = [];
 
                 matches.forEach(coord => {
                     const [r, c] = coord.split(',').map(Number);
                     const tile = this.grid[r][c];
                     if (tile) {
-                        if (tile.hasRing) ringsFound++;
+                        if (tile.hasRing) {
+                            ringsFound++;
+                            // record where the prize was mined + its colour
+                            haul.push({
+                                x: tile.group.position.x,
+                                y: tile.group.position.y,
+                                css: hexToCss(SHAPE_SPECS[tile.shapeType].color)
+                            });
+                        }
                         tile.destroy(() => {
                             this.engine.scene.remove(tile.group);
                         });
                         this.grid[r][c] = null;
                     }
                 });
+
+                if (haul.length > 0) {
+                    this.engine.energyCollect(haul);
+                }
 
                 if (ringsFound > 0) {
                     this.onRingsCollected(ringsFound);
@@ -2083,6 +2424,13 @@
                 document.getElementById('back-to-menu-btn').addEventListener('click', () => {
                     this.exitLevel();
                 });
+
+                const soundBtn = document.getElementById('sound-toggle');
+                soundBtn.addEventListener('click', () => {
+                    const on = this.engine.audio.toggle();
+                    soundBtn.innerHTML = on ? '&#128266;' : '&#128263;';
+                    soundBtn.classList.toggle('muted', !on);
+                });
             }
 
             setupNoMovesHook() {
@@ -2121,16 +2469,12 @@
             handleRingsCollected(amount) {
                 this.collectedRings += amount;
                 this.updateHudRatio();
-
-                const scoreField = document.getElementById('hud-ring-ratio');
-                scoreField.classList.add('ring-count-glow');
-                setTimeout(() => scoreField.classList.remove('ring-count-glow'), 250);
+                // counter pulse + haul call-out are handled by the energy FX so they
+                // land when the mined energy reaches the HUD
 
                 if (this.collectedRings >= this.currentLevel.target) {
-                    this.showNotification("Target Achieved! Shuffling Deck.");
+                    this.showNotification("Quota met &mdash; tapping a fresh vein");
                     this.activeBoard.runSlotMachineReset(false);
-                } else {
-                    this.showNotification(`+${amount} Torus Ring${amount > 1 ? 's' : ''}`);
                 }
             }
 
@@ -2138,9 +2482,9 @@
                 if (!isNoMovesReset) {
                     this.collectedRings = 0;
                     this.updateHudRatio();
-                    this.showNotification("Core Deck Refilled.");
+                    this.showNotification("Fresh ore field online");
                 } else {
-                    this.showNotification("Lattice Re-aligned.");
+                    this.showNotification("Field re-aligned");
                 }
             }
 
