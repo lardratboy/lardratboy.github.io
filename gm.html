@@ -18,9 +18,9 @@
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background: #ffffff;
+            background: #090a15; /* Deep space background */
             font-family: 'Segoe UI', -apple-system, Roboto, Helvetica, Arial, sans-serif;
-            color: #1a1a24;
+            color: #ffffff;
         }
 
         #webgl-container {
@@ -72,7 +72,7 @@
 
         /* Level Selection Screen */
         #menu-screen {
-            background: radial-gradient(circle at center, rgba(255, 255, 255, 0.6) 0%, rgba(245, 246, 248, 0.9) 100%);
+            background: radial-gradient(circle at center, rgba(14, 16, 32, 0.45) 0%, rgba(9, 10, 21, 0.95) 100%);
         }
 
         .header-area {
@@ -85,7 +85,7 @@
             font-weight: 800;
             letter-spacing: 4px;
             text-transform: uppercase;
-            background: linear-gradient(45deg, #1a1a24, #3b4cd4, #d05ad0);
+            background: linear-gradient(45deg, #ffffff, #5e72eb, #df7adf);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             margin-bottom: 10px;
@@ -93,7 +93,7 @@
 
         .header-area p {
             font-size: 1rem;
-            color: #656b82;
+            color: #8c95b3;
             letter-spacing: 2px;
             text-transform: uppercase;
         }
@@ -449,7 +449,7 @@
             left: 0;
             width: 100%;
             height: 100%;
-            background: #ffffff;
+            background: #090a15;
             z-index: 100;
             display: flex;
             flex-direction: column;
@@ -461,8 +461,8 @@
         .spinner {
             width: 50px;
             height: 50px;
-            border: 3px solid rgba(0, 0, 0, 0.05);
-            border-top: 3px solid #aa8c2c;
+            border: 3px solid rgba(255, 255, 255, 0.05);
+            border-top: 3px solid #ffd700;
             border-radius: 50%;
             animation: spin 1s linear infinite;
             margin-bottom: 20px;
@@ -512,7 +512,7 @@
     <!-- Load Progress Screen -->
     <div id="loader">
         <div class="spinner"></div>
-        <p style="letter-spacing: 2px; text-transform: uppercase; font-size: 0.9rem; color: #656b82;">Calibrating Studio Environment...</p>
+        <p style="letter-spacing: 2px; text-transform: uppercase; font-size: 0.9rem; color: #8c95b3;">Calibrating Studio Environment...</p>
     </div>
 
     <!-- WebGL Rendering Space -->
@@ -590,6 +590,267 @@
             { type: 5, color: 0xe5e5e5, name: "Sphere" }       // Porcelain White
         ];
 
+        class SpaceBackground {
+            constructor(scene) {
+                this.scene = scene;
+                this.group = new THREE.Group();
+                this.group.name = "SpaceBackground";
+                this.scene.add(this.group);
+
+                this.stars = [];
+                this.clouds = [];
+                this.ships = [];
+                this.planet = null;
+
+                this.buildStars();
+                this.buildClouds();
+                this.buildPlanet();
+                this.buildShips();
+            }
+
+            getRandomHemispherePoint(R) {
+                const theta = Math.random() * Math.PI * 2;
+                const cosPhi = -Math.random(); // Back hemisphere only (Z is always negative)
+                const sinPhi = Math.sqrt(1 - cosPhi * cosPhi);
+
+                return new THREE.Vector3(
+                    R * sinPhi * Math.cos(theta),
+                    R * sinPhi * Math.sin(theta),
+                    R * cosPhi
+                );
+            }
+
+            buildStars() {
+                // Distribute stars on a perfect outer celestial sphere shell
+                const R_stars = 32;
+                const starGeo = new THREE.OctahedronGeometry(1, 0);
+                const starMat = new THREE.MeshBasicMaterial({
+                    color: 0xfffbe3,
+                    transparent: true,
+                    opacity: 0.8
+                });
+
+                for (let i = 0; i < 65; i++) {
+                    const star = new THREE.Mesh(starGeo, starMat.clone());
+                    
+                    const pos = this.getRandomHemispherePoint(R_stars);
+                    star.position.copy(pos);
+
+                    // Stylize some stars as 4-pointed thin stars, some as standard octahedrons
+                    const scaleX = 0.08 + Math.random() * 0.12;
+                    const scaleY = 0.35 + Math.random() * 0.55;
+                    const scaleZ = 0.08 + Math.random() * 0.12;
+
+                    if (Math.random() > 0.45) {
+                        star.scale.set(scaleX, scaleY, scaleZ);
+                        star.rotation.z = Math.random() * Math.PI;
+                    } else {
+                        const uniformScale = 0.12 + Math.random() * 0.18;
+                        star.scale.set(uniformScale, uniformScale, uniformScale);
+                    }
+
+                    star.userData = {
+                        twinkleSpeed: 0.02 + Math.random() * 0.04,
+                        twinkleOffset: Math.random() * Math.PI * 2
+                    };
+
+                    this.group.add(star);
+                    this.stars.push(star);
+                }
+            }
+
+            buildClouds() {
+                // Place clouds on an inner concentric sphere wrapping around the sides
+                const R_clouds = 21;
+
+                const cloudMatTeal = new THREE.MeshStandardMaterial({
+                    color: 0x144552, // Dark teal
+                    roughness: 0.9,
+                    metalness: 0.1,
+                    flatShading: true
+                });
+
+                const cloudMatPurple = new THREE.MeshStandardMaterial({
+                    color: 0x2d173d, // Dark purple
+                    roughness: 0.9,
+                    metalness: 0.1,
+                    flatShading: true
+                });
+
+                const mats = [cloudMatTeal, cloudMatPurple];
+
+                // Direct vectors projected onto the concentric sphere R=21
+                const baseDirections = [
+                    new THREE.Vector3(-10, -7, -14), // Bottom-Left
+                    new THREE.Vector3(-12, 5, -15),  // Top-Left
+                    new THREE.Vector3(11, -6, -14),  // Bottom-Right
+                    new THREE.Vector3(12, 6, -15),   // Top-Right
+                    new THREE.Vector3(-15, 0, -10),  // Left-Wrap
+                    new THREE.Vector3(15, 0, -10)    // Right-Wrap
+                ];
+
+                const clusterConfigs = baseDirections.map((dir, idx) => {
+                    dir.normalize().multiplyScalar(R_clouds);
+                    return {
+                        x: dir.x,
+                        y: dir.y,
+                        z: dir.z,
+                        size: 5.5 + Math.random() * 2.0,
+                        colorIdx: idx % 2
+                    };
+                });
+
+                clusterConfigs.forEach(cp => {
+                    const cluster = new THREE.Group();
+                    cluster.position.set(cp.x, cp.y, cp.z);
+
+                    const numSpheres = 7 + Math.floor(Math.random() * 6);
+                    const baseGeo = new THREE.IcosahedronGeometry(cp.size * 0.5, 1);
+
+                    for (let i = 0; i < numSpheres; i++) {
+                        const sphere = new THREE.Mesh(baseGeo, mats[cp.colorIdx]);
+                        
+                        const ox = (Math.random() - 0.5) * (cp.size * 0.65);
+                        const oy = (Math.random() - 0.5) * (cp.size * 0.65);
+                        const oz = (Math.random() - 0.5) * (cp.size * 0.45);
+                        sphere.position.set(ox, oy, oz);
+
+                        const s = 0.65 + Math.random() * 0.85;
+                        sphere.scale.set(s, s, s);
+                        
+                        sphere.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+
+                        cluster.add(sphere);
+                    }
+
+                    // Slow idle rotation
+                    cluster.userData = {
+                        rotSpeed: (Math.random() - 0.5) * 0.001,
+                        driftSpeed: (Math.random() - 0.5) * 0.002
+                    };
+
+                    this.group.add(cluster);
+                    this.clouds.push(cluster);
+                });
+            }
+
+            buildPlanet() {
+                // Saturn moved further back and scaled up to maintain size/visibility
+                const R_planet = 28;
+                this.planet = new THREE.Group();
+                
+                // Project base directional vector onto sphere of radius 28
+                const dir = new THREE.Vector3(6, 4.5, -10).normalize().multiplyScalar(R_planet);
+                this.planet.position.copy(dir);
+
+                // Planet body scale increased from 1.5 to 3.6
+                const planetGeo = new THREE.IcosahedronGeometry(3.6, 2);
+                const planetMat = new THREE.MeshStandardMaterial({
+                    color: 0xdfd3a8, // Cream beige
+                    roughness: 0.8,
+                    metalness: 0.1,
+                    flatShading: true
+                });
+                const bodyMesh = new THREE.Mesh(planetGeo, planetMat);
+                this.planet.add(bodyMesh);
+
+                // Planet ring scale increased accordingly
+                const ringGeo = new THREE.RingGeometry(4.6, 7.8, 24);
+                ringGeo.rotateX(Math.PI / 2);
+                const ringMat = new THREE.MeshStandardMaterial({
+                    color: 0xcfc495,
+                    roughness: 0.9,
+                    metalness: 0.05,
+                    side: THREE.DoubleSide,
+                    flatShading: true
+                });
+                const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+                this.planet.add(ringMesh);
+
+                // Tilt angle
+                this.planet.rotation.x = 0.4;
+                this.planet.rotation.z = -0.25;
+
+                this.group.add(this.planet);
+            }
+
+            buildShips() {
+                const shipColors = [0xe5e5e5, 0x3b4cd4];
+
+                const bodyMat = new THREE.MeshStandardMaterial({ color: shipColors[0], roughness: 0.5, flatShading: true });
+                const wingMat = new THREE.MeshStandardMaterial({ color: shipColors[1], roughness: 0.5, flatShading: true });
+
+                for (let i = 0; i < 2; i++) {
+                    const ship = new THREE.Group();
+                    
+                    // Hull
+                    const hullGeo = new THREE.BoxGeometry(0.5, 0.2, 0.2);
+                    const hull = new THREE.Mesh(hullGeo, bodyMat);
+                    ship.add(hull);
+
+                    // Wings
+                    const wingsGeo = new THREE.BoxGeometry(0.15, 0.05, 0.9);
+                    const wings = new THREE.Mesh(wingsGeo, wingMat);
+                    wings.position.set(-0.1, 0, 0);
+                    ship.add(wings);
+
+                    // Offset further out to look great over the larger sky background
+                    const startX = -22 - Math.random() * 10;
+                    const startY = (i === 0) ? -2.5 : 3.0;
+                    const startZ = -12 - Math.random() * 4;
+                    ship.position.set(startX, startY, startZ);
+
+                    ship.rotation.y = Math.PI / 2;
+                    ship.rotation.z = (Math.random() - 0.5) * 0.1;
+
+                    ship.userData = {
+                        speed: 0.015 + Math.random() * 0.015,
+                        startY: startY,
+                        oscSpeed: 0.01 + Math.random() * 0.02,
+                        oscOffset: Math.random() * Math.PI * 2
+                    };
+
+                    this.group.add(ship);
+                    this.ships.push(ship);
+                }
+            }
+
+            update(time) {
+                // Twinkle stars
+                this.stars.forEach(star => {
+                    const twinkle = Math.sin(time * star.userData.twinkleSpeed + star.userData.twinkleOffset);
+                    if (star.scale.y > star.scale.x * 2) {
+                        star.scale.set(star.scale.x, star.scale.y, star.scale.z);
+                        star.material.opacity = 0.4 + (twinkle + 1) * 0.3;
+                    } else {
+                        star.material.opacity = 0.5 + (twinkle + 1) * 0.25;
+                    }
+                });
+
+                // Rotate planet
+                if (this.planet) {
+                    this.planet.rotation.y += 0.0015;
+                }
+
+                // Drift clouds
+                this.clouds.forEach(cloud => {
+                    cloud.rotation.z += cloud.userData.rotSpeed;
+                    cloud.position.y += Math.sin(time * 0.001) * cloud.userData.driftSpeed;
+                });
+
+                // Guide ships
+                this.ships.forEach(ship => {
+                    ship.position.x += ship.userData.speed;
+                    ship.position.y = ship.userData.startY + Math.sin(time * ship.userData.oscSpeed + ship.userData.oscOffset) * 0.15;
+
+                    if (ship.position.x > 22) {
+                        ship.position.x = -22;
+                        ship.userData.speed = 0.015 + Math.random() * 0.015;
+                    }
+                });
+            }
+        }
+
         class Engine {
             constructor() {
                 this.container = document.getElementById('webgl-container');
@@ -606,12 +867,13 @@
                 this.container.appendChild(this.renderer.domElement);
 
                 this.setupLights();
+                this.spaceBg = new SpaceBackground(this.scene);
                 this.setupResizeHandler();
                 this.animate();
             }
 
             setupLights() {
-                this.ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
+                this.ambientLight = new THREE.AmbientLight(0xffffff, 0.75); // Softened ambient light
                 this.scene.add(this.ambientLight);
 
                 this.dirLight1 = new THREE.DirectionalLight(0xffffff, 0.9);
@@ -635,6 +897,11 @@
                 requestAnimationFrame(() => this.animate());
                 TWEEN.update();
                 
+                const time = performance.now();
+                if (this.spaceBg) {
+                    this.spaceBg.update(time);
+                }
+
                 this.scene.traverse((obj) => {
                     if (obj.userData && obj.userData.isRotatable) {
                         obj.rotation.z += 0.02;
