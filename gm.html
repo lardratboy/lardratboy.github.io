@@ -715,18 +715,41 @@
                 this.group.add(this.mesh);
 
                 if (this.hasRing) {
-                    const ringMat = new THREE.MeshStandardMaterial({
-                        color: 0xaa8c2c,
-                        metalness: 0.9,
-                        roughness: 0.2,
-                        flatShading: false
-                    });
-                    const ringGeo = new THREE.TorusGeometry(baseScale * 1.45, baseScale * 0.1, 12, 48);
-                    this.ring = new THREE.Mesh(ringGeo, ringMat);
-                    
-                    this.ring.rotation.x = Math.PI / 3;
-                    this.ring.rotation.y = Math.PI / 12;
+                    // Create a tilted local container for the satellites
+                    this.ring = new THREE.Group();
+                    this.ring.name = "SatelliteOrbitGroup";
+                    this.ring.rotation.x = Math.PI / 4;
+                    this.ring.rotation.y = Math.PI / 8;
                     this.ring.userData = { isRotatable: true };
+
+                    // Satellites match the geometry and basic color of the central shape
+                    const satelliteMat = new THREE.MeshStandardMaterial({
+                        color: spec.color,
+                        metalness: 0.15,
+                        roughness: 0.25,
+                        transparent: true,
+                        flatShading: (spec.type !== 5)
+                    });
+
+                    // Define dynamically tighter binding radii based on geometry dimensions
+                    let orbitRadius = baseScale * 1.22;
+                    if (spec.type === 1) orbitRadius = baseScale * 1.5; // Cube needs a wider path to clear vertices
+                    if (spec.type === 3) orbitRadius = baseScale * 1.32; // Dodecahedron
+                    if (spec.type === 4) orbitRadius = baseScale * 1.35; // Icosahedron
+
+                    const numSatellites = 7;
+                    const satScale = 0.20;
+
+                    for (let i = 0; i < numSatellites; i++) {
+                        const angle = (i / numSatellites) * Math.PI * 2;
+                        const moon = new THREE.Mesh(geometry, satelliteMat);
+                        moon.scale.set(satScale, satScale, satScale);
+                        
+                        // Distribute evenly in the orbital plane
+                        moon.position.set(Math.cos(angle) * orbitRadius, Math.sin(angle) * orbitRadius, 0);
+                        moon.userData = { isSlowIdle: true };
+                        this.ring.add(moon);
+                    }
                     
                     this.group.add(this.ring);
                 }
@@ -761,9 +784,14 @@
                         .to({ x: 2.2, y: 2.2, z: 2.2 }, 350)
                         .easing(TWEEN.Easing.Quadratic.Out)
                         .start();
-                    new TWEEN.Tween(this.ring.material)
-                        .to({ opacity: 0 }, 350)
-                        .start();
+                    this.ring.traverse((child) => {
+                        if (child.isMesh && child.material) {
+                            child.material.transparent = true;
+                            new TWEEN.Tween(child.material)
+                                .to({ opacity: 0 }, 350)
+                                .start();
+                        }
+                    });
                 }
 
                 new TWEEN.Tween(this.group.scale)
