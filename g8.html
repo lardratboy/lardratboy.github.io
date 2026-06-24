@@ -754,7 +754,6 @@
             return Array.from({ length: r }, (_, i) => Array.from({ length: c }, (_, j) => fn(i, j)));
         }
 
-        // Standard Mulberry32 PRNG for uniform float distribution in [0, 1)
         class SeededRNG {
             constructor(seed = Math.floor(Math.random() * 0xffffffff)) {
                 this.seed = seed >>> 0;
@@ -800,7 +799,6 @@
                     for (let c = 0; c < this.cols; c++) {
                         if (!this.mask[r][c]) continue;
                         let pal = fill[r][c];
-                        // If cell is null and randomFill permits, pick random shape from palette
                         if (pal === null && rfill && rfill[r][c]) {
                             pal = Math.floor(this.rng.next() * this.def.palette.length);
                         }
@@ -1092,7 +1090,6 @@
                 palette: COLOR_SPECS,
                 layers: {
                     mask: { binding: 'substrate', grid: mGrid },
-                    // CRITICAL FIX: Initialize pieces grid with nulls so randomFill generates varied shapes!
                     pieces: { binding: 'mobile', grid: grid(rows, cols, () => null) },
                     randomFill: { binding: 'field', grid: mGrid },
                     prizes: { binding: 'rider', cells: prizeCells || [] }
@@ -1109,7 +1106,6 @@
             };
         }
 
-        // Distinct Level Scenarios for Selection Carousel
         const MISSIONS = [
             {
                 id: 1, name: "Nova Cluster", difficulty: "easy",
@@ -1690,7 +1686,6 @@
                 this.id = id;
                 this.row = row;
                 this.col = col;
-                // Safeguard against invalid index values
                 this.paletteType = (paletteType >= 0 && paletteType < COLOR_SPECS.length) ? paletteType : 0;
                 this.hasPrize = hasPrize;
                 this.spacing = spacing;
@@ -1745,7 +1740,7 @@
                     });
                     const orbCount = 5;
                     let r = size * 1.38;
-                    if (spec.type === 1) r = size * 1.62; // Wider path to clear sharp box vertices
+                    if (spec.type === 1) r = size * 1.62;
 
                     for (let i = 0; i < orbCount; i++) {
                         const sat = new THREE.Mesh(geo, orbMat);
@@ -1808,7 +1803,6 @@
                 this.onWin = onWin;
                 this.onLose = onLose;
 
-                // Initialize PRNG with unique unsigned 32-bit seed
                 const rng = new SeededRNG();
                 const baseDef = baseGameDef(
                     missionSpec.name,
@@ -1820,7 +1814,6 @@
                 this.rulesDef = missionSpec.setup ? missionSpec.setup(baseDef) : baseDef;
                 this.rules = new RulesEngine(this.rulesDef, rng);
 
-                // Safeguard: Ensure newly generated random boards contain active matches on start
                 let retryGuard = 0;
                 while (!this.rules.hasValidMoves() && retryGuard++ < 25) {
                     this.rules.reset();
@@ -1879,24 +1872,55 @@
                 this.boardParent.add(this.gridHolograms);
             }
 
+            // Enhanced Level Intro: Slot machine reel-spin drop cascade
             renderInitialBoard() {
+                this.interactionLocked = true;
+                let maxDelay = 0;
+
                 for (let r = 0; r < this.rules.rows; r++) {
                     for (let c = 0; c < this.rules.cols; c++) {
                         const id = this.rules.grid[r][c];
                         if (id == null) continue;
 
-                        const pal = this.rules.palAt(r, c); // Returns random palette index 0..5
+                        const pal = this.rules.palAt(r, c);
                         const prize = this.rules.prizeAt(r, c);
 
                         const vt = new VisualTile(id, r, c, pal, prize, this.gridSpacing, this.rules.rows, this.rules.cols);
                         this.tilesMap.set(id, vt);
                         this.boardParent.add(vt.group);
 
+                        // Position high above screen viewport
+                        const startY = ((this.rules.rows - 1) / 2 + 6) * this.gridSpacing;
+                        vt.group.position.set(vt.targetX, startY, 0);
                         vt.group.scale.set(0, 0, 0);
-                        const t = setTimeout(() => vt.scaleTo(1.0, 400), (r + c) * 35);
-                        this.activeTimeouts.push(t);
+
+                        // Cascaded delays creating a rolling column-spin aesthetic
+                        const delay = c * 80 + (this.rules.rows - 1 - r) * 40;
+                        maxDelay = Math.max(maxDelay, delay);
+
+                        const t1 = setTimeout(() => {
+                            // Falling kinetic spin landing
+                            new TWEEN.Tween(vt.group.position)
+                                .to({ x: vt.targetX, y: vt.targetY, z: 0 }, 550)
+                                .easing(TWEEN.Easing.Back.Out)
+                                .start();
+
+                            // Elastic scale expansion
+                            new TWEEN.Tween(vt.group.scale)
+                                .to({ x: 1, y: 1, z: 1 }, 400)
+                                .easing(TWEEN.Easing.Quadratic.Out)
+                                .start();
+                        }, delay);
+
+                        this.activeTimeouts.push(t1);
                     }
                 }
+
+                // Unlock player interaction once the entire board has fully cascaded in
+                const t2 = setTimeout(() => {
+                    this.interactionLocked = false;
+                }, maxDelay + 550);
+                this.activeTimeouts.push(t2);
             }
 
             setupInputs() {
