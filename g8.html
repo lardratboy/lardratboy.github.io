@@ -1,0 +1,2254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Platonic Matcher — Core Edition</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #090a15;
+            font-family: 'Segoe UI', -apple-system, Roboto, Helvetica, Arial, sans-serif;
+            color: #ffffff;
+        }
+
+        #webgl-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* UI Overlays */
+        .ui-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.5s ease, transform 0.5s ease;
+            pointer-events: none;
+        }
+
+        .ui-screen.hidden {
+            opacity: 0;
+            transform: scale(0.95);
+            pointer-events: none;
+        }
+
+        .ui-screen.active {
+            opacity: 1;
+            transform: scale(1);
+            pointer-events: auto;
+        }
+
+        /* Glassmorphism Panels */
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            box-shadow: 0 10px 35px rgba(0, 0, 0, 0.08), inset 0 0 15px rgba(255, 255, 255, 0.6);
+            border-radius: 20px;
+        }
+
+        #menu-screen {
+            background: radial-gradient(circle at center, rgba(14, 16, 32, 0.45) 0%, rgba(9, 10, 21, 0.95) 100%);
+        }
+
+        .header-area {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header-area h1 {
+            font-size: 3rem;
+            font-weight: 800;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            background: linear-gradient(45deg, #ffffff, #5e72eb, #df7adf);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+
+        .header-area p {
+            font-size: 1rem;
+            color: #8c95b3;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        /* Carousel Layout */
+        .carousel-outer {
+            position: relative;
+            width: 100%;
+            max-width: 1100px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px 0;
+        }
+
+        .carousel-viewport {
+            width: calc(100% - 120px);
+            overflow-x: auto;
+            scroll-behavior: smooth;
+            display: flex;
+            gap: 30px;
+            padding: 20px 10px;
+            scrollbar-width: none;
+        }
+
+        .carousel-viewport::-webkit-scrollbar {
+            display: none;
+        }
+
+        .carousel-card {
+            flex: 0 0 280px;
+            height: 400px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 30px 25px;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+            position: relative;
+            overflow: hidden;
+            color: #1a1a24;
+        }
+
+        .carousel-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+        }
+
+        .carousel-card.easy { border-color: rgba(51, 255, 119, 0.4); }
+        .carousel-card.easy::before { background: linear-gradient(90deg, #2ecc71, #00ffcc); }
+        .carousel-card.easy:hover {
+            box-shadow: 0 10px 30px rgba(46, 204, 113, 0.2);
+            border-color: rgba(46, 204, 113, 0.6);
+            transform: translateY(-8px);
+        }
+
+        .carousel-card.medium { border-color: rgba(51, 153, 255, 0.4); }
+        .carousel-card.medium::before { background: linear-gradient(90deg, #3498db, #2980b9); }
+        .carousel-card.medium:hover {
+            box-shadow: 0 10px 30px rgba(52, 152, 219, 0.2);
+            border-color: rgba(52, 152, 219, 0.6);
+            transform: translateY(-8px);
+        }
+
+        .carousel-card.hard { border-color: rgba(187, 51, 255, 0.4); }
+        .carousel-card.hard::before { background: linear-gradient(90deg, #9b59b6, #e74c3c); }
+        .carousel-card.hard:hover {
+            box-shadow: 0 10px 30px rgba(155, 89, 182, 0.2);
+            border-color: rgba(155, 89, 182, 0.6);
+            transform: translateY(-8px);
+        }
+
+        .carousel-card.expert { border-color: rgba(255, 153, 51, 0.4); }
+        .carousel-card.expert::before { background: linear-gradient(90deg, #e67e22, #d35400); }
+        .carousel-card.expert:hover {
+            box-shadow: 0 10px 30px rgba(230, 126, 34, 0.2);
+            border-color: rgba(230, 126, 34, 0.6);
+            transform: translateY(-8px);
+        }
+
+        .carousel-card.legendary { border-color: rgba(255, 215, 0, 0.4); }
+        .carousel-card.legendary::before { background: linear-gradient(90deg, #f1c40f, #e74c3c); }
+        .carousel-card.legendary:hover {
+            box-shadow: 0 10px 30px rgba(241, 196, 15, 0.3);
+            border-color: rgba(241, 196, 15, 0.7);
+            transform: translateY(-8px);
+        }
+
+        .card-top {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .card-difficulty {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            font-weight: 700;
+        }
+        .easy .card-difficulty { color: #27ae60; }
+        .medium .card-difficulty { color: #2980b9; }
+        .hard .card-difficulty { color: #8e44ad; }
+        .expert .card-difficulty { color: #d35400; }
+        .legendary .card-difficulty { color: #d68910; }
+
+        .card-title {
+            font-size: 1.4rem;
+            font-weight: 800;
+            color: #1a1a24;
+            margin-top: 5px;
+            letter-spacing: 0.5px;
+        }
+
+        .card-stats {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 25px;
+            border-top: 1px solid rgba(0, 0, 0, 0.05);
+            padding-top: 20px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            color: #555c70;
+        }
+
+        .stat-val {
+            font-weight: 700;
+            color: #1a1a24;
+        }
+
+        .card-action {
+            margin-top: auto;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.03);
+            padding: 12px;
+            border-radius: 10px;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            font-weight: 700;
+            border: 1px solid rgba(0, 0, 0, 0.05);
+            transition: all 0.2s ease;
+            color: #1a1a24;
+        }
+
+        .carousel-card:hover .card-action {
+            background: rgba(0, 0, 0, 0.08);
+            color: #000000;
+        }
+
+        .arrow-btn {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            color: #1a1a24;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        }
+
+        .arrow-btn:hover {
+            background: #ffffff;
+            border-color: rgba(0, 0, 0, 0.2);
+            transform: scale(1.05);
+        }
+
+        /* HUD Overlay Screen */
+        #hud-container {
+            position: absolute;
+            top: 20px;
+            left: 0;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 30px;
+            z-index: 15;
+            pointer-events: none;
+        }
+
+        .hud-left, .hud-right {
+            pointer-events: auto;
+        }
+        .hud-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .hud-panel {
+            padding: 12px 25px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .level-badge {
+            font-size: 0.8rem;
+            font-weight: 800;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            padding: 4px 10px;
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.05);
+        }
+
+        .easy-badge { background: rgba(46, 204, 113, 0.15); color: #27ae60; }
+        .medium-badge { background: rgba(52, 152, 219, 0.15); color: #2980b9; }
+        .hard-badge { background: rgba(155, 89, 182, 0.15); color: #8e44ad; }
+        .expert-badge { background: rgba(230, 126, 34, 0.15); color: #d35400; }
+        .legendary-badge { background: rgba(241, 196, 15, 0.15); color: #d68910; }
+
+        .hud-stats {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .stat-box {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .stat-label {
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #555c70;
+            margin-bottom: 2px;
+        }
+
+        .stat-value {
+            font-size: 1.3rem;
+            font-weight: 800;
+            font-variant-numeric: tabular-nums;
+            color: #1a1a24;
+        }
+
+        .btn-back {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 20px;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 700;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            transition: all 0.2s ease;
+            color: #1a1a24;
+        }
+
+        .btn-back:hover {
+            background: rgba(0, 0, 0, 0.05);
+            transform: translateX(-4px);
+        }
+
+        /* Action Panel Overlay */
+        #mission-actions {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 12px;
+            padding: 10px 20px;
+            z-index: 15;
+            align-items: center;
+            border-radius: 16px;
+            pointer-events: auto;
+            transition: opacity 0.3s ease, transform 0.3s ease;
+        }
+        #mission-actions.hidden {
+            opacity: 0;
+            pointer-events: none;
+            transform: translateX(-50%) translateY(20px);
+        }
+
+        .action-btn {
+            background: rgba(0, 0, 0, 0.06);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            color: #1a1a24;
+            padding: 10px 16px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .action-btn:hover {
+            background: rgba(0, 0, 0, 0.12);
+            transform: translateY(-2px);
+        }
+        .action-btn:active {
+            transform: translateY(0);
+        }
+
+        /* Modal Dialog Overlays */
+        .modal-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(9, 10, 21, 0.8);
+            backdrop-filter: blur(10px);
+            z-index: 30;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.4s ease;
+        }
+        .modal-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .modal-content {
+            padding: 40px;
+            width: 90%;
+            max-width: 440px;
+            text-align: center;
+            color: #1a1a24;
+            transform: scale(0.9);
+            transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        .modal-overlay.active .modal-content {
+            transform: scale(1);
+        }
+
+        .modal-title {
+            font-size: 2rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 10px;
+        }
+        .modal-desc {
+            font-size: 1rem;
+            color: #555c70;
+            margin-bottom: 30px;
+        }
+        .modal-btn {
+            background: #1a1a24;
+            color: #ffffff;
+            border: none;
+            padding: 14px 28px;
+            font-weight: 700;
+            text-transform: uppercase;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
+        }
+        .modal-btn:hover {
+            background: #2e3047;
+            transform: translateY(-2px);
+        }
+
+        /* Game Notifications */
+        #game-notifications {
+            position: absolute;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 15;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .notification-toast {
+            padding: 12px 24px;
+            font-weight: 800;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            font-size: 1rem;
+            border-radius: 30px;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.05);
+            animation: slideUpFade 1.6s forwards cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #1a1a24;
+        }
+
+        @keyframes slideUpFade {
+            0% { opacity: 0; transform: translateY(20px); }
+            12% { opacity: 1; transform: translateY(0); }
+            85% { opacity: 1; transform: translateY(0); }
+            100% { opacity: 0; transform: translateY(-20px); }
+        }
+
+        /* Mining Energy Visual FX */
+        #fx-layer {
+            position: absolute;
+            inset: 0;
+            z-index: 12;
+            pointer-events: none;
+            overflow: hidden;
+        }
+
+        .energy-orb {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            margin: -10px 0 0 -10px;
+            border-radius: 50%;
+            background: radial-gradient(circle, var(--c) 0%, var(--c) 28%, rgba(255,255,255,0) 72%);
+            box-shadow: 0 0 14px var(--c), 0 0 28px var(--c);
+            opacity: 1;
+            will-change: transform, opacity;
+            transition: transform 0.72s cubic-bezier(0.45, 0, 0.18, 1), opacity 0.72s ease-in;
+        }
+
+        #energy-flash {
+            position: absolute;
+            inset: 0;
+            z-index: 11;
+            pointer-events: none;
+            opacity: 0;
+            background: radial-gradient(ellipse at center, rgba(120, 220, 255, 0) 45%, rgba(120, 220, 255, 0.22) 100%);
+            transition: opacity 0.5s ease;
+        }
+
+        .haul-popup {
+            position: absolute;
+            left: 50%;
+            top: 42%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            pointer-events: none;
+            white-space: nowrap;
+            animation: haulPop 1.15s cubic-bezier(0.18, 0.9, 0.3, 1.2) forwards;
+        }
+        .haul-popup .haul-name {
+            font-weight: 800;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            font-size: 2.4rem;
+            line-height: 1;
+            color: var(--c, #7fe7ff);
+            text-shadow: 0 0 18px var(--c, #7fe7ff), 0 2px 12px rgba(0,0,0,0.5);
+        }
+        .haul-popup .haul-sub {
+            margin-top: 8px;
+            font-weight: 700;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            font-size: 1rem;
+            color: #e9f6ff;
+            text-shadow: 0 0 10px rgba(120,220,255,0.6);
+        }
+        .haul-popup.small .haul-name { font-size: 1.5rem; letter-spacing: 2px; }
+        .haul-popup.mega .haul-name { font-size: 3rem; }
+
+        @keyframes haulPop {
+            0%   { opacity: 0; transform: translate(-50%, -40%) scale(0.6); }
+            18%  { opacity: 1; transform: translate(-50%, -50%) scale(1.08); }
+            34%  { transform: translate(-50%, -50%) scale(1.0); }
+            78%  { opacity: 1; transform: translate(-50%, -52%) scale(1.0); }
+            100% { opacity: 0; transform: translate(-50%, -64%) scale(0.96); }
+        }
+
+        .ring-count-glow {
+            text-shadow: 0 0 10px rgba(170, 140, 44, 0.4);
+            color: #aa8c2c;
+            transform: scale(1.15);
+            transition: transform 0.1s ease;
+        }
+        .ring-count-mega {
+            color: #7fe7ff !important;
+            text-shadow: 0 0 16px rgba(127, 231, 255, 0.9) !important;
+            transform: scale(1.35) !important;
+            transition: transform 0.12s ease;
+        }
+
+        #sound-toggle {
+            padding: 12px 14px;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 1rem;
+            line-height: 1;
+            color: #1a1a24;
+            transition: all 0.2s ease;
+        }
+        #sound-toggle:hover {
+            background: rgba(0, 0, 0, 0.05);
+        }
+        #sound-toggle.muted { opacity: 0.55; }
+
+        /* Loader */
+        #loader {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #090a15;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.5s ease;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 3px solid rgba(255, 255, 255, 0.05);
+            border-top: 3px solid #ffd700;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 768px) {
+            .header-area h1 { font-size: 2rem; }
+            .carousel-outer { padding: 10px 0; }
+            .carousel-viewport { width: calc(100% - 60px); gap: 15px; }
+            .carousel-card { flex: 0 0 240px; height: 340px; padding: 20px 15px; }
+            .arrow-btn { width: 40px; height: 40px; }
+            #hud-container { flex-direction: column; gap: 10px; align-items: center; top: 10px; padding: 0 10px; }
+            .hud-panel { padding: 8px 15px; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Loading Screen -->
+    <div id="loader">
+        <div class="spinner"></div>
+        <p style="letter-spacing: 2px; text-transform: uppercase; font-size: 0.9rem; color: #8c95b3;">Connecting Quantum Link...</p>
+    </div>
+
+    <!-- WebGL Space Rendering Workspace -->
+    <div id="webgl-container"></div>
+
+    <!-- LEVEL SELECTION CAROUSEL (Screen 1) -->
+    <div id="menu-screen" class="ui-screen active">
+        <div class="header-area">
+            <h1>Platonic Matrix</h1>
+            <p>Harmonize the Geometry. Extract the Satellites.</p>
+        </div>
+
+        <div class="carousel-outer">
+            <button class="arrow-btn" id="prev-btn" style="margin-right: 10px;">&#9664;</button>
+            <div class="carousel-viewport" id="level-carousel"></div>
+            <button class="arrow-btn" id="next-btn" style="margin-left: 10px;">&#9654;</button>
+        </div>
+    </div>
+
+    <!-- ACTIVE GAME INTERACTIVE HUD (Screen 2) -->
+    <div id="hud-screen" class="ui-screen hidden">
+        <div id="hud-container">
+            <div class="hud-left">
+                <button class="glass-panel btn-back" id="back-to-menu-btn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+                    Disconnect
+                </button>
+                <button class="glass-panel" id="sound-toggle" title="Toggle sound" aria-label="Toggle sound">&#128266;</button>
+            </div>
+            
+            <div class="hud-right">
+                <div class="glass-panel hud-panel">
+                    <span id="hud-level-tier" class="level-badge">Easy</span>
+                    <div class="hud-stats">
+                        <div class="stat-box">
+                            <span class="stat-label">Grid Layout</span>
+                            <span id="hud-grid-dim" class="stat-value">8x8</span>
+                        </div>
+                        <div style="width: 1px; height: 30px; background: rgba(255,255,255,0.15);"></div>
+                        <div class="stat-box">
+                            <span class="stat-label">Energy Satellite Target</span>
+                            <span id="hud-ring-ratio" class="stat-value">0 / 10</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Transform Modifier Actions Panel -->
+        <div id="mission-actions" class="glass-panel hidden"></div>
+    </div>
+
+    <!-- Game Dialog Modals -->
+    <div id="modal-victory" class="modal-overlay">
+        <div class="glass-panel modal-content">
+            <div class="modal-title" style="color: #27ae60;">Quota Met</div>
+            <div class="modal-desc">All orbiting energy satellites successfully extracted and stored in core cache. Sector cleared.</div>
+            <button class="modal-btn" id="btn-next-mission">Proceed to Menu</button>
+        </div>
+    </div>
+
+    <div id="modal-defeat" class="modal-overlay">
+        <div class="glass-panel modal-content">
+            <div class="modal-title" style="color: #c0392b;">Matrix Deadlock</div>
+            <div class="modal-desc">No further matching configurations available. Grid power collapsed.</div>
+            <button class="modal-btn" id="btn-retry-mission" style="background: #c0392b; margin-right: 10px;">Re-link Matrix</button>
+            <button class="modal-btn" id="btn-defeat-quit" style="background: #1a1a24;">Return</button>
+        </div>
+    </div>
+
+    <!-- Ambient FX Overlays -->
+    <div id="energy-flash"></div>
+    <div id="fx-layer"></div>
+
+    <!-- Floating Alerts -->
+    <div id="game-notifications"></div>
+
+    <!-- CDN ThreeJS + TWEEN Dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+
+    <script>
+        // ====================================================================
+        //  ENGINE CODE (Adapted from latticerules.js)
+        // ====================================================================
+        const GRAVITY = {
+            down: { dr: 1, dc: 0 },
+            up: { dr: -1, dc: 0 },
+            right: { dr: 0, dc: 1 },
+            left: { dr: 0, dc: -1 },
+            none: { dr: 0, dc: 0 }
+        };
+
+        const ADJACENCY = {
+            moore: [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]],
+            vonNeumann: [[-1, 0], [1, 0], [0, -1], [0, 1]]
+        };
+
+        function grid(r, c, fn) {
+            return Array.from({ length: r }, (_, i) => Array.from({ length: c }, (_, j) => fn(i, j)));
+        }
+
+        // Standard Mulberry32 PRNG for uniform float distribution in [0, 1)
+        class SeededRNG {
+            constructor(seed = Math.floor(Math.random() * 0xffffffff)) {
+                this.seed = seed >>> 0;
+            }
+            next() {
+                let t = (this.seed += 0x6D2B79F5);
+                t = Math.imul(t ^ (t >>> 15), t | 1);
+                t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+                return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            }
+            setState(s) { this.seed = s >>> 0; }
+        }
+
+        class RulesEngine {
+            constructor(def, rng) {
+                this.def = def;
+                this.rng = rng;
+                this._nextId = 1;
+                this.reset();
+            }
+
+            reset() {
+                const L = this.def.lattice;
+                this.rows = L.rows;
+                this.cols = L.cols;
+                this.topology = L.topology || 'plane';
+                this.gravityDir = this.def.rules.gravity || 'down';
+                this.mask = grid(this.rows, this.cols, (r, c) => this.def.layers.mask.grid[r][c]);
+                this.gravityField = this.def.layers.gravityZones
+                    ? grid(this.rows, this.cols, (r, c) => this.def.layers.gravityZones.grid[r][c])
+                    : null;
+                this.grid = grid(this.rows, this.cols, () => null);
+                this.pieceData = new Map();
+                this.score = 0;
+                this.collected = 0;
+                this.totalPrizes = 0;
+
+                const fill = this.def.layers.pieces.grid;
+                const rfill = this.def.layers.randomFill ? this.def.layers.randomFill.grid : null;
+                const prizeCells = new Set((this.def.layers.prizes?.cells || []).map(([r, c]) => r + ',' + c));
+
+                for (let r = 0; r < this.rows; r++) {
+                    for (let c = 0; c < this.cols; c++) {
+                        if (!this.mask[r][c]) continue;
+                        let pal = fill[r][c];
+                        // If cell is null and randomFill permits, pick random shape from palette
+                        if (pal === null && rfill && rfill[r][c]) {
+                            pal = Math.floor(this.rng.next() * this.def.palette.length);
+                        }
+                        if (pal === null || pal === undefined) continue;
+                        const prize = prizeCells.has(r + ',' + c);
+                        if (prize) this.totalPrizes++;
+                        this.grid[r][c] = this._spawn(pal, prize);
+                    }
+                }
+            }
+
+            _spawn(p, z) {
+                const id = this._nextId++;
+                this.pieceData.set(id, { palette: p, prize: !!z });
+                return id;
+            }
+
+            palAt(r, c) {
+                const id = this.grid[r][c];
+                return id == null ? null : this.pieceData.get(id).palette;
+            }
+
+            prizeAt(r, c) {
+                const id = this.grid[r][c];
+                return id == null ? false : this.pieceData.get(id).prize;
+            }
+
+            effGravity(r, c) {
+                if (this.gravityField && this.gravityField[r][c]) return GRAVITY[this.gravityField[r][c]];
+                return GRAVITY[this.gravityDir];
+            }
+
+            inBounds(r, c) {
+                return r >= 0 && r < this.rows && c >= 0 && c < this.cols;
+            }
+
+            findGroup(r, c) {
+                const sid = this.grid[r][c];
+                if (sid == null) return [];
+                const target = this.pieceData.get(sid).palette;
+                const offs = ADJACENCY[this.def.rules.matchAdjacency] || ADJACENCY.moore;
+                const seen = new Set([r + ',' + c]), out = [{ r, c }], st = [{ r, c }];
+
+                while (st.length) {
+                    const { r: cr, c: cc } = st.pop();
+                    for (const [dr, dc] of offs) {
+                        let nr = cr + dr, nc = cc + dc;
+                        if (this.def.rules.wrapMatch) {
+                            nr = (nr + this.rows) % this.rows;
+                            nc = (nc + this.cols) % this.cols;
+                        }
+                        if (!this.inBounds(nr, nc)) continue;
+                        const k = nr + ',' + nc;
+                        if (seen.has(k)) continue;
+                        if (this.palAt(nr, nc) === target) {
+                            seen.add(k);
+                            out.push({ r: nr, c: nc });
+                            st.push({ r: nr, c: nc });
+                        }
+                    }
+                }
+                return out;
+            }
+
+            settle() {
+                const origin = new Map();
+                for (let r = 0; r < this.rows; r++) {
+                    for (let c = 0; c < this.cols; c++) {
+                        if (this.grid[r][c] != null) origin.set(this.grid[r][c], { r, c });
+                    }
+                }
+                let moved = true, guard = 0;
+                while (moved && guard++ < this.rows * this.cols + 5) {
+                    moved = false;
+                    for (let r = 0; r < this.rows; r++) {
+                        for (let c = 0; c < this.cols; c++) {
+                            const id = this.grid[r][c];
+                            if (id == null) continue;
+                            const g = this.effGravity(r, c);
+                            if (g.dr === 0 && g.dc === 0) continue;
+                            const nr = r + g.dr, nc = c + g.dc;
+                            if (!this.inBounds(nr, nc) || !this.mask[nr][nc] || this.grid[nr][nc] != null) continue;
+                            const ng = this.effGravity(nr, nc);
+                            if (ng.dr !== g.dr || ng.dc !== g.dc) continue;
+                            this.grid[nr][nc] = id;
+                            this.grid[r][c] = null;
+                            moved = true;
+                        }
+                    }
+                }
+                const moves = [];
+                for (let r = 0; r < this.rows; r++) {
+                    for (let c = 0; c < this.cols; c++) {
+                        const id = this.grid[r][c];
+                        if (id == null) continue;
+                        const o = origin.get(id);
+                        if (o.r !== r || o.c !== c) moves.push({ id, toR: r, toC: c });
+                    }
+                }
+                return moves;
+            }
+
+            collapse() {
+                if (this.def.rules.laneCollapse === false) return null;
+                if (this.gravityField) return null;
+                const g = GRAVITY[this.gravityDir];
+                if (g.dr === 0 && g.dc === 0) return null;
+                const vertical = g.dr !== 0;
+
+                if (vertical) {
+                    const keep = [];
+                    for (let c = 0; c < this.cols; c++) {
+                        let m = false, p = false;
+                        for (let r = 0; r < this.rows; r++) {
+                            if (this.mask[r][c]) m = true;
+                            if (this.grid[r][c] != null) p = true;
+                        }
+                        if (!(m && !p)) keep.push(c);
+                    }
+                    if (keep.length === this.cols) return null;
+                    this._reindex(this.rows, keep.length, (r, c) => [r, keep[c]]);
+                } else {
+                    const keep = [];
+                    for (let r = 0; r < this.rows; r++) {
+                        let m = false, p = false;
+                        for (let c = 0; c < this.cols; c++) {
+                            if (this.mask[r][c]) m = true;
+                            if (this.grid[r][c] != null) p = true;
+                        }
+                        if (!(m && !p)) keep.push(r);
+                    }
+                    if (keep.length === this.rows) return null;
+                    this._reindex(keep.length, this.cols, (r, c) => [keep[r], c]);
+                }
+                return this._snapshotMoves();
+            }
+
+            rotate(dir) {
+                const R = this.rows, C = this.cols, nR = C, nC = R;
+                const src = (r, c) => dir === 'cw' ? [R - 1 - c, r] : [c, C - 1 - r];
+                this._apply(nR, nC, src);
+                return this._snapshotMoves();
+            }
+
+            _reindex(nR, nC, src) { this._apply(nR, nC, src); }
+
+            _apply(nR, nC, src) {
+                const nm = grid(nR, nC, (r, c) => { const [or, oc] = src(r, c); return this.mask[or] ? this.mask[or][oc] : false; });
+                const ng = grid(nR, nC, (r, c) => { const [or, oc] = src(r, c); return this.grid[or] ? this.grid[or][oc] : null; });
+                const nf = this.gravityField ? grid(nR, nC, (r, c) => { const [or, oc] = src(r, c); return this.gravityField[or][oc]; }) : null;
+                this.rows = nR;
+                this.cols = nC;
+                this.mask = nm;
+                this.grid = ng;
+                this.gravityField = nf;
+            }
+
+            _snapshotMoves() {
+                const m = [];
+                for (let r = 0; r < this.rows; r++) {
+                    for (let c = 0; c < this.cols; c++) {
+                        const id = this.grid[r][c];
+                        if (id != null) m.push({ id, toR: r, toC: c });
+                    }
+                }
+                return m;
+            }
+
+            maskCopy() { return this.mask.map(row => row.slice()); }
+
+            _collapseStep() {
+                const cm = this.collapse();
+                return cm ? { kind: 'collapse', dims: { rows: this.rows, cols: this.cols }, moves: cm, mask: this.maskCopy() } : null;
+            }
+
+            tapAt(r, c) {
+                const group = this.findGroup(r, c);
+                if (group.length < this.def.rules.minGroupSize) return null;
+                const steps = [], cleared = [];
+
+                for (const { r: gr, c: gc } of group) {
+                    const id = this.grid[gr][gc], pd = this.pieceData.get(id);
+                    if (pd.prize) { this.collected++; this.score += 50; }
+                    cleared.push({ id, r: gr, c: gc, palette: pd.palette, prize: pd.prize });
+                    this.grid[gr][gc] = null;
+                    this.pieceData.delete(id);
+                }
+                this.score += group.length * 10;
+                steps.push({ kind: 'clear', cells: cleared, center: { r, c } });
+
+                const sm = this.settle();
+                if (sm.length) steps.push({ kind: 'settle', moves: sm });
+
+                const cs = this._collapseStep();
+                if (cs) steps.push(cs);
+
+                steps.push({ kind: 'state', ...this.checkState() });
+                return steps;
+            }
+
+            rotateBoard(dir) {
+                const rm = this.rotate(dir);
+                const steps = [{ kind: 'rotate', dir, dims: { rows: this.rows, cols: this.cols }, moves: rm, mask: this.maskCopy() }];
+                const sm = this.settle();
+                if (sm.length) steps.push({ kind: 'settle', moves: sm });
+                const cs = this._collapseStep();
+                if (cs) steps.push(cs);
+                steps.push({ kind: 'state', ...this.checkState() });
+                return steps;
+            }
+
+            scroll(spec) {
+                let dr = 0, dc = 0;
+                if (spec === 'scrollC+') dr = 1; else if (spec === 'scrollC-') dr = -1;
+                else if (spec === 'scrollR+') dc = 1; else if (spec === 'scrollR-') dc = -1; else return null;
+
+                const ng = grid(this.rows, this.cols, () => null);
+                for (let r = 0; r < this.rows; r++) {
+                    for (let c = 0; c < this.cols; c++) {
+                        const id = this.grid[r][c];
+                        if (id == null) continue;
+                        const nr = (r + dr + this.rows) % this.rows;
+                        const nc = (c + dc + this.cols) % this.cols;
+                        ng[nr][nc] = id;
+                    }
+                }
+                this.grid = ng;
+                return this._snapshotMoves();
+            }
+
+            scrollBoard(spec) {
+                const sm0 = this.scroll(spec);
+                if (!sm0) return [{ kind: 'state', ...this.checkState() }];
+                const steps = [{ kind: 'scroll', moves: sm0 }];
+                const sm = this.settle();
+                if (sm.length) steps.push({ kind: 'settle', moves: sm });
+                const cs = this._collapseStep();
+                if (cs) steps.push(cs);
+                steps.push({ kind: 'state', ...this.checkState() });
+                return steps;
+            }
+
+            hasValidMoves() {
+                for (let r = 0; r < this.rows; r++) {
+                    for (let c = 0; c < this.cols; c++) {
+                        if (this.grid[r][c] != null && this.findGroup(r, c).length >= this.def.rules.minGroupSize) return true;
+                    }
+                }
+                return false;
+            }
+
+            checkState() {
+                if (this.def.win.type === 'collectAllPrizes' && this.totalPrizes > 0 && this.collected >= this.totalPrizes) return { status: 'won' };
+                if (this.def.win.type === 'clearAll' && this.pieceData.size === 0) return { status: 'won' };
+                if (!this.hasValidMoves()) return { status: 'lost' };
+                return { status: 'playing' };
+            }
+        }
+
+        // ====================================================================
+        //  CONFIGS & LEVEL SCHEMES (Merged Game Rules + Playgrounds)
+        // ====================================================================
+        const COLOR_SPECS = [
+            { type: 0, color: 0xd84343, name: "Tetrahedron" },
+            { type: 1, color: 0x6bc96b, name: "Cube" },
+            { type: 2, color: 0x3b4cd4, name: "Octahedron" },
+            { type: 3, color: 0xdad283, name: "Dodecahedron" },
+            { type: 4, color: 0xd05ad0, name: "Icosahedron" },
+            { type: 5, color: 0xe5e5e5, name: "Sphere" }
+        ];
+
+        const TEMPLATES = {
+            rectangle: (r, c) => grid(r, c, () => true),
+            diamond: (r, c) => {
+                const mr = (r - 1) / 2, mc = (c - 1) / 2, maxD = Math.min(mr, mc);
+                return grid(r, c, (i, j) => Math.abs(i - mr) + Math.abs(j - mc) <= maxD + 0.1);
+            },
+            cross: (r, c) => {
+                const mr = (r - 1) / 2, mc = (c - 1) / 2, arm = Math.max(1, Math.floor(Math.min(r, c) / 3.5));
+                return grid(r, c, (i, j) => Math.abs(i - mr) <= arm || Math.abs(j - mc) <= arm);
+            }
+        };
+
+        function baseGameDef(name, rows, cols, prizeCells, maskTemplate = 'rectangle') {
+            const mGrid = TEMPLATES[maskTemplate] ? TEMPLATES[maskTemplate](rows, cols) : TEMPLATES.rectangle(rows, cols);
+            return {
+                name,
+                lattice: { rows, cols, topology: 'plane' },
+                palette: COLOR_SPECS,
+                layers: {
+                    mask: { binding: 'substrate', grid: mGrid },
+                    // CRITICAL FIX: Initialize pieces grid with nulls so randomFill generates varied shapes!
+                    pieces: { binding: 'mobile', grid: grid(rows, cols, () => null) },
+                    randomFill: { binding: 'field', grid: mGrid },
+                    prizes: { binding: 'rider', cells: prizeCells || [] }
+                },
+                rules: {
+                    matchAdjacency: 'moore',
+                    matchBy: 'type',
+                    minGroupSize: 2,
+                    gravity: 'down',
+                    laneCollapse: true,
+                    transforms: ['rotateCW', 'rotateCCW']
+                },
+                win: { type: 'collectAllPrizes' }
+            };
+        }
+
+        // Distinct Level Scenarios for Selection Carousel
+        const MISSIONS = [
+            {
+                id: 1, name: "Nova Cluster", difficulty: "easy",
+                rows: 7, cols: 7, prizes: 6, shape: 'rectangle',
+                setup: (d) => {
+                    d.rules.matchAdjacency = 'vonNeumann';
+                    d.rules.transforms = [];
+                    return d;
+                },
+                flavor: "Standard orthogonal connections. Standard downward pull."
+            },
+            {
+                id: 2, name: "Void Matrix", difficulty: "medium",
+                rows: 8, cols: 8, prizes: 8, shape: 'diamond',
+                setup: (d) => {
+                    d.rules.matchAdjacency = 'moore';
+                    d.rules.transforms = ['rotateCW', 'rotateCCW'];
+                    return d;
+                },
+                flavor: "Moore connection grid (includes diagonals). Board rotates enabled."
+            },
+            {
+                id: 3, name: "Gravity Well", difficulty: "hard",
+                rows: 9, cols: 9, prizes: 10, shape: 'cross',
+                setup: (d) => {
+                    d.rules.gravity = 'left';
+                    d.rules.matchAdjacency = 'vonNeumann';
+                    d.rules.transforms = [];
+                    return d;
+                },
+                flavor: "Continuous gravitational pull to the left."
+            },
+            {
+                id: 4, name: "Quantum Carousel", difficulty: "expert",
+                rows: 8, cols: 8, prizes: 12, shape: 'rectangle',
+                setup: (d) => {
+                    d.rules.laneCollapse = false;
+                    d.rules.gravity = 'none';
+                    d.rules.transforms = ['scrollR-', 'scrollR+', 'scrollC-', 'scrollC+'];
+                    return d;
+                },
+                flavor: "No gravity lanes. Complete matrix scroll manipulation enabled."
+            },
+            {
+                id: 5, name: "Binary Core", difficulty: "legendary",
+                rows: 9, cols: 9, prizes: 14, shape: 'rectangle',
+                setup: (d) => {
+                    d.rules.matchAdjacency = 'moore';
+                    d.layers.gravityZones = {
+                        binding: 'field',
+                        anchored: true,
+                        grid: grid(9, 9, (r, c) => c >= 5 ? 'right' : 'down')
+                    };
+                    d.rules.transforms = [];
+                    return d;
+                },
+                flavor: "Dual-zone gravity. Right zone pulls elements rightward."
+            }
+        ];
+
+        // ====================================================================
+        //  SOUNDS SYNTHESIZER
+        // ====================================================================
+        class SoundFX {
+            constructor() {
+                this.ctx = null;
+                this.master = null;
+                this.enabled = true;
+            }
+
+            ensure() {
+                if (!this.ctx) {
+                    const AC = window.AudioContext || window.webkitAudioContext;
+                    if (!AC) return;
+                    this.ctx = new AC();
+                    this.master = this.ctx.createGain();
+                    this.master.gain.value = 0.5;
+                    this.master.connect(this.ctx.destination);
+                }
+                if (this.ctx.state === "suspended") this.ctx.resume();
+            }
+
+            blip(freq, start, dur, type, gain) {
+                const o = this.ctx.createOscillator();
+                const g = this.ctx.createGain();
+                o.type = type;
+                o.frequency.setValueAtTime(freq, start);
+                o.connect(g); g.connect(this.master);
+                g.gain.setValueAtTime(0.0001, start);
+                g.gain.exponentialRampToValueAtTime(gain, start + 0.012);
+                g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+                o.start(start);
+                o.stop(start + dur + 0.03);
+            }
+
+            collect(count) {
+                if (!this.enabled) return;
+                this.ensure();
+                if (!this.ctx) return;
+                const now = this.ctx.currentTime;
+                const steps = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24];
+                const notes = Math.max(1, Math.min(count, steps.length));
+                const base = 392;
+                for (let i = 0; i < notes; i++) {
+                    const f = base * Math.pow(2, steps[i] / 12);
+                    this.blip(f, now + i * 0.052, 0.20, "triangle", 0.09);
+                }
+                if (count >= 2) this.blip(98, now, 0.34, "sine", 0.16);
+                if (count >= 4) this.blip(65, now + 0.02, 0.5, "sine", 0.18);
+            }
+
+            action() {
+                if (!this.enabled) return;
+                this.ensure();
+                this.blip(220, this.ctx.currentTime, 0.15, "sawtooth", 0.08);
+            }
+
+            toggle() {
+                this.enabled = !this.enabled;
+                if (this.enabled) this.ensure();
+                return this.enabled;
+            }
+        }
+
+        // ====================================================================
+        //  3D AMBIENT ENVIRONMENT (Nebula Background, Traffic & Satellite)
+        // ====================================================================
+        class SpaceBackground {
+            constructor(scene) {
+                this.scene = scene;
+                this.group = new THREE.Group();
+                this.group.name = "SpaceBackground";
+                this.scene.add(this.group);
+
+                this.stars = [];
+                this.clouds = [];
+                this.ships = [];
+                this.glows = [];
+                this.planet = null;
+                this.satellite = null;
+
+                this.texGlow = this.makeGlowTexture();
+                this.texGrid = this.makeGridTexture();
+                this.texPanel = this.makePanelTexture();
+
+                this.buildBackdrop();
+                this.buildAtmosphere();
+                this.buildStars();
+                this.buildNebulaClouds();
+                this.buildPlanet();
+                this.buildShips();
+                this.buildSatellite();
+            }
+
+            makeGlowTexture() {
+                const c = document.createElement('canvas');
+                c.width = c.height = 128;
+                const ctx = c.getContext('2d');
+                const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+                g.addColorStop(0.0, 'rgba(255,255,255,1)');
+                g.addColorStop(0.22, 'rgba(255,255,255,0.55)');
+                g.addColorStop(0.55, 'rgba(255,255,255,0.12)');
+                g.addColorStop(1.0, 'rgba(255,255,255,0)');
+                ctx.fillStyle = g; ctx.fillRect(0, 0, 128, 128);
+                return new THREE.CanvasTexture(c);
+            }
+
+            makeGridTexture() {
+                const S = 1024;
+                const c = document.createElement('canvas');
+                c.width = c.height = S;
+                const ctx = c.getContext('2d');
+                ctx.clearRect(0, 0, S, S);
+
+                const g = ctx.createRadialGradient(S * 0.5, S * 0.52, 0, S * 0.5, S * 0.52, S * 0.62);
+                g.addColorStop(0.0, 'rgba(46,104,120,0.30)');
+                g.addColorStop(0.45, 'rgba(24,52,82,0.12)');
+                g.addColorStop(1.0, 'rgba(8,10,21,0)');
+                ctx.fillStyle = g; ctx.fillRect(0, 0, S, S);
+
+                ctx.strokeStyle = 'rgba(126,158,190,0.045)';
+                ctx.lineWidth = 1;
+                const step = 74; const h = step * Math.sqrt(3) / 2;
+                for (let row = 0, y = 0; y <= S + h; y += h, row++) {
+                    const xo = (row % 2) ? step / 2 : 0;
+                    for (let x = -step; x <= S + step; x += step) {
+                        ctx.beginPath(); ctx.moveTo(x + xo, y);
+                        ctx.lineTo(x + xo + step / 2, y + h);
+                        ctx.lineTo(x + xo - step / 2, y + h);
+                        ctx.closePath(); ctx.stroke();
+                    }
+                }
+                return new THREE.CanvasTexture(c);
+            }
+
+            makePanelTexture() {
+                const W = 256, H = 128;
+                const c = document.createElement('canvas');
+                c.width = W; c.height = H;
+                const ctx = c.getContext('2d');
+                ctx.fillStyle = '#16224f'; ctx.fillRect(0, 0, W, H);
+                ctx.strokeStyle = '#3a55a8'; ctx.lineWidth = 3;
+                const cols = 8, rows = 4;
+                for (let i = 0; i <= cols; i++) {
+                    const x = (i / cols) * W;
+                    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+                }
+                for (let j = 0; j <= rows; j++) {
+                    const y = (j / rows) * H;
+                    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+                }
+                return new THREE.CanvasTexture(c);
+            }
+
+            buildBackdrop() {
+                const geo = new THREE.PlaneGeometry(150, 95);
+                const mat = new THREE.MeshBasicMaterial({
+                    map: this.texGrid, transparent: true, depthWrite: false, opacity: 0.9
+                });
+                const plane = new THREE.Mesh(geo, mat);
+                plane.position.set(0, 0, -46);
+                this.group.add(plane);
+            }
+
+            addGlowSprite(color, x, y, z, size, opacity) {
+                const mat = new THREE.SpriteMaterial({
+                    map: this.texGlow, color: color, transparent: true,
+                    opacity: opacity, blending: THREE.AdditiveBlending, depthWrite: false
+                });
+                const s = new THREE.Sprite(mat);
+                s.position.set(x, y, z);
+                s.scale.set(size, size, 1);
+                this.group.add(s);
+                return s;
+            }
+
+            buildAtmosphere() {
+                const core = this.addGlowSprite(0x3a6f9a, -2, 1, -34, 46, 0.40);
+                const left = this.addGlowSprite(0x4a5786, -16, 7, -30, 30, 0.32);
+                const right = this.addGlowSprite(0x3a738c, 17, -7, -30, 30, 0.30);
+                this.glows.push(
+                    { sprite: core, base: 0.40, speed: 0.0006, off: 0 },
+                    { sprite: left, base: 0.32, speed: 0.0009, off: 2 },
+                    { sprite: right, base: 0.30, speed: 0.0008, off: 4 }
+                );
+            }
+
+            buildStars() {
+                const count = 100;
+                const geo = new THREE.SphereGeometry(0.04, 6, 6);
+                const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
+                for (let i = 0; i < count; i++) {
+                    const mesh = new THREE.Mesh(geo, mat.clone());
+                    const r = 25 + Math.random() * 20;
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.acos((Math.random() * 2) - 1);
+                    mesh.position.set(
+                        r * Math.sin(phi) * Math.cos(theta),
+                        r * Math.sin(phi) * Math.sin(theta),
+                        r * Math.cos(phi) - 10
+                    );
+                    mesh.userData = {
+                        base: 0.4 + Math.random() * 0.6,
+                        speed: 0.001 + Math.random() * 0.003,
+                        off: Math.random() * Math.PI * 2
+                    };
+                    this.group.add(mesh);
+                    this.stars.push(mesh);
+                }
+            }
+
+            buildNebulaClouds() {
+                const count = 5;
+                const cloudColors = [0x5c8a98, 0x6f86a8, 0x434f73, 0x6c6a98];
+                for (let i = 0; i < count; i++) {
+                    const c = cloudColors[i % cloudColors.length];
+                    const geo = new THREE.DodecahedronGeometry(2.5 + Math.random() * 2, 0);
+                    const mat = new THREE.MeshStandardMaterial({
+                        color: c, roughness: 0.95, metalness: 0.0, flatShading: true, transparent: true, opacity: 0.85
+                    });
+                    const m = new THREE.Mesh(geo, mat);
+                    const angle = (i / count) * Math.PI * 2;
+                    m.position.set(Math.cos(angle) * 22, Math.sin(angle) * 14, -20 - Math.random() * 5);
+                    m.userData = {
+                        rotSpeed: (Math.random() - 0.5) * 0.0005,
+                        bobSpeed: 0.0003 + Math.random() * 0.0004,
+                        baseY: m.position.y,
+                        off: Math.random() * Math.PI * 2
+                    };
+                    this.group.add(m);
+                    this.clouds.push(m);
+                }
+            }
+
+            buildPlanet() {
+                this.planet = new THREE.Group();
+                this.planet.position.set(24, 12, -26);
+
+                let bodyGeo = new THREE.IcosahedronGeometry(3.2, 2);
+                if (bodyGeo.index !== null) bodyGeo = bodyGeo.toNonIndexed();
+                const pos = bodyGeo.attributes.position;
+                const cols = [];
+                const cA = new THREE.Color(0xe7dcb4);
+                const cB = new THREE.Color(0xc9b483);
+                const tmp = new THREE.Color();
+                for (let i = 0; i < pos.count; i += 3) {
+                    const yAvg = (pos.getY(i) + pos.getY(i + 1) + pos.getY(i + 2)) / 3;
+                    const band = 0.5 + 0.5 * Math.sin(yAvg * 2.1);
+                    tmp.copy(cB).lerp(cA, band);
+                    tmp.multiplyScalar(0.92 + Math.random() * 0.12);
+                    for (let k = 0; k < 3; k++) cols.push(tmp.r, tmp.g, tmp.b);
+                }
+                bodyGeo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+                bodyGeo.computeVertexNormals();
+
+                const bodyMat = new THREE.MeshStandardMaterial({
+                    vertexColors: true, roughness: 0.85, metalness: 0.05, flatShading: true
+                });
+                this.planet.add(new THREE.Mesh(bodyGeo, bodyMat));
+
+                const ringMat = new THREE.MeshStandardMaterial({
+                    color: 0xbfb084, roughness: 0.9, side: THREE.DoubleSide, flatShading: true
+                });
+                const ring = new THREE.RingGeometry(4.2, 6.8, 32);
+                ring.rotateX(Math.PI / 2.2);
+                this.planet.add(new THREE.Mesh(ring, ringMat));
+
+                this.group.add(this.planet);
+            }
+
+            buildShips() {
+                const colors = [0x3b4cd4, 0x2aa39a, 0x6a5ad0];
+                for (let i = 0; i < 2; i++) {
+                    const s = new THREE.Group();
+                    const mat = new THREE.MeshStandardMaterial({ color: colors[i], flatShading: true });
+                    const wing = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 0.4), mat);
+                    const fuselage = new THREE.Mesh(new THREE.ConeGeometry(0.2, 1.2, 6), mat);
+                    fuselage.rotation.x = Math.PI / 2;
+                    s.add(wing, fuselage);
+
+                    const carrier = new THREE.Group();
+                    carrier.add(s);
+                    carrier.position.set(-30 + i * 15, -15 + i * 8, -15);
+                    carrier.userData = { speed: 0.03 + Math.random() * 0.03, heading: 0.4 };
+                    this.group.add(carrier);
+                    this.ships.push(carrier);
+                }
+            }
+
+            buildSatellite() {
+                this.satellite = new THREE.Group();
+                const foilMat = new THREE.MeshStandardMaterial({ color: 0xcaa94e, roughness: 0.4, metalness: 0.5, flatShading: true });
+                const panelMat = new THREE.MeshStandardMaterial({ map: this.texPanel, roughness: 0.3, metalness: 0.4 });
+
+                const bus = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), foilMat);
+                const panelL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.3, 0.9), panelMat);
+                panelL.position.set(-0.6, 0, 0);
+                const panelR = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.3, 0.9), panelMat);
+                panelR.position.set(0.6, 0, 0);
+
+                this.satellite.add(bus, panelL, panelR);
+                this.satellite.position.set(-14, 8, -12);
+                this.satellite.userData = { rotX: 0.002, rotY: 0.003 };
+                this.group.add(this.satellite);
+            }
+
+            update(time) {
+                this.stars.forEach(s => {
+                    const u = s.userData;
+                    s.material.opacity = u.base * (0.6 + 0.4 * Math.sin(time * u.speed + u.off));
+                });
+                this.glows.forEach(g => {
+                    g.sprite.material.opacity = g.base * (0.8 + 0.2 * Math.sin(time * g.speed + g.off));
+                });
+                this.clouds.forEach(c => {
+                    const u = c.userData;
+                    c.rotation.y += u.rotSpeed;
+                    c.position.y = u.baseY + Math.sin(time * u.bobSpeed + u.off) * 0.6;
+                });
+                if (this.planet) this.planet.rotation.y += 0.001;
+                if (this.satellite) {
+                    this.satellite.rotation.x += this.satellite.userData.rotX;
+                    this.satellite.rotation.y += this.satellite.userData.rotY;
+                }
+                this.ships.forEach(ship => {
+                    ship.position.x += ship.userData.speed;
+                    ship.position.y += ship.userData.speed * ship.userData.heading;
+                    if (ship.position.x > 32) {
+                        ship.position.set(-32, -18, -15);
+                    }
+                });
+            }
+        }
+
+        // ====================================================================
+        //  3D RENDER ENGINE (ThreeJS Framework + Interactive Mining)
+        // ====================================================================
+        class RenderEngine {
+            constructor() {
+                this.container = document.getElementById('webgl-container');
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+                this.camera.position.set(0, 0, 15);
+                this.camera.lookAt(0, 0, 0);
+
+                this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+                this.renderer.setPixelRatio(window.devicePixelRatio);
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.container.appendChild(this.renderer.domElement);
+
+                this.setupLights();
+                this.spaceBg = new SpaceBackground(this.scene);
+
+                this.audio = new SoundFX();
+                this.fxLayer = document.getElementById('fx-layer');
+                this.energyFlash = document.getElementById('energy-flash');
+                this._tmpVec = new THREE.Vector3();
+
+                window.addEventListener('resize', () => this.onWindowResize());
+                this.animate();
+            }
+
+            setupLights() {
+                const ambient = new THREE.AmbientLight(0xffffff, 0.85);
+                this.scene.add(ambient);
+                const d1 = new THREE.DirectionalLight(0xffffff, 0.8);
+                d1.position.set(5, 10, 10);
+                this.scene.add(d1);
+                const d2 = new THREE.DirectionalLight(0xecf3ff, 0.3);
+                d2.position.set(-5, -5, 5);
+                this.scene.add(d2);
+            }
+
+            onWindowResize() {
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+
+            projectToScreen(x, y, z) {
+                this._tmpVec.set(x, y, z).project(this.camera);
+                return {
+                    x: (this._tmpVec.x * 0.5 + 0.5) * window.innerWidth,
+                    y: (-this._tmpVec.y * 0.5 + 0.5) * window.innerHeight
+                };
+            }
+
+            animate() {
+                requestAnimationFrame(() => this.animate());
+                TWEEN.update();
+                const time = performance.now();
+                if (this.spaceBg) this.spaceBg.update(time);
+
+                this.scene.traverse((o) => {
+                    if (o.userData && o.userData.isRotatable) {
+                        o.rotation.z += 0.02;
+                    }
+                    if (o.userData && o.userData.isSlowIdle) {
+                        o.rotation.x += 0.005;
+                        o.rotation.y += 0.008;
+                    }
+                });
+
+                this.renderer.render(this.scene, this.camera);
+            }
+
+            triggerMiningFeedback(haul) {
+                const count = haul.length;
+                this.audio.collect(count);
+                this.flashScreen(count);
+
+                const ratioEl = document.getElementById('hud-ring-ratio');
+                let tx = window.innerWidth - 80, ty = 60;
+                if (ratioEl) {
+                    const r = ratioEl.getBoundingClientRect();
+                    tx = r.left + r.width / 2; ty = r.top + r.height / 2;
+                }
+
+                let cx = 0, cy = 0;
+                haul.forEach((h, i) => {
+                    cx += h.x; cy += h.y;
+                    this.spawnWorldGlow(h.x, h.y, h.css, count >= 4 ? 2.2 : 1.4);
+                    const s = this.projectToScreen(h.x, h.y, 0);
+                    this.spawnEnergyOrb(s.x, s.y, tx, ty, h.css, i * 45);
+                });
+                cx /= count; cy /= count;
+
+                if (count >= 3) this.spawnExpandingShockwave(cx, cy, count);
+                if (count >= 2) this.displayComboPopup(count);
+
+                const arrival = 60 + (count - 1) * 45 + 660;
+                setTimeout(() => this.pulseTargetHUD(count), arrival);
+            }
+
+            spawnEnergyOrb(x0, y0, x1, y1, css, delay) {
+                if (!this.fxLayer) return;
+                const orb = document.createElement('div');
+                orb.className = 'energy-orb';
+                orb.style.left = x0 + 'px'; orb.style.top = y0 + 'px';
+                orb.style.setProperty('--c', css);
+                this.fxLayer.appendChild(orb);
+
+                const rx = (Math.random() - 0.5) * 50;
+                const ry = (Math.random() - 0.5) * 50;
+                requestAnimationFrame(() => {
+                    orb.style.transform = `translate(${rx}px, ${ry}px) scale(1.3)`;
+                    setTimeout(() => {
+                        orb.style.transform = `translate(${x1 - x0}px, ${y1 - y0}px) scale(0.35)`;
+                        orb.style.opacity = '0.1';
+                    }, 60 + delay);
+                });
+                setTimeout(() => orb.remove(), delay + 1100);
+            }
+
+            flashScreen(count) {
+                if (!this.energyFlash) return;
+                const peak = Math.min(0.12 + count * 0.05, 0.5);
+                this.energyFlash.style.opacity = String(peak);
+                setTimeout(() => { this.energyFlash.style.opacity = '0'; }, 140);
+            }
+
+            spawnWorldGlow(x, y, css, scale) {
+                if (!this.spaceBg || !this.spaceBg.texGlow) return;
+                const mat = new THREE.SpriteMaterial({
+                    map: this.spaceBg.texGlow, color: new THREE.Color(css),
+                    transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false
+                });
+                const spr = new THREE.Sprite(mat);
+                spr.position.set(x, y, 0.5); spr.scale.set(0.3, 0.3, 1);
+                this.scene.add(spr);
+
+                new TWEEN.Tween(spr.scale).to({ x: scale * 2.5, y: scale * 2.5 }, 450).easing(TWEEN.Easing.Cubic.Out).start();
+                new TWEEN.Tween(mat).to({ opacity: 0 }, 450).easing(TWEEN.Easing.Cubic.Out)
+                    .onComplete(() => { this.scene.remove(spr); mat.dispose(); }).start();
+            }
+
+            spawnExpandingShockwave(x, y, count) {
+                const geo = new THREE.RingGeometry(0.1, 0.3, 32);
+                const mat = new THREE.MeshBasicMaterial({
+                    color: 0xbfeaff, transparent: true, opacity: 0.8, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false
+                });
+                const r = new THREE.Mesh(geo, mat); r.position.set(x, y, 0.4); this.scene.add(r);
+                const limit = 2.0 + count * 0.4;
+                new TWEEN.Tween(r.scale).to({ x: limit, y: limit, z: limit }, 600).easing(TWEEN.Easing.Cubic.Out).start();
+                new TWEEN.Tween(mat).to({ opacity: 0 }, 600).easing(TWEEN.Easing.Cubic.Out)
+                    .onComplete(() => { this.scene.remove(r); geo.dispose(); mat.dispose(); }).start();
+            }
+
+            displayComboPopup(count) {
+                if (!this.fxLayer) return;
+                const pop = document.createElement('div');
+                let name = "+1 Energy Core", tier = "small", color = "#9fe9ff";
+                if (count >= 6) { name = "Ultimate Core"; tier = "mega"; color = "#ff9ff3"; }
+                else if (count >= 4) { name = "Mega Extract"; tier = ""; color = "#ffd76b"; }
+                else if (count >= 2) { name = "Double Charge"; tier = ""; color = "#7fe7ff"; }
+
+                pop.className = `haul-popup ${tier}`;
+                pop.style.setProperty('--c', color);
+                pop.innerHTML = `<div class="haul-name">${name}</div><div class="haul-sub">+${count} satellites</div>`;
+                this.fxLayer.appendChild(pop);
+                setTimeout(() => pop.remove(), 1250);
+            }
+
+            pulseTargetHUD(count) {
+                const el = document.getElementById('hud-ring-ratio');
+                if (!el) return;
+                const cls = count >= 4 ? 'ring-count-mega' : 'ring-count-glow';
+                el.classList.add(cls);
+                setTimeout(() => el.classList.remove(cls), 250);
+            }
+        }
+
+        // ====================================================================
+        //  VISUAL TILE & BOARD CONTROL (3D Bridge to RulesEngine)
+        // ====================================================================
+        class VisualTile {
+            constructor(id, row, col, paletteType, hasPrize, spacing, totalRows, totalCols) {
+                this.id = id;
+                this.row = row;
+                this.col = col;
+                // Safeguard against invalid index values
+                this.paletteType = (paletteType >= 0 && paletteType < COLOR_SPECS.length) ? paletteType : 0;
+                this.hasPrize = hasPrize;
+                this.spacing = spacing;
+                this.totalRows = totalRows;
+                this.totalCols = totalCols;
+
+                this.group = new THREE.Group();
+                this.group.name = `TileGroup_${id}`;
+
+                this.calcCoordinates();
+                this.group.position.set(this.targetX, this.targetY, 0);
+
+                this.mesh = null;
+                this.ring = null;
+                this.buildGeometry();
+            }
+
+            calcCoordinates() {
+                this.targetX = (this.col - (this.totalCols - 1) / 2) * this.spacing;
+                this.targetY = ((this.totalRows - 1) / 2 - this.row) * this.spacing;
+            }
+
+            buildGeometry() {
+                const spec = COLOR_SPECS[this.paletteType];
+                const mat = new THREE.MeshStandardMaterial({
+                    color: spec.color, metalness: 0.15, roughness: 0.25, flatShading: (spec.type !== 5)
+                });
+
+                let geo;
+                const size = this.spacing * 0.38;
+                switch (spec.type) {
+                    case 0: geo = new THREE.TetrahedronGeometry(size); break;
+                    case 1: geo = new THREE.BoxGeometry(size * 1.4, size * 1.4, size * 1.4); break;
+                    case 2: geo = new THREE.OctahedronGeometry(size * 1.15); break;
+                    case 3: geo = new THREE.DodecahedronGeometry(size * 1.15); break;
+                    case 4: geo = new THREE.IcosahedronGeometry(size * 1.22); break;
+                    case 5: default: geo = new THREE.SphereGeometry(size * 1.15, 24, 24); break;
+                }
+
+                this.mesh = new THREE.Mesh(geo, mat);
+                this.mesh.userData = { isSlowIdle: true, parentTile: this };
+                this.group.add(this.mesh);
+
+                if (this.hasPrize) {
+                    this.ring = new THREE.Group();
+                    this.ring.rotation.x = Math.PI / 4;
+                    this.ring.rotation.y = Math.PI / 8;
+                    this.ring.userData = { isRotatable: true };
+
+                    const orbMat = new THREE.MeshStandardMaterial({
+                        color: spec.color, metalness: 0.2, roughness: 0.3, flatShading: true
+                    });
+                    const orbCount = 5;
+                    let r = size * 1.38;
+                    if (spec.type === 1) r = size * 1.62; // Wider path to clear sharp box vertices
+
+                    for (let i = 0; i < orbCount; i++) {
+                        const sat = new THREE.Mesh(geo, orbMat);
+                        sat.scale.set(0.18, 0.18, 0.18);
+                        const angle = (i / orbCount) * Math.PI * 2;
+                        sat.position.set(Math.cos(angle) * r, Math.sin(angle) * r, 0);
+                        sat.userData = { isSlowIdle: true };
+                        this.ring.add(sat);
+                    }
+                    this.group.add(this.ring);
+                }
+            }
+
+            scaleTo(scale, dur = 200) {
+                new TWEEN.Tween(this.group.scale).to({ x: scale, y: scale, z: scale }, dur).easing(TWEEN.Easing.Quadratic.Out).start();
+            }
+
+            slideTo(r, c, rows, cols, spacing, dur = 300) {
+                this.row = r;
+                this.col = c;
+                this.totalRows = rows;
+                this.totalCols = cols;
+                this.spacing = spacing;
+                this.calcCoordinates();
+
+                new TWEEN.Tween(this.group.position).to({ x: this.targetX, y: this.targetY, z: 0 }, dur).easing(TWEEN.Easing.Quadratic.Out).start();
+            }
+
+            destroy(onComplete) {
+                if (this.ring) {
+                    new TWEEN.Tween(this.ring.scale).to({ x: 2.5, y: 2.5, z: 2.5 }, 350).easing(TWEEN.Easing.Quadratic.Out).start();
+                    this.ring.traverse((o) => {
+                        if (o.isMesh && o.material) {
+                            o.material.transparent = true;
+                            new TWEEN.Tween(o.material).to({ opacity: 0 }, 350).start();
+                        }
+                    });
+                }
+                new TWEEN.Tween(this.group.scale).to({ x: 0, y: 0, z: 0 }, 380).easing(TWEEN.Easing.Back.In)
+                    .onComplete(() => {
+                        this.group.traverse((child) => {
+                            if (child.isMesh) {
+                                if (child.geometry) child.geometry.dispose();
+                                if (child.material) {
+                                    if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+                                    else child.material.dispose();
+                                }
+                            }
+                        });
+                        if (onComplete) onComplete();
+                    }).start();
+            }
+        }
+
+        class VisualBoard {
+            constructor(engine, level, missionSpec, onWin, onLose) {
+                this.engine = engine;
+                this.level = level;
+                this.missionSpec = missionSpec;
+                this.onWin = onWin;
+                this.onLose = onLose;
+
+                // Initialize PRNG with unique unsigned 32-bit seed
+                const rng = new SeededRNG();
+                const baseDef = baseGameDef(
+                    missionSpec.name,
+                    missionSpec.rows,
+                    missionSpec.cols,
+                    this.generatePrizes(missionSpec.rows, missionSpec.cols, missionSpec.prizes),
+                    missionSpec.shape
+                );
+                this.rulesDef = missionSpec.setup ? missionSpec.setup(baseDef) : baseDef;
+                this.rules = new RulesEngine(this.rulesDef, rng);
+
+                // Safeguard: Ensure newly generated random boards contain active matches on start
+                let retryGuard = 0;
+                while (!this.rules.hasValidMoves() && retryGuard++ < 25) {
+                    this.rules.reset();
+                }
+
+                this.gridSpacing = 11.0 / Math.max(this.rules.rows, this.rules.cols);
+                this.tilesMap = new Map();
+
+                this.raycaster = new THREE.Raycaster();
+                this.pointer = new THREE.Vector2();
+
+                this.interactionLocked = false;
+                this.activeTimeouts = [];
+
+                this.gridHolograms = null;
+                this.boardParent = new THREE.Group();
+                this.engine.scene.add(this.boardParent);
+
+                this.buildHologramGrid();
+                this.renderInitialBoard();
+                this.setupInputs();
+            }
+
+            generatePrizes(rows, cols, count) {
+                const pool = [];
+                for (let r = 0; r < rows; r++) {
+                    for (let c = 0; c < cols; c++) pool.push([r, c]);
+                }
+                for (let i = pool.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [pool[i], pool[j]] = [pool[j], pool[i]];
+                }
+                return pool.slice(0, count);
+            }
+
+            buildHologramGrid() {
+                if (this.gridHolograms) this.boardParent.remove(this.gridHolograms);
+                this.gridHolograms = new THREE.Group();
+
+                const mat = new THREE.MeshBasicMaterial({
+                    color: 0x5e72eb, transparent: true, opacity: 0.05, wireframe: true
+                });
+                const cellGeo = new THREE.PlaneGeometry(this.gridSpacing * 0.9, this.gridSpacing * 0.9);
+
+                for (let r = 0; r < this.rules.rows; r++) {
+                    for (let c = 0; c < this.rules.cols; c++) {
+                        if (this.rules.mask[r] && this.rules.mask[r][c]) {
+                            const mesh = new THREE.Mesh(cellGeo, mat);
+                            const tx = (c - (this.rules.cols - 1) / 2) * this.gridSpacing;
+                            const ty = ((this.rules.rows - 1) / 2 - r) * this.gridSpacing;
+                            mesh.position.set(tx, ty, -0.15);
+                            this.gridHolograms.add(mesh);
+                        }
+                    }
+                }
+                this.boardParent.add(this.gridHolograms);
+            }
+
+            renderInitialBoard() {
+                for (let r = 0; r < this.rules.rows; r++) {
+                    for (let c = 0; c < this.rules.cols; c++) {
+                        const id = this.rules.grid[r][c];
+                        if (id == null) continue;
+
+                        const pal = this.rules.palAt(r, c); // Returns random palette index 0..5
+                        const prize = this.rules.prizeAt(r, c);
+
+                        const vt = new VisualTile(id, r, c, pal, prize, this.gridSpacing, this.rules.rows, this.rules.cols);
+                        this.tilesMap.set(id, vt);
+                        this.boardParent.add(vt.group);
+
+                        vt.group.scale.set(0, 0, 0);
+                        const t = setTimeout(() => vt.scaleTo(1.0, 400), (r + c) * 35);
+                        this.activeTimeouts.push(t);
+                    }
+                }
+            }
+
+            setupInputs() {
+                this.clickCallback = (e) => this.handleScreenTap(e);
+                window.addEventListener('mousedown', this.clickCallback);
+                window.addEventListener('touchstart', this.clickCallback);
+            }
+
+            handleScreenTap(e) {
+                if (this.interactionLocked) return;
+                this.engine.audio.ensure();
+
+                const cx = e.touches ? e.touches[0].clientX : e.clientX;
+                const cy = e.touches ? e.touches[0].clientY : e.clientY;
+
+                this.pointer.x = (cx / window.innerWidth) * 2 - 1;
+                this.pointer.y = -(cy / window.innerHeight) * 2 + 1;
+
+                this.raycaster.setFromCamera(this.pointer, this.engine.camera);
+                const hits = this.raycaster.intersectObjects(this.boardParent.children, true);
+
+                for (let h of hits) {
+                    let o = h.object;
+                    while (o && !o.userData.parentTile) o = o.parent;
+                    if (o && o.userData.parentTile) {
+                        const tile = o.userData.parentTile;
+                        this.executeMatchTap(tile);
+                        break;
+                    }
+                }
+            }
+
+            executeMatchTap(tile) {
+                const steps = this.rules.tapAt(tile.row, tile.col);
+                if (steps && steps.length > 0) {
+                    this.executeAnimationPipeline(steps);
+                } else {
+                    tile.group.position.x += 0.1;
+                    setTimeout(() => tile.group.position.x -= 0.1, 80);
+                }
+            }
+
+            async executeAnimationPipeline(steps) {
+                this.interactionLocked = true;
+                for (let step of steps) {
+                    await this.playStep(step);
+                }
+                this.interactionLocked = false;
+                this.updateHudMetrics();
+            }
+
+            playStep(step) {
+                return new Promise((resolve) => {
+                    if (step.kind === 'clear') {
+                        const haul = [];
+                        step.cells.forEach(c => {
+                            const vt = this.tilesMap.get(c.id);
+                            if (vt) {
+                                if (c.prize) {
+                                    haul.push({
+                                        x: vt.group.position.x, y: vt.group.position.y,
+                                        css: '#' + (COLOR_SPECS[vt.paletteType].color & 0xffffff).toString(16).padStart(6, '0')
+                                    });
+                                }
+                                vt.destroy(() => {
+                                    this.boardParent.remove(vt.group);
+                                    this.tilesMap.delete(c.id);
+                                });
+                            }
+                        });
+                        if (haul.length > 0) this.engine.triggerMiningFeedback(haul);
+                        setTimeout(resolve, 380);
+
+                    } else if (step.kind === 'settle' || step.kind === 'scroll') {
+                        step.moves.forEach(m => {
+                            const vt = this.tilesMap.get(m.id);
+                            if (vt) {
+                                vt.slideTo(m.toR, m.toC, this.rules.rows, this.rules.cols, this.gridSpacing, 320);
+                            }
+                        });
+                        setTimeout(resolve, 340);
+
+                    } else if (step.kind === 'collapse') {
+                        this.gridSpacing = 11.0 / Math.max(step.dims.rows, step.dims.cols);
+                        this.buildHologramGrid();
+
+                        step.moves.forEach(m => {
+                            const vt = this.tilesMap.get(m.id);
+                            if (vt) {
+                                vt.slideTo(m.toR, m.toC, step.dims.rows, step.dims.cols, this.gridSpacing, 340);
+                            }
+                        });
+                        setTimeout(resolve, 360);
+
+                    } else if (step.kind === 'rotate') {
+                        const directionAngle = step.dir === 'cw' ? -Math.PI / 2 : Math.PI / 2;
+
+                        this.gridSpacing = 11.0 / Math.max(step.dims.rows, step.dims.cols);
+                        this.buildHologramGrid();
+
+                        step.moves.forEach(m => {
+                            const vt = this.tilesMap.get(m.id);
+                            if (vt) {
+                                vt.slideTo(m.toR, m.toC, step.dims.rows, step.dims.cols, this.gridSpacing, 400);
+                            }
+                        });
+
+                        new TWEEN.Tween(this.boardParent.rotation)
+                            .to({ z: this.boardParent.rotation.z + directionAngle }, 450)
+                            .easing(TWEEN.Easing.Quadratic.Out)
+                            .onComplete(() => resolve())
+                            .start();
+
+                    } else if (step.kind === 'state') {
+                        if (step.status === 'won') {
+                            setTimeout(() => { this.onWin(); resolve(); }, 300);
+                        } else if (step.status === 'lost') {
+                            setTimeout(() => { this.onLose(); resolve(); }, 300);
+                        } else {
+                            resolve();
+                        }
+                    } else {
+                        resolve();
+                    }
+                });
+            }
+
+            triggerRotation(dir) {
+                if (this.interactionLocked) return;
+                this.engine.audio.action();
+                const steps = this.rules.rotateBoard(dir);
+                if (steps) this.executeAnimationPipeline(steps);
+            }
+
+            triggerScroll(dirSpec) {
+                if (this.interactionLocked) return;
+                this.engine.audio.action();
+                const steps = this.rules.scrollBoard(dirSpec);
+                if (steps) this.executeAnimationPipeline(steps);
+            }
+
+            updateHudMetrics() {
+                const el = document.getElementById('hud-ring-ratio');
+                if (el) el.innerText = `${this.rules.collected} / ${this.rules.totalPrizes}`;
+            }
+
+            cleanup() {
+                window.removeEventListener('mousedown', this.clickCallback);
+                window.removeEventListener('touchstart', this.clickCallback);
+                this.activeTimeouts.forEach(t => clearTimeout(t));
+
+                this.tilesMap.forEach(vt => {
+                    this.boardParent.remove(vt.group);
+                    vt.group.traverse(o => {
+                        if (o.isMesh) {
+                            if (o.geometry) o.geometry.dispose();
+                            if (o.material) {
+                                if (Array.isArray(o.material)) o.material.forEach(m => m.dispose());
+                                else o.material.dispose();
+                            }
+                        }
+                    });
+                });
+                this.tilesMap.clear();
+                this.engine.scene.remove(this.boardParent);
+            }
+        }
+
+        // ====================================================================
+        //  UI MANAGER & GAME CYCLE
+        // ====================================================================
+        class Game {
+            constructor() {
+                this.engine = new RenderEngine();
+                this.activeBoard = null;
+
+                this.menuScreen = document.getElementById('menu-screen');
+                this.hudScreen = document.getElementById('hud-screen');
+                this.carousel = document.getElementById('level-carousel');
+                this.loader = document.getElementById('loader');
+                this.actionPanel = document.getElementById('mission-actions');
+
+                this.buildCarousel();
+                this.bindUIEvents();
+            }
+
+            buildCarousel() {
+                MISSIONS.forEach((lvl) => {
+                    const card = document.createElement('div');
+                    card.className = `glass-panel carousel-card ${lvl.difficulty}`;
+                    card.innerHTML = `
+                        <div class="card-top">
+                            <span class="card-difficulty">${lvl.difficulty}</span>
+                            <span class="card-title">${lvl.name}</span>
+                        </div>
+                        <p style="font-size:0.8rem; color:#555c70; margin-top:10px; line-height:1.4;">${lvl.flavor}</p>
+                        <div class="card-stats">
+                            <div class="stat-row">
+                                <span>Grid Size</span>
+                                <span class="stat-val">${lvl.rows} x ${lvl.cols}</span>
+                            </div>
+                            <div class="stat-row">
+                                <span>Torus Target</span>
+                                <span class="stat-val">${lvl.prizes} Satellites</span>
+                            </div>
+                            <div class="stat-row">
+                                <span>Mask Layout</span>
+                                <span class="stat-val" style="text-transform:capitalize;">${lvl.shape}</span>
+                            </div>
+                        </div>
+                        <div class="card-action">Establish Link</div>
+                    `;
+                    card.addEventListener('click', () => this.bootMission(lvl));
+                    this.carousel.appendChild(card);
+                });
+
+                setTimeout(() => {
+                    this.loader.style.opacity = 0;
+                    setTimeout(() => this.loader.remove(), 500);
+                }, 1000);
+            }
+
+            bindUIEvents() {
+                document.getElementById('prev-btn').addEventListener('click', () => {
+                    this.carousel.scrollBy({ left: -280, behavior: 'smooth' });
+                });
+                document.getElementById('next-btn').addEventListener('click', () => {
+                    this.carousel.scrollBy({ left: 280, behavior: 'smooth' });
+                });
+                document.getElementById('back-to-menu-btn').addEventListener('click', () => {
+                    this.exitMission();
+                });
+
+                const soundToggle = document.getElementById('sound-toggle');
+                soundToggle.addEventListener('click', () => {
+                    const on = this.engine.audio.toggle();
+                    soundToggle.innerHTML = on ? '&#128266;' : '&#128263;';
+                    soundToggle.classList.toggle('muted', !on);
+                });
+
+                document.getElementById('btn-next-mission').addEventListener('click', () => {
+                    document.getElementById('modal-victory').classList.remove('active');
+                    this.exitMission();
+                });
+                document.getElementById('btn-retry-mission').addEventListener('click', () => {
+                    document.getElementById('modal-defeat').classList.remove('active');
+                    const spec = this.activeBoard.missionSpec;
+                    this.activeBoard.cleanup();
+                    this.launchBoard(spec);
+                });
+                document.getElementById('btn-defeat-quit').addEventListener('click', () => {
+                    document.getElementById('modal-defeat').classList.remove('active');
+                    this.exitMission();
+                });
+            }
+
+            bootMission(lvlSpec) {
+                this.menuScreen.classList.remove('active');
+                this.menuScreen.classList.add('hidden');
+                this.hudScreen.classList.remove('hidden');
+                this.hudScreen.classList.add('active');
+
+                const b = document.getElementById('hud-level-tier');
+                b.className = `level-badge ${lvlSpec.difficulty}-badge`;
+                b.innerText = lvlSpec.difficulty;
+
+                document.getElementById('hud-grid-dim').innerText = `${lvlSpec.rows}x${lvlSpec.cols}`;
+                this.launchBoard(lvlSpec);
+            }
+
+            launchBoard(spec) {
+                this.activeBoard = new VisualBoard(
+                    this.engine,
+                    spec.difficulty,
+                    spec,
+                    () => this.handleVictory(),
+                    () => this.handleDefeat()
+                );
+                this.activeBoard.updateHudMetrics();
+                this.setupModifiers(this.activeBoard.rulesDef.rules.transforms);
+                this.notify(`Sector Linked: ${spec.name}`);
+            }
+
+            setupModifiers(transforms) {
+                this.actionPanel.innerHTML = "";
+                if (!transforms || transforms.length === 0) {
+                    this.actionPanel.classList.add('hidden');
+                    return;
+                }
+                this.actionPanel.classList.remove('hidden');
+
+                transforms.forEach(t => {
+                    const btn = document.createElement('button');
+                    btn.className = "action-btn";
+                    if (t === 'rotateCW') {
+                        btn.innerHTML = "↺ Rot";
+                        btn.addEventListener('click', () => this.activeBoard.triggerRotation('ccw'));
+                    } else if (t === 'rotateCCW') {
+                        btn.innerHTML = "Rot ↻";
+                        btn.addEventListener('click', () => this.activeBoard.triggerRotation('cw'));
+                    } else if (t === 'scrollC+') {
+                        btn.innerHTML = "Col ▼";
+                        btn.addEventListener('click', () => this.activeBoard.triggerScroll('scrollC+'));
+                    } else if (t === 'scrollC-') {
+                        btn.innerHTML = "Col ▲";
+                        btn.addEventListener('click', () => this.activeBoard.triggerScroll('scrollC-'));
+                    } else if (t === 'scrollR+') {
+                        btn.innerHTML = "Row ▶";
+                        btn.addEventListener('click', () => this.activeBoard.triggerScroll('scrollR+'));
+                    } else if (t === 'scrollR-') {
+                        btn.innerHTML = "Row ◀";
+                        btn.addEventListener('click', () => this.activeBoard.triggerScroll('scrollR-'));
+                    }
+                    this.actionPanel.appendChild(btn);
+                });
+            }
+
+            handleVictory() {
+                document.getElementById('modal-victory').classList.add('active');
+            }
+
+            handleDefeat() {
+                document.getElementById('modal-defeat').classList.add('active');
+            }
+
+            exitMission() {
+                if (this.activeBoard) {
+                    this.activeBoard.cleanup();
+                    this.activeBoard = null;
+                }
+                this.hudScreen.classList.remove('active');
+                this.hudScreen.classList.add('hidden');
+                this.actionPanel.classList.add('hidden');
+
+                this.menuScreen.classList.remove('hidden');
+                this.menuScreen.classList.add('active');
+                this.notify("Quantum Matrix Disconnected");
+            }
+
+            notify(text) {
+                const area = document.getElementById('game-notifications');
+                const t = document.createElement('div');
+                t.className = 'glass-panel notification-toast';
+                t.innerHTML = `<span style="color:#aa8c2c;">&#10022;</span> ${text}`;
+                area.appendChild(t);
+                setTimeout(() => t.remove(), 1600);
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            new Game();
+        });
+    </script>
+</body>
+</html>
