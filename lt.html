@@ -604,6 +604,47 @@ class RulesEngine{
   //    Phase 7: escalate per cascade tick (linear ramp), capped by comboMax.
   _combo(tick){return 1;}
 
+  // ── Refill (freshdesign §16.1, refill:fromSource — locked Decisions 4 & 5). Scalar gravity
+  //    only. For each lane parallel to gravity, fill the SOURCE-CONNECTED segment (the run of
+  //    playable cells open to the source edge, up to the first wall) to full: after a settle the
+  //    holes sit contiguously at the source end, and a piece entering from outside falls until it
+  //    hits a wall or a resting piece — so those source-end holes are exactly the fillable cells.
+  //    Pieces are placed DIRECTLY at their settled cells (engine never holds off-board state), and
+  //    each carries an off-board {fromR,fromC} origin = cell − k·gravity (k = holes in the lane) so
+  //    the View animates a rigid stack dropping in from beyond the source edge (model i). Palettes
+  //    are drawn from this.rng (same as reset), so refill replays deterministically. Returns a
+  //    {kind:'spawn',spawned:[…]} step, or null when there's nothing to do or the config is out of
+  //    scope (per-cell-gravity field, or gravity:none — both have no single source edge).
+  _refill(){
+    if(this.refillMode!=='fromSource')return null;
+    if(this.gravityField)return null;                  // per-cell-gravity refill deferred (scalar only)
+    const g=GRAVITY[this.gravityDir];
+    if(g.dr===0&&g.dc===0)return null;                 // gravity:none has no source edge
+    const vertical=g.dc===0;                           // down/up → lanes are columns; left/right → rows
+    const nLanes=vertical?this.cols:this.rows;
+    const laneLen=vertical?this.rows:this.cols;
+    const spawned=[];
+    for(let L=0;L<nLanes;L++){
+      const empties=[];
+      for(let s=0;s<laneLen;s++){                       // s walks source→sink along +gravity
+        const r=vertical?(g.dr>0?s:laneLen-1-s):L;
+        const c=vertical?L:(g.dc>0?s:laneLen-1-s);
+        if(!this.mask[r][c])break;                      // first wall closes the source-connected segment
+        if(this.grid[r][c]==null)empties.push({r,c});
+      }
+      const k=empties.length;
+      if(!k)continue;
+      for(const cell of empties){
+        const pal=Math.floor(this.rng.next()*this.def.palette.length);
+        const id=this._spawn(pal,false);
+        this.grid[cell.r][cell.c]=id;
+        spawned.push({id,r:cell.r,c:cell.c,palette:pal,prize:false,
+                      fromR:cell.r-k*g.dr,fromC:cell.c-k*g.dc});   // off-board origin for the drop-in
+      }
+    }
+    return spawned.length?{kind:'spawn',spawned}:null;
+  }
+
   // ── Shared post-match resolution. Given the localized match the action already found
   //    (`initial`: a list of {r,c}), clear it, settle, [refill — P3], and if resolveMode
   //    is 'cascade' re-scan the whole board and repeat until no matches remain; then collapse.
@@ -630,7 +671,7 @@ class RulesEngine{
       if(tick===1&&center)clearStep.center=center;           // keep tap's center metadata intact
       steps.push(clearStep);
       const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
-      // P3: if(this.refillMode==='fromSource'){ steps.push(this._refillStep()); const rs=this.settle(); if(rs.length)steps.push({kind:'settle',moves:rs}); }
+      if(this.refillMode==='fromSource'){const sp=this._refill();if(sp)steps.push(sp);}  // top up to full
       if(this.resolveMode!=='cascade')break;
       matched=this.findAllMatches();                          // re-scan board-wide for chained matches
     }
@@ -644,6 +685,35 @@ class RulesEngine{
     const steps=this._resolve(group,{r,c});
     steps.push({kind:'state',...this.checkState()});
     return steps;
+  }
+  // ── Swap two adjacent cells (freshdesign §16.1, interaction:swapAdjacent — Decisions 2 & 3).
+  //    Commit-only with swapMustMatch always on for v1: the swap is applied, then kept ONLY if it
+  //    forms a match touching either swapped cell; otherwise it's reverted and a 'swapReject' bounce
+  //    is returned (board + score unchanged). On commit the 'swap' step animates the two pieces
+  //    crossing, then _resolve runs clear→settle→refill→cascade exactly as a tap does. Adjacency is
+  //    enforced by the caller via isSwapAdjacent; this method still no-ops (null) on out-of-range,
+  //    masked, or empty cells so it can never corrupt state.
+  swapAt(r1,c1,r2,c2){
+    if(!this.inBounds(r1,c1)||!this.inBounds(r2,c2))return null;
+    if(!this.mask[r1][c1]||!this.mask[r2][c2])return null;
+    const id1=this.grid[r1][c1],id2=this.grid[r2][c2];
+    if(id1==null||id2==null)return null;
+    this.grid[r1][c1]=id2;this.grid[r2][c2]=id1;                      // tentatively swap
+    const min=this.def.rules.minGroupSize;
+    const g1=this.findGroup(r1,c1),g2=this.findGroup(r2,c2);
+    const ok1=g1.length>=min,ok2=g2.length>=min;
+    if(ok1||ok2){                                                     // forms a match → commit
+      const swapStep={kind:'swap',a:{id:id1,toR:r2,toC:c2},b:{id:id2,toR:r1,toC:c1}};
+      const initial=[],seen=new Set();
+      for(const g of [ok1?g1:[],ok2?g2:[]])for(const cell of g){
+        const k=cell.r+','+cell.c;if(!seen.has(k)){seen.add(k);initial.push(cell);}}
+      const steps=[swapStep,...this._resolve(initial,null)];
+      steps.push({kind:'state',...this.checkState()});
+      return steps;
+    }
+    this.grid[r1][c1]=id1;this.grid[r2][c2]=id2;                      // no match → revert, bounce only
+    return [{kind:'swapReject',a:{id:id1,r:r1,c:c1},b:{id:id2,r:r2,c:c2}},
+            {kind:'state',...this.checkState()}];
   }
   setGravity(dir){this.gravityDir=dir;const steps=[];
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
@@ -671,10 +741,37 @@ class RulesEngine{
     steps.push({kind:'state',...this.checkState()});return steps;}
   hasValidMoves(){for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++)
     if(this.grid[r][c]!=null&&this.findGroup(r,c).length>=this.def.rules.minGroupSize)return true;return false;}
+  // Adjacency test for swap input (uses swapAdjacency, independent of matchAdjacency — Decision 3).
+  isSwapAdjacent(r1,c1,r2,c2){
+    const offs=ADJACENCY[this.swapAdjacency]||ADJACENCY.vonNeumann;
+    return offs.some(([dr,dc])=>r1+dr===r2&&c1+dc===c2);
+  }
+  // Swap-game liveness: does ANY adjacent swap produce a match? This — not "a group already exists"
+  // — is the correct "valid move" test for swap games, whose resting board is deliberately match-free.
+  hasValidSwap(){
+    const offs=ADJACENCY[this.swapAdjacency]||ADJACENCY.vonNeumann;
+    const min=this.def.rules.minGroupSize;
+    for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){
+      if(this.grid[r][c]==null||!this.mask[r][c])continue;
+      for(const [dr,dc] of offs){
+        const nr=r+dr,nc=c+dc;
+        if(nr<r||(nr===r&&nc<c))continue;                  // test each unordered pair once
+        if(!this.inBounds(nr,nc)||!this.mask[nr][nc]||this.grid[nr][nc]==null)continue;
+        const a=this.grid[r][c],b=this.grid[nr][nc];
+        this.grid[r][c]=b;this.grid[nr][nc]=a;
+        const ok=this.findGroup(r,c).length>=min||this.findGroup(nr,nc).length>=min;
+        this.grid[r][c]=a;this.grid[nr][nc]=b;
+        if(ok)return true;
+      }
+    }
+    return false;
+  }
+  // Unified liveness used by checkState + the game-start retry. Tap games keep exact old semantics.
+  canMove(){return this.interaction==='swapAdjacent'?this.hasValidSwap():this.hasValidMoves();}
   checkState(){
     if(this.def.win.type==='collectAllPrizes'&&this.totalPrizes>0&&this.collected>=this.totalPrizes)return{status:'won'};
     if(this.def.win.type==='clearAll'&&this.pieceData.size===0)return{status:'won'};
-    if(!this.hasValidMoves())return{status:'lost'};
+    if(!this.canMove())return{status:'lost'};
     return{status:'playing'};
   }
   restoreFromFrame(frame,score,collected,rngState){
@@ -753,6 +850,16 @@ const GAMES=[
   {key:'cascade', label:'Cascade SameGame · chains',   // P2: resolve:cascade — clears chain as pieces fall
     build:(r,c,pz)=>baseDef('Cascade SameGame',r,c,pz,d=>{
       d.rules.matchAdjacency='vonNeumann';d.rules.transforms=[];d.rules.resolve='cascade';return d;})},
+  {key:'refill', label:'Refill cascade · tap',         // P3: cascade + refill:fromSource — board tops up from the top
+    build:(r,c,pz)=>baseDef('Refill cascade',r,c,pz,d=>{
+      d.rules.matchAdjacency='vonNeumann';d.rules.transforms=[];d.rules.minGroupSize=3;
+      d.rules.resolve='cascade';d.rules.refill='fromSource';d.rules.laneCollapse=false;return d;})},
+  {key:'bejeweled', label:'Bejeweled-lite · swap',     // P4: swapAdjacent — the playable match-3 (swap → cascade → refill)
+    build:(r,c,pz)=>baseDef('Bejeweled-lite',r,c,pz,d=>{
+      d.rules.interaction='swapAdjacent';d.rules.swapAdjacency='vonNeumann';
+      d.rules.matchAdjacency='vonNeumann';d.rules.minGroupSize=3;
+      d.rules.resolve='cascade';d.rules.refill='fromSource';
+      d.rules.transforms=[];d.rules.laneCollapse=false;return d;})},
 ];
 
 const TEMPLATES={
@@ -840,6 +947,7 @@ class View {
     this.tubeConnections=[];
     this.dims={rows:0,cols:0};
     this.hoverGroup=new Set();
+    this.selection=null;                                    // id of the swap-selected piece (or null)
     this.cameraTargetZ=20;
   }
   cellToWorld(r,c,dims){
@@ -1062,6 +1170,12 @@ class View {
     const ids = new Set([...A.keys(),...B.keys()]);
     
     const kind = step ? step.kind : 'linear';
+    // Per-piece off-board origins for a refill 'spawn' step, so new pieces fall in from beyond
+    // the source edge (model i) rather than popping in place.
+    const spawnFrom = (step && step.kind === 'spawn') ? new Map(step.spawned.map(s => [s.id, s])) : null;
+    // Rejected swap: each of the two pieces nudges toward the OTHER's cell and returns (no net move).
+    const rejectMap = (step && step.kind === 'swapReject')
+      ? new Map([[step.a.id,{r:step.b.r,c:step.b.c}],[step.b.id,{r:step.a.r,c:step.a.c}]]) : null;
     
     // Choose specific easing functions depending on the transformation kind
     let posF = f;
@@ -1075,11 +1189,24 @@ class View {
       posF = EASE.cubicOut(f);
     } else if (kind === 'resize') {
       posF = EASE.cubicInOut(f);
+    } else if (kind === 'swap') {
+      posF = EASE.cubicInOut(f);
     }
     
     for(const id of ids){
       const a=A.get(id),b=B.get(id),pl=b||a;
       let m=this.ensureMesh(pl);seen.add(id);
+      // Rejected-swap bounce: the two pieces lean toward each other and spring back (board unchanged).
+      if(rejectMap){
+        const rj=rejectMap.get(id);
+        if(rj){
+          const wH=this.cellToWorld(pl.r,pl.c,frameB.dims),wT=this.cellToWorld(rj.r,rj.c,frameB.dims);
+          const t=Math.sin(f*Math.PI)*0.34;                       // 0 → 0.34 → 0
+          m.position.set(wH.x+(wT.x-wH.x)*t, wH.y+(wT.y-wH.y)*t, 0);
+          m.scale.setScalar(1);m.material.emissiveIntensity=0;m.rotation.z=0;
+          continue;
+        }
+      }
       if(a&&b){
         const wa=this.cellToWorld(a.r,a.c,frameA.dims),wb=this.cellToWorld(b.r,b.c,frameB.dims);
         m.position.set(wa.x+(wb.x-wa.x)*posF, wa.y+(wb.y-wa.y)*posF, 0);
@@ -1091,6 +1218,15 @@ class View {
           m.rotation.z = posF * Math.PI * 2;
         } else if (kind === 'scroll') {
           m.rotation.z = Math.sin(f * Math.PI) * 0.4;
+        } else if (kind === 'swap' && step && (id === step.a.id || id === step.b.id)) {
+          // Arc the two swapping pieces around each other (opposite perpendicular offsets) so they
+          // don't slide straight through one another.
+          const sign = (id === step.a.id) ? 1 : -1;
+          const dx = wb.x - wa.x, dy = wb.y - wa.y, len = Math.hypot(dx, dy) || 1;
+          const arc = Math.sin(f * Math.PI) * SPACING * 0.33 * sign;
+          m.position.x += (-dy / len) * arc;
+          m.position.y += ( dx / len) * arc;
+          m.rotation.z = sign * posF * Math.PI;
         } else {
           m.rotation.z = 0;
         }
@@ -1109,19 +1245,33 @@ class View {
         m.material.emissiveIntensity = f * 0.95;
         m.rotation.z = f * Math.PI * 3;
       }else{
-        // Un-clear pop back in (reversible pop)
-        const wb=this.cellToWorld(b.r,b.c,frameB.dims);
-        m.position.set(wb.x,wb.y,0);
-        
-        let scaleF;
-        if (f > 0.75) {
-          scaleF = ( (1 - f) / 0.25 ) * 0.25 + 1;
+        const sf = spawnFrom && spawnFrom.get(id);
+        if (sf) {
+          // Refill drop-in: fall from the off-board source origin to the final cell, settle-style.
+          // cellToWorld maps the negative source row to a point above the board, so the piece
+          // streams in from beyond the top edge (model i, Decision 4).
+          const wa = this.cellToWorld(sf.fromR, sf.fromC, frameB.dims);
+          const wb = this.cellToWorld(b.r, b.c, frameB.dims);
+          const ef = EASE.bounceOut(f);
+          m.position.set(wa.x + (wb.x - wa.x) * ef, wa.y + (wb.y - wa.y) * ef, 0);
+          m.scale.setScalar(1);
+          m.material.emissiveIntensity = 0;
+          m.rotation.z = 0;
         } else {
-          scaleF = 1.25 * (f / 0.75);
+          // Un-clear pop back in (reversible pop)
+          const wb=this.cellToWorld(b.r,b.c,frameB.dims);
+          m.position.set(wb.x,wb.y,0);
+          
+          let scaleF;
+          if (f > 0.75) {
+            scaleF = ( (1 - f) / 0.25 ) * 0.25 + 1;
+          } else {
+            scaleF = 1.25 * (f / 0.75);
+          }
+          m.scale.setScalar(Math.max(0.001, scaleF));
+          m.material.emissiveIntensity = (1 - f) * 0.95;
+          m.rotation.z = (1 - f) * Math.PI * 3;
         }
-        m.scale.setScalar(Math.max(0.001, scaleF));
-        m.material.emissiveIntensity = (1 - f) * 0.95;
-        m.rotation.z = (1 - f) * Math.PI * 3;
       }
     }
     for(const [id,m] of [...this.meshes.entries()]) if(!seen.has(id)){this._disposeMesh(m);this.meshes.delete(id);}
@@ -1197,6 +1347,11 @@ class View {
   setHover(engine,r,c){
     if(liveAnim.active)return;
     this.clearTubeConnections();
+    if(engine.interaction==='swapAdjacent'){     // swap games: no group glow/tubes; cell is the unit
+      this.hoverGroup.clear();
+      document.body.style.cursor=(r!=null)?'pointer':'default';
+      return;
+    }
     const grp=(r==null)?[]:engine.findGroup(r,c);
     const clearable=grp.length>=engine.def.rules.minGroupSize;
     const next=new Set(clearable?grp.map(g=>engine.grid[g.r][g.c]) : []);
@@ -1207,6 +1362,8 @@ class View {
       this.createTubes(engine, grp);
     }
   }
+  setSelection(engine,r,c){ this.selection = (r==null)?null:engine.grid[r][c]; }
+  clearSelection(){ this.selection=null; }
   clearHover(){
     this.clearTubeConnections();
     this.hoverGroup.clear();
@@ -1230,8 +1387,10 @@ class View {
     for(const [id, m] of this.meshes.entries()) {
       m.visible = this.layerVisible.pieces;
       if(m.userData.ring) m.userData.ring.visible = this.layerVisible.prizes;
-      const targetEmissive = this.hoverGroup.has(id) ? 0.4 : 0;
+      const sel = (this.selection!=null && id===this.selection);
+      const targetEmissive = sel ? 0.85 : (this.hoverGroup.has(id) ? 0.4 : 0);
       m.material.emissiveIntensity += (targetEmissive - m.material.emissiveIntensity) * 0.2;
+      if(sel) m.scale.setScalar(1 + Math.sin(performance.now()*0.006)*0.07);
       
       if(!m.userData.isSphere) m.rotation.y+=m.userData.spin;
       if(m.userData.ring) {
@@ -1297,6 +1456,15 @@ function generateSubFrames(startFrame, steps) {
     if (step.kind === 'clear') {
       const clearedIds = new Set(step.cells.map(c => c.id));
       nextPlacements = current.placements.filter(p => !clearedIds.has(p.id));
+    } else if (step.kind === 'spawn') {   // refill: ADD new pieces at their final settled cells
+      nextPlacements = current.placements.concat(
+        step.spawned.map(s => ({ id: s.id, r: s.r, c: s.c, palette: s.palette, prize: s.prize }))
+      );
+    } else if (step.kind === 'swap') {     // two pieces exchange cells (the crossing is animated)
+      const mv = new Map([[step.a.id,{r:step.a.toR,c:step.a.toC}],[step.b.id,{r:step.b.toR,c:step.b.toC}]]);
+      nextPlacements = current.placements.map(p => { const m=mv.get(p.id); return m?{...p,r:m.r,c:m.c}:p; });
+    } else if (step.kind === 'swapReject') {  // rejected swap: board unchanged; bounce is purely visual
+      nextPlacements = current.placements;
     } else if (step.kind === 'settle' || step.kind === 'scroll') {
       const moveMap = new Map(step.moves.map(m => [m.id, m]));
       nextPlacements = current.placements.map(p => {
@@ -1528,6 +1696,7 @@ function initEditState(){
 function stateFrameAt(i){const e=editTimeline.entries[i];return e.subFrames[e.subFrames.length-1];}
 function enterDesign(){
   if(liveAnim.active||replay.active)return;
+  swapSel=null; view.clearSelection();
   initEditState();
   designMode=true; timeline=editTimeline; replay.T=designIdx;
   view._designGrid=true;
@@ -2287,6 +2456,7 @@ function chosenSize(){
 }
 function newBoard(){
   if(replay.active) exitReplay(true);
+  swapSel=null; view.clearSelection();
   const floors=document.getElementById('floors-check').checked;
   let tries=0, ok=false, seed=0;
   do{
@@ -2301,7 +2471,7 @@ function newBoard(){
     def.layers.prizes.cells=pickPrizeCells(def,prizeN);
     seed=(Math.random()*4294967296)>>>0;
     engine=new RulesEngine(def, createSeededRNG(seed));
-    ok = engine.hasValidMoves() &&
+    ok = engine.canMove() &&
          (engine.def.win.type!=='collectAllPrizes' || engine.totalPrizes>0);
     tries++;
   } while(!ok && tries<160);
@@ -2374,6 +2544,7 @@ function hide(id){document.getElementById(id).classList.remove('show');}
 
 // input
 let hoverRAF=null;
+let swapSel=null;                                 // first-picked cell of a pending swap (swapAdjacent), or null
 stage.addEventListener('pointermove',e=>{
   if(designMode){
     if(strokeActive){ const cell=view.pickCell(e.clientX,e.clientY,editState.dims); if(cell) continueStroke(cell.r,cell.c); }
@@ -2394,6 +2565,20 @@ stage.addEventListener('pointerdown',e=>{
   if(liveAnim.active)return;
   const cell=view.pick(engine,e.clientX,e.clientY);if(!cell)return;
   if(replay.active) maybeFork();
+  if(engine.interaction==='swapAdjacent'){          // two-pick: select a cell, then a neighbour to swap
+    if(swapSel===null){
+      swapSel={r:cell.r,c:cell.c}; view.setSelection(engine,cell.r,cell.c);
+    } else if(swapSel.r===cell.r && swapSel.c===cell.c){
+      swapSel=null; view.clearSelection();                                   // re-tap selection → deselect
+    } else if(engine.isSwapAdjacent(swapSel.r,swapSel.c,cell.r,cell.c)){
+      const a=swapSel; swapSel=null; view.clearSelection();
+      const steps=engine.swapAt(a.r,a.c,cell.r,cell.c);
+      if(steps) runSteps(steps,{type:'swap',args:{r1:a.r,c1:a.c,r2:cell.r,c2:cell.c}});
+    } else {
+      swapSel={r:cell.r,c:cell.c}; view.setSelection(engine,cell.r,cell.c);  // non-adjacent → reselect
+    }
+    return;
+  }
   const steps=engine.tapAt(cell.r,cell.c);if(steps)runSteps(steps,{type:'tap',args:{r:cell.r,c:cell.c}});
 });
 stage.addEventListener('pointerup',()=>{ if(strokeActive) endStroke(); });
@@ -2448,6 +2633,7 @@ function enterReplay(){
   if(liveAnim.active||designMode)return;
   if(timeline.entries.length<2){return;}
   replay.active=true;replay.playing=false;replay.dir=1;replay.T=lastT();
+  swapSel=null; view.clearSelection();
   view.clearHoverNow();
   hide('ov-win');hide('ov-lose');
   showReplayBar(true);refreshReplayUI();
