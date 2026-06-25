@@ -477,6 +477,18 @@ class RulesEngine{
     const L=this.def.lattice;
     this.rows=L.rows;this.cols=L.cols;this.topology=L.topology||'plane';
     this.gravityDir=this.def.rules.gravity||'down';
+    // ── Match-3 axes (freshdesign §16.1). Defaults reproduce classic tap-group play, so
+    //    any definition omitting these keys behaves exactly as before. Consumed by phase:
+    //    interaction → input/swapAt (P4); matchShape → findAllMatches (P2/P5);
+    //    refillMode → _resolve/refill (P3); resolveMode → _resolve cascade loop (P2);
+    //    swapAdjacency → swapAt/solvability (P4); comboMode/comboMax → scoring (P7).
+    this.interaction   = this.def.rules.interaction    || 'tapGroup';
+    this.matchShape    = this.def.rules.matchShape      || 'connected';
+    this.refillMode    = this.def.rules.refill          || 'none';
+    this.resolveMode   = this.def.rules.resolve         || 'single';
+    this.swapAdjacency = this.def.rules.swapAdjacency   || 'vonNeumann';
+    this.comboMode     = this.def.rules.comboMultiplier || 'linear';
+    this.comboMax      = this.def.rules.comboMax ?? Infinity;
     this.mask=grid(this.rows,this.cols,(r,c)=>this.def.layers.mask.grid[r][c]);
     this.gravityField=this.def.layers.gravityZones
       ?grid(this.rows,this.cols,(r,c)=>this.def.layers.gravityZones.grid[r][c]):null;
@@ -567,18 +579,51 @@ class RulesEngine{
   // a collapse step also carries the post-collapse mask, since collapse reshapes the wall pattern
   _collapseStep(){const cm=this.collapse();return cm?{kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm,mask:this.maskCopy()}:null;}
 
+  // ── Board-wide match detection (freshdesign §16.1 — the cascade re-scan).
+  //    Phase 2 fills this in: union of all connected groups ≥ minGroupSize (and `line`
+  //    runs in Phase 5). Stubbed to [] for now, so resolve:cascade safely degrades to a
+  //    single pass until P2 lands. Returns a flat list of {r,c} cells to clear.
+  findAllMatches(){return[];}
+
+  // ── Combo multiplier for cascade scoring (freshdesign §16.1, Decision 7).
+  //    Phase 1: always 1, so scoring is byte-identical to the old flat `group.length*10`.
+  //    Phase 7: escalate per cascade tick (linear ramp), capped by comboMax.
+  _combo(tick){return 1;}
+
+  // ── Shared post-match resolution. Given the localized match the action already found
+  //    (`initial`: a list of {r,c}), clear it, settle, [refill — P3], and if resolveMode
+  //    is 'cascade' re-scan board-wide and repeat [P2]; then collapse. tapAt and the future
+  //    swapAt both funnel through here. The trailing {kind:'state'} is appended by the caller.
+  //    Phase 1: resolveMode defaults to 'single', so the loop runs exactly once — behaviourally
+  //    identical to tapAt's old inline tail. `center` is preserved on the first clear step.
+  _resolve(initial,center){
+    const steps=[];
+    let matched=initial,tick=0;
+    while(matched&&matched.length){
+      tick++;
+      const cleared=[];
+      for(const{r:gr,c:gc}of matched){const id=this.grid[gr][gc];if(id==null)continue;
+        const pd=this.pieceData.get(id);
+        if(pd.prize){this.collected++;this.score+=50;}
+        cleared.push({id,r:gr,c:gc,palette:pd.palette,prize:pd.prize});
+        this.grid[gr][gc]=null;this.pieceData.delete(id);}
+      this.score+=cleared.length*10*this._combo(tick);       // P7: ×combo; P1: ×1 ⇒ flat, as before
+      const clearStep={kind:'clear',cells:cleared};
+      if(tick===1&&center)clearStep.center=center;           // keep tap's center metadata intact
+      steps.push(clearStep);
+      const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
+      // P3: if(this.refillMode==='fromSource'){ steps.push(this._refillStep()); const rs=this.settle(); if(rs.length)steps.push({kind:'settle',moves:rs}); }
+      if(this.resolveMode!=='cascade')break;
+      matched=this.findAllMatches();                          // P2: board-wide re-scan
+    }
+    const cs=this._collapseStep();if(cs)steps.push(cs);
+    return steps;
+  }
+
   tapAt(r,c){
     const group=this.findGroup(r,c);
     if(group.length<this.def.rules.minGroupSize)return null;
-    const steps=[],cleared=[];
-    for(const{r:gr,c:gc}of group){const id=this.grid[gr][gc],pd=this.pieceData.get(id);
-      if(pd.prize){this.collected++;this.score+=50;}
-      cleared.push({id,r:gr,c:gc,palette:pd.palette,prize:pd.prize});
-      this.grid[gr][gc]=null;this.pieceData.delete(id);}
-    this.score+=group.length*10;
-    steps.push({kind:'clear',cells:cleared,center:{r,c}});
-    const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
-    const cs=this._collapseStep();if(cs)steps.push(cs);
+    const steps=this._resolve(group,{r,c});
     steps.push({kind:'state',...this.checkState()});
     return steps;
   }
