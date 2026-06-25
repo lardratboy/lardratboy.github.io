@@ -579,11 +579,25 @@ class RulesEngine{
   // a collapse step also carries the post-collapse mask, since collapse reshapes the wall pattern
   _collapseStep(){const cm=this.collapse();return cm?{kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm,mask:this.maskCopy()}:null;}
 
-  // ── Board-wide match detection (freshdesign §16.1 — the cascade re-scan).
-  //    Phase 2 fills this in: union of all connected groups ≥ minGroupSize (and `line`
-  //    runs in Phase 5). Stubbed to [] for now, so resolve:cascade safely degrades to a
-  //    single pass until P2 lands. Returns a flat list of {r,c} cells to clear.
-  findAllMatches(){return[];}
+  // ── Board-wide match detection (freshdesign §16.1 — the cascade re-scan). Returns a flat,
+  //    de-duplicated list of {r,c} cells belonging to any clearable group, scanning the WHOLE
+  //    board because cascades form matches wherever pieces fall. Reuses findGroup's flood-fill
+  //    through a shared `seen` set, so every cell is touched once (O(cells)). matchAdjacency and
+  //    wrapMatch come along for free via findGroup. `line` matchShape (collinear runs) is Phase 5.
+  findAllMatches(){
+    if(this.matchShape==='line')return this._findLineMatches();   // P5: scan rows/cols for runs
+    const min=this.def.rules.minGroupSize,seen=new Set(),out=[];
+    for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){
+      if(this.grid[r][c]==null)continue;
+      if(seen.has(r+','+c))continue;
+      const grp=this.findGroup(r,c);
+      for(const cell of grp)seen.add(cell.r+','+cell.c);          // whole group visited, size aside
+      if(grp.length>=min)for(const cell of grp)out.push(cell);
+    }
+    return out;
+  }
+  // P5: collinear-run detection (classic match-3 lines). Until then `line` finds nothing.
+  _findLineMatches(){return[];}
 
   // ── Combo multiplier for cascade scoring (freshdesign §16.1, Decision 7).
   //    Phase 1: always 1, so scoring is byte-identical to the old flat `group.length*10`.
@@ -592,14 +606,17 @@ class RulesEngine{
 
   // ── Shared post-match resolution. Given the localized match the action already found
   //    (`initial`: a list of {r,c}), clear it, settle, [refill — P3], and if resolveMode
-  //    is 'cascade' re-scan board-wide and repeat [P2]; then collapse. tapAt and the future
-  //    swapAt both funnel through here. The trailing {kind:'state'} is appended by the caller.
-  //    Phase 1: resolveMode defaults to 'single', so the loop runs exactly once — behaviourally
-  //    identical to tapAt's old inline tail. `center` is preserved on the first clear step.
+  //    is 'cascade' re-scan the whole board and repeat until no matches remain; then collapse.
+  //    tapAt and the future swapAt both funnel through here; the trailing {kind:'state'} is
+  //    appended by the caller. With resolveMode 'single' the loop runs exactly once, which is
+  //    byte-identical to tapAt's old inline tail. `center` is preserved on the first clear step.
+  //    Guards: a hard tick cap (mirrors settle's) and a break if a tick clears nothing, so a
+  //    cascade can never spin — important once P3 refill stops the board strictly shrinking.
   _resolve(initial,center){
     const steps=[];
     let matched=initial,tick=0;
-    while(matched&&matched.length){
+    const maxTicks=this.rows*this.cols+5;
+    while(matched&&matched.length&&tick<maxTicks){
       tick++;
       const cleared=[];
       for(const{r:gr,c:gc}of matched){const id=this.grid[gr][gc];if(id==null)continue;
@@ -607,14 +624,15 @@ class RulesEngine{
         if(pd.prize){this.collected++;this.score+=50;}
         cleared.push({id,r:gr,c:gc,palette:pd.palette,prize:pd.prize});
         this.grid[gr][gc]=null;this.pieceData.delete(id);}
-      this.score+=cleared.length*10*this._combo(tick);       // P7: ×combo; P1: ×1 ⇒ flat, as before
+      if(!cleared.length)break;                              // nothing actually cleared → stop
+      this.score+=cleared.length*10*this._combo(tick);       // P7: ×combo; P1/P2: ×1 ⇒ flat, as before
       const clearStep={kind:'clear',cells:cleared};
       if(tick===1&&center)clearStep.center=center;           // keep tap's center metadata intact
       steps.push(clearStep);
       const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
       // P3: if(this.refillMode==='fromSource'){ steps.push(this._refillStep()); const rs=this.settle(); if(rs.length)steps.push({kind:'settle',moves:rs}); }
       if(this.resolveMode!=='cascade')break;
-      matched=this.findAllMatches();                          // P2: board-wide re-scan
+      matched=this.findAllMatches();                          // re-scan board-wide for chained matches
     }
     const cs=this._collapseStep();if(cs)steps.push(cs);
     return steps;
@@ -732,6 +750,9 @@ const GAMES=[
       d.layers.gravityZones={binding:'field',anchored:true,
         grid:grid(r,c,(rr,cc)=> cc>=Math.floor(c/2)?'right':null)};
       return d;})},
+  {key:'cascade', label:'Cascade SameGame · chains',   // P2: resolve:cascade — clears chain as pieces fall
+    build:(r,c,pz)=>baseDef('Cascade SameGame',r,c,pz,d=>{
+      d.rules.matchAdjacency='vonNeumann';d.rules.transforms=[];d.rules.resolve='cascade';return d;})},
 ];
 
 const TEMPLATES={
