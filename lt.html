@@ -1342,11 +1342,12 @@ function triggerLiveAnimation(fromT,toT){
   replay.T=fromT;
   view.clearHover();
   
-  // the traversed segment lives in entries[max] (entry[i].subFrames is the transition INTO i),
-  // so this is correct whether we step forward (a move) or backward (an undo)
-  const seg = timeline.entries[Math.max(fromT,toT)];
-  const M = seg.subFrames.length - 1;
-  liveAnim.duration = (Math.max(1, M) * 320) / speedSetting.current;
+  // Match replay's tempo exactly: a fixed wall-clock budget PER ENTRY, independent of how many
+  // sub-steps the action has. loop()'s replay branch advances replay.T at speed/SEGMENT_MS
+  // entries-per-ms, so one entry there takes SEGMENT_MS/speed; mirror that here. (`span` is 1 for
+  // a normal tap; it stays general in case a live transition ever spans more than one entry.)
+  const span = Math.abs(toT - fromT) || 1;
+  liveAnim.duration = (span * SEGMENT_MS) / speedSetting.current;
 }
 
 function maybeFork(){
@@ -2566,11 +2567,12 @@ function loop(t){
   if (liveAnim.active) {
     liveAnim.elapsed += dt;
     const progress = Math.min(1, liveAnim.elapsed / liveAnim.duration);
-    const eased = progress < 0.5 
-      ? 4 * progress * progress * progress 
-      : 1 - Math.pow(-2 * progress + 2, 3) / 2;
-    
-    replay.T = liveAnim.startT + (liveAnim.targetT - liveAnim.startT) * eased;
+    // Advance the playhead LINEARLY in time, exactly like loop()'s replay branch.
+    // Per-step easing (bounceOut for settle, cubicInOut for rotate, …) is applied
+    // downstream in renderInterpolated(); feeding it a time-linear parameter is what makes
+    // a live move look identical to scrubbing that move in replay. The old code eased here
+    // too, double-easing every sub-step and smearing the global curve across sub-step seams.
+    replay.T = liveAnim.startT + (liveAnim.targetT - liveAnim.startT) * progress;
     
     if (progress >= 1) {
       replay.T = liveAnim.targetT;
