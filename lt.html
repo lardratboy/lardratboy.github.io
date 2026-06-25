@@ -362,10 +362,34 @@
       
       <div style="display: flex; flex-direction: column; gap: 12px; font-family: var(--mono); font-size: 12px;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span class="k" style="color: var(--muted);">Interaction:</span>
+          <select id="rule-interaction" class="gselect">
+            <option value="tapGroup">Tap Group</option>
+            <option value="swapAdjacent">Swap Adjacent</option>
+          </select>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span class="k" style="color: var(--muted);">Match Shape:</span>
+          <select id="rule-match-shape" class="gselect">
+            <option value="connected">Connected Blob</option>
+            <option value="line">Collinear Line</option>
+          </select>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center;">
           <span class="k" style="color: var(--muted);">Adjacency:</span>
           <select id="rule-adjacency" class="gselect">
             <option value="moore">Moore (8-way)</option>
             <option value="vonNeumann">von Neumann (4-way)</option>
+          </select>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span class="k" style="color: var(--muted);">Swap Adjacency:</span>
+          <select id="rule-swap-adjacency" class="gselect">
+            <option value="vonNeumann">von Neumann (4-way)</option>
+            <option value="moore">Moore (8-way)</option>
           </select>
         </div>
         
@@ -382,6 +406,22 @@
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <span class="k" style="color: var(--muted);">Lane Collapse:</span>
           <input type="checkbox" id="rule-lane-collapse" style="accent-color: var(--signal);">
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span class="k" style="color: var(--muted);">Refill Mode:</span>
+          <select id="rule-refill" class="gselect">
+            <option value="none">None / Shrink</option>
+            <option value="fromSource">Source Edge Fall</option>
+          </select>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span class="k" style="color: var(--muted);">Resolve Mode:</span>
+          <select id="rule-resolve" class="gselect">
+            <option value="single">Single Resolve</option>
+            <option value="cascade">Cascading Chains</option>
+          </select>
         </div>
 
         <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -498,10 +538,48 @@ class RulesEngine{
     const fill=this.def.layers.pieces.grid;
     const rfill=this.def.layers.randomFill?this.def.layers.randomFill.grid:null;
     const prizeCells=new Set((this.def.layers.prizes?.cells||[]).map(([r,c])=>r+','+c));
+
+    const preventInitialMatches = (this.resolveMode === 'cascade' || this.interaction === 'swapAdjacent');
+
     for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){
       if(!this.mask[r][c])continue;
       let pal=fill[r][c];
-      if(pal===null&&rfill&&rfill[r][c])pal=Math.floor(this.rng.next()*this.def.palette.length);
+      if(pal===null&&rfill&&rfill[r][c]){
+        if (preventInitialMatches) {
+          const candidates = [];
+          const numPalettes = this.def.palette.length;
+          for (let p = 0; p < numPalettes; p++) {
+            candidates.push(p);
+          }
+          // Shuffle candidates to keep randomness
+          for (let i = candidates.length - 1; i > 0; i--) {
+            const j = Math.floor(this.rng.next() * (i + 1));
+            const tmp = candidates[i];
+            candidates[i] = candidates[j];
+            candidates[j] = tmp;
+          }
+          
+          let chosenPal = candidates[0];
+          for (const candidate of candidates) {
+            // Temporarily place to run flood fill / line scan checks
+            const tempId = this._spawn(candidate, false);
+            this.grid[r][c] = tempId;
+            const matches = this.findAllMatches();
+            // Clean up
+            this.grid[r][c] = null;
+            this.pieceData.delete(tempId);
+            this._nextId--;
+            
+            if (matches.length === 0) {
+              chosenPal = candidate;
+              break;
+            }
+          }
+          pal = chosenPal;
+        } else {
+          pal=Math.floor(this.rng.next()*this.def.palette.length);
+        }
+      }
       if(pal===null||pal===undefined)continue;
       const prize=prizeCells.has(r+','+c); if(prize)this.totalPrizes++;
       this.grid[r][c]=this._spawn(pal,prize);
@@ -596,13 +674,83 @@ class RulesEngine{
     }
     return out;
   }
-  // P5: collinear-run detection (classic match-3 lines). Until then `line` finds nothing.
-  _findLineMatches(){return[];}
+  
+  // P5: collinear-run detection (classic match-3 lines).
+  _findLineMatches(){
+    const min = this.def.rules.minGroupSize || 3;
+    const matchedCells = new Set();
+    const dirs = [[0, 1], [1, 0]]; // horizontal and vertical
+    if (this.def.rules.matchAdjacency === 'moore') {
+      dirs.push([1, 1], [1, -1]); // diagonals
+    }
+
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        const id = this.grid[r][c];
+        if (id == null) continue;
+        const pal = this.palAt(r, c);
+
+        for (const [dr, dc] of dirs) {
+          let prevR = r - dr;
+          let prevC = c - dc;
+          let hasPrevMatch = false;
+          if (this.def.rules.wrapMatch) {
+            prevR = (prevR + this.rows) % this.rows;
+            prevC = (prevC + this.cols) % this.cols;
+          }
+          if (this.inBounds(prevR, prevC) && this.mask[prevR][prevC]) {
+            if (this.palAt(prevR, prevC) === pal) {
+              hasPrevMatch = true;
+            }
+          }
+          if (hasPrevMatch && !this.def.rules.wrapMatch) {
+            continue; // Already processed as part of a larger run
+          }
+
+          const run = [{r, c}];
+          let currR = r, currC = c;
+          const limit = Math.max(this.rows, this.cols);
+          for (let step = 1; step < limit; step++) {
+            let nr = currR + dr;
+            let nc = currC + dc;
+            if (this.def.rules.wrapMatch) {
+              nr = (nr + this.rows) % this.rows;
+              nc = (nc + this.cols) % this.cols;
+            }
+            if (!this.inBounds(nr, nc) || !this.mask[nr][nc]) break;
+            if (this.palAt(nr, nc) !== pal) break;
+            if (nr === r && nc === c) break;
+
+            run.push({r: nr, c: nc});
+            currR = nr;
+            currC = nc;
+          }
+
+          if (run.length >= min) {
+            for (const cell of run) {
+              matchedCells.add(cell.r + ',' + cell.c);
+            }
+          }
+        }
+      }
+    }
+
+    const out = [];
+    for (const k of matchedCells) {
+      const [sr, sc] = k.split(',').map(Number);
+      out.push({r: sr, c: sc});
+    }
+    return out;
+  }
 
   // ── Combo multiplier for cascade scoring (freshdesign §16.1, Decision 7).
-  //    Phase 1: always 1, so scoring is byte-identical to the old flat `group.length*10`.
   //    Phase 7: escalate per cascade tick (linear ramp), capped by comboMax.
-  _combo(tick){return 1;}
+  _combo(tick){
+    if (this.comboMode === 'linear') {
+      return Math.min(this.comboMax || Infinity, tick);
+    }
+    return 1;
+  }
 
   // ── Refill (freshdesign §16.1, refill:fromSource — locked Decisions 4 & 5). Scalar gravity
   //    only. For each lane parallel to gravity, fill the SOURCE-CONNECTED segment (the run of
@@ -676,7 +824,70 @@ class RulesEngine{
       matched=this.findAllMatches();                          // re-scan board-wide for chained matches
     }
     const cs=this._collapseStep();if(cs)steps.push(cs);
+
+    // Auto-shuffle deadlock resolution (Decision 8)
+    if (this.interaction === 'swapAdjacent' && !this.canMove()) {
+      const isWon = (this.def.win.type==='collectAllPrizes'&&this.totalPrizes>0&&this.collected>=this.totalPrizes) ||
+                    (this.def.win.type==='clearAll'&&this.pieceData.size===0);
+      if (!isWon) {
+        const shuffleMoves = this.shufflePieces();
+        if (shuffleMoves) {
+          steps.push({kind: 'shuffle', moves: shuffleMoves});
+        }
+      }
+    }
+
     return steps;
+  }
+
+  shufflePieces(){
+    const cells = [];
+    const pieces = [];
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        if (this.mask[r][c] && this.grid[r][c] != null) {
+          cells.push({r, c});
+          pieces.push(this.grid[r][c]);
+        }
+      }
+    }
+    if (cells.length === 0) return null;
+
+    let attempts = 0;
+    const maxAttempts = 200;
+    let ok = false;
+
+    while (!ok && attempts++ < maxAttempts) {
+      // Fisher-Yates shuffle
+      for (let i = pieces.length - 1; i > 0; i--) {
+        const j = Math.floor(this.rng.next() * (i + 1));
+        const tmp = pieces[i];
+        pieces[i] = pieces[j];
+        pieces[j] = tmp;
+      }
+
+      for (let i = 0; i < cells.length; i++) {
+        const {r, c} = cells[i];
+        this.grid[r][c] = pieces[i];
+      }
+
+      if (this.findAllMatches().length === 0 && this.canMove()) {
+        ok = true;
+      }
+    }
+
+    if (!ok) return null;
+
+    const moves = [];
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        const id = this.grid[r][c];
+        if (id != null) {
+          moves.push({id, toR: r, toC: c});
+        }
+      }
+    }
+    return moves;
   }
 
   tapAt(r,c){
@@ -700,8 +911,29 @@ class RulesEngine{
     if(id1==null||id2==null)return null;
     this.grid[r1][c1]=id2;this.grid[r2][c2]=id1;                      // tentatively swap
     const min=this.def.rules.minGroupSize;
-    const g1=this.findGroup(r1,c1),g2=this.findGroup(r2,c2);
-    const ok1=g1.length>=min,ok2=g2.length>=min;
+    
+    let ok1 = false, ok2 = false;
+    let g1 = [], g2 = [];
+    if (this.matchShape === 'line') {
+      const allMatches = this.findAllMatches();
+      const matchSet = new Set(allMatches.map(cell => cell.r + ',' + cell.c));
+      ok1 = matchSet.has(r1 + ',' + c1);
+      ok2 = matchSet.has(r2 + ',' + c2);
+      if (ok1 || ok2) {
+        // Collect matches belonging to the swapped positions
+        const allSet = new Set();
+        g1 = allMatches.filter(cell => {
+          if (Math.abs(cell.r - r1) + Math.abs(cell.c - c1) <= 2) return true; // nearby associated runs
+          return false;
+        });
+      }
+    } else {
+      g1=this.findGroup(r1,c1);
+      g2=this.findGroup(r2,c2);
+      ok1=g1.length>=min;
+      ok2=g2.length>=min;
+    }
+
     if(ok1||ok2){                                                     // forms a match → commit
       const swapStep={kind:'swap',a:{id:id1,toR:r2,toC:c2},b:{id:id2,toR:r1,toC:c1}};
       const initial=[],seen=new Set();
@@ -759,7 +991,14 @@ class RulesEngine{
         if(!this.inBounds(nr,nc)||!this.mask[nr][nc]||this.grid[nr][nc]==null)continue;
         const a=this.grid[r][c],b=this.grid[nr][nc];
         this.grid[r][c]=b;this.grid[nr][nc]=a;
-        const ok=this.findGroup(r,c).length>=min||this.findGroup(nr,nc).length>=min;
+        
+        let ok;
+        if (this.matchShape === 'line') {
+          ok = this.findAllMatches().length > 0;
+        } else {
+          ok = this.findGroup(r,c).length>=min||this.findGroup(nr,nc).length>=min;
+        }
+        
         this.grid[r][c]=a;this.grid[nr][nc]=b;
         if(ok)return true;
       }
@@ -1183,7 +1422,7 @@ class View {
       posF = EASE.bounceOut(f);
     } else if (kind === 'rotate') {
       posF = EASE.cubicInOut(f);
-    } else if (kind === 'scroll') {
+    } else if (kind === 'scroll' || kind === 'shuffle') {
       posF = EASE.backOut(f);
     } else if (kind === 'collapse') {
       posF = EASE.cubicOut(f);
@@ -1465,7 +1704,7 @@ function generateSubFrames(startFrame, steps) {
       nextPlacements = current.placements.map(p => { const m=mv.get(p.id); return m?{...p,r:m.r,c:m.c}:p; });
     } else if (step.kind === 'swapReject') {  // rejected swap: board unchanged; bounce is purely visual
       nextPlacements = current.placements;
-    } else if (step.kind === 'settle' || step.kind === 'scroll') {
+    } else if (step.kind === 'settle' || step.kind === 'scroll' || step.kind === 'shuffle') {
       const moveMap = new Map(step.moves.map(m => [m.id, m]));
       nextPlacements = current.placements.map(p => {
         const mv = moveMap.get(p.id);
@@ -1513,7 +1752,12 @@ function timelineReset(seed){
       wrapMatch: !!engine.def.rules.wrapMatch,
       laneCollapse: engine.def.rules.laneCollapse !== false,
       gravity: engine.def.rules.gravity || 'down',
-      winType: engine.def.win.type || 'collectAllPrizes'
+      winType: engine.def.win.type || 'collectAllPrizes',
+      interaction: engine.def.rules.interaction || 'tapGroup',
+      matchShape: engine.def.rules.matchShape || 'connected',
+      refill: engine.def.rules.refill || 'none',
+      resolve: engine.def.rules.resolve || 'single',
+      swapAdjacency: engine.def.rules.swapAdjacency || 'vonNeumann'
     };
   }
   timeline.entries=[{
@@ -1630,7 +1874,12 @@ function frameToEditState(frame){
       wrapMatch: false,
       laneCollapse: true,
       gravity: 'down',
-      winType: 'collectAllPrizes'
+      winType: 'collectAllPrizes',
+      interaction: 'tapGroup',
+      matchShape: 'connected',
+      refill: 'none',
+      resolve: 'single',
+      swapAdjacency: 'vonNeumann'
     }
   };
 }
@@ -1640,8 +1889,8 @@ function nextEditId(s){
   return maxId+1;
 }
 function isMaskFullRectangle(mask, dims){
-  for(let r=0; r<dims.rows; r++){
-    for(let c=0; c<dims.cols; c++){
+  for(let r= 0; r<dims.rows; r++){
+    for(let c= 0; c<dims.cols; c++){
       if(!mask[r] || !mask[r][c]) return false;
     }
   }
@@ -1663,7 +1912,12 @@ function initEditState(){
         wrapMatch: !!engine.def.rules.wrapMatch,
         laneCollapse: engine.def.rules.laneCollapse !== false,
         gravity: engine.def.rules.gravity || 'down',
-        winType: engine.def.win.type || 'collectAllPrizes'
+        winType: engine.def.win.type || 'collectAllPrizes',
+        interaction: engine.def.rules.interaction || 'tapGroup',
+        matchShape: engine.def.rules.matchShape || 'connected',
+        refill: engine.def.rules.refill || 'none',
+        resolve: engine.def.rules.resolve || 'single',
+        swapAdjacency: engine.def.rules.swapAdjacency || 'vonNeumann'
       }
     };
     for(let r=0;r<engine.rows;r++)for(let c=0;c<engine.cols;c++){
@@ -1685,7 +1939,12 @@ function initEditState(){
         wrapMatch: false,
         laneCollapse: true,
         gravity: 'down',
-        winType: 'collectAllPrizes'
+        winType: 'collectAllPrizes',
+        interaction: 'tapGroup',
+        matchShape: 'connected',
+        refill: 'none',
+        resolve: 'single',
+        swapAdjacency: 'vonNeumann'
       }
     };
   }
@@ -1771,6 +2030,12 @@ function exitDesign(){
     engine.def.rules.laneCollapse = !!frame.meta.laneCollapse;
     engine.def.rules.gravity = frame.meta.gravity;
     engine.def.win.type = frame.meta.winType;
+    
+    engine.def.rules.interaction = frame.meta.interaction;
+    engine.def.rules.matchShape = frame.meta.matchShape;
+    engine.def.rules.refill = frame.meta.refill;
+    engine.def.rules.resolve = frame.meta.resolve;
+    engine.def.rules.swapAdjacency = frame.meta.swapAdjacency;
   }
 
   engine.restoreFromFrame(resolvedFrame, 0, 0, seed);
@@ -1800,17 +2065,25 @@ function refreshDesignUI(){
   byId('dz-undo').disabled = designIdx<=0;
   byId('dz-redo').disabled = designIdx>=editTimeline.entries.length-1;
   
-  // In-editor validity: holey mask invalidates scroll (neweditor §11.4)
   const isFull = isMaskFullRectangle(editState.mask, editState.dims);
   const validityEl = byId('dz-validity');
-  if(!isFull){
+  validityEl.textContent = "";
+  validityEl.style.color = "var(--signal)";
+  
+  if(!isFull && editState.meta && editState.meta.transforms && editState.meta.transforms.some(t => t.startsWith('scroll'))){
     validityEl.textContent = "⚠ Scroll disabled (holey mask)";
-    validityEl.style.color = "var(--signal)";
-  } else {
-    // Keep loaded success indicators unless overwritten by validation checks
-    if (validityEl.textContent !== "✓ Loaded successfully") {
-      validityEl.textContent = "";
+  } else if (editState.meta) {
+    if (editState.meta.refill === 'fromSource') {
+      if (editState.meta.gravity === 'none') {
+        validityEl.textContent = "⚠ Refill ignored when gravity is none";
+      } else if (editState.meta.laneCollapse) {
+        validityEl.textContent = "⚠ Refill & Collapse conflict (refill keeps board full)";
+      }
     }
+  }
+  
+  if (validityEl.textContent === "") {
+    validityEl.style.color = "var(--bad)";
   }
 }
 function finalizeLiveAnim(){ if(liveAnim.active){liveAnim.active=false;replay.T=liveAnim.targetT;} }
@@ -2092,7 +2365,12 @@ function exportDesignToJSON() {
       gravity: s.meta.gravity,
       laneCollapse: s.meta.laneCollapse,
       wrapMatch: !!s.meta.wrapMatch,
-      transforms: s.meta.transforms || transforms
+      transforms: s.meta.transforms || transforms,
+      interaction: s.meta.interaction || "tapGroup",
+      matchShape: s.meta.matchShape || "connected",
+      refill: s.meta.refill || "none",
+      resolve: s.meta.resolve || "single",
+      swapAdjacency: s.meta.swapAdjacency || "vonNeumann"
     },
     win: { type: s.meta.winType },
     lose: { type: "noValidMoves" }
@@ -2195,7 +2473,12 @@ function importDesignFromJSON(jsonText) {
       laneCollapse: rules.laneCollapse !== false,
       gravity: rules.gravity || 'down',
       winType: (data.win && data.win.type) || 'collectAllPrizes',
-      transforms: rules.transforms || (rules.laneCollapse !== false ? ['rotateCCW', 'rotateCW'] : ['scrollC-', 'scrollC+', 'scrollR-', 'scrollR+'])
+      transforms: rules.transforms || (rules.laneCollapse !== false ? ['rotateCCW', 'rotateCW'] : ['scrollC-', 'scrollC+', 'scrollR-', 'scrollR+']),
+      interaction: rules.interaction || 'tapGroup',
+      matchShape: rules.matchShape || 'connected',
+      refill: rules.refill || 'none',
+      resolve: rules.resolve || 'single',
+      swapAdjacency: rules.swapAdjacency || 'vonNeumann'
     };
 
     // Construct the fully compiled newState object
@@ -2735,6 +3018,13 @@ byId('dz-rules-toggle').addEventListener('click', () => {
   byId('rule-lane-collapse').checked = !!editState.meta.laneCollapse;
   byId('rule-gravity').value = editState.meta.gravity || 'down';
   byId('rule-win').value = editState.meta.winType || 'collectAllPrizes';
+  
+  byId('rule-interaction').value = editState.meta.interaction || 'tapGroup';
+  byId('rule-match-shape').value = editState.meta.matchShape || 'connected';
+  byId('rule-refill').value = editState.meta.refill || 'none';
+  byId('rule-resolve').value = editState.meta.resolve || 'single';
+  byId('rule-swap-adjacency').value = editState.meta.swapAdjacency || 'vonNeumann';
+  
   show('ov-rules');
 });
 byId('rule-cancel').addEventListener('click', () => {
@@ -2747,8 +3037,26 @@ byId('rule-save').addEventListener('click', () => {
     wrapMatch: byId('rule-wrap-match').checked,
     laneCollapse: byId('rule-lane-collapse').checked,
     gravity: byId('rule-gravity').value,
-    winType: byId('rule-win').value
+    winType: byId('rule-win').value,
+    interaction: byId('rule-interaction').value,
+    matchShape: byId('rule-match-shape').value,
+    refill: byId('rule-refill').value,
+    resolve: byId('rule-resolve').value,
+    swapAdjacency: byId('rule-swap-adjacency').value
   };
+
+  const validityEl = byId('dz-validity');
+  validityEl.textContent = "";
+  validityEl.style.color = "var(--signal)";
+  
+  if (newMeta.refill === 'fromSource') {
+    if (newMeta.gravity === 'none') {
+      validityEl.textContent = "⚠ Refill fromSource ignored when gravity is none";
+    } else if (newMeta.laneCollapse) {
+      validityEl.textContent = "⚠ Contradictory: refill fromSource keeps board full, laneCollapse won't trigger";
+    }
+  }
+
   const s = cloneEditState();
   s.meta = newMeta;
   view._defaultGravity = newMeta.gravity;
