@@ -1807,20 +1807,28 @@ const replay={active:false,playing:false,dir:1,T:0};
 const SEGMENT_MS=1120;
 
 // ── Normalized per-sub-step timing ──────────────────────────────────────────────────────────
-// Each animated sub-step (a clear, a settle, a spawn, a swap) takes the SAME wall-clock time at
-// 1x. An entry's total budget is therefore (its sub-step count) × STEP_MS — replacing the old
-// fixed-per-entry budget that was divided among however many sub-steps an action happened to
-// have. That old scheme made deep cascades blur (many sub-steps crammed into one fixed budget)
-// and made a "clear" run at different speeds depending on how many siblings shared its entry.
-// With a constant per-step duration, cascades read at a steady legible pace and a clear looks
-// identical whether it stands alone or sits inside a long chain. Tune this one number to taste.
-const STEP_MS=300;
-// Animated sub-step transitions in entry `i` (initial frame has none ⇒ clamp to ≥1 so it's never
-// a zero-length, divide-by-zero budget).
-function entryStepCount(i){
-  const e=timeline.entries[i];
-  return e ? Math.max(1, e.subFrames.length-1) : 1;
+// Each animated sub-step takes a constant wall-clock time at 1x, so an entry's total budget is
+// the SUM of its sub-steps' durations — replacing the old fixed-per-entry budget that was divided
+// among however many sub-steps an action happened to have. That old scheme made deep cascades
+// blur (many sub-steps crammed into one fixed budget) and made a "clear" run at different speeds
+// depending on how many siblings shared its entry. With constant per-step durations, cascades
+// read at a steady legible pace and a clear looks identical whether alone or inside a long chain.
+const STEP_MS=300;                  // base duration for a normal sub-step (clear/settle/spawn/swap)
+// Per-kind overrides. Board rotation reads better slower, so it runs at half speed (2× the base).
+const STEP_MS_BY_KIND={ rotate: STEP_MS*2 };
+function stepMs(step){ return (step && STEP_MS_BY_KIND[step.kind]) || STEP_MS; }
+// Per-sub-step durations of entry `i` (one entry = `subFrames.length-1` transitions; the i-th
+// transition is driven by the i-th non-'state' step, which lines up with entry.steps[i] since the
+// single 'state' step is always trailing — the same alignment renderInterpolated relies on).
+function entryDurations(entry){
+  if(!entry) return [STEP_MS];
+  const M=entry.subFrames.length-1;
+  if(M<=0) return [STEP_MS];
+  const out=[];
+  for(let i=0;i<M;i++) out.push(stepMs(entry.steps ? entry.steps[i] : null));
+  return out;
 }
+function entryTotalMs(i){ const d=entryDurations(timeline.entries[i]); return d.reduce((a,b)=>a+b,0)||STEP_MS; }
 
 // Shared Speed Multipliers (Including high-granularity slow motion)
 const speeds = [0.5, 1, 2, 4, 8];   // labels anchored at 1x = the default pace
@@ -1853,14 +1861,14 @@ function triggerLiveAnimation(fromT,toT){
   replay.T=fromT;
   view.clearHover();
   
-  // Budget = (sum of the spanned entries' sub-step counts) × STEP_MS, so every sub-step lasts
-  // STEP_MS at 1x no matter how many an action contains. For a normal single-entry action this is
-  // simply that entry's sub-step count × STEP_MS. Replay's branch in loop() mirrors this exactly,
-  // so a live move looks identical to scrubbing it. (`span` ≥ 1 entries; gameplay is always 1.)
+  // Budget = sum of the spanned entries' sub-step durations, so each sub-step lasts its own
+  // STEP_MS (rotate longer) regardless of how many an action contains. For a normal single-entry
+  // action this is just that entry's total. Replay's branch in loop() mirrors this exactly, so a
+  // live move looks identical to scrubbing it. (`span` ≥ 1 entries; gameplay is always 1.)
   const a=Math.min(fromT,toT), b=Math.max(fromT,toT);
-  let subSteps=0;
-  for(let k=a+1;k<=b;k++) subSteps+=entryStepCount(k);
-  liveAnim.duration=(Math.max(1,subSteps)*STEP_MS)/speedSetting.current;
+  let totalMs=0;
+  for(let k=a+1;k<=b;k++) totalMs+=entryTotalMs(k);
+  liveAnim.duration=Math.max(STEP_MS,totalMs)/speedSetting.current;
 }
 
 function maybeFork(){
@@ -2980,9 +2988,15 @@ function renderReplayFrame(){
     return;
   }
   
-  const lf = f * M;
-  const idx = Math.min(M - 1, Math.floor(lf));
-  const localF = lf - idx;
+  // Map the entry-fraction f (linear in wall-clock) onto sub-frames weighted by their durations,
+  // so a longer sub-step (e.g. rotate) occupies proportionally more of f — i.e. more screen time.
+  // With equal durations this reduces exactly to the old lf = f*M.
+  const durs = entryDurations(entry);
+  const total = durs.reduce((a,b)=>a+b,0) || 1;
+  let target = f * total;
+  let idx = 0;
+  while (idx < M - 1 && target >= durs[idx]) { target -= durs[idx]; idx++; }
+  const localF = durs[idx] > 0 ? Math.min(1, target / durs[idx]) : 0;
   
   const step = entry.steps ? entry.steps[idx] : null;
   view.renderInterpolated(subFrames[idx], subFrames[idx + 1], localF, step);
@@ -3189,11 +3203,11 @@ function loop(t){
     renderReplayFrame();
   } else if(replay.active){
     if(replay.playing){
-      // Pace the entry currently being traversed at (its sub-step count × STEP_MS)/speed, so each
-      // sub-step is STEP_MS/speed — identical to the live branch. The -1e-6 nudge picks the entry
-      // we're moving INTO when reversing across an exact integer boundary.
+      // Pace the entry being traversed by its total sub-step duration, so each sub-step lasts its
+      // own STEP_MS/speed (rotate longer) — identical to the live branch. The -1e-6 nudge picks
+      // the entry we're moving INTO when reversing across an exact integer boundary.
       const k=Math.floor(replay.T + (replay.dir<0?-1e-6:0));
-      const entryMs=entryStepCount(k+1)*STEP_MS;
+      const entryMs=entryTotalMs(k+1);
       replay.T+=replay.dir*speedSetting.current*(dt/entryMs);
       if(replay.T>=lastT()){replay.T=lastT();replay.playing=false;}
       else if(replay.T<=0){replay.T=0;replay.playing=false;}
