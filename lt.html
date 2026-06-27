@@ -525,14 +525,14 @@ class RulesEngine{
     //    swapAdjacency → swapAt/solvability (P4); comboMode/comboMax → scoring (P7).
     this.interaction   = this.def.rules.interaction    || 'tapGroup';
     this.matchShape    = this.def.rules.matchShape      || 'connected';
-    this.refillMode    = this.def.rules.refill          || 'none';
+    this.refillMode    = this._refillMode();            // endless ⇒ 'fromSource' (see _refillMode)
     this.resolveMode   = this.def.rules.resolve         || 'single';
     this.swapAdjacency = this.def.rules.swapAdjacency   || 'vonNeumann';
     this.comboMode     = this.def.rules.comboMultiplier || 'linear';
     this.comboMax      = this.def.rules.comboMax ?? Infinity;
     this.mask=grid(this.rows,this.cols,(r,c)=>this.def.layers.mask.grid[r][c]);
-    this.gravityField=this.def.layers.gravityZones
-      ?grid(this.rows,this.cols,(r,c)=>this.def.layers.gravityZones.grid[r][c]):null;
+    this.gravityField=this._normGravity(this.def.layers.gravityZones
+      ?grid(this.rows,this.cols,(r,c)=>this.def.layers.gravityZones.grid[r][c]):null);
     this.grid=grid(this.rows,this.cols,()=>null);
     this.pieceData=new Map();
     this.score=0;this.collected=0;this.totalPrizes=0;
@@ -590,6 +590,16 @@ class RulesEngine{
   palAt(r,c){const id=this.grid[r][c];return id==null?null:this.pieceData.get(id).palette;}
   prizeAt(r,c){const id=this.grid[r][c];return id==null?false:this.pieceData.get(id).prize;}
   effGravity(r,c){if(this.gravityField&&this.gravityField[r][c])return GRAVITY[this.gravityField[r][c]];return GRAVITY[this.gravityDir];}
+  // A gravityField with no actual direction in any cell is just scalar gravity everywhere. The
+  // editor materializes an all-null field for rendering, and serializing it yields an all-null
+  // gravityZones layer; left as a non-null grid it would trip per-cell-gravity guards (refill and
+  // lane-collapse both defer when a field is present). Collapse all-null/empty fields to null so
+  // those guards only fire on REAL per-cell gravity.
+  _normGravity(field){
+    if(!field)return null;
+    for(const row of field)for(const v of row)if(v)return field;
+    return null;
+  }
   inBounds(r,c){return r>=0&&r<this.rows&&c>=0&&c<this.cols;}
 
   findGroup(r,c){
@@ -764,8 +774,15 @@ class RulesEngine{
   //    are drawn from this.rng (same as reset), so refill replays deterministically. Returns a
   //    {kind:'spawn',spawned:[…]} step, or null when there's nothing to do or the config is out of
   //    scope (per-cell-gravity field, or gravity:none — both have no single source edge).
+  // Effective refill mode. ENDLESS modes always refill: a non-refilling endless game just shrinks
+  // to nothing, so "endless" with refill:none would be a contradiction. Read live from the def so
+  // it stays correct however the definition was assembled or restored (reset, JSON, frame-restore).
+  _refillMode(){
+    if(this.def.win && this.def.win.type==='endless') return 'fromSource';
+    return this.def.rules.refill || 'none';
+  }
   _refill(){
-    if(this.refillMode!=='fromSource')return null;
+    if(this._refillMode()!=='fromSource')return null;
     if(this.gravityField)return null;                  // per-cell-gravity refill deferred (scalar only)
     const g=GRAVITY[this.gravityDir];
     if(g.dr===0&&g.dc===0)return null;                 // gravity:none has no source edge
@@ -820,7 +837,7 @@ class RulesEngine{
       if(tick===1&&center)clearStep.center=center;           // keep tap's center metadata intact
       steps.push(clearStep);
       const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
-      if(this.refillMode==='fromSource'){const sp=this._refill();if(sp)steps.push(sp);}  // top up to full
+      if(this._refillMode()==='fromSource'){const sp=this._refill();if(sp)steps.push(sp);}  // top up to full
       if(this.resolveMode!=='cascade')break;
       matched=this.findAllMatches();                          // re-scan board-wide for chained matches
     }
@@ -1047,6 +1064,7 @@ class RulesEngine{
         return null;
       });
     }else{this.gravityField=null;}
+    this.gravityField=this._normGravity(this.gravityField);   // all-null field ⇒ scalar gravity (see _normGravity)
   }
 }
 
@@ -1770,7 +1788,7 @@ function timelineReset(seed){
       winType: engine.def.win.type || 'collectAllPrizes',
       interaction: engine.def.rules.interaction || 'tapGroup',
       matchShape: engine.def.rules.matchShape || 'connected',
-      refill: engine.def.rules.refill || 'none',
+      refill: engine._refillMode(),
       resolve: engine.def.rules.resolve || 'single',
       swapAdjacency: engine.def.rules.swapAdjacency || 'vonNeumann'
     };
@@ -1956,7 +1974,7 @@ function initEditState(){
         winType: engine.def.win.type || 'collectAllPrizes',
         interaction: engine.def.rules.interaction || 'tapGroup',
         matchShape: engine.def.rules.matchShape || 'connected',
-        refill: engine.def.rules.refill || 'none',
+        refill: engine._refillMode(),
         resolve: engine.def.rules.resolve || 'single',
         swapAdjacency: engine.def.rules.swapAdjacency || 'vonNeumann'
       }
@@ -2517,7 +2535,8 @@ function importDesignFromJSON(jsonText) {
       transforms: rules.transforms || (rules.laneCollapse !== false ? ['rotateCCW', 'rotateCW'] : ['scrollC-', 'scrollC+', 'scrollR-', 'scrollR+']),
       interaction: rules.interaction || 'tapGroup',
       matchShape: rules.matchShape || 'connected',
-      refill: rules.refill || 'none',
+      // Endless games always refill (see RulesEngine._refillMode); keep the imported meta honest.
+      refill: ((data.win && data.win.type)==='endless') ? 'fromSource' : (rules.refill || 'none'),
       resolve: rules.resolve || 'single',
       swapAdjacency: rules.swapAdjacency || 'vonNeumann'
     };
@@ -3072,11 +3091,22 @@ byId('dz-rules-toggle').addEventListener('click', () => {
   
   byId('rule-interaction').value = editState.meta.interaction || 'tapGroup';
   byId('rule-match-shape').value = editState.meta.matchShape || 'connected';
-  byId('rule-refill').value = editState.meta.refill || 'none';
+  // Endless modes always refill — show fromSource and lock the control so the rule is visible.
+  const _endless = (byId('rule-win').value === 'endless');
+  byId('rule-refill').value = _endless ? 'fromSource' : (editState.meta.refill || 'none');
+  byId('rule-refill').disabled = _endless;
+  byId('rule-refill').title = _endless ? 'Endless modes always refill' : '';
   byId('rule-resolve').value = editState.meta.resolve || 'single';
   byId('rule-swap-adjacency').value = editState.meta.swapAdjacency || 'vonNeumann';
   
   show('ov-rules');
+});
+// Picking Endless forces refill on (and locks it); leaving Endless re-enables the control.
+byId('rule-win').addEventListener('change', () => {
+  const endless = byId('rule-win').value === 'endless';
+  if (endless) byId('rule-refill').value = 'fromSource';
+  byId('rule-refill').disabled = endless;
+  byId('rule-refill').title = endless ? 'Endless modes always refill' : '';
 });
 byId('rule-cancel').addEventListener('click', () => {
   hide('ov-rules');
@@ -3096,11 +3126,17 @@ byId('rule-save').addEventListener('click', () => {
     swapAdjacency: byId('rule-swap-adjacency').value
   };
 
+  // Endless modes always refill (a non-refilling endless game just shrinks away). Enforce it here
+  // so the saved/exported rules are honest, matching RulesEngine._refillMode at runtime.
+  if (newMeta.winType === 'endless') newMeta.refill = 'fromSource';
+
   const validityEl = byId('dz-validity');
   validityEl.textContent = "";
   validityEl.style.color = "var(--signal)";
   
-  if (newMeta.refill === 'fromSource') {
+  if (newMeta.winType === 'endless' && byId('rule-refill').value !== 'fromSource') {
+    validityEl.textContent = "Endless mode always refills — refill set to fromSource";
+  } else if (newMeta.refill === 'fromSource') {
     if (newMeta.gravity === 'none') {
       validityEl.textContent = "⚠ Refill fromSource ignored when gravity is none";
     } else if (newMeta.laneCollapse) {
