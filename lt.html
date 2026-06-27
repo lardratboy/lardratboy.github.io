@@ -514,22 +514,27 @@ function grid(r,c,fn){return Array.from({length:r},(_,i)=>Array.from({length:c},
 
 class RulesEngine{
   constructor(def,rng){this.def=def;this.rng=rng;this._nextId=1;this.reset();}
-  reset(){
-    const L=this.def.lattice;
-    this.rows=L.rows;this.cols=L.cols;this.topology=L.topology||'plane';
-    this.gravityDir=this.def.rules.gravity||'down';
-    // ── Match-3 axes (freshdesign §16.1). Defaults reproduce classic tap-group play, so
-    //    any definition omitting these keys behaves exactly as before. Consumed by phase:
-    //    interaction → input/swapAt (P4); matchShape → findAllMatches (P2/P5);
-    //    refillMode → _resolve/refill (P3); resolveMode → _resolve cascade loop (P2);
-    //    swapAdjacency → swapAt/solvability (P4); comboMode/comboMax → scoring (P7).
-    this.interaction   = this.def.rules.interaction    || 'tapGroup';
+  // Derive the cached rule fields from the definition. Called by reset() AND after any live edit
+  // that mutates def.rules (e.g. Test Board applying the editor's meta) so these never go stale —
+  // the input dispatch reads engine.interaction, settle reads engine.gravityDir, etc. Without the
+  // post-edit re-sync, a definition swapped to swapAdjacent kept the old cached 'tapGroup' value.
+  _syncRules(){
+    this.gravityDir    = this.def.rules.gravity         || 'down';
+    // interaction → input/swapAt (P4); matchShape → findAllMatches (P2/P5);
+    // refillMode → _resolve/refill (P3); resolveMode → cascade loop (P2);
+    // swapAdjacency → swapAt/solvability (P4); comboMode/comboMax → scoring (P7).
+    this.interaction   = this.def.rules.interaction     || 'tapGroup';
     this.matchShape    = this.def.rules.matchShape      || 'connected';
     this.refillMode    = this._refillMode();            // endless ⇒ 'fromSource' (see _refillMode)
     this.resolveMode   = this.def.rules.resolve         || 'single';
     this.swapAdjacency = this.def.rules.swapAdjacency   || 'vonNeumann';
     this.comboMode     = this.def.rules.comboMultiplier || 'linear';
     this.comboMax      = this.def.rules.comboMax ?? Infinity;
+  }
+  reset(){
+    const L=this.def.lattice;
+    this.rows=L.rows;this.cols=L.cols;this.topology=L.topology||'plane';
+    this._syncRules();   // gravityDir + the match-3 axes, derived from def
     this.mask=grid(this.rows,this.cols,(r,c)=>this.def.layers.mask.grid[r][c]);
     this.gravityField=this._normGravity(this.def.layers.gravityZones
       ?grid(this.rows,this.cols,(r,c)=>this.def.layers.gravityZones.grid[r][c]):null);
@@ -2095,6 +2100,7 @@ function exitDesign(){
     engine.def.rules.refill = frame.meta.refill;
     engine.def.rules.resolve = frame.meta.resolve;
     engine.def.rules.swapAdjacency = frame.meta.swapAdjacency;
+    engine._syncRules();   // re-derive cached fields (interaction, swapAdjacency, …) from the updated def
   }
 
   engine.restoreFromFrame(resolvedFrame, 0, 0, seed);
