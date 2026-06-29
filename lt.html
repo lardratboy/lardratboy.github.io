@@ -392,6 +392,11 @@
             <option value="moore">Moore (8-way)</option>
           </select>
         </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span class="k" style="color: var(--muted);">Swap to Empty:</span>
+          <input type="checkbox" id="rule-swap-to-empty" style="accent-color: var(--signal);" title="Allow swapping a piece into an adjacent empty playable cell when the move forms a match. Only meaningful when Interaction is Swap Adjacent.">
+        </div>
         
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <span class="k" style="color: var(--muted);">Min Group Size:</span>
@@ -528,6 +533,11 @@ class RulesEngine{
     this.refillMode    = this._refillMode();            // endless ⇒ 'fromSource' (see _refillMode)
     this.resolveMode   = this.def.rules.resolve         || 'single';
     this.swapAdjacency = this.def.rules.swapAdjacency   || 'vonNeumann';
+    // swapToEmpty (default false): when interaction==='swapAdjacent', permit a piece to slide into
+    // an adjacent EMPTY playable cell if the relocated piece forms a match at the destination. The
+    // source cell becomes empty (this is a move, not a true swap). Liveness (hasValidSwap) also
+    // considers slide-into-empty moves so a board with empty playable cells can stay alive.
+    this.swapToEmpty   = !!this.def.rules.swapToEmpty;
     this.comboMode     = this.def.rules.comboMultiplier || 'linear';
     this.comboMax      = this.def.rules.comboMax ?? Infinity;
   }
@@ -927,34 +937,54 @@ class RulesEngine{
   //    crossing, then _resolve runs clear→settle→refill→cascade exactly as a tap does. Adjacency is
   //    enforced by the caller via isSwapAdjacent; this method still no-ops (null) on out-of-range,
   //    masked, or empty cells so it can never corrupt state.
+  //
+  //    swapToEmpty extension: when this.swapToEmpty is on, ONE side may be empty (mask=true,
+  //    grid=null). That's a slide-into-empty move: the lone piece relocates, the source becomes
+  //    empty, and the move is kept only if the relocated piece forms a match at its destination.
+  //    The step shapes use b.id=null to signal "no second piece" so the renderer can degrade
+  //    cleanly (no arc-around for swap, single-piece bounce for swapReject).
   swapAt(r1,c1,r2,c2){
     if(!this.inBounds(r1,c1)||!this.inBounds(r2,c2))return null;
     if(!this.mask[r1][c1]||!this.mask[r2][c2])return null;
     const id1=this.grid[r1][c1],id2=this.grid[r2][c2];
-    if(id1==null||id2==null)return null;
-    this.grid[r1][c1]=id2;this.grid[r2][c2]=id1;                      // tentatively swap
+    // Both empty is never meaningful. Both filled is the classic swap. One-filled-one-empty is the
+    // slide-into-empty case, only permitted when swapToEmpty is on.
+    if(id1==null && id2==null) return null;
+    const slide = (id1==null || id2==null);
+    if(slide && !this.swapToEmpty) return null;
+
+    this.grid[r1][c1]=id2;this.grid[r2][c2]=id1;                      // tentatively swap (works for slide too: null↔piece)
     const min=this.def.rules.minGroupSize;
-    
-    let ok1 = false, ok2 = false;
-    let g1 = [], g2 = [];
+
+    // For the match test, only count cells that hold a piece after the (tentative) move. A slide
+    // leaves one of the two cells empty — that cell can't be in a group, so we just skip it.
+    const checkCells=[];
+    if(this.grid[r1][c1]!=null) checkCells.push({r:r1,c:c1});
+    if(this.grid[r2][c2]!=null) checkCells.push({r:r2,c:c2});
+
+    let ok1=false, ok2=false;
+    let g1=[], g2=[];
     if (this.matchShape === 'line') {
       const allMatches = this.findAllMatches();
       const matchSet = new Set(allMatches.map(cell => cell.r + ',' + cell.c));
-      ok1 = matchSet.has(r1 + ',' + c1);
-      ok2 = matchSet.has(r2 + ',' + c2);
+      if(this.grid[r1][c1]!=null) ok1 = matchSet.has(r1 + ',' + c1);
+      if(this.grid[r2][c2]!=null) ok2 = matchSet.has(r2 + ',' + c2);
       if (ok1 || ok2) {
         if (ok1) g1 = allMatches;   // seed cascade with the whole current match set
         if (ok2) g2 = allMatches;   // (seen-set below dedupes overlap; cascade re-scan handles later ticks)
       }
     } else {
-      g1=this.findGroup(r1,c1);
-      g2=this.findGroup(r2,c2);
-      ok1=g1.length>=min;
-      ok2=g2.length>=min;
+      if(this.grid[r1][c1]!=null){ g1=this.findGroup(r1,c1); ok1=g1.length>=min; }
+      if(this.grid[r2][c2]!=null){ g2=this.findGroup(r2,c2); ok2=g2.length>=min; }
     }
 
     if(ok1||ok2){                                                     // forms a match → commit
-      const swapStep={kind:'swap',a:{id:id1,toR:r2,toC:c2},b:{id:id2,toR:r1,toC:c1}};
+      // For a slide, the "empty side" of the step carries id:null so the View can recognize the
+      // one-piece variant and skip the two-piece arc-around. The position interpolation falls out
+      // of frame A→B placements automatically (the relocated piece appears at its new cell in B).
+      const swapStep={kind:'swap',
+        a:{id:id1,toR:r2,toC:c2},
+        b:{id:id2,toR:r1,toC:c1}};
       const initial=[],seen=new Set();
       for(const g of [ok1?g1:[],ok2?g2:[]])for(const cell of g){
         const k=cell.r+','+cell.c;if(!seen.has(k)){seen.add(k);initial.push(cell);}}
@@ -999,25 +1029,39 @@ class RulesEngine{
   }
   // Swap-game liveness: does ANY adjacent swap produce a match? This — not "a group already exists"
   // — is the correct "valid move" test for swap games, whose resting board is deliberately match-free.
+  // When swapToEmpty is on, slide-into-empty moves (piece ↔ adjacent empty playable cell) also count
+  // as candidate moves, so a board with empty cells stays alive as long as one slide forms a match.
   hasValidSwap(){
     const offs=ADJACENCY[this.swapAdjacency]||ADJACENCY.vonNeumann;
     const min=this.def.rules.minGroupSize;
     for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){
-      if(this.grid[r][c]==null||!this.mask[r][c])continue;
+      if(this.grid[r][c]==null||!this.mask[r][c])continue;             // we iterate from each *piece*
       for(const [dr,dc] of offs){
         const nr=r+dr,nc=c+dc;
-        if(nr<r||(nr===r&&nc<c))continue;                  // test each unordered pair once
-        if(!this.inBounds(nr,nc)||!this.mask[nr][nc]||this.grid[nr][nc]==null)continue;
+        if(!this.inBounds(nr,nc)||!this.mask[nr][nc])continue;
+        const neighborPiece = this.grid[nr][nc]!=null;
+        // Piece↔piece pair: test each unordered pair once (the (nr<r||(nr===r&&nc<c)) guard).
+        // Piece↔empty (slide): NEVER symmetric — the empty side has no piece to seed iteration from
+        // — so we test it from the piece side regardless of (r,c) ordering.
+        if(neighborPiece){
+          if(nr<r||(nr===r&&nc<c))continue;
+        }else{
+          if(!this.swapToEmpty)continue;
+        }
         const a=this.grid[r][c],b=this.grid[nr][nc];
         this.grid[r][c]=b;this.grid[nr][nc]=a;
-        
+
         let ok;
         if (this.matchShape === 'line') {
           ok = this.findAllMatches().length > 0;
         } else {
-          ok = this.findGroup(r,c).length>=min||this.findGroup(nr,nc).length>=min;
+          // For a slide, one side is empty after the swap; only test the filled side. findGroup on
+          // an empty cell would return [] and skew nothing, but skipping is cheaper and clearer.
+          const okR  = (this.grid[r][c]   !=null) && this.findGroup(r,c).length>=min;
+          const okNR = (this.grid[nr][nc] !=null) && this.findGroup(nr,nc).length>=min;
+          ok = okR || okNR;
         }
-        
+
         this.grid[r][c]=a;this.grid[nr][nc]=b;
         if(ok)return true;
       }
@@ -1451,8 +1495,14 @@ class View {
     // the source edge (model i) rather than popping in place.
     const spawnFrom = (step && step.kind === 'spawn') ? new Map(step.spawned.map(s => [s.id, s])) : null;
     // Rejected swap: each of the two pieces nudges toward the OTHER's cell and returns (no net move).
-    const rejectMap = (step && step.kind === 'swapReject')
-      ? new Map([[step.a.id,{r:step.b.r,c:step.b.c}],[step.b.id,{r:step.a.r,c:step.a.c}]]) : null;
+    // For a slide-into-empty reject (swapToEmpty), b.id is null — the single piece bounces toward
+    // the empty target cell and back, with no second piece to animate.
+    let rejectMap = null;
+    if (step && step.kind === 'swapReject') {
+      rejectMap = new Map();
+      if (step.a && step.a.id != null) rejectMap.set(step.a.id, {r:step.b.r, c:step.b.c});
+      if (step.b && step.b.id != null) rejectMap.set(step.b.id, {r:step.a.r, c:step.a.c});
+    }
     
     // Choose specific easing functions depending on the transformation kind
     let posF = f;
@@ -1495,9 +1545,11 @@ class View {
           m.rotation.z = posF * Math.PI * 2;
         } else if (kind === 'scroll') {
           m.rotation.z = Math.sin(f * Math.PI) * 0.4;
-        } else if (kind === 'swap' && step && (id === step.a.id || id === step.b.id)) {
+        } else if (kind === 'swap' && step && step.a && step.b && step.a.id != null && step.b.id != null && (id === step.a.id || id === step.b.id)) {
           // Arc the two swapping pieces around each other (opposite perpendicular offsets) so they
-          // don't slide straight through one another.
+          // don't slide straight through one another. Skipped for slide-into-empty (b.id null):
+          // a single piece sliding into an empty cell needs no dodge — the straight cubicInOut path
+          // reads correctly on its own.
           const sign = (id === step.a.id) ? 1 : -1;
           const dx = wb.x - wa.x, dy = wb.y - wa.y, len = Math.hypot(dx, dy) || 1;
           const arc = Math.sin(f * Math.PI) * SPACING * 0.33 * sign;
@@ -1795,7 +1847,8 @@ function timelineReset(seed){
       matchShape: engine.def.rules.matchShape || 'connected',
       refill: engine._refillMode(),
       resolve: engine.def.rules.resolve || 'single',
-      swapAdjacency: engine.def.rules.swapAdjacency || 'vonNeumann'
+      swapAdjacency: engine.def.rules.swapAdjacency || 'vonNeumann',
+      swapToEmpty: !!engine.def.rules.swapToEmpty
     };
   }
   timeline.entries=[{
@@ -1943,7 +1996,8 @@ function frameToEditState(frame){
       matchShape: 'connected',
       refill: 'none',
       resolve: 'single',
-      swapAdjacency: 'vonNeumann'
+      swapAdjacency: 'vonNeumann',
+      swapToEmpty: false
     }
   };
 }
@@ -1981,7 +2035,8 @@ function initEditState(){
         matchShape: engine.def.rules.matchShape || 'connected',
         refill: engine._refillMode(),
         resolve: engine.def.rules.resolve || 'single',
-        swapAdjacency: engine.def.rules.swapAdjacency || 'vonNeumann'
+        swapAdjacency: engine.def.rules.swapAdjacency || 'vonNeumann',
+        swapToEmpty: !!engine.def.rules.swapToEmpty
       }
     };
     for(let r=0;r<engine.rows;r++)for(let c=0;c<engine.cols;c++){
@@ -2008,7 +2063,8 @@ function initEditState(){
         matchShape: 'connected',
         refill: 'none',
         resolve: 'single',
-        swapAdjacency: 'vonNeumann'
+        swapAdjacency: 'vonNeumann',
+        swapToEmpty: false
       }
     };
   }
@@ -2100,6 +2156,7 @@ function exitDesign(){
     engine.def.rules.refill = frame.meta.refill;
     engine.def.rules.resolve = frame.meta.resolve;
     engine.def.rules.swapAdjacency = frame.meta.swapAdjacency;
+    engine.def.rules.swapToEmpty = !!frame.meta.swapToEmpty;
     engine._syncRules();   // re-derive cached fields (interaction, swapAdjacency, …) from the updated def
   }
 
@@ -2435,7 +2492,8 @@ function exportDesignToJSON() {
       matchShape: s.meta.matchShape || "connected",
       refill: s.meta.refill || "none",
       resolve: s.meta.resolve || "single",
-      swapAdjacency: s.meta.swapAdjacency || "vonNeumann"
+      swapAdjacency: s.meta.swapAdjacency || "vonNeumann",
+      swapToEmpty: !!s.meta.swapToEmpty
     },
     win: { type: s.meta.winType },
     lose: { type: "noValidMoves" }
@@ -2544,7 +2602,8 @@ function importDesignFromJSON(jsonText) {
       // Endless games always refill (see RulesEngine._refillMode); keep the imported meta honest.
       refill: ((data.win && data.win.type)==='endless') ? 'fromSource' : (rules.refill || 'none'),
       resolve: rules.resolve || 'single',
-      swapAdjacency: rules.swapAdjacency || 'vonNeumann'
+      swapAdjacency: rules.swapAdjacency || 'vonNeumann',
+      swapToEmpty: !!rules.swapToEmpty
     };
 
     // Construct the fully compiled newState object
@@ -2916,7 +2975,16 @@ stage.addEventListener('pointerdown',e=>{
     return;
   }
   if(liveAnim.active)return;
-  const cell=view.pick(engine,e.clientX,e.clientY);if(!cell)return;
+  // For swap games we need to be able to TARGET an empty playable cell once a piece is selected
+  // (swapToEmpty). view.pick() only hits piece meshes, so when a swap is in progress with
+  // swapToEmpty on, fall back to view.pickCell which projects onto the board plane and works on
+  // empty cells too. Outside that case we keep view.pick — it's the precise piece-picker.
+  let cell=view.pick(engine,e.clientX,e.clientY);
+  if(!cell && engine.interaction==='swapAdjacent' && engine.swapToEmpty && swapSel!==null){
+    const c2=view.pickCell(e.clientX,e.clientY,{rows:engine.rows,cols:engine.cols});
+    if(c2 && engine.mask[c2.r][c2.c] && engine.grid[c2.r][c2.c]==null) cell=c2;
+  }
+  if(!cell)return;
   if(replay.active) maybeFork();
   if(engine.interaction==='swapAdjacent'){          // two-pick: select a cell, then a neighbour to swap
     if(swapSel===null){
@@ -2928,7 +2996,13 @@ stage.addEventListener('pointerdown',e=>{
       const steps=engine.swapAt(a.r,a.c,cell.r,cell.c);
       if(steps) runSteps(steps,{type:'swap',args:{r1:a.r,c1:a.c,r2:cell.r,c2:cell.c}});
     } else {
-      swapSel={r:cell.r,c:cell.c}; view.setSelection(engine,cell.r,cell.c);  // non-adjacent → reselect
+      // Non-adjacent: re-select only if the new cell holds a piece. (An empty cell can't be the
+      // *source* of a swap, so don't make it the new selection — that would strand the player.)
+      if(engine.grid[cell.r][cell.c]!=null){
+        swapSel={r:cell.r,c:cell.c}; view.setSelection(engine,cell.r,cell.c);
+      } else {
+        swapSel=null; view.clearSelection();
+      }
     }
     return;
   }
@@ -3104,6 +3178,7 @@ byId('dz-rules-toggle').addEventListener('click', () => {
   byId('rule-refill').title = _endless ? 'Endless modes always refill' : '';
   byId('rule-resolve').value = editState.meta.resolve || 'single';
   byId('rule-swap-adjacency').value = editState.meta.swapAdjacency || 'vonNeumann';
+  byId('rule-swap-to-empty').checked = !!editState.meta.swapToEmpty;
   
   show('ov-rules');
 });
@@ -3129,7 +3204,8 @@ byId('rule-save').addEventListener('click', () => {
     matchShape: byId('rule-match-shape').value,
     refill: byId('rule-refill').value,
     resolve: byId('rule-resolve').value,
-    swapAdjacency: byId('rule-swap-adjacency').value
+    swapAdjacency: byId('rule-swap-adjacency').value,
+    swapToEmpty: byId('rule-swap-to-empty').checked
   };
 
   // Endless modes always refill (a non-refilling endless game just shrinks away). Enforce it here
