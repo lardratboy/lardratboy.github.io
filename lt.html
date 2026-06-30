@@ -1451,30 +1451,59 @@ class View {
           box.position.set(x,y,-0.25);box.userData={baseOp:0.65,layer:'rand'};
           this.scene.add(box);objs.push(box);
         }
-        // Cell markers (marked.md §8): wireframe square outline hugging the cell footprint at
-        // z=-0.27 so it sits above mask chrome but below pieces. Uncollected = solid green-cool
-        // outline. Collected = dim, half-alpha ghost — still readable as "this cell counted" but
-        // visually quieter. Both states use a slightly inset square so the line reads as enclosed
-        // by the cell rather than touching its neighbours.
+        // Cell markers (marked.md §8): a 3D wireframe cube — twelve gray tubes for the edges plus
+        // eight small gray cubes at the vertices, sized to fit inside the cell with the piece nested
+        // in the middle. The cage reads as a structure anchored to the lattice cell, not to anything
+        // mobile, which is the whole point of the substrate-marker binding. The flat outline shipped
+        // first looked like just another grid line; this one has presence.
+        // Uncollected = full gray with crisp edges and visible vertex caps. Collected = dim, half-
+        // alpha ghost — same cage shape, quieter, so a player can see "this one's already done."
         if(markers && markers[r] && markers[r][c]!==null){
-          const inset=s*0.86, collected=markers[r][c]===true;
-          const geom=new THREE.EdgesGeometry(new THREE.PlaneGeometry(inset,inset));
-          const op=collected?0.30:0.85, color=collected?0x3a7048:0x5bd97a;
-          const ring=new THREE.LineSegments(geom,
-            new THREE.LineBasicMaterial({color,transparent:true,opacity:op,linewidth:2}));
-          ring.position.set(x,y,-0.27);
-          ring.userData={baseOp:op,layer:'markers'};
-          this.scene.add(ring);objs.push(ring);
-          // Inner accent square — gives uncollected markers a slightly heavier read without needing
-          // motion. On collected markers we skip the inner ring so the ghost stays minimal.
-          if(!collected){
-            const innerInset=s*0.66;
-            const inner=new THREE.LineSegments(
-              new THREE.EdgesGeometry(new THREE.PlaneGeometry(innerInset,innerInset)),
-              new THREE.LineBasicMaterial({color:0x5bd97a,transparent:true,opacity:0.35,linewidth:1}));
-            inner.position.set(x,y,-0.27);
-            inner.userData={baseOp:0.35,layer:'markers'};
-            this.scene.add(inner);objs.push(inner);
+          const collected = markers[r][c] === true;
+          const h = s * 0.42;                                       // cube half-extent (each edge ≈ 0.84·s)
+          const tubeR = s * 0.030;                                  // tube radius (visible without crowding the piece)
+          const capSize = s * 0.10;                                 // small box at each cube vertex
+          const color = collected ? 0x6c6c74 : 0xb4b4bc;            // ghost dimmer + slightly cooler
+          const op    = collected ? 0.40    : 0.92;
+          // Shared geometries and material per marker — eight caps and twelve tubes all reference
+          // the same buffers. Disposal is idempotent in THREE.js, so the existing per-object dispose
+          // loop in _ensureMarkerSlot still works; we just allocate twenty meshes' worth of one
+          // material and three geometries instead of twenty of each.
+          const capGeom = new THREE.BoxGeometry(capSize, capSize, capSize);
+          const tubeLen = 2*h;
+          const tubeGeom = new THREE.CylinderGeometry(tubeR, tubeR, tubeLen, 6);
+          const mat = new THREE.MeshBasicMaterial({color, transparent:true, opacity:op});
+
+          // 8 vertex caps at every (±h, ±h, ±h) corner
+          for(let xi=0; xi<2; xi++) for(let yi=0; yi<2; yi++) for(let zi=0; zi<2; zi++){
+            const cap = new THREE.Mesh(capGeom, mat);
+            cap.position.set(x + (xi?h:-h), y + (yi?h:-h), zi?h:-h);
+            cap.userData = {baseOp:op, layer:'markers'};
+            this.scene.add(cap); objs.push(cap);
+          }
+          // 12 edges: 4 along each axis. Default CylinderGeometry points along Y; rotate for X / Z.
+          // X-axis edges run between (-h,y0,z0) and (+h,y0,z0)
+          for(let yi=0; yi<2; yi++) for(let zi=0; zi<2; zi++){
+            const tube = new THREE.Mesh(tubeGeom, mat);
+            tube.position.set(x, y + (yi?h:-h), zi?h:-h);
+            tube.rotation.z = Math.PI/2;
+            tube.userData = {baseOp:op, layer:'markers'};
+            this.scene.add(tube); objs.push(tube);
+          }
+          // Y-axis edges (no rotation — cylinder is Y-aligned by default)
+          for(let xi=0; xi<2; xi++) for(let zi=0; zi<2; zi++){
+            const tube = new THREE.Mesh(tubeGeom, mat);
+            tube.position.set(x + (xi?h:-h), y, zi?h:-h);
+            tube.userData = {baseOp:op, layer:'markers'};
+            this.scene.add(tube); objs.push(tube);
+          }
+          // Z-axis edges
+          for(let xi=0; xi<2; xi++) for(let yi=0; yi<2; yi++){
+            const tube = new THREE.Mesh(tubeGeom, mat);
+            tube.position.set(x + (xi?h:-h), y + (yi?h:-h), 0);
+            tube.rotation.x = Math.PI/2;
+            tube.userData = {baseOp:op, layer:'markers'};
+            this.scene.add(tube); objs.push(tube);
           }
         }
       }
