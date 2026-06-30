@@ -1867,6 +1867,18 @@ function createSeededRNG(initialSeed) {
   };
 }
 
+// ── Marker frame convention ─────────────────────────────────────────────────────────────────
+// Frames carry markers as a tri-state grid: null = no marker, false = uncollected goal, true =
+// collected goal. The engine produces this directly. The editor stores a simpler boolean grid
+// (true = goal, false = no goal — there's no "collected" concept at design time) and converts
+// here, at the boundary where editor data becomes a frame the View will read. Without this
+// conversion the View would see editor `false` as "uncollected goal" and decorate every empty
+// cell with the bright marker chrome — the bug the on/off-reversed editor display exposed.
+function markersEditorToFrame(em){
+  if(!em) return null;
+  return em.map(row => row.map(v => v ? false : null));
+}
+
 function captureFrame(eng){
   const placements=[];
   for(let r=0;r<eng.rows;r++)for(let c=0;c<eng.cols;c++){
@@ -1944,8 +1956,10 @@ function generateSubFrames(startFrame, steps) {
       nextGravity = step.gravityField;
       nextRandom = step.randomFill;
       // Editor edits carry their own markers grid; if absent (older edit not yet aware of markers)
-      // fall back to the current snapshot so timelines stay coherent.
-      if (step.markers !== undefined) nextMarkers = step.markers;
+      // fall back to the current snapshot so timelines stay coherent. The editor stores a boolean
+      // grid (true = goal); convert to the frame's tri-state convention so the View renders the
+      // right cells with the right chrome.
+      if (step.markers !== undefined) nextMarkers = markersEditorToFrame(step.markers);
     }
     
     current = { dims: nextDims, mask: nextMask, placements: nextPlacements, gravityField: nextGravity, randomFill: nextRandom, markers: nextMarkers, meta: nextMeta };
@@ -2104,7 +2118,8 @@ function captureEditFrame(){
     mask:editState.mask.map(row=>row.slice()),
     gravityField:editState.gravityField ? editState.gravityField.map(row=>row.slice()) : grid(editState.dims.rows, editState.dims.cols, () => null),
     randomFill:editState.randomFill ? editState.randomFill.map(row=>row.slice()) : grid(editState.dims.rows, editState.dims.cols, () => false),
-    markers:editState.markers ? editState.markers.map(row=>row.slice()) : grid(editState.dims.rows, editState.dims.cols, () => false),
+    // Editor markers are boolean; the frame system wants tri-state (see markersEditorToFrame).
+    markers: markersEditorToFrame(editState.markers) || grid(editState.dims.rows, editState.dims.cols, () => null),
     placements:editState.placements.map(p=>({...p})),
     meta:{...editState.meta}
   };
@@ -2115,10 +2130,11 @@ function frameToEditState(frame){
     mask:frame.mask.map(row=>row.slice()),
     gravityField:frame.gravityField ? frame.gravityField.map(row=>row.slice()) : grid(frame.dims.rows, frame.dims.cols, () => null),
     randomFill:frame.randomFill ? frame.randomFill.map(row=>row.slice()) : grid(frame.dims.rows, frame.dims.cols, () => false),
-    // Editor markers grid (boolean: true = marker, false = none). At runtime the engine uses
-    // a tri-state grid (null/false/true with the third state being 'collected'), but in the
-    // editor there's no collection — only "is this a goal cell?" — so a boolean is the right shape.
-    markers:frame.markers ? frame.markers.map(row=>row.slice().map(v => v===true||v===false ? !!v : false)) : grid(frame.dims.rows, frame.dims.cols, () => false),
+    // Frame → editor: a frame's tri-state markers (null/false/true) collapse to a boolean
+    // "is this a design-time goal cell?" — both engine false (uncollected) and engine true
+    // (collected) are goals at the design level; only null means "not a goal." The previous
+    // `!!v` mishandled this and mapped uncollected goals back to non-goals.
+    markers:frame.markers ? frame.markers.map(row=>row.map(v => v != null)) : grid(frame.dims.rows, frame.dims.cols, () => false),
     placements:frame.placements.map(p=>({...p})),
     meta:frame.meta ? {...frame.meta} : {
       adjacency: 'moore',
@@ -2956,7 +2972,8 @@ function frameFromState(s){
   return {dims:{...s.dims}, mask:s.mask.map(r=>r.slice()),
     gravityField:s.gravityField?s.gravityField.map(r=>r.slice()):null,
     randomFill:s.randomFill?s.randomFill.map(r=>r.slice()):null,
-    markers:s.markers?s.markers.map(r=>r.slice()):null,
+    // Editor → frame: convert boolean markers to tri-state so the View renders correctly.
+    markers: markersEditorToFrame(s.markers),
     placements:s.placements.map(p=>({...p})), meta:{...s.meta}};
 }
 function computeStrokeOp(r,c){ // toggle brushes resolve their target from the first cell, then paint uniformly
