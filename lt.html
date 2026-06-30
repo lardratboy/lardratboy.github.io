@@ -157,6 +157,7 @@
     <div class="scoreboard">
       <div class="stat"><div class="v" id="score">0</div><div class="l">Score</div></div>
       <div class="stat prizes"><div class="v" id="prizes">0</div><div class="l">Prizes left</div></div>
+      <div class="stat markers"><div class="v" id="markers">0</div><div class="l">Markers left</div></div>
     </div>
   </div>
 
@@ -266,6 +267,7 @@
         <button class="tbtn" id="br-erase" title="Erase piece" style="width:100%;">⌫</button>
         <button class="tbtn" id="br-prize" title="Prize — toggle on the piece" style="width:100%;">◎</button>
         <button class="tbtn" id="br-rand" title="Random Fill — toggle '?' cell intent" style="width:100%;">?</button>
+        <button class="tbtn" id="br-marker" title="Marker — toggle a cell-anchored goal (collect by emptying the cell)" style="width:100%;">▢</button>
       </div>
     </div>
 
@@ -310,6 +312,13 @@
           <div style="display:flex; gap:4px;">
             <button class="txt" onclick="editModifyLayer('clear', 'prizes')" style="height:22px; padding:0 8px; font-size:9.5px; border-radius:4px;">Clear</button>
             <button class="txt" onclick="editModifyLayer('fill', 'prizes')" style="height:22px; padding:0 8px; font-size:9.5px; border-radius:4px;">Fill</button>
+          </div>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; background:#161d29; padding:4px 8px; border:1px solid var(--hair); border-radius:6px;">
+          <span style="color:var(--muted-2);">Markers</span>
+          <div style="display:flex; gap:4px;">
+            <button class="txt" onclick="editModifyLayer('clear', 'markers')" style="height:22px; padding:0 8px; font-size:9.5px; border-radius:4px;">Clear</button>
+            <button class="txt" onclick="editModifyLayer('fill', 'markers')" style="height:22px; padding:0 8px; font-size:9.5px; border-radius:4px;">Rand</button>
           </div>
         </div>
         <div style="display:flex; justify-content:space-between; align-items:center; background:#161d29; padding:4px 8px; border:1px solid var(--hair); border-radius:6px;">
@@ -444,6 +453,7 @@
           <span class="k" style="color: var(--muted);">Win Goal:</span>
           <select id="rule-win" class="gselect">
             <option value="collectAllPrizes">Collect All Prizes</option>
+            <option value="collectAllMarkers">Collect All Markers</option>
             <option value="clearAll">Clear All Pieces</option>
             <option value="endless">Endless (no win)</option>
           </select>
@@ -464,13 +474,14 @@
     <button class="lt-btn on" data-layer="walls">Walls</button>
     <button class="lt-btn on" data-layer="gravity">Gravity</button>
     <button class="lt-btn on" data-layer="prizes">Prizes</button>
+    <button class="lt-btn on" data-layer="markers">Markers</button>
     <button class="lt-btn on" data-layer="grid">Grid</button>
     <button class="lt-btn on" data-layer="rand">Rand</button>
   </div>
 
   <div class="overlay" id="ov-win"><div class="card win">
-    <div class="tag">win · collectAllPrizes</div><h2>Cleared</h2>
-    <p>Every prize collected. The win condition came straight from the definition.</p>
+    <div class="tag" id="ov-win-tag">win · collectAllPrizes</div><h2>Cleared</h2>
+    <p id="ov-win-body">Every prize collected. The win condition came straight from the definition.</p>
     <button class="txt primary" id="win-again">Play again</button>
     <button class="txt" id="win-review">Review session</button>
   </div></div>
@@ -554,7 +565,20 @@ class RulesEngine{
     const fill=this.def.layers.pieces.grid;
     const rfill=this.def.layers.randomFill?this.def.layers.randomFill.grid:null;
     const prizeCells=new Set((this.def.layers.prizes?.cells||[]).map(([r,c])=>r+','+c));
-    
+
+    // ── Markers (marked.md): substrate-anchored collectibles, stored as a per-cell grid where
+    //    null = not a marker, false = uncollected, true = collected. Storing per-cell rather
+    //    than as a sparse list lets the existing _apply() transform routine remap them for free
+    //    alongside the mask and gravityField — markers ride D4 rotates and collapses; scroll
+    //    deliberately leaves them put (world-frame, §3 of marked.md).
+    const markerCells=new Set((this.def.layers.markers?.cells||[]).map(([r,c])=>r+','+c));
+    this.markers=grid(this.rows,this.cols,(r,c)=>markerCells.has(r+','+c)?false:null);
+    this.totalMarkers=0; this.collectedMarkers=0;
+    for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){
+      if(this.markers[r][c]===false && this.mask[r][c]) this.totalMarkers++;
+      else if(this.markers[r][c]!==null && !this.mask[r][c]) this.markers[r][c]=null;   // strip markers off non-playable cells defensively
+    }
+
     const preventInitialMatches = (this.interaction === 'swapAdjacent');
 
     for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){
@@ -676,12 +700,20 @@ class RulesEngine{
     const nm=grid(nR,nC,(r,c)=>{const[or,oc]=src(r,c);return this.mask[or][oc];});
     const ng=grid(nR,nC,(r,c)=>{const[or,oc]=src(r,c);return this.grid[or][oc];});
     const nf=this.gravityField?grid(nR,nC,(r,c)=>{const[or,oc]=src(r,c);return this.gravityField[or][oc];}):null;
+    // Markers are substrate-anchored — same frame as the mask under D4 rotates and lane collapses
+    // (board-frame; reorient with the board). Scroll is the exception and stays untouched there;
+    // see scroll() for that side. The `collected` state rides with the cell, naturally.
+    const nMk=this.markers?grid(nR,nC,(r,c)=>{const[or,oc]=src(r,c);return this.markers[or][oc];}):null;
     this.rows=nR;this.cols=nC;this.mask=nm;this.grid=ng;this.gravityField=nf;
+    if(nMk)this.markers=nMk;
   }
   _snapshotMoves(){const m=[];for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){const id=this.grid[r][c];if(id!=null)m.push({id,toR:r,toC:c});}return m;}
   maskCopy(){return this.mask.map(row=>row.slice());}
+  // Snapshot of the markers grid — emitted on steps that reshape the lattice (rotate, collapse,
+  // markersCollected) so the timeline carries the post-step marker state and replay/scrub work.
+  markersCopy(){return this.markers?this.markers.map(row=>row.slice()):null;}
   // a collapse step also carries the post-collapse mask, since collapse reshapes the wall pattern
-  _collapseStep(){const cm=this.collapse();return cm?{kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm,mask:this.maskCopy()}:null;}
+  _collapseStep(){const cm=this.collapse();return cm?{kind:'collapse',dims:{rows:this.rows,cols:this.cols},moves:cm,mask:this.maskCopy(),markers:this.markersCopy()}:null;}
 
   // ── Board-wide match detection (freshdesign §16.1 — the cascade re-scan). Returns a flat,
   //    de-duplicated list of {r,c} cells belonging to any clearable group, scanning the WHOLE
@@ -856,11 +888,18 @@ class RulesEngine{
       if(this.resolveMode!=='cascade')break;
       matched=this.findAllMatches();                          // re-scan board-wide for chained matches
     }
+    // ── Marker collection (marked.md §2): scan at the END of _resolve, after the cascade loop has
+    //    fully terminated and any final refill has settled. Mid-cascade exposure does NOT count —
+    //    a marker only collects on a *resting* board. Runs BEFORE _collapseStep so a marker on a
+    //    lane that's about to vanish gets collected (and then the now-marker-free lane collapses
+    //    normally). Step is omitted when nothing was collected, to keep timelines uncluttered.
+    const mc=this._collectMarkers(); if(mc) steps.push(mc);
     const cs=this._collapseStep();if(cs)steps.push(cs);
 
     // Auto-shuffle deadlock resolution (Decision 8)
     if (this.interaction === 'swapAdjacent' && !this.canMove()) {
       const isWon = (this.def.win.type==='collectAllPrizes'&&this.totalPrizes>0&&this.collected>=this.totalPrizes) ||
+                    (this.def.win.type==='collectAllMarkers'&&this.totalMarkers>0&&this.collectedMarkers>=this.totalMarkers) ||
                     (this.def.win.type==='clearAll'&&this.pieceData.size===0);
       if (!isWon) {
         const shuffleMoves = this.shufflePieces();
@@ -871,6 +910,24 @@ class RulesEngine{
     }
 
     return steps;
+  }
+
+  // Marker collection scan (called at end of _resolve and after every other settle-producing
+  // path — setGravity, rotateBoard, scrollBoard). For each uncollected marker whose cell is
+  // currently empty, flip it to collected, bump the counter, and emit a {kind:'markersCollected'}
+  // step carrying the cells (for view animation) and a fresh markers snapshot (for replay/scrub).
+  _collectMarkers(){
+    if(!this.markers) return null;
+    const cells=[];
+    for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){
+      if(this.markers[r][c]===false && this.grid[r][c]==null && this.mask[r][c]){
+        this.markers[r][c]=true; this.collectedMarkers++;
+        cells.push({r,c});
+        this.score+=50;                                       // mirror prize-collection score boost
+      }
+    }
+    if(!cells.length) return null;
+    return {kind:'markersCollected', cells, markers:this.markersCopy()};
   }
 
   shufflePieces(){
@@ -998,11 +1055,13 @@ class RulesEngine{
   }
   setGravity(dir){this.gravityDir=dir;const steps=[];
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
+    const mc=this._collectMarkers();if(mc)steps.push(mc);
     const cs=this._collapseStep();if(cs)steps.push(cs);
     steps.push({kind:'state',...this.checkState()});return steps;}
   rotateBoard(dir){const rm=this.rotate(dir);
-    const steps=[{kind:'rotate',dir,dims:{rows:this.rows,cols:this.cols},moves:rm,mask:this.maskCopy()}];
+    const steps=[{kind:'rotate',dir,dims:{rows:this.rows,cols:this.cols},moves:rm,mask:this.maskCopy(),markers:this.markersCopy()}];
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
+    const mc=this._collectMarkers();if(mc)steps.push(mc);
     const cs=this._collapseStep();if(cs)steps.push(cs);
     steps.push({kind:'state',...this.checkState()});return steps;}
   scroll(spec){
@@ -1013,11 +1072,15 @@ class RulesEngine{
     for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){const id=this.grid[r][c];if(id==null)continue;
       ng[(r+dr+this.rows)%this.rows][(c+dc+this.cols)%this.cols]=id;}
     this.grid=ng; return this._snapshotMoves();
+    // Note: scroll deliberately does NOT touch this.markers — markers are world-frame under scroll
+    // (marked.md §3, freshdesign §5.1). Pieces scroll past stationary markers, which is the whole
+    // point: empty cells can be walked under markers to expose them.
   }
   scrollBoard(spec){
     const sm0=this.scroll(spec); if(!sm0)return[{kind:'state',...this.checkState()}];
     const steps=[{kind:'scroll',moves:sm0}];
     const sm=this.settle();if(sm.length)steps.push({kind:'settle',moves:sm});
+    const mc=this._collectMarkers();if(mc)steps.push(mc);
     const cs=this._collapseStep();if(cs)steps.push(cs);
     steps.push({kind:'state',...this.checkState()});return steps;}
   hasValidMoves(){for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++)
@@ -1073,6 +1136,7 @@ class RulesEngine{
   checkState(){
     const w=this.def.win.type;
     if(w==='collectAllPrizes'&&this.totalPrizes>0&&this.collected>=this.totalPrizes)return{status:'won'};
+    if(w==='collectAllMarkers'&&this.totalMarkers>0&&this.collectedMarkers>=this.totalMarkers)return{status:'won'};
     if(w==='clearAll'&&this.pieceData.size===0)return{status:'won'};
     if(w==='endless')return{status:'playing'};            // never wins; placed before the no-moves check so it never auto-loses → truly endless
     if(!this.canMove())return{status:'lost'};
@@ -1114,6 +1178,22 @@ class RulesEngine{
       });
     }else{this.gravityField=null;}
     this.gravityField=this._normGravity(this.gravityField);   // all-null field ⇒ scalar gravity (see _normGravity)
+    // Restore markers. Replay/scrub frames carry the full grid (collected flags and all); fresh
+    // restores (e.g. Test Board) fall back to building from def.layers.markers.cells. The
+    // collected counter is derived rather than stored so we don't drift if a frame is hand-edited.
+    if(frame.markers){
+      this.markers=frame.markers.map(row=>row.slice());
+    }else if(this.def.layers.markers){
+      const mc=new Set((this.def.layers.markers.cells||[]).map(([r,c])=>r+','+c));
+      this.markers=grid(this.rows,this.cols,(r,c)=>mc.has(r+','+c)?false:null);
+    }else{
+      this.markers=grid(this.rows,this.cols,()=>null);
+    }
+    this.totalMarkers=0; this.collectedMarkers=0;
+    for(let r=0;r<this.rows;r++)for(let c=0;c<this.cols;c++){
+      if(this.markers[r][c]===false){ this.totalMarkers++; }
+      else if(this.markers[r][c]===true){ this.totalMarkers++; this.collectedMarkers++; }
+    }
   }
 }
 
@@ -1129,7 +1209,8 @@ function baseDef(name,rows,cols,prizeCells,over){
       mask:{binding:'substrate',grid:grid(rows,cols,()=>true)},
       pieces:{binding:'mobile',grid:grid(rows,cols,()=>null)},
       randomFill:{binding:'field',grid:grid(rows,cols,()=>true)},
-      prizes:{binding:'rider',cells:prizeCells||[]}
+      prizes:{binding:'rider',cells:prizeCells||[]},
+      markers:{binding:'marker',cells:[]}
     },
     rules:{matchAdjacency:'moore',matchBy:'type',minGroupSize:2,gravity:'down',laneCollapse:true,
            transforms:['rotateCCW','rotateCW']},
@@ -1264,7 +1345,7 @@ class View {
     this._mk={a:{sig:null,objs:[]},b:{sig:null,objs:[]}};  // two marker slots (cross-fade on mask/dims/gravity change)
     this._designGrid=false;                                 // when true, also outline playable cells (design)
     this._defaultGravity='down';                            // current board default (effective-gravity legibility)
-    this.layerVisible={pieces:true,walls:true,grid:true,gravity:true,rand:true,prizes:true};
+    this.layerVisible={pieces:true,walls:true,grid:true,gravity:true,rand:true,prizes:true,markers:true};
     this.tubeConnections=[];
     this.dims={rows:0,cols:0};
     this.hoverGroup=new Set();
@@ -1302,7 +1383,7 @@ class View {
   // ── mask markers, frame-driven ──────────────────────────────────────────────
   // Markers (floor tiles) now follow the timeline like pieces: built from a frame's mask,
   // cross-faded when the mask/dims/gravityField change.
-  _maskSig(mask,dims,gravityField,randomFill){
+  _maskSig(mask,dims,gravityField,randomFill,markers){
     const g=this._designGrid?'D':'P';
     let s=g+(this._defaultGravity||'x')+':';
     if(!mask)return s+dims.rows+'x'+dims.cols+':full';
@@ -1316,9 +1397,16 @@ class View {
       s+='|R:';
       for(const row of randomFill)for(const v of row)s+=v?'1':'0';
     }
+    if(markers){
+      // Three states per cell (null/uncollected/collected) become three signature chars so
+      // marking, collecting, and clearing each force a chrome rebuild — collected markers render
+      // as a ghost outline rather than the live outline, so they're a real visual change.
+      s+='|M:';
+      for(const row of markers)for(const v of row)s+=v===null?'.':v?'c':'m';
+    }
     return s;
   }
-  _buildMarkerSet(mask,dims,gravityField,randomFill){
+  _buildMarkerSet(mask,dims,gravityField,randomFill,markers){
     const objs=[],s=SPACING*0.72;
     const eff=(r,c)=>{ // effective gravity at a playable cell: override, else board default
       const o=gravityField&&gravityField[r]&&gravityField[r][c];
@@ -1363,6 +1451,32 @@ class View {
           box.position.set(x,y,-0.25);box.userData={baseOp:0.65,layer:'rand'};
           this.scene.add(box);objs.push(box);
         }
+        // Cell markers (marked.md §8): wireframe square outline hugging the cell footprint at
+        // z=-0.27 so it sits above mask chrome but below pieces. Uncollected = solid green-cool
+        // outline. Collected = dim, half-alpha ghost — still readable as "this cell counted" but
+        // visually quieter. Both states use a slightly inset square so the line reads as enclosed
+        // by the cell rather than touching its neighbours.
+        if(markers && markers[r] && markers[r][c]!==null){
+          const inset=s*0.86, collected=markers[r][c]===true;
+          const geom=new THREE.EdgesGeometry(new THREE.PlaneGeometry(inset,inset));
+          const op=collected?0.30:0.85, color=collected?0x3a7048:0x5bd97a;
+          const ring=new THREE.LineSegments(geom,
+            new THREE.LineBasicMaterial({color,transparent:true,opacity:op,linewidth:2}));
+          ring.position.set(x,y,-0.27);
+          ring.userData={baseOp:op,layer:'markers'};
+          this.scene.add(ring);objs.push(ring);
+          // Inner accent square — gives uncollected markers a slightly heavier read without needing
+          // motion. On collected markers we skip the inner ring so the ghost stays minimal.
+          if(!collected){
+            const innerInset=s*0.66;
+            const inner=new THREE.LineSegments(
+              new THREE.EdgesGeometry(new THREE.PlaneGeometry(innerInset,innerInset)),
+              new THREE.LineBasicMaterial({color:0x5bd97a,transparent:true,opacity:0.35,linewidth:1}));
+            inner.position.set(x,y,-0.27);
+            inner.userData={baseOp:0.35,layer:'markers'};
+            this.scene.add(inner);objs.push(inner);
+          }
+        }
       }
     }
     // emergent-wall edges: a line where two playable neighbours disagree on effective direction (freshdesign §8.4)
@@ -1387,11 +1501,11 @@ class View {
     }
     return objs;
   }
-  _ensureMarkerSlot(slot,mask,dims,gravityField,randomFill){
-    const sig=this._maskSig(mask,dims,gravityField,randomFill);
+  _ensureMarkerSlot(slot,mask,dims,gravityField,randomFill,markers){
+    const sig=this._maskSig(mask,dims,gravityField,randomFill,markers);
     if(slot.sig===sig)return slot.objs;
     for(const o of slot.objs){this.scene.remove(o);o.geometry.dispose();o.material.dispose();}
-    slot.objs=this._buildMarkerSet(mask,dims,gravityField,randomFill);slot.sig=sig;
+    slot.objs=this._buildMarkerSet(mask,dims,gravityField,randomFill,markers);slot.sig=sig;
     return slot.objs;
   }
   _setMarkerOpacity(objs,k){
@@ -1402,14 +1516,14 @@ class View {
     }
   }
   renderMaskMarkers(frameA,frameB,f){
-    const sigA=this._maskSig(frameA.mask,frameA.dims,frameA.gravityField,frameA.randomFill);
-    const sigB=this._maskSig(frameB.mask,frameB.dims,frameB.gravityField,frameB.randomFill);
+    const sigA=this._maskSig(frameA.mask,frameA.dims,frameA.gravityField,frameA.randomFill,frameA.markers);
+    const sigB=this._maskSig(frameB.mask,frameB.dims,frameB.gravityField,frameB.randomFill,frameB.markers);
     if(sigA===sigB){                              // unchanged across this sub-step → one static set
-      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.a,frameA.mask,frameA.dims,frameA.gravityField,frameA.randomFill),1);
-      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.b,null,frameB.dims,null,null),0);
-    }else{                                        // changed (rotate/collapse/edit) → dissolve A→B
-      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.a,frameA.mask,frameA.dims,frameA.gravityField,frameA.randomFill),1-f);
-      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.b,frameB.mask,frameB.dims,frameB.gravityField,frameB.randomFill),f);
+      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.a,frameA.mask,frameA.dims,frameA.gravityField,frameA.randomFill,frameA.markers),1);
+      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.b,null,frameB.dims,null,null,null),0);
+    }else{                                        // changed (rotate/collapse/edit/markersCollected) → dissolve A→B
+      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.a,frameA.mask,frameA.dims,frameA.gravityField,frameA.randomFill,frameA.markers),1-f);
+      this._setMarkerOpacity(this._ensureMarkerSlot(this._mk.b,frameB.mask,frameB.dims,frameB.gravityField,frameB.randomFill,frameB.markers),f);
     }
   }
   makeMesh(id,pd){
@@ -1764,6 +1878,7 @@ function captureFrame(eng){
     dims:{rows:eng.rows,cols:eng.cols},
     mask:eng.mask.map(row=>row.slice()),
     gravityField:eng.gravityField ? eng.gravityField.map(row=>row.slice()) : null,
+    markers:eng.markers ? eng.markers.map(row=>row.slice()) : null,
     placements
   };
 }
@@ -1780,6 +1895,10 @@ function generateSubFrames(startFrame, steps) {
     let nextPlacements = [];
     let nextGravity = current.gravityField;
     let nextRandom = current.randomFill;
+    // Markers ride the lattice (board-frame under rotate/collapse, world-frame under scroll), so
+    // they only change on rotate, collapse, markersCollected, and editor edits. Every other step
+    // (clear, settle, swap, swapReject, spawn, scroll, shuffle) leaves them untouched.
+    let nextMarkers = current.markers;
     let nextMeta = step.meta || current.meta || null;
     
     if (step.kind === 'clear') {
@@ -1805,20 +1924,31 @@ function generateSubFrames(startFrame, steps) {
       nextMask = step.mask || current.mask;   // rotate/collapse carry the reshaped wall pattern
       nextGravity = step.gravityField || current.gravityField;
       nextRandom = step.randomFill || current.randomFill;
+      // Rotate and collapse carry the remapped markers snapshot — they're a substrate-anchored
+      // layer just like the mask, so they ride the same remap routine.
+      if (step.markers !== undefined) nextMarkers = step.markers;
       const moveMap = new Map(step.moves.map(m => [m.id, m]));
       nextPlacements = current.placements.map(p => {
         const mv = moveMap.get(p.id);
         return mv ? { ...p, r: mv.toR, c: mv.toC } : p;
       });
+    } else if (step.kind === 'markersCollected') {
+      // markersCollected only updates the markers grid (flipping uncollected→collected). Placements
+      // and dims unchanged; pieces don't move because a settle has already happened before this step.
+      nextMarkers = step.markers || current.markers;
+      nextPlacements = current.placements;
     } else if (step.kind === 'resize' || step.kind === 'edit') {  // editor: adopt new lattice/mask/placements
       nextDims = { ...step.dims };
       nextMask = step.mask;
       nextPlacements = step.placements;
       nextGravity = step.gravityField;
       nextRandom = step.randomFill;
+      // Editor edits carry their own markers grid; if absent (older edit not yet aware of markers)
+      // fall back to the current snapshot so timelines stay coherent.
+      if (step.markers !== undefined) nextMarkers = step.markers;
     }
     
-    current = { dims: nextDims, mask: nextMask, placements: nextPlacements, gravityField: nextGravity, randomFill: nextRandom, meta: nextMeta };
+    current = { dims: nextDims, mask: nextMask, placements: nextPlacements, gravityField: nextGravity, randomFill: nextRandom, markers: nextMarkers, meta: nextMeta };
     frames.push(current);
   }
   return frames;
@@ -1974,6 +2104,7 @@ function captureEditFrame(){
     mask:editState.mask.map(row=>row.slice()),
     gravityField:editState.gravityField ? editState.gravityField.map(row=>row.slice()) : grid(editState.dims.rows, editState.dims.cols, () => null),
     randomFill:editState.randomFill ? editState.randomFill.map(row=>row.slice()) : grid(editState.dims.rows, editState.dims.cols, () => false),
+    markers:editState.markers ? editState.markers.map(row=>row.slice()) : grid(editState.dims.rows, editState.dims.cols, () => false),
     placements:editState.placements.map(p=>({...p})),
     meta:{...editState.meta}
   };
@@ -1984,6 +2115,10 @@ function frameToEditState(frame){
     mask:frame.mask.map(row=>row.slice()),
     gravityField:frame.gravityField ? frame.gravityField.map(row=>row.slice()) : grid(frame.dims.rows, frame.dims.cols, () => null),
     randomFill:frame.randomFill ? frame.randomFill.map(row=>row.slice()) : grid(frame.dims.rows, frame.dims.cols, () => false),
+    // Editor markers grid (boolean: true = marker, false = none). At runtime the engine uses
+    // a tri-state grid (null/false/true with the third state being 'collected'), but in the
+    // editor there's no collection — only "is this a goal cell?" — so a boolean is the right shape.
+    markers:frame.markers ? frame.markers.map(row=>row.slice().map(v => v===true||v===false ? !!v : false)) : grid(frame.dims.rows, frame.dims.cols, () => false),
     placements:frame.placements.map(p=>({...p})),
     meta:frame.meta ? {...frame.meta} : {
       adjacency: 'moore',
@@ -2023,6 +2158,10 @@ function initEditState(){
       mask:engine.mask.map(row=>row.slice()),
       gravityField:engine.gravityField ? engine.gravityField.map(row=>row.slice()) : grid(engine.rows, engine.cols, () => null),
       randomFill: engine.def.layers.randomFill ? engine.def.layers.randomFill.grid.map(row=>row.slice()) : grid(engine.rows, engine.cols, () => false),
+      // Read markers off the engine's runtime grid — even an in-progress game lets us re-enter
+      // design mode with the currently-uncollected markers intact (collected ones are dropped
+      // since they aren't goals anymore; the editor's grid is boolean "is this a goal cell").
+      markers: engine.markers ? engine.markers.map(row=>row.slice().map(v=>v===false||v===true)) : grid(engine.rows, engine.cols, () => false),
       placements:[],
       meta:{
         adjacency: engine.def.rules.matchAdjacency || 'moore',
@@ -2051,6 +2190,7 @@ function initEditState(){
       mask:fullMask(8,8),
       gravityField:grid(8,8,()=>null),
       randomFill:grid(8,8,()=>false),
+      markers:grid(8,8,()=>false),
       placements:[],
       meta:{
         adjacency: 'moore',
@@ -2115,8 +2255,25 @@ function exitDesign(){
     dims: { ...frame.dims },
     mask: frame.mask.map(row=>row.slice()),
     gravityField: frame.gravityField ? frame.gravityField.map(row=>row.slice()) : null,
+    // Convert the editor's boolean markers grid (true/false) to the engine's tri-state runtime
+    // grid (null/false/true). Editor "true" = "this cell is a goal" maps to engine "false" =
+    // "uncollected goal"; editor "false" maps to engine "null" = "no marker". Collected state
+    // doesn't survive returning to the editor — every Test Board run starts fresh.
+    markers: frame.markers
+      ? frame.markers.map((row,r)=>row.map((v,c)=>(v && frame.mask[r][c]) ? false : null))
+      : null,
     placements: frame.placements.map(p=>({...p}))
   };
+  // Also keep the def's markers layer in sync so a hypothetical re-init from the def (rather
+  // than from the frame) would see the same goals. The layer is a sparse [[r,c],...] list.
+  if (frame.markers) {
+    const cells = [];
+    for (let r=0; r<frame.dims.rows; r++) for (let c=0; c<frame.dims.cols; c++) {
+      if (frame.markers[r][c] && frame.mask[r][c]) cells.push([r,c]);
+    }
+    if (!engine.def.layers.markers) engine.def.layers.markers = { binding: 'marker' };
+    engine.def.layers.markers.cells = cells;
+  }
   
   // Resolve '?' cells into concrete placements based on Test seed
   const tempRNG = createSeededRNG(seed);
@@ -2191,7 +2348,24 @@ function refreshDesignUI(){
   const validityEl = byId('dz-validity');
   validityEl.textContent = "";
   validityEl.style.color = "var(--signal)";
-  
+
+  // Count markers, and partition them into "lives on a piece-or-randomFill cell" (collectable
+  // through normal play) vs. "lives on an empty non-randomFill cell" (auto-collected at game
+  // start — almost certainly not what the designer meant). marked.md §7 lists this exact
+  // distinction as a warn, not a hard disallow.
+  let markerCount=0, autoCollectMarkers=0;
+  if(editState.markers){
+    const placedAt = new Set(editState.placements.map(p=>p.r+','+p.c));
+    for(let r=0; r<editState.dims.rows; r++)for(let c=0; c<editState.dims.cols; c++){
+      if(!editState.markers[r][c]) continue;
+      if(!editState.mask[r][c]) continue;                              // already filtered elsewhere
+      markerCount++;
+      const hasPiece = placedAt.has(r+','+c);
+      const hasFill  = editState.randomFill && editState.randomFill[r][c];
+      if(!hasPiece && !hasFill) autoCollectMarkers++;
+    }
+  }
+
   if(!isFull && editState.meta && editState.meta.transforms && editState.meta.transforms.some(t => t.startsWith('scroll'))){
     validityEl.textContent = "⚠ Scroll disabled (holey mask)";
   } else if (editState.meta) {
@@ -2200,7 +2374,18 @@ function refreshDesignUI(){
         validityEl.textContent = "⚠ Refill ignored when gravity is none";
       } else if (editState.meta.laneCollapse) {
         validityEl.textContent = "⚠ Refill & Collapse conflict (refill keeps board full)";
+      } else if (markerCount > 0) {
+        validityEl.textContent = "⚠ Markers seldom collectable under fromSource refill";
       }
+    }
+    // Marker-specific warnings, layered after the higher-priority rule conflicts so the most
+    // structural issue wins the single slot. Worth eventually moving to a stacked warnings list
+    // (§12 "matrix is a deliverable"), but one-at-a-time matches the current panel's footprint.
+    if (validityEl.textContent === "" && autoCollectMarkers > 0) {
+      validityEl.textContent = `⚠ ${autoCollectMarkers} marker${autoCollectMarkers>1?'s':''} on empty cell${autoCollectMarkers>1?'s':''} (auto-collected at start)`;
+    }
+    if (validityEl.textContent === "" && editState.meta.winType === 'collectAllMarkers' && markerCount === 0) {
+      validityEl.textContent = "⚠ Win is collectAllMarkers but no markers placed";
     }
   }
   
@@ -2229,6 +2414,7 @@ function cloneEditState(){
     mask:editState.mask.map(r=>r.slice()),
     gravityField:editState.gravityField ? editState.gravityField.map(r=>r.slice()) : grid(editState.dims.rows, editState.dims.cols, () => null),
     randomFill:editState.randomFill ? editState.randomFill.map(r=>r.slice()) : grid(editState.dims.rows, editState.dims.cols, () => false),
+    markers:editState.markers ? editState.markers.map(r=>r.slice()) : grid(editState.dims.rows, editState.dims.cols, () => false),
     placements:editState.placements.map(p=>({...p})),
     meta:{...editState.meta}
   };
@@ -2240,7 +2426,7 @@ function editMaskToggle(r,c){
     s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c));   // a wall can't hold a piece
     s.randomFill[r][c]=false;
   }
-  commitEdit({type:on?'mask·on':'mask·off'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,meta:{...s.meta}},s);
+  commitEdit({type:on?'mask·on':'mask·off'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,markers:s.markers,meta:{...s.meta}},s);
 }
 function editPaintPiece(r,c,pal){
   const s=cloneEditState();
@@ -2249,24 +2435,36 @@ function editPaintPiece(r,c,pal){
   s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c));
   const id = nextEditId(s);
   s.placements.push({id,r,c,palette:pal,prize:false});
-  commitEdit({type:'piece·'+pal},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,meta:{...s.meta}},s);
+  commitEdit({type:'piece·'+pal},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,markers:s.markers,meta:{...s.meta}},s);
 }
 function editErase(r,c){
   if(!placementAt(editState,r,c) && !editState.randomFill[r][c])return; // nothing to erase
   const s=cloneEditState();
   s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c));
   s.randomFill[r][c]=false;
-  commitEdit({type:'erase'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,meta:{...s.meta}},s);
+  commitEdit({type:'erase'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,markers:s.markers,meta:{...s.meta}},s);
 }
 function editTogglePrize(r,c){
   if(!placementAt(editState,r,c)){console.log('[design] prize needs a piece beneath it (riders, freshdesign §5)');return;}
   const s=cloneEditState(); const p=placementAt(s,r,c); p.prize=!p.prize;
-  commitEdit({type:p.prize?'prize·on':'prize·off'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,meta:{...s.meta}},s);
+  commitEdit({type:p.prize?'prize·on':'prize·off'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,markers:s.markers,meta:{...s.meta}},s);
+}
+// Markers (marked.md): toggle a cell-anchored goal. Unlike prizes (riders), a marker doesn't need
+// a piece beneath it — it's anchored to the lattice cell. We DO require the cell be playable
+// (mask=true), because a marker on a wall could never be uncovered and would be degenerate.
+// The validation matrix in marked.md §7 covers the softer warning case (marker on a cell that's
+// empty AND not randomFill at game start = "auto-collected at start"); that's a designer-time
+// warning, not a hard refusal.
+function editToggleMarker(r,c){
+  if(!editState.markers){console.log('[design] markers grid missing — initEditState bug?');return;}
+  if(!editState.mask[r][c]){console.log('[design] marker needs a playable cell (substrate, marked.md §7)');return;}
+  const s=cloneEditState(); s.markers[r][c]=!s.markers[r][c];
+  commitEdit({type:s.markers[r][c]?'marker·on':'marker·off'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,markers:s.markers,meta:{...s.meta}},s);
 }
 function editPaintGravity(r,c,dir){
   const s=cloneEditState();
   s.gravityField[r][c]=dir;
-  commitEdit({type:dir?`grav·${dir}`:'grav·inherit'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,meta:{...s.meta}},s);
+  commitEdit({type:dir?`grav·${dir}`:'grav·inherit'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,markers:s.markers,meta:{...s.meta}},s);
 }
 function editToggleRandomFill(r,c){
   const s=cloneEditState(); const on=!s.randomFill[r][c]; s.randomFill[r][c]=on;
@@ -2274,7 +2472,7 @@ function editToggleRandomFill(r,c){
     s.mask[r][c]=true;
     s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c)); // random intent overrides concrete piece
   }
-  commitEdit({type:on?'rand·on':'rand·off'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,meta:{...s.meta}},s);
+  commitEdit({type:on?'rand·on':'rand·off'},{kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,markers:s.markers,meta:{...s.meta}},s);
 }
 
 // Procedurally populate pieces onto active masks
@@ -2358,10 +2556,38 @@ function editModifyLayer(action, layer){
       }
     }
   }
+  else if(layer === 'markers'){
+    // 'Clear' wipes every marker; 'Rand' sprinkles a modest number of markers across playable
+    // cells. The count scales with board size (same shape as editFillPrizes) so a small board
+    // doesn't drown in goals; floor at 1 so 'Rand' always does something visible.
+    if(s.markers){
+      if(action === 'clear'){
+        for(let r=0; r<s.dims.rows; r++)for(let c=0; c<s.dims.cols; c++) s.markers[r][c] = false;
+      } else {
+        // Count playable cells, pick ~1 per 14 (mirroring editFillPrizes's density). Build a
+        // shuffled candidate list of playable-cell coordinates and pick the first N.
+        const candidates=[];
+        for(let r=0; r<s.dims.rows; r++)for(let c=0; c<s.dims.cols; c++){
+          if(s.mask[r][c]) candidates.push([r,c]);
+        }
+        for(let r=0; r<s.dims.rows; r++)for(let c=0; c<s.dims.cols; c++) s.markers[r][c]=false;
+        const target=Math.max(1, Math.min(10, Math.floor(candidates.length/14)));
+        // Fisher-Yates partial shuffle
+        for(let i=candidates.length-1; i>0 && i>=candidates.length-target; i--){
+          const j=Math.floor(tempRNG.next()*(i+1));
+          const tmp=candidates[i]; candidates[i]=candidates[j]; candidates[j]=tmp;
+        }
+        for(let i=0; i<Math.min(target, candidates.length); i++){
+          const [r,c]=candidates[candidates.length-1-i];
+          s.markers[r][c]=true;
+        }
+      }
+    }
+  }
   
   commitEdit(
     {type:`layer·${action}·${layer}`},
-    {kind:'edit', dims:{...s.dims}, mask:s.mask, placements:s.placements, gravityField:s.gravityField, randomFill:s.randomFill, meta:{...s.meta}},
+    {kind:'edit', dims:{...s.dims}, mask:s.mask, placements:s.placements, gravityField:s.gravityField, randomFill:s.randomFill, markers:s.markers, meta:{...s.meta}},
     s
   );
 }
@@ -2388,10 +2614,18 @@ function editApplyTemplate(templateKey){
   if(s.randomFill){
     for(let r=0; r<s.dims.rows; r++)for(let c=0; c<s.dims.cols; c++) s.randomFill[r][c] = false;
   }
+  // The new template's mask may have walls where the old design had markers; strip those rather
+  // than leave dangling goal-cells on non-playable squares (defensive: the engine would refuse
+  // them at load, but resetting here keeps the editor's view consistent with what'll get saved).
+  if(s.markers){
+    for(let r=0; r<s.dims.rows; r++)for(let c=0; c<s.dims.cols; c++){
+      if(!s.mask[r][c]) s.markers[r][c]=false;
+    }
+  }
   
   commitEdit(
     {type:`template·${templateKey}`},
-    {kind:'edit', dims:{...s.dims}, mask:s.mask, placements:s.placements, gravityField:s.gravityField, randomFill:s.randomFill, meta:{...s.meta}},
+    {kind:'edit', dims:{...s.dims}, mask:s.mask, placements:s.placements, gravityField:s.gravityField, randomFill:s.randomFill, markers:s.markers, meta:{...s.meta}},
     s
   );
 }
@@ -2430,7 +2664,7 @@ function editBake(){
   if(bakedCount>0){
     commitEdit(
       {type:`bake·${bakedCount}`},
-      {kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,meta:{...s.meta}},
+      {kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,markers:s.markers,meta:{...s.meta}},
       s
     );
   }
@@ -2449,6 +2683,14 @@ function exportDesignToJSON() {
     piecesGrid[p.r][p.c] = p.palette;
     if (p.prize) {
       prizeCells.push([p.r, p.c]);
+    }
+  }
+  // Markers: sparse [[r,c],...] list, mirroring the prize layer shape — the format the engine
+  // reads at load time. Skip cells whose mask was nuked between paint and export (defensive).
+  const markerCells = [];
+  if (s.markers) {
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      if (s.markers[r][c] && s.mask[r][c]) markerCells.push([r, c]);
     }
   }
 
@@ -2474,6 +2716,7 @@ function exportDesignToJSON() {
       pieces: { binding: "mobile", grid: piecesGrid },
       randomFill: { binding: "field", grid: s.randomFill ? s.randomFill.map(r => r.slice()) : Array.from({length: rows}, () => Array(cols).fill(false)) },
       prizes: { binding: "rider", cells: prizeCells },
+      markers: { binding: "marker", cells: markerCells },
       gravityZones: {
         binding: "field",
         anchored: true,
@@ -2545,6 +2788,18 @@ function importDesignFromJSON(jsonText) {
       });
     }
 
+    // Extract markers (cell-anchored goals; marked.md). Sparse [[r,c],...] list, mirroring prizes.
+    // Build a boolean grid the editor uses; the engine re-derives its tri-state runtime grid from
+    // this sparse list on reset() / restoreFromFrame(), so the editor only ever stores "is goal".
+    const markers = Array.from({length: rows}, () => Array(cols).fill(false));
+    if (data.layers.markers && Array.isArray(data.layers.markers.cells)) {
+      data.layers.markers.cells.forEach(([r, c]) => {
+        if (r >= 0 && r < rows && c >= 0 && c < cols && maskGrid[r] && maskGrid[r][c]) {
+          markers[r][c] = true;
+        }
+      });
+    }
+
     // Extract sparse placements
     const placements = [];
     let nextId = 1;
@@ -2612,6 +2867,7 @@ function importDesignFromJSON(jsonText) {
       mask: maskGrid.map(row => row.map(v => !!v)),
       gravityField,
       randomFill,
+      markers,
       placements,
       meta
     };
@@ -2627,6 +2883,7 @@ function importDesignFromJSON(jsonText) {
       placements: newState.placements,
       gravityField: newState.gravityField,
       randomFill: newState.randomFill,
+      markers: newState.markers,
       meta: newState.meta
     }, newState);
 
@@ -2656,6 +2913,7 @@ function applyBrush(r,c){
   if(currentBrush.mode==='mask') editMaskToggle(r,c);
   else if(currentBrush.mode==='erase') editErase(r,c);
   else if(currentBrush.mode==='prize') editTogglePrize(r,c);
+  else if(currentBrush.mode==='marker') editToggleMarker(r,c);
   else if(currentBrush.mode==='gravity') editPaintGravity(r,c,currentBrush.gravDir);
   else if(currentBrush.mode==='randomFill') editToggleRandomFill(r,c);
   else editPaintPiece(r,c,currentBrush.pal);
@@ -2674,6 +2932,7 @@ function refreshBrushUI(){
   byId('br-erase').classList.toggle('on',currentBrush.mode==='erase');
   byId('br-prize').classList.toggle('on',currentBrush.mode==='prize');
   byId('br-rand').classList.toggle('on',currentBrush.mode==='randomFill');
+  byId('br-marker').classList.toggle('on',currentBrush.mode==='marker');
   byId('br-grav-up').classList.toggle('on',currentBrush.mode==='gravity'&&currentBrush.gravDir==='up');
   byId('br-grav-down').classList.toggle('on',currentBrush.mode==='gravity'&&currentBrush.gravDir==='down');
   byId('br-grav-left').classList.toggle('on',currentBrush.mode==='gravity'&&currentBrush.gravDir==='left');
@@ -2697,6 +2956,7 @@ function frameFromState(s){
   return {dims:{...s.dims}, mask:s.mask.map(r=>r.slice()),
     gravityField:s.gravityField?s.gravityField.map(r=>r.slice()):null,
     randomFill:s.randomFill?s.randomFill.map(r=>r.slice()):null,
+    markers:s.markers?s.markers.map(r=>r.slice()):null,
     placements:s.placements.map(p=>({...p})), meta:{...s.meta}};
 }
 function computeStrokeOp(r,c){ // toggle brushes resolve their target from the first cell, then paint uniformly
@@ -2704,17 +2964,25 @@ function computeStrokeOp(r,c){ // toggle brushes resolve their target from the f
   if(m==='mask') return {set:!editState.mask[r][c]};
   if(m==='randomFill') return {set:!editState.randomFill[r][c]};
   if(m==='prize'){ const p=editState.placements.find(p=>p.r===r&&p.c===c); return {set:p?!p.prize:true}; }
+  if(m==='marker') return {set:!(editState.markers && editState.markers[r][c])};
   return {set:true}; // piece / erase / gravity are inherently "set"
 }
 function paintCellInto(s,r,c,op){
   const m=currentBrush.mode;
   if(m==='mask'){
     s.mask[r][c]=op.set;
-    if(!op.set){ s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c)); s.randomFill[r][c]=false; }
+    if(!op.set){ s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c)); s.randomFill[r][c]=false;
+      // Removing a cell from play also strips any marker on it — a marker on a non-playable cell
+      // is the very degeneracy editToggleMarker refuses to create, so we don't allow it via the
+      // mask-erase back-door either.
+      if(s.markers) s.markers[r][c]=false;
+    }
   } else if(m==='erase'){
     s.placements=s.placements.filter(p=>!(p.r===r&&p.c===c)); s.randomFill[r][c]=false;
   } else if(m==='prize'){
     const p=s.placements.find(p=>p.r===r&&p.c===c); if(p) p.prize=op.set;
+  } else if(m==='marker'){
+    if(s.mask[r][c] && s.markers) s.markers[r][c]=op.set;   // playable-cell requirement enforced
   } else if(m==='gravity'){
     s.gravityField[r][c]=currentBrush.gravDir;
   } else if(m==='randomFill'){
@@ -2729,6 +2997,7 @@ function paintCellInto(s,r,c,op){
 function strokePaintCell(r,c){
   const key=r+','+c; if(strokePainted.has(key))return;
   if(currentBrush.mode==='prize' && !strokeState.placements.find(p=>p.r===r&&p.c===c)) return; // rider rule
+  if(currentBrush.mode==='marker' && !strokeState.mask[r][c]) return;                            // playable-cell rule
   strokePainted.add(key);
   paintCellInto(strokeState,r,c,strokeOp);
   strokeFrame=frameFromState(strokeState);
@@ -2748,7 +3017,7 @@ function endStroke(){
   strokeState=null; strokeFrame=null;
   if(painted){
     commitEdit({type:'stroke·'+currentBrush.mode},
-      {kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,meta:{...s.meta}},
+      {kind:'edit',dims:{...s.dims},mask:s.mask,placements:s.placements,gravityField:s.gravityField,randomFill:s.randomFill,markers:s.markers,meta:{...s.meta}},
       s, false);  // already rendered live during the drag → commit instant
   }
 }
@@ -2759,12 +3028,16 @@ function editResize(rows,cols){
   const om=editState.mask, oR=editState.dims.rows, oC=editState.dims.cols;
   const og=editState.gravityField;
   const newRandom=editState.randomFill ? editState.randomFill.map(row=>row.slice()) : null;
+  const oMk=editState.markers ? editState.markers.map(row=>row.slice()) : null;
   const newMask=grid(rows,cols,(r,c)=> (r<oR&&c<oC) ? om[r][c] : true);   // grow→playable, shrink→clip
   const newGrav=grid(rows,cols,(r,c)=> (r<oR&&c<oC&&og) ? og[r][c] : null);
   const newRandomResized=grid(rows,cols,(r,c)=> (r<oR&&c<oC&&newRandom) ? newRandom[r][c] : false);
+  // Markers: clip to surviving rect on shrink, default-false on grown cells. New cells aren't goals
+  // until the designer paints them; clipped-off markers are simply gone.
+  const newMarkersResized=grid(rows,cols,(r,c)=> (r<oR&&c<oC&&oMk) ? oMk[r][c] : false);
   const newPlacements=editState.placements.filter(p=>p.r<rows&&p.c<cols).map(p=>({...p}));
-  const step={kind:'resize',dims:{rows,cols},mask:newMask,placements:newPlacements,gravityField:newGrav,randomFill:newRandomResized};
-  commitEdit({type:`resize·${rows}×${cols}`},step,{dims:{rows,cols},mask:newMask,placements:newPlacements,gravityField:newGrav,randomFill:newRandomResized,meta:{...editState.meta}});
+  const step={kind:'resize',dims:{rows,cols},mask:newMask,placements:newPlacements,gravityField:newGrav,randomFill:newRandomResized,markers:newMarkersResized};
+  commitEdit({type:`resize·${rows}×${cols}`},step,{dims:{rows,cols},mask:newMask,placements:newPlacements,gravityField:newGrav,randomFill:newRandomResized,markers:newMarkersResized,meta:{...editState.meta}});
 }
 function editStepSize(dr,dc){editResize(editState.dims.rows+dr,editState.dims.cols+dc);}
 function undoEdit(){
@@ -2832,7 +3105,7 @@ function disableEditControls(disable){
   byId('dz-template-apply').disabled = disable;
   byId('dz-save').disabled = disable;
   byId('dz-load').disabled = disable;
-  const brushes = ['br-mask','br-erase','br-prize','br-rand','br-grav-up','br-grav-down','br-grav-left','br-grav-right','br-grav-none'];
+  const brushes = ['br-mask','br-erase','br-prize','br-rand','br-marker','br-grav-up','br-grav-down','br-grav-left','br-grav-right','br-grav-none'];
   brushes.forEach(id => {
     const el = byId(id);
     if (el) el.disabled = disable;
@@ -2893,9 +3166,35 @@ function newBoard(){
   syncHUD(); renderDefinition(); renderTransformControls();
   hide('ov-win'); hide('ov-lose');
 }
+function populateWinOverlay() {
+  // Win-overlay copy adapts to the win type so the panel honestly reports what was achieved.
+  // Keep the messages short and parallel — same shape, swapped noun — so a glance reads the same.
+  const w = engine.def.win.type || 'collectAllPrizes';
+  const tag = document.getElementById('ov-win-tag');
+  const body = document.getElementById('ov-win-body');
+  if (!tag || !body) return;
+  if (w === 'collectAllMarkers') {
+    tag.textContent = 'win · collectAllMarkers';
+    body.textContent = 'Every marker exposed. The cells you needed are clear.';
+  } else if (w === 'clearAll') {
+    tag.textContent = 'win · clearAll';
+    body.textContent = 'Board cleared. No pieces remain.';
+  } else {
+    tag.textContent = 'win · collectAllPrizes';
+    body.textContent = 'Every prize collected. The win condition came straight from the definition.';
+  }
+}
 function syncHUD(){
   document.getElementById('score').textContent=engine.score;
   document.getElementById('prizes').textContent=Math.max(0,engine.totalPrizes-engine.collected);
+  // Markers counter: show remaining (total - collected). Hide the whole stat when the board has
+  // no markers, so non-marker games don't show a perpetually-zero "Markers left" — same logic
+  // as the prizes stat could use but we leave Prizes always-visible for backwards comfort.
+  const mEl=document.getElementById('markers'), mStat=mEl?mEl.parentElement:null;
+  if(mEl){
+    mEl.textContent=Math.max(0,(engine.totalMarkers||0)-(engine.collectedMarkers||0));
+    if(mStat)mStat.style.display=(engine.totalMarkers||0)>0?'':'none';
+  }
   document.querySelectorAll('.gbtn').forEach(b=>b.classList.toggle('on',b.dataset.grav===engine.gravityDir));
 }
 function renderDefinition(){
@@ -3114,6 +3413,7 @@ byId('br-mask').addEventListener('click',()=>setBrush('mask'));
 byId('br-erase').addEventListener('click',()=>setBrush('erase'));
 byId('br-prize').addEventListener('click',()=>setBrush('prize'));
 byId('br-rand').addEventListener('click',()=>setBrush('randomFill'));
+byId('br-marker').addEventListener('click',()=>setBrush('marker'));
 byId('br-grav-up').addEventListener('click',()=>setBrush('gravity','up'));
 byId('br-grav-down').addEventListener('click',()=>setBrush('gravity','down'));
 byId('br-grav-left').addEventListener('click',()=>setBrush('gravity','left'));
@@ -3231,7 +3531,7 @@ byId('rule-save').addEventListener('click', () => {
   view._defaultGravity = newMeta.gravity;
   commitEdit(
     {type: 'ruleSet'},
-    {kind:'edit', dims:{...s.dims}, mask:s.mask, placements:s.placements, gravityField:s.gravityField, randomFill:s.randomFill, meta:s.meta},
+    {kind:'edit', dims:{...s.dims}, mask:s.mask, placements:s.placements, gravityField:s.gravityField, randomFill:s.randomFill, markers:s.markers, meta:s.meta},
     s
   );
   hide('ov-rules');
@@ -3313,7 +3613,7 @@ function loop(t){
         const lastEntry = timeline.entries[timeline.entries.length - 1];
         const finalStep = lastEntry.steps && lastEntry.steps[lastEntry.steps.length - 1];
         if (finalStep && finalStep.kind === 'state') {
-          if (finalStep.status === 'won') show('ov-win');
+          if (finalStep.status === 'won') { populateWinOverlay(); show('ov-win'); }
           else if (finalStep.status === 'lost') show('ov-lose');
         }
       }
