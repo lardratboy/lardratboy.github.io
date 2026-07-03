@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Companding Strata — Stereographic Terrain</title>
+<title>Companding Strata — Scale Atlas</title>
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #050508; color: #ccc; font-family: 'Consolas', 'SF Mono', monospace; overflow: hidden; }
@@ -171,6 +171,7 @@
                 <option value="2">Atlas 3D</option>
                 <option value="3">Stereo Terrain</option>
                 <option value="4">Equal-Area Terrain</option>
+                <option value="5">Scale Atlas (w-Tiles)</option>
             </select>
         </div>
         <div>
@@ -197,6 +198,17 @@
     <div class="ctrl">
         <label>Dive (Bit Shift) <span class="val" id="vShift">24</span></label>
         <input type="range" id="sShift" min="0" max="24" step="1" value="24">
+    </div>
+    <div class="select-row">
+        <div>
+            <div class="group-label">Atlas Tile Step</div>
+            <select id="selTileStep" onchange="state.tileStep=parseInt(this.value); if(state.mode===5) runCompute();">
+                <option value="4" selected>4 bits (7 tiles)</option>
+                <option value="2">2 bits (13 tiles)</option>
+                <option value="1">1 bit (25 tiles)</option>
+            </select>
+        </div>
+        <div style="font-size:9px;color:#446;align-self:end;padding-bottom:6px;">Scale Atlas only: shift per w-tile, 24 &rarr; 0</div>
     </div>
         </div>
     </details>
@@ -431,7 +443,7 @@
 const COMPUTE_WGSL = `
 struct Params {
     format: u32, isLE: u32, shift: u32, tupleCount: u32,
-    byteStep: u32, wSize: u32, compandCurve: u32, _p0: u32,
+    byteStep: u32, wSize: u32, compandCurve: u32, maxPoints: u32,
     compandParam: f32, _p1: u32, _p2: u32, _p3: u32,
 };
 
@@ -604,7 +616,7 @@ fn main(
     }
     workgroupBarrier();
 
-    if (isUnique) {
+    if (isUnique && (wg_base + localSlot) < P.maxPoints) {
         let b = (wg_base + localSlot) * 4u;
         output[b]     = packed[0];
         output[b+1u]  = packed[1];
@@ -619,7 +631,7 @@ fn main(
 // =============================================================================
 
 const BAKE_WGSL = `
-struct BakeParams { count: u32, _pad0: u32, _pad1: u32, _pad2: u32 };
+struct BakeParams { count: u32, start: u32, tile: u32, _pad2: u32 };
 
 @group(0) @binding(0) var<storage, read_write> points: array<f32>;
 @group(0) @binding(1) var<storage, read> countTable: array<u32>;
@@ -629,8 +641,8 @@ struct BakeParams { count: u32, _pad0: u32, _pad1: u32, _pad2: u32 };
 fn bakeMain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if (idx >= B.count) { return; }
-    
-    let b = idx * 4u;
+
+    let b = (B.start + idx) * 4u;
     let raw0 = bitcast<u32>(points[b]);
     let raw1 = bitcast<u32>(points[b+1u]);
 
@@ -649,7 +661,8 @@ fn bakeMain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mesoKey = (mz << 16u) | (my << 8u) | mx;
     let count = countTable[mesoKey];
 
-    points[b+3u] = bitcast<f32>(count);
+    // Top byte carries the w-tile index (Scale Atlas); low 24 bits carry the density count
+    points[b+3u] = bitcast<f32>((B.tile << 24u) | min(count, 0xFFFFFFu));
 }
 `;
 
@@ -752,7 +765,8 @@ fn vs(
     let raw0 = bitcast<u32>(pk.x); 
     let raw1 = bitcast<u32>(pk.y); 
     let raw2 = bitcast<u32>(pk.z); 
-    let rawCount = bitcast<u32>(pk.w); // Density completely baked into float 3!
+    let rawTag = bitcast<u32>(pk.w); // Density baked into float 3; top byte = w-tile index (Scale Atlas)
+    let rawCount = rawTag & 0xFFFFFFu;
 
     let p0 = vec3(f32((raw0>>16u)&0xFFu), f32((raw0>>8u)&0xFFu), f32(raw0&0xFFu));
     let p1 = vec3(f32((raw1>>16u)&0xFFu), f32((raw1>>8u)&0xFFu), f32(raw1&0xFFu));
@@ -823,7 +837,7 @@ fn vs(
         }
 
         world = vec3(stereoX * 2.0, stereoY * 2.0, terrainZ * R.depthScale * 4.0);
-    } else {
+    } else if (R.mode < 4.5) {
         // Mode 4: Lambert Equal-Area Terrain
         let full = p0 * 16.0 + p1;
         let centered = full / 127.5 - 1.0;
@@ -850,6 +864,38 @@ fn vs(
         }
 
         world = vec3(eaX * 2.0, eaY * 2.0, terrainZ * R.depthScale * 4.0);
+    } else {
+        // Mode 5: Scale Atlas — one Lambert equal-area density terrain per w-tile
+        let tile = f32(rawTag >> 24u);
+        let cols = max(R.stepX1, 1.0);
+        let rows = max(R.stepY0, 1.0);
+        let tileCol = tile - floor(tile / cols) * cols;
+        let tileRow = floor(tile / cols);
+        let spacing = R.stepX0;
+
+        let full = p0 * 16.0 + p1;
+        let centered = full / 127.5 - 1.0;
+        let r = max(length(centered), 0.001);
+        let onSphere = centered / r;
+        let k = sqrt(2.0 / max(1.0 - onSphere.z, 0.01));
+        var eaX = k * onSphere.x;
+        var eaY = k * onSphere.y;
+        let eaR = length(vec2(eaX, eaY));
+        if (eaR > 3.0) {
+            let clampF = 3.0 / eaR;
+            eaX = eaX * clampF;
+            eaY = eaY * clampF;
+        }
+
+        var terrainZ = 0.0;
+        if (R.maxCount > 0.0 && rawCount > 0u) {
+            terrainZ = log2(f32(rawCount) + 1.0) / log2(R.maxCount + 1.0);
+        }
+
+        let tHalf = spacing * 0.145;
+        let tx = (tileCol - (cols - 1.0) * 0.5) * spacing;
+        let ty = ((rows - 1.0) * 0.5 - tileRow) * spacing;
+        world = vec3(tx + eaX * tHalf, ty + eaY * tHalf, terrainZ * R.depthScale * spacing * 0.4);
     }
 
     let gravCenter = vec3(R.gravTargetX, R.gravTargetY, R.gravTargetZ);
@@ -1096,7 +1142,7 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
             terrainZ = log2(f32(rawCount)+1.0) / log2(R.maxCount+1.0);
         }
         world = vec3(stereoX*2.0, stereoY*2.0, terrainZ*R.depthScale*4.0);
-    } else {
+    } else if (R.mode < 4.5) {
         // Lambert Equal-Area Terrain (selection)
         let full = p0 * 16.0 + p1;
         let centered = full / 127.5 - 1.0;
@@ -1113,6 +1159,33 @@ fn selectMain(@builtin(global_invocation_id) gid: vec3<u32>) {
             terrainZ = log2(f32(rawCount)+1.0) / log2(R.maxCount+1.0);
         }
         world = vec3(eaX*2.0, eaY*2.0, terrainZ*R.depthScale*4.0);
+    } else {
+        // Mode 5: Scale Atlas (selection) — mirrors the render vertex transform
+        let rawTag = bitcast<u32>(points[b+3u]);
+        let rawCount = rawTag & 0xFFFFFFu;
+        let tile = f32(rawTag >> 24u);
+        let cols = max(R.stepX1, 1.0);
+        let rows = max(R.stepY0, 1.0);
+        let tileCol = tile - floor(tile / cols) * cols;
+        let tileRow = floor(tile / cols);
+        let spacing = R.stepX0;
+        let full = p0 * 16.0 + p1;
+        let centered = full / 127.5 - 1.0;
+        let r = max(length(centered), 0.001);
+        let onSphere = centered / r;
+        let k = sqrt(2.0 / max(1.0 - onSphere.z, 0.01));
+        var eaX = k * onSphere.x;
+        var eaY = k * onSphere.y;
+        let eaR = length(vec2(eaX, eaY));
+        if (eaR > 3.0) { let cf = 3.0/eaR; eaX=eaX*cf; eaY=eaY*cf; }
+        var terrainZ = 0.0;
+        if (R.maxCount > 0.0 && rawCount > 0u) {
+            terrainZ = log2(f32(rawCount)+1.0) / log2(R.maxCount+1.0);
+        }
+        let tHalf = spacing * 0.145;
+        let tx = (tileCol - (cols - 1.0) * 0.5) * spacing;
+        let ty = ((rows - 1.0) * 0.5 - tileRow) * spacing;
+        world = vec3(tx + eaX * tHalf, ty + eaY * tHalf, terrainZ * R.depthScale * spacing * 0.4);
     }
 
     let soft = max(R.slabSoft, 0.001);
@@ -1184,6 +1257,7 @@ let state = {
     aabbEnabled: 0, aabbMin:[-5, -5, -5], aabbMax:[5, 5, 5],
     csgMode: 0, gizmoAlpha: 0.3, palette: 0, selectionActive: false,
     densityStrength: 0, densityCurve: 0, densityGamma: 0.5, densityMode: 0,
+    tileStep: 4,
     densityThreshold: 7943282, decodedImageBuf: null,
     compandCurve: 0, compandParam: 10.0,
 };
@@ -1576,6 +1650,15 @@ async function loadWindow() {
     if (windowDirty) loadWindow();
 }
 
+const ATLAS_TILE_SPACING = 4.0;
+
+function atlasLayout() {
+    const n = Math.floor(24 / state.tileStep) + 1;
+    const cols = Math.ceil(Math.sqrt(n));
+    const rows = Math.ceil(n / cols);
+    return { n, cols, rows };
+}
+
 async function runCompute() {
     if (!state.buffer || !device) return;
     const byteLen = state.buffer.byteLength;
@@ -1586,11 +1669,17 @@ async function runCompute() {
     state.selectionActive = false;
 
     const statsEl = document.getElementById('stats');
-    const initEnc = device.createCommandEncoder();
-    initEnc.clearBuffer(bitTableBuf, 0, BIT_TABLE_SIZE);
-    if (state.densityMode === 0) { initEnc.clearBuffer(countTableBuf, 0, COUNT_TABLE_SIZE); }
-    device.queue.submit([initEnc.finish()]);
+    const atlas = state.mode === 5;
+    const layout = atlasLayout();
+    // Scale Atlas: one extraction pass per w-tile, shift descending 24 -> 0.
+    // Otherwise: single pass at the Dive slider's shift, tile tag 0.
+    const passes = atlas
+        ? Array.from({ length: layout.n }, (_, i) => ({ shift: 24 - i * state.tileStep, tile: i }))
+        : [{ shift: state.shift, tile: 0 }];
+
     device.queue.writeBuffer(indirectBuf, 0, indirectResetData);
+    // Global max across ALL tiles (never cleared between passes) so tile terrains share one scale
+    device.queue.writeBuffer(maxCountBuf, 0, new Uint32Array([0]));
 
     const MAX_DISPATCH = 65535 * 256;
     const chunkTuples = Math.min(Math.floor(CHUNK_BYTES / byteStep), MAX_DISPATCH);
@@ -1605,96 +1694,125 @@ async function runCompute() {
         { binding: 4, resource: { buffer: computeUniformBuf } },
         { binding: 5, resource: { buffer: countTableBuf } },
     ]});
-
-    for (let chunk = 0; chunk < totalChunks; chunk++) {
-        const startTuple = chunk * chunkTuples;
-        const count = Math.min(chunkTuples, totalTuples - startTuple);
-        const chunkByteOff = startTuple * byteStep;
-        const chunkByteLen = count * byteStep;
-
-        const alignedLen = Math.ceil(chunkByteLen / 4) * 4;
-        if (chunkByteOff + alignedLen <= srcBytes.length) {
-            device.queue.writeBuffer(rawDataBuf, 0, srcBytes, chunkByteOff, alignedLen);
-        } else {
-            const tmp = new Uint8Array(alignedLen);
-            tmp.set(srcBytes.subarray(chunkByteOff, chunkByteOff + chunkByteLen));
-            device.queue.writeBuffer(rawDataBuf, 0, tmp);
-        }
-
-        computeUniformData[0] = FORMAT_ID[state.format];
-        computeUniformData[1] = state.isLE ? 1 : 0;
-        computeUniformData[2] = state.shift;
-        computeUniformData[3] = count;
-        computeUniformData[4] = byteStep;
-        computeUniformData[5] = getWordSize(state.format);
-        computeUniformData[6] = state.compandCurve;
-        computeUniformData[7] = 0;
-        computeUniformDataFloat[8] = state.compandParam;
-        device.queue.writeBuffer(computeUniformBuf, 0, computeUniformData);
-
-        const enc = device.createCommandEncoder();
-        const pass = enc.beginComputePass();
-        pass.setPipeline(computePipeline);
-        pass.setBindGroup(0, computeBG);
-        pass.dispatchWorkgroups(Math.ceil(count / 256));
-        pass.end();
-        device.queue.submit([enc.finish()]);
-
-        if (totalChunks > 1) {
-            await device.queue.onSubmittedWorkDone();
-            statsEl.innerHTML = `Processing: <b>chunk ${chunk + 1}/${totalChunks}</b> · ${((chunk + 1) / totalChunks * 100).toFixed(0)}%`;
-        }
-    }
-
-    device.queue.writeBuffer(maxCountBuf, 0, new Uint32Array([0]));
     const redBG = device.createBindGroup({ layout:reduceBGL, entries:[
         {binding:0, resource:{buffer:countTableBuf}},
         {binding:1, resource:{buffer:maxCountBuf}},
     ]});
-    const redEnc = device.createCommandEncoder();
-    const redPass = redEnc.beginComputePass();
-    redPass.setPipeline(reducePipeline);
-    redPass.setBindGroup(0, redBG);
-    redPass.dispatchWorkgroups(Math.min(65535, Math.ceil((1 << 24) / 256)));
-    redPass.end();
-    device.queue.submit([redEnc.finish()]);
+    const bakeBG = device.createBindGroup({ layout: bakeBGL, entries:[
+        {binding:0, resource:{buffer:outputBuf}},
+        {binding:1, resource:{buffer:countTableBuf}},
+        {binding:2, resource:{buffer:bakeUniformBuf}},
+    ]});
 
-    const rb = device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(indirectBuf, 0, rb, 0, 20);
-    enc.copyBufferToBuffer(maxCountBuf, 0, rb, 20, 4);
-    device.queue.submit([enc.finish()]);
-    await rb.mapAsync(GPUMapMode.READ);
-    const rbData = new Uint32Array(rb.getMappedRange());
-    pointCount = rbData[1];
-    maxCountValue = rbData[5];
-    rb.unmap(); rb.destroy();
+    let prevEnd = 0;
+    let overflowed = false;
 
-    // Bake density counts into the final output vertices
-    if (pointCount > 0) {
-        device.queue.writeBuffer(bakeUniformBuf, 0, new Uint32Array([pointCount]));
-        const bakeBG = device.createBindGroup({ layout: bakeBGL, entries:[
-            {binding:0, resource:{buffer:outputBuf}},
-            {binding:1, resource:{buffer:countTableBuf}},
-            {binding:2, resource:{buffer:bakeUniformBuf}},
-        ]});
-        const bakeEnc = device.createCommandEncoder();
-        const bakePass = bakeEnc.beginComputePass();
-        bakePass.setPipeline(bakePipeline);
-        bakePass.setBindGroup(0, bakeBG);
-        bakePass.dispatchWorkgroups(Math.ceil(pointCount / 256));
-        bakePass.end();
-        device.queue.submit([bakeEnc.finish()]);
+    for (let p = 0; p < passes.length; p++) {
+        const ps = passes[p];
+
+        // Per-pass clears: dedup is per-tile; density is per-tile in atlas mode
+        // (cumulative density mode is honored only outside the atlas)
+        const initEnc = device.createCommandEncoder();
+        initEnc.clearBuffer(bitTableBuf, 0, BIT_TABLE_SIZE);
+        if (atlas || state.densityMode === 0) { initEnc.clearBuffer(countTableBuf, 0, COUNT_TABLE_SIZE); }
+        device.queue.submit([initEnc.finish()]);
+
+        for (let chunk = 0; chunk < totalChunks; chunk++) {
+            const startTuple = chunk * chunkTuples;
+            const count = Math.min(chunkTuples, totalTuples - startTuple);
+            const chunkByteOff = startTuple * byteStep;
+            const chunkByteLen = count * byteStep;
+
+            const alignedLen = Math.ceil(chunkByteLen / 4) * 4;
+            if (chunkByteOff + alignedLen <= srcBytes.length) {
+                device.queue.writeBuffer(rawDataBuf, 0, srcBytes, chunkByteOff, alignedLen);
+            } else {
+                const tmp = new Uint8Array(alignedLen);
+                tmp.set(srcBytes.subarray(chunkByteOff, chunkByteOff + chunkByteLen));
+                device.queue.writeBuffer(rawDataBuf, 0, tmp);
+            }
+
+            computeUniformData[0] = FORMAT_ID[state.format];
+            computeUniformData[1] = state.isLE ? 1 : 0;
+            computeUniformData[2] = ps.shift;
+            computeUniformData[3] = count;
+            computeUniformData[4] = byteStep;
+            computeUniformData[5] = getWordSize(state.format);
+            computeUniformData[6] = state.compandCurve;
+            computeUniformData[7] = MAX_OUTPUT_POINTS;
+            computeUniformDataFloat[8] = state.compandParam;
+            device.queue.writeBuffer(computeUniformBuf, 0, computeUniformData);
+
+            const enc = device.createCommandEncoder();
+            const pass = enc.beginComputePass();
+            pass.setPipeline(computePipeline);
+            pass.setBindGroup(0, computeBG);
+            pass.dispatchWorkgroups(Math.ceil(count / 256));
+            pass.end();
+            device.queue.submit([enc.finish()]);
+
+            if (totalChunks > 1 || passes.length > 1) {
+                await device.queue.onSubmittedWorkDone();
+                statsEl.innerHTML = atlas
+                    ? `Scale Atlas: <b>tile ${p + 1}/${passes.length}</b> (shift ${ps.shift}) · chunk ${chunk + 1}/${totalChunks}`
+                    : `Processing: <b>chunk ${chunk + 1}/${totalChunks}</b> · ${((chunk + 1) / totalChunks * 100).toFixed(0)}%`;
+            }
+        }
+
+        // Fold this pass's counts into the global max
+        const redEnc = device.createCommandEncoder();
+        const redPass = redEnc.beginComputePass();
+        redPass.setPipeline(reducePipeline);
+        redPass.setBindGroup(0, redBG);
+        redPass.dispatchWorkgroups(Math.min(65535, Math.ceil((1 << 24) / 256)));
+        redPass.end();
+        device.queue.submit([redEnc.finish()]);
+
+        // Read back the running point count to bound this pass's bake range
+        const rb = device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const cEnc = device.createCommandEncoder();
+        cEnc.copyBufferToBuffer(indirectBuf, 0, rb, 0, 20);
+        cEnc.copyBufferToBuffer(maxCountBuf, 0, rb, 20, 4);
+        device.queue.submit([cEnc.finish()]);
+        await rb.mapAsync(GPUMapMode.READ);
+        const rbData = new Uint32Array(rb.getMappedRange());
+        let thisEnd = rbData[1];
+        maxCountValue = rbData[5];
+        rb.unmap(); rb.destroy();
+
+        if (thisEnd > MAX_OUTPUT_POINTS) { thisEnd = MAX_OUTPUT_POINTS; overflowed = true; }
+        const rangeCount = thisEnd - prevEnd;
+
+        // Bake density counts + w-tile tag into this pass's vertex range
+        if (rangeCount > 0) {
+            device.queue.writeBuffer(bakeUniformBuf, 0, new Uint32Array([rangeCount, prevEnd, ps.tile, 0]));
+            const bakeEnc = device.createCommandEncoder();
+            const bakePass = bakeEnc.beginComputePass();
+            bakePass.setPipeline(bakePipeline);
+            bakePass.setBindGroup(0, bakeBG);
+            bakePass.dispatchWorkgroups(Math.ceil(rangeCount / 256));
+            bakePass.end();
+            device.queue.submit([bakeEnc.finish()]);
+            await device.queue.onSubmittedWorkDone();
+        }
+        prevEnd = thisEnd;
     }
+
+    pointCount = prevEnd;
+    // Clamp the indirect instance count in case the atomic counter ran past capacity
+    device.queue.writeBuffer(indirectBuf, 4, new Uint32Array([pointCount]));
 
     const mbFull = (state.fileSize / (1024 * 1024)).toFixed(1);
     const mbWin = (byteLen / (1024 * 1024)).toFixed(1);
     const mbOut = (pointCount * BYTES_PER_POINT / (1024 * 1024)).toFixed(1);
     const offPct = (state.scrubOffset * 100).toFixed(1);
     const densInfo = maxCountValue > 0 ? ` · Peak: <b>${maxCountValue.toLocaleString()}</b>×` : '';
+    const atlasInfo = atlas ? `<br>Atlas: <b>${layout.n} tiles</b> · shift 24→0 step ${state.tileStep} · grid ${layout.cols}×${layout.rows}` : '';
+    const ovWarn = overflowed ? ` · <b style="color:#f80">output cap hit — reduce window</b>` : '';
     statsEl.innerHTML =
         `Source: <b>${state.fileName}</b> (${mbFull} MB)<br>` +
-        `Window: <b>${mbWin} MB</b> @ ${offPct}% · Nodes: <b>${pointCount.toLocaleString()}</b>${densInfo}<br>` +
+        `Window: <b>${mbWin} MB</b> @ ${offPct}% · Nodes: <b>${pointCount.toLocaleString()}</b>${densInfo}${ovWarn}` +
+        atlasInfo + `<br>` +
         `GPU: <b>${mbOut} MB</b> · Chunks: <b>${totalChunks}</b> · <b>WebGPU</b>`;
 }
 
@@ -1777,8 +1895,14 @@ function render() {
     ruData.set(mvp, 0);
     ruData[16]=st.s0; ruData[17]=st.s1; ruData[18]=st.ctr; ruData[19]=st.scl;
     ruData[20]=Math.max(1.0, Math.min(16.0, 30.0 / camRadius)) * state.pointScale; ruData[21]=w; ruData[22]=h; ruData[23]=state.mode;
-    ruData[24]=ti.stepX0; ruData[25]=ti.stepX1; ruData[26]=ti.stepY0; ruData[27]=ti.stepY1;
-    ruData[28]=ti.centerX; ruData[29]=ti.centerY; ruData[30]=ti.scale; ruData[31]=state.proximity;
+    if (state.mode === 5) {
+        const la = atlasLayout();
+        ruData[24]=ATLAS_TILE_SPACING; ruData[25]=la.cols; ruData[26]=la.rows; ruData[27]=0;
+        ruData[28]=0; ruData[29]=0; ruData[30]=1; ruData[31]=state.proximity;
+    } else {
+        ruData[24]=ti.stepX0; ruData[25]=ti.stepX1; ruData[26]=ti.stepY0; ruData[27]=ti.stepY1;
+        ruData[28]=ti.centerX; ruData[29]=ti.centerY; ruData[30]=ti.scale; ruData[31]=state.proximity;
+    }
     ruData[32]=state.falloffCurve;
     if (state.gravityTarget === 1) { ruData[33]=camTarget[0]; ruData[34]=camTarget[1]; ruData[35]=camTarget[2]; } 
     else { ruData[33]=0; ruData[34]=0; ruData[35]=0; }
@@ -1972,11 +2096,12 @@ async function exportPLY() {
             const stR=Math.sqrt(stX*stX+stY*stY);
             if(stR>3){const cf=3/stR;stX*=cf;stY*=cf;}
             let terrainZ=0;
-            if(maxCountValue>0 && rawCount>0){
-                terrainZ=Math.log2(rawCount+1)/Math.log2(maxCountValue+1);
+            const cnt3 = rawCount & 0xFFFFFF;
+            if(maxCountValue>0 && cnt3>0){
+                terrainZ=Math.log2(cnt3+1)/Math.log2(maxCountValue+1);
             }
             return [stX*2, stY*2, terrainZ*state.depthScale*4];
-        } else {
+        } else if (state.mode === 4) {
             // Mode 4: Lambert Equal-Area Terrain
             const fx=p0x*16+p1x, fy=p0y*16+p1y, fz=p0z*16+p1z;
             const cx=fx/127.5-1, cy=fy/127.5-1, cz=fz/127.5-1;
@@ -1987,10 +2112,35 @@ async function exportPLY() {
             const eaR=Math.sqrt(eaX*eaX+eaY*eaY);
             if(eaR>3){const cf=3/eaR;eaX*=cf;eaY*=cf;}
             let terrainZ=0;
-            if(maxCountValue>0 && rawCount>0){
-                terrainZ=Math.log2(rawCount+1)/Math.log2(maxCountValue+1);
+            const cnt4 = rawCount & 0xFFFFFF;
+            if(maxCountValue>0 && cnt4>0){
+                terrainZ=Math.log2(cnt4+1)/Math.log2(maxCountValue+1);
             }
             return [eaX*2, eaY*2, terrainZ*state.depthScale*4];
+        } else {
+            // Mode 5: Scale Atlas — mirrors the render vertex transform
+            const la = atlasLayout();
+            const tile = rawCount >>> 24;
+            const cnt = rawCount & 0xFFFFFF;
+            const tileCol = tile % la.cols;
+            const tileRow = Math.floor(tile / la.cols);
+            const spacing = ATLAS_TILE_SPACING;
+            const fx=p0x*16+p1x, fy=p0y*16+p1y, fz=p0z*16+p1z;
+            const cx=fx/127.5-1, cy=fy/127.5-1, cz=fz/127.5-1;
+            const r=Math.max(Math.sqrt(cx*cx+cy*cy+cz*cz), 0.001);
+            const sx=cx/r, sy=cy/r, sz=cz/r;
+            const k=Math.sqrt(2.0/Math.max(1.0-sz, 0.01));
+            let eaX=k*sx, eaY=k*sy;
+            const eaR=Math.sqrt(eaX*eaX+eaY*eaY);
+            if(eaR>3){const cf=3/eaR;eaX*=cf;eaY*=cf;}
+            let terrainZ=0;
+            if(maxCountValue>0 && cnt>0){
+                terrainZ=Math.log2(cnt+1)/Math.log2(maxCountValue+1);
+            }
+            const tHalf = spacing*0.145;
+            const tx=(tileCol-(la.cols-1)*0.5)*spacing;
+            const ty=((la.rows-1)*0.5-tileRow)*spacing;
+            return [tx+eaX*tHalf, ty+eaY*tHalf, terrainZ*state.depthScale*spacing*0.4];
         }
     }
 
@@ -2046,7 +2196,7 @@ async function exportPLY() {
     }
 
     const count = survivors.length;
-    const projNames = ['3D','Tiled2D','Atlas3D','StereoTerrain','EqualAreaTerrain'];
+    const projNames = ['3D','Tiled2D','Atlas3D','StereoTerrain','EqualAreaTerrain','ScaleAtlas'];
     const header =[
         "ply", "format binary_little_endian 1.0",
         `comment Generated by Companding Strata — ${state.fileName}`,
@@ -2136,7 +2286,15 @@ function setFormat(f){
     }
 }
 function setEndian(le){state.isLE=le;document.getElementById('selEndian').value=le?'le':'be';runCompute();}
-function setMode(m){state.mode=m;document.getElementById('selMode').value=String(m);state.subRotX=0;state.subRotY=0;if(m>=3){camPhi=Math.PI*0.3;camTheta=Math.PI*0.25;camRadius=10;}}
+function setMode(m){
+    const was = state.mode;
+    state.mode=m;document.getElementById('selMode').value=String(m);
+    state.subRotX=0;state.subRotY=0;
+    if(m>=3){camPhi=Math.PI*0.3;camTheta=Math.PI*0.25;camRadius=10;}
+    if(m===5){const la=atlasLayout();camRadius=la.cols*ATLAS_TILE_SPACING*1.7;camPhi=Math.PI*0.34;}
+    // Atlas needs per-tile multi-shift extraction; leaving it needs single-shift data back
+    if((m===5)!==(was===5)) runCompute();
+}
 function setCompand(c) {
     state.compandCurve = c;
     const ctrl = document.getElementById('ctrlCompParam');
@@ -2323,7 +2481,8 @@ let densityUndoAvailable = false;
 
 function runBakePass() {
     if (!device || !outputBuf || pointCount === 0) return;
-    device.queue.writeBuffer(bakeUniformBuf, 0, new Uint32Array([pointCount]));
+    if (state.mode === 5) { console.log('Density bake skipped: Scale Atlas uses per-tile count tables'); return; }
+    device.queue.writeBuffer(bakeUniformBuf, 0, new Uint32Array([pointCount, 0, 0, 0]));
     const bg = device.createBindGroup({ layout: bakeBGL, entries:[
         {binding:0, resource:{buffer:outputBuf}},
         {binding:1, resource:{buffer:countTableBuf}},
@@ -2370,6 +2529,11 @@ function snapshotCountTable() {
 
 async function applyDensityEdit(mode, value) {
     if (!device || !outputBuf || pointCount === 0) return;
+    if (state.mode === 5) {
+        console.log('Density annotation is unavailable in Scale Atlas mode — switch projection to edit');
+        updateDensityEditStatus('Unavailable in Scale Atlas');
+        return;
+    }
     if (!state.selectionActive) {
         console.log('No selection active — select a region first (Shift+Drag)');
         updateDensityEditStatus('Select a region first');
@@ -2409,6 +2573,7 @@ async function applyDensityEdit(mode, value) {
 }
 
 async function undoDensityEdit() {
+    if (state.mode === 5) { console.log('Density undo unavailable in Scale Atlas mode'); return; }
     if (!densityUndoAvailable || !device || !countTableBuf || !undoCountTableBuf) return;
     const enc = device.createCommandEncoder();
     enc.copyBufferToBuffer(undoCountTableBuf, 0, countTableBuf, 0, COUNT_TABLE_SIZE);
