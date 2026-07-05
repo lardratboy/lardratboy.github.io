@@ -90,7 +90,7 @@
 
 <div class="hud" id="stats">— fps · — particles</div>
 
-<div class="hud" id="hint">drag to look · middle-drag steers frame B (flick to tumble, dbl-click home) · right-hold to stir · shift+right to repel · scroll to zoom · space = supernova · R reshuffle · T geometry · H hide</div>
+<div class="hud" id="hint">drag to look · middle-drag steers frame B (flick to tumble, dbl-click home) · right-hold to stir · shift+right to repel · scroll to zoom · P pause matter · [ ] dilate time · . step · space = supernova · R reshuffle · T geometry · H hide</div>
 
 <div class="hud" id="panel">
   <div id="panelHead"><span>FIELD CONTROLS</span><span id="panelChevron">▾</span></div>
@@ -160,6 +160,10 @@ const state = {
   time: 0, shockTime: -1, shockPos: [0, 0, 1],
   attractor: [0, 0, 0, 0],             // xyz + strength
   paused: false,
+  userPaused: false,   // Phase 1: matter frozen, projection clock still flows
+  lambda: 1,           // Phase 2: matter time-dilation factor λ
+  lamIdx: 3,           // index into LAMBDA_STEPS
+  stepOnce: false,     // Phase 2: advance exactly one matter step while paused
 };
 
 function mulberry32(a) {
@@ -1316,6 +1320,33 @@ window.addEventListener("keydown", e => {
       break;
     }
     case "KeyE":   setToggle("togEvolve", state.evolve = !state.evolve); break;
+    case "KeyP": {
+      state.userPaused = !state.userPaused;
+      AudioEngine.duck(state.userPaused);
+      statTimer = 0;
+      console.log(state.userPaused
+        ? "matter paused — projection clock still flowing (specimen mode)"
+        : "matter resumed");
+      break;
+    }
+    case "BracketLeft": {                       // dilate matter time down: 1 → .25 → .05 → 0
+      state.lamIdx = Math.max(0, state.lamIdx - 1);
+      state.lambda = LAMBDA_STEPS[state.lamIdx];
+      statTimer = 0;
+      console.log("matter λ =", state.lambda);
+      break;
+    }
+    case "BracketRight": {                      // dilate matter time up
+      state.lamIdx = Math.min(LAMBDA_STEPS.length - 1, state.lamIdx + 1);
+      state.lambda = LAMBDA_STEPS[state.lamIdx];
+      statTimer = 0;
+      console.log("matter λ =", state.lambda);
+      break;
+    }
+    case "Period": {                            // single-step one matter tick while frozen
+      if (state.userPaused || state.lambda === 0) state.stepOnce = true;
+      break;
+    }
     case "KeyA":   toggleAudio(); break;
     case "KeyH": {
       for (const id of ["title", "stats", "panel", "hint"])
@@ -1404,10 +1435,13 @@ function updateWormhole(dt) {
   }
 }
 
-function updateTesseract(dt) {
-  tess.ang = [state.time * 0.31 + 0.4, state.time * 0.23, state.time * 0.17];
+function updateTesseract(dtP) {
+  // Tumble angles live in projection time (moproj.md §1): rot4 exists only in
+  // the render shader, so a paused specimen keeps rotating through W.
+  // Continuous by construction — ang is a pure function of the projTime clock.
+  tess.ang = [projTime * 0.31 + 0.4, projTime * 0.23, projTime * 0.17];
   for (let i = 0; i < 3; i++) {
-    tessBounce.p[i] += tessBounce.v[i] * dt;
+    tessBounce.p[i] += tessBounce.v[i] * dtP;
     if (Math.abs(tessBounce.p[i]) > 0.16) {
       tessBounce.p[i] = Math.sign(tessBounce.p[i]) * 0.16;
       tessBounce.v[i] *= -1;
@@ -1480,6 +1514,11 @@ const AudioEngine = {
     if (!this.ctx) return;
     if (this.ctx.state === "suspended") this.ctx.resume();
     this.master.gain.linearRampToValueAtTime(on ? 0.55 : 0.0, this.ctx.currentTime + 1.2);
+  },
+  duck(d) {
+    // Specimen mode: matter sleeps, audio bed dims but stays breathing.
+    if (!this.ctx || !state.audio) return;
+    this.master.gain.linearRampToValueAtTime(d ? 0.15 : 0.55, this.ctx.currentTime + 0.6);
   },
   setStir(active) {
     if (!this.ctx || !state.audio) return;
@@ -1650,14 +1689,27 @@ function writeRenderUniforms(basis, aspect) {
 }
 
 let fpsEMA = 60, lastT = 0, statTimer = 0;
+let projTime = 0;                                  // t_p: the projection clock
+const LAMBDA_STEPS = [0, 0.05, 0.25, 1];           // matter time-dilation ladder
 function frame(tms) {
   requestAnimationFrame(frame);
-  if (state.paused) { lastT = tms; return; }
+  if (state.paused) { lastT = tms; return; }       // tab hidden: halt everything (battery)
   const delta = Math.min((tms - lastT) / 1000 || 0.016, 0.05);
   lastT = tms;
-  const dt = Math.min(delta, 0.033);
-  state.time += dt;
+
+  /* ── Split clocks (moproj.md §1) ──
+     dtP (projection time) always flows: camera, Frame B, Clifford tumble.
+     dtM (matter time) = dtP · λ_eff: compute shader, comets, singularity,
+     wormholes, rule evolution.  λ_eff = 0 is specimen mode. */
+  const dtP = Math.min(delta, 0.033);
+  let dtM = dtP * (state.userPaused ? 0 : state.lambda);
+  if (state.stepOnce) { dtM = 1 / 60; state.stepOnce = false; }
+  const simActive = dtM > 0;
+  state.time += dtM;                               // t_m: matter clock (sim, bombs, evolution)
+  projTime   += dtP;
   fpsEMA += (1 / Math.max(delta, 1e-4) - fpsEMA) * 0.05;
+
+  const dt = dtP;                                  // projection-side integrations below
 
   cam.yaw += cam.vyaw * 600 * dt; cam.pitch += cam.vpitch * 600 * dt;
   cam.vyaw *= Math.exp(-5 * dt); cam.vpitch *= Math.exp(-5 * dt);
@@ -1684,7 +1736,7 @@ function frame(tms) {
              performance.now() - frameB.lastTouch > 7000 &&
              Math.hypot(frameB.vyaw, frameB.vpitch) < 0.00002) {
     frameB.yaw += 0.05 * dt;               // idle precession: never fully static
-    frameB.pitch += Math.sin(state.time * 0.13) * 0.010 * dt;
+    frameB.pitch += Math.sin(projTime * 0.13) * 0.010 * dt;
   }
   const steerTgt = (steeringB || Math.hypot(frameB.vyaw, frameB.vpitch) > 0.00006) ? 1 : 0;
   frameB.glow += (steerTgt - frameB.glow) * (1 - Math.exp(-dt * 6));
@@ -1714,28 +1766,35 @@ function frame(tms) {
     state.attractor = [p[0], p[1], p[2], stirring];
   } else state.attractor[3] = 0;
 
-  updateComets(dt);
-  updateSingularity(dt);
-  updateWormhole(dt);
-  updateTesseract(dt);
-  updateEvolution(dt);
-  device.queue.writeBuffer(bufRules, 0, rules);
-  writeSimUniforms(dt);
+  updateComets(dtM);                 // matter clock: attractors freeze with the specimen
+  updateSingularity(dtM);
+  updateWormhole(dtM);
+  updateTesseract(dtP);              // projection clock: Clifford tumble never sleeps
+  updateEvolution(dtM);
+  if (simActive) {
+    device.queue.writeBuffer(bufRules, 0, rules);
+    writeSimUniforms(dtM);
+  }
   const aspect = canvas.width / canvas.height;
   writeRenderUniforms(basis, aspect);
 
   const enc = device.createCommandEncoder();
 
-  /* — simulation — */
-  {
+  /* — simulation (matter clock only) —
+     Ping-pong gotcha (moproj.md §2.1): the sim writes cur → 1-cur.  When the
+     sim is skipped, the freshest positions are still in `cur`, so draw from
+     `cur` and do NOT flip — otherwise the first paused frame shows stale
+     positions and the first resumed frame teleports. */
+  let drawFrom = cur;
+  if (simActive) {
     const cp = enc.beginComputePass();
     cp.setBindGroup(0, simBG[cur]);
     cp.setPipeline(pipeClear); cp.dispatchWorkgroups(Math.ceil(NUM_CELLS / WG));
     cp.setPipeline(pipeBin);   cp.dispatchWorkgroups(Math.ceil(state.count / WG));
     cp.setPipeline(pipeSim);   cp.dispatchWorkgroups(Math.ceil(state.count / WG));
     cp.end();
+    drawFrom = 1 - cur;
   }
-  const drawFrom = 1 - cur;
 
   /* — trails accumulation — */
   {
@@ -1787,9 +1846,13 @@ function frame(tms) {
       modeLabel = `Bi-Projective 4D · frame B ${by}\u00B0/${bp}\u00B0`;
     }
 
+    const clock = state.userPaused ? "\u23F8 matter paused"
+                : state.lambda < 1 ? `matter \u03BB=${state.lambda}` : "";
+
     $("stats").textContent =
       `${Math.round(fpsEMA)} fps · ${(state.count / 1000).toFixed(0)}k particles · ${modeLabel} · ` +
-      `${state.evolve ? "rules evolving" : "rules frozen"}`;
+      `${state.evolve ? "rules evolving" : "rules frozen"}` +
+      (clock ? ` · ${clock}` : "");
     statTimer = 0.5;
   }
 }
