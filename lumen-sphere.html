@@ -90,7 +90,7 @@
 
 <div class="hud" id="stats">— fps · — particles</div>
 
-<div class="hud" id="hint">drag to look · middle-drag steers frame B (flick tumbles · long-press commits keyframe · dbl-click home/reset) · shift+middle scrubs blend · S scan W · G blend map · right-hold to stir (shift repels) · scroll to zoom · P pause matter · [ ] dilate time · . step · space = supernova · R reshuffle · T geometry · H hide</div>
+<div class="hud" id="hint">drag to look · middle-drag steers frame B (flick tumbles · long-press commits keyframe · dbl-click home/reset) · shift+middle scrubs blend · S scan W · G blend map · D ghosts · L lens · right-hold to stir (shift repels) · scroll to zoom · P pause matter · [ ] dilate time · . step · space = supernova · R reshuffle · T geometry · H hide</div>
 
 <div class="hud" id="panel">
   <div id="panelHead"><span>FIELD CONTROLS</span><span id="panelChevron">▾</span></div>
@@ -164,6 +164,8 @@ const state = {
   lambda: 1,           // Phase 2: matter time-dilation factor λ
   lamIdx: 3,           // index into LAMBDA_STEPS
   stepOnce: false,     // Phase 2: advance exactly one matter step while paused
+  ghost: false,        // Phase 5: double-exposure ghost pass (mode 4)
+  lens: false,         // Phase 6: perspective ↔ stereographic lens morphing
 };
 
 function mulberry32(a) {
@@ -597,6 +599,7 @@ struct RenderU {
   frameB: vec4f,        // Camera B rotor: x yaw, y pitch, z steer-glow, w carousel chain length N
   blendCtl: vec4f,      // blend map: x mode (0 depth,1 override,2 scanner,3 banding), y p1, z p2, w override gain
   carKeys: vec4f,       // carousel keyframes: (K1.yaw, K1.pitch, K2.yaw, K2.pitch)
+  fx: vec4f,            // x ghost double-exposure on, y particle count, z lens-morph gain, w spare
 };
 @group(0) @binding(0) var<uniform> R: RenderU;
 @group(0) @binding(1) var<storage, read> parts: array<Particle>;
@@ -666,9 +669,18 @@ fn frameAt(v: vec3f, k: f32, n: f32) -> vec3f {
    If in Mode 4 (Bi-Projective), coordinates smoothly morph between front
    and rotated side profiles along the W dimension. */
 fn project4(p: vec4f) -> vec4f {
+  let r = project4full(p);
+  return vec4f(r.world, r.f);
+}
+
+/* Full projection: exposes the carousel endpoints wa/wb and fraction t so the
+   ghost pass (moproj.md §2.6) can draw both shadows with weights (1-t, t) —
+   weights sum to 1, so double exposure conserves brightness additively. */
+struct Proj4 { world: vec3f, f: f32, wa: vec3f, wb: vec3f, t: f32 };
+fn project4full(p: vec4f) -> Proj4 {
   let q = rot4(p);
   let mode = R.tessB.w;
-  
+
   // Singularity 4D space warping
   let singRot = rot4(vec4f(R.singR.xyz, 0.0));
   let distToSing = length(q - singRot);
@@ -676,12 +688,22 @@ fn project4(p: vec4f) -> vec4f {
 
   let f = R.tessA.w / max(R.tessA.w - q.w * lensFactor, 0.35);
   var world = q.xyz * (f * 0.5);
-  
-  // Mode 4: Bi-Projective morphing in world-space! (moproj.md §2.2–2.5)
-  // σ_eff comes from the active blend map; the position is then walked along
-  // a carousel chain A(identity) → K1 → K2 → B(live), length N = frameB.w.
-  // N is a float so commits can EASE the chain open instead of popping.
-  // With N=2 and map 0 this reduces exactly to the original bi-projective.
+
+  // Phase 6 — Lens morphing (moproj.md §2.7): near the singularity the
+  // projection FAMILY itself gives way, blending perspective toward
+  // stereographic.  A small global term makes the far hemisphere balloon
+  // subtly even without a black hole; proximity does the heavy curdling.
+  if (R.fx.z > 0.001) {
+    let stereo = (q.xyz / max(0.98 - q.w, 0.32)) * 0.5;
+    let muLoc = 0.45 / (distToSing * distToSing + 0.10);
+    let mu = clamp(R.fx.z * (0.12 + muLoc * min(R.singR.w, 1.0)), 0.0, 0.85);
+    world = mix(world, stereo, mu);
+  }
+
+  var out: Proj4;
+  out.wa = world; out.wb = world; out.t = 0.0;
+
+  // Mode 4: Bi-Projective morphing (moproj.md §2.2–2.5)
   if (mode > 3.5) {
     let bm = R.blendCtl.x;
     var sig = clamp((q.w / 0.45) * 0.5 + 0.5, 0.0, 1.0);          // 0: depth map
@@ -697,12 +719,14 @@ fn project4(p: vec4f) -> vec4f {
     let n = max(R.frameB.w, 2.0);
     let u = sig * (n - 1.0);
     let i = clamp(floor(u), 0.0, n - 2.0);
-    let wa = frameAt(world, i, n);
-    let wb = frameAt(world, i + 1.0, n);
-    world = mix(wa, wb, u - i);
+    out.wa = frameAt(world, i, n);
+    out.wb = frameAt(world, i + 1.0, n);
+    out.t = u - i;
+    world = mix(out.wa, out.wb, out.t);
   }
 
-  return vec4f(world, f);
+  out.world = world; out.f = f;
+  return out;
 }
 
 fn speciesColor(s: f32, hshift: f32) -> vec3f {
@@ -727,6 +751,7 @@ struct VOut {
   @location(0) uv: vec2f,
   @location(1) col: vec3f,
   @location(2) boost: f32,
+  @location(3) wgt: f32,
 };
 
 @vertex
@@ -735,7 +760,17 @@ fn vsParticle(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
     vec2f(-1.0,-1.0), vec2f(1.0,-1.0), vec2f(-1.0, 1.0),
     vec2f(-1.0, 1.0), vec2f(1.0,-1.0), vec2f( 1.0, 1.0));
   let c = corners[vi];
-  let prt = parts[ii];
+  // Phase 5 ghost pass: instances are doubled; remap to pid BEFORE the fetch
+  // so side-B ghosts never read past the particle array.
+  let ghosting = R.fx.x > 0.5 && R.tessB.w > 3.5;
+  var pid = ii;
+  var ghostSide = 0u;
+  if (ghosting) {
+    let n = u32(max(R.fx.y, 1.0));
+    pid = ii % n;
+    ghostSide = ii / n;
+  }
+  let prt = parts[pid];
   let spd = length(prt.v.xyz);
 
   let raw = u32(prt.m.x);
@@ -745,19 +780,25 @@ fn vsParticle(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
   var sz = R.params.x;
   if (sid >= 8.0) { sz *= 1.8; }
 
-  let ba = bombAmpR(ii);
+  let ba = bombAmpR(pid);
   sz *= 1.0 + ba * 3.5;
 
   var world = prt.p.xyz;
   var pf = 1.0;
   var wCoord = prt.p.w;
+  var wgt = 1.0;
 
   if (R.tessB.w > 0.5) {
-    let pr = project4(prt.p);
-    world = pr.xyz;
-    pf = pr.w;
+    let pr4 = project4full(prt.p);
+    if (ghosting) {
+      // §2.6 double exposure: each particle drawn at BOTH carousel endpoints,
+      // alpha split (1-t, t) — two orthogonal shadows cross-fading by depth.
+      if (ghostSide == 0u) { world = pr4.wa; wgt = 1.0 - pr4.t; }
+      else                 { world = pr4.wb; wgt = pr4.t; }
+    } else { world = pr4.world; }
+    pf = pr4.f;
     sz *= pf * 0.9;
-    
+
     let qRot = rot4(prt.p);
     wCoord = qRot.w;
   }
@@ -786,6 +827,7 @@ fn vsParticle(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
   if (R.tessB.w > 0.5) { col *= 0.45 + 0.55 * pf; }
   
   o.col = mix(col, vec3f(1.5, 1.35, 1.1), clamp(ba * 1.4, 0.0, 1.0));
+  o.wgt = wgt;
   return o;
 }
 
@@ -880,7 +922,7 @@ fn fsParticle(v: VOut) -> @location(0) vec4f {
   if (q > 1.0) { discard; }
   let core = exp(-q * 9.0);
   let halo = exp(-q * 2.6) * 0.30;
-  let a = (core + halo) * (0.55 + v.boost * 0.9);
+  let a = (core + halo) * (0.55 + v.boost * 0.9) * v.wgt;
   return vec4f(v.col * a, a);
 }
 
@@ -1024,7 +1066,7 @@ async function initGPU() {
   bufGridIdx   = device.createBuffer({ size: NUM_CELLS * CELL_CAP * 4, usage: GPUBufferUsage.STORAGE });
   bufRules     = device.createBuffer({ size: 256 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   bufSim       = device.createBuffer({ size: 288, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  bufRender    = device.createBuffer({ size: 304, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  bufRender    = device.createBuffer({ size: 320, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   const simModule = device.createShaderModule({ code: WGSL_SIM });
   const simBGL = device.createBindGroupLayout({ entries: [
@@ -1451,6 +1493,20 @@ window.addEventListener("keydown", e => {
       blend.scanHold = true;
       break;
     }
+    case "KeyD": {                              // Phase 5: ghost double exposure
+      state.ghost = !state.ghost;
+      statTimer = 0;
+      console.log("ghost double exposure:", state.ghost ? "on — both shadows, alpha split (1-t, t)" : "off");
+      break;
+    }
+    case "KeyL": {                              // Phase 6: lens morphing
+      state.lens = !state.lens;
+      statTimer = 0;
+      console.log(state.lens
+        ? "lens morphing on — enable the singularity and drag it around to curdle the projection"
+        : "lens morphing off");
+      break;
+    }
     case "KeyA":   toggleAudio(); break;
     case "KeyH": {
       for (const id of ["title", "stats", "panel", "hint"])
@@ -1724,7 +1780,7 @@ document.addEventListener("visibilitychange", () => { state.paused = document.hi
 
 /* uniform staging buffers (mixed f32/u32) */
 const simAB = new ArrayBuffer(288), simF = new Float32Array(simAB), simU = new Uint32Array(simAB);
-const renF = new Float32Array(76);
+const renF = new Float32Array(80);
 
 function writeSimUniforms(dt) {
   const oS = state.tesseract ? CUBE_OBJ : 1;
@@ -1793,6 +1849,7 @@ function writeRenderUniforms(basis, aspect) {
   const k1 = carousel.keys[0] || [0, 0];
   const k2 = carousel.keys[1] || [0, 0];
   renF.set([k1[0], k1[1], k2[0], k2[1]], 72);
+  renF.set([state.ghost ? 1 : 0, state.count, state.lens ? 1 : 0, 0], 76);
   device.queue.writeBuffer(bufRender, 0, renF);
 }
 
@@ -1941,7 +1998,7 @@ function frame(tms) {
     rp.draw(3);
     rp.setPipeline(pipeParticle);
     rp.setBindGroup(0, renderPartBG[drawFrom]);
-    rp.draw(6, state.count);
+    rp.draw(6, state.count * (state.ghost && state.geometry === 4 ? 2 : 1));
     if (state.geometry >= 1) {
       rp.setPipeline(pipeEdge);
       rp.setBindGroup(0, edgeBG);
@@ -1980,8 +2037,10 @@ function frame(tms) {
       modeLabel = `Bi-Projective 4D · frame B ${by}\u00B0/${bp}\u00B0`;
       if (blend.gMode !== 0) modeLabel += ` · \u03C3:${BLEND_NAMES[blend.gMode]}`;
       if (carousel.keys.length) modeLabel += ` · path ${carousel.keys.length + 2}f`;
+      if (state.ghost) modeLabel += " · ghosts";
     }
 
+    if (state.lens && state.geometry >= 1) modeLabel += " · lens\u03BC";
     const clock = state.userPaused ? "\u23F8 matter paused"
                 : state.lambda < 1 ? `matter \u03BB=${state.lambda}` : "";
 
