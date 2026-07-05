@@ -90,7 +90,7 @@
 
 <div class="hud" id="stats">— fps · — particles</div>
 
-<div class="hud" id="hint">drag to look · right-hold to stir · shift+right to repel · scroll to zoom · space = supernova · R reshuffle · T geometry · H hide</div>
+<div class="hud" id="hint">drag to look · middle-drag steers frame B (flick to tumble, dbl-click home) · right-hold to stir · shift+right to repel · scroll to zoom · space = supernova · R reshuffle · T geometry · H hide</div>
 
 <div class="hud" id="panel">
   <div id="panelHead"><span>FIELD CONTROLS</span><span id="panelChevron">▾</span></div>
@@ -590,6 +590,7 @@ struct RenderU {
   wormA: vec4f, wormB: vec4f,
   tessA: vec4f,         // rot angles XW, YW, ZW + projection distance
   tessB: vec4f,         // xyz bounce offset, w = mode
+  frameB: vec4f,        // Camera B rotor: x yaw, y pitch, z steer-glow, w unused
 };
 @group(0) @binding(0) var<uniform> R: RenderU;
 @group(0) @binding(1) var<storage, read> parts: array<Particle>;
@@ -654,8 +655,18 @@ fn project4(p: vec4f) -> vec4f {
   var world = q.xyz * (f * 0.5);
   
   // Mode 4: Bi-Projective morphing in world-space!
+  // Camera B is no longer a fixed 90-degree swing: it is a live rotor
+  // (yaw about Y, then pitch about X) steered by middle-button drag.
+  // At frameB = (pi/2, 0) this reduces exactly to the original (z, y, -x).
   if (mode > 3.5) {
-    let worldRotated = vec3f(world.z, world.y, -world.x); // orthogonal side profile
+    let cy = cos(R.frameB.x); let sy = sin(R.frameB.x);
+    let cp = cos(R.frameB.y); let sp = sin(R.frameB.y);
+    var worldRotated = vec3f(world.x * cy + world.z * sy,
+                             world.y,
+                            -world.x * sy + world.z * cy);
+    worldRotated = vec3f(worldRotated.x,
+                         worldRotated.y * cp - worldRotated.z * sp,
+                         worldRotated.y * sp + worldRotated.z * cp);
     let blend = clamp((q.w / 0.45) * 0.5 + 0.5, 0.0, 1.0);  // normalized W map
     world = mix(world, worldRotated, blend);
   }
@@ -817,8 +828,12 @@ fn vsEdge(@builtin(vertex_index) vi: u32) -> EOut {
 
 @fragment
 fn fsEdge(v: EOut) -> @location(0) vec4f {
-  let a = 0.085 * v.glow;
-  return vec4f(vec3f(0.45, 0.85, 1.0) * a, a);
+  // Steer-glow: while frame B is being grabbed/tumbling, the hyper-loop
+  // wireframe brightens and warms so the projective bridges stay legible.
+  let g = clamp(R.frameB.z, 0.0, 1.0);
+  let a = (0.085 + 0.12 * g) * v.glow;
+  let tint = mix(vec3f(0.45, 0.85, 1.0), vec3f(1.0, 0.78, 0.5), g * 0.6);
+  return vec4f(tint * a, a);
 }
 
 @fragment
@@ -971,7 +986,7 @@ async function initGPU() {
   bufGridIdx   = device.createBuffer({ size: NUM_CELLS * CELL_CAP * 4, usage: GPUBufferUsage.STORAGE });
   bufRules     = device.createBuffer({ size: 256 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   bufSim       = device.createBuffer({ size: 288, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  bufRender    = device.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  bufRender    = device.createBuffer({ size: 272, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   const simModule = device.createShaderModule({ code: WGSL_SIM });
   const simBGL = device.createBindGroupLayout({ entries: [
@@ -1165,6 +1180,23 @@ function respawnParticles() {
 const cam = { yaw: 0.6, pitch: 0.12, vyaw: 0, vpitch: 0, back: 0.25, fov: 75 * Math.PI / 180 };
 let lastInteract = 0, dragging = false, stirring = 0, mouse = [0, 0];
 
+/* ── Frame B: the steerable second projection of Bi-Projective mode ──
+   Home orientation (yaw = π/2, pitch = 0) is the original hardcoded
+   orthogonal side profile.  Middle-drag applies angular velocity with
+   very light damping, so a flick leaves Camera B tumbling — the whole
+   swarm keeps morphing on its own.  Double-middle-click tweens home. */
+const frameB = {
+  yaw: Math.PI / 2, pitch: 0,
+  vyaw: 0, vpitch: 0,
+  homeYaw: Math.PI / 2, homePitch: 0,
+  homing: false,
+  glow: 0,                 // steer-glow envelope sent to the shader
+  lastTouch: -1e9,         // performance.now() of last middle interaction
+  lastClick: -1e9,         // for double-middle-click detection
+};
+let steeringB = false;
+const wrapPi = a => ((a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+
 function camBasis() {
   const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
   const cy = Math.cos(cam.yaw),   sy = Math.sin(cam.yaw);
@@ -1214,14 +1246,32 @@ canvas.addEventListener("pointerdown", e => {
   canvas.setPointerCapture(e.pointerId);
   lastInteract = performance.now();
   mouse = [e.clientX, e.clientY];
-  if (e.button === 2 || e.buttons & 2) {
+  if (e.button === 1) {                      // middle button → grab Frame B
+    e.preventDefault();                      // suppress autoscroll gesture
+    steeringB = true;
+    frameB.homing = false;                   // a grab cancels any homing tween
+    const now = performance.now();
+    if (now - frameB.lastClick < 320) {      // double-middle-click → go home
+      frameB.homing = true;
+      frameB.vyaw = 0; frameB.vpitch = 0;
+      console.log("frame B: homing to orthogonal side profile");
+    }
+    frameB.lastClick = now;
+    frameB.lastTouch = now;
+  } else if (e.button === 2 || e.buttons & 2) {
     stirring = e.shiftKey ? -2.6 : 2.6;
     AudioEngine.setStir(true);
   } else { dragging = true; }
 });
 canvas.addEventListener("pointermove", e => {
   mouse = [e.clientX, e.clientY];
-  if (dragging) {
+  if (steeringB) {
+    frameB.vyaw   += (e.movementX || 0) * 0.000060;
+    frameB.vpitch += (e.movementY || 0) * 0.000060;
+    frameB.homing = false;
+    frameB.lastTouch = performance.now();
+    lastInteract = performance.now();        // keep autopilot camera off our back
+  } else if (dragging) {
     cam.vyaw   += (e.movementX || 0) * 0.000045;
     cam.vpitch += (e.movementY || 0) * 0.000045;
     lastInteract = performance.now();
@@ -1229,11 +1279,14 @@ canvas.addEventListener("pointermove", e => {
 });
 const stopPointer = e => {
   dragging = false;
+  steeringB = false;
   if (stirring !== 0) { stirring = 0; AudioEngine.setStir(false); }
 };
 canvas.addEventListener("pointerup", stopPointer);
 canvas.addEventListener("pointercancel", stopPointer);
 canvas.addEventListener("contextmenu", e => e.preventDefault());
+canvas.addEventListener("mousedown", e => { if (e.button === 1) e.preventDefault(); });
+canvas.addEventListener("auxclick",  e => { if (e.button === 1) e.preventDefault(); });
 canvas.addEventListener("wheel", e => {
   e.preventDefault();
   cam.back = Math.min(0.72, Math.max(0.02, cam.back + e.deltaY * 0.0006));
@@ -1528,7 +1581,7 @@ document.addEventListener("visibilitychange", () => { state.paused = document.hi
 
 /* uniform staging buffers (mixed f32/u32) */
 const simAB = new ArrayBuffer(288), simF = new Float32Array(simAB), simU = new Uint32Array(simAB);
-const renF = new Float32Array(64);
+const renF = new Float32Array(68);
 
 function writeSimUniforms(dt) {
   const oS = state.tesseract ? CUBE_OBJ : 1;
@@ -1592,6 +1645,7 @@ function writeRenderUniforms(basis, aspect) {
   renF.set(wB, 52);
   renF.set([...tess.ang, TESS_PROJ], 56);
   renF.set([...tessBounce.p, state.geometry], 60);
+  renF.set([frameB.yaw, frameB.pitch, frameB.glow, 0], 64);
   device.queue.writeBuffer(bufRender, 0, renF);
 }
 
@@ -1608,6 +1662,32 @@ function frame(tms) {
   cam.yaw += cam.vyaw * 600 * dt; cam.pitch += cam.vpitch * 600 * dt;
   cam.vyaw *= Math.exp(-5 * dt); cam.vpitch *= Math.exp(-5 * dt);
   cam.pitch = Math.max(-1.45, Math.min(1.45, cam.pitch));
+
+  /* ── Frame B dynamics ──
+     Inertia with far lighter damping than the main camera (-0.55 vs -5):
+     a flick keeps Camera B tumbling for seconds, morphing the swarm.
+     Frame B is a rotor, not an eye — pitch is unclamped, full tumbles ok. */
+  frameB.yaw   += frameB.vyaw   * 600 * dt;
+  frameB.pitch += frameB.vpitch * 600 * dt;
+  frameB.vyaw   *= Math.exp(-0.55 * dt);
+  frameB.vpitch *= Math.exp(-0.55 * dt);
+  if (frameB.homing) {
+    const hk = 1 - Math.exp(-dt * 4.5);
+    frameB.yaw   += wrapPi(frameB.homeYaw   - frameB.yaw)   * hk;
+    frameB.pitch += wrapPi(frameB.homePitch - frameB.pitch) * hk;
+    if (Math.abs(wrapPi(frameB.homeYaw - frameB.yaw)) < 0.002 &&
+        Math.abs(wrapPi(frameB.homePitch - frameB.pitch)) < 0.002) {
+      frameB.yaw = frameB.homeYaw; frameB.pitch = frameB.homePitch;
+      frameB.homing = false;
+    }
+  } else if (state.geometry === 4 &&
+             performance.now() - frameB.lastTouch > 7000 &&
+             Math.hypot(frameB.vyaw, frameB.vpitch) < 0.00002) {
+    frameB.yaw += 0.05 * dt;               // idle precession: never fully static
+    frameB.pitch += Math.sin(state.time * 0.13) * 0.010 * dt;
+  }
+  const steerTgt = (steeringB || Math.hypot(frameB.vyaw, frameB.vpitch) > 0.00006) ? 1 : 0;
+  frameB.glow += (steerTgt - frameB.glow) * (1 - Math.exp(-dt * 6));
   const sinceInteract = performance.now() - lastInteract;
   if (sing.active && sinceInteract > 2500) {
     let td = sing.pos;
@@ -1701,7 +1781,11 @@ function frame(tms) {
     if (state.geometry === 1) modeLabel = "Tesseract 4D";
     if (state.geometry === 2) modeLabel = "Hypersphere 4D";
     if (state.geometry === 3) modeLabel = "Hypertorus 4D";
-    if (state.geometry === 4) modeLabel = "Bi-Projective 4D";
+    if (state.geometry === 4) {
+      const by = Math.round(wrapPi(frameB.yaw) * 180 / Math.PI);
+      const bp = Math.round(wrapPi(frameB.pitch) * 180 / Math.PI);
+      modeLabel = `Bi-Projective 4D · frame B ${by}\u00B0/${bp}\u00B0`;
+    }
 
     $("stats").textContent =
       `${Math.round(fpsEMA)} fps · ${(state.count / 1000).toFixed(0)}k particles · ${modeLabel} · ` +
