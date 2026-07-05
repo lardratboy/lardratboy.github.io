@@ -90,11 +90,20 @@
 
 <div class="hud" id="stats">— fps · — particles</div>
 
-<div class="hud" id="hint">drag to look · right-hold to stir · shift+right to repel · scroll to zoom · space = supernova · R reshuffle · H hide</div>
+<div class="hud" id="hint">drag to look · right-hold to stir · shift+right to repel · scroll to zoom · space = supernova · R reshuffle · T geometry · H hide</div>
 
 <div class="hud" id="panel">
   <div id="panelHead"><span>FIELD CONTROLS</span><span id="panelChevron">▾</span></div>
   <div id="panelBody">
+    <div class="row">
+      <label>geometry</label>
+      <select id="uiGeometry">
+        <option value="0" selected>Sphere 3D</option>
+        <option value="1">Tesseract 4D</option>
+        <option value="2">Hypersphere 4D</option>
+        <option value="3">Hypertorus 4D</option>
+      </select>
+    </div>
     <div class="row">
       <label>particles</label>
       <input type="range" id="uiCount" min="4096" max="262144" step="4096" value="16384">
@@ -113,7 +122,6 @@
       <div class="tog on" id="togEvolve" title="rule matrix slowly mutates over time">evolve</div>
       <div class="tog on" id="togComets" title="wandering attractors that drag rivers of particles">comets</div>
       <div class="tog on" id="togWorm" title="a pair of wormhole mouths exchanging matter">wormhole</div>
-      <div class="tog" id="togTess" title="run the whole ecosystem in a 4D hypercube, viewed through an animating tesseract">tesseract</div>
       <div class="tog" id="togAudio" title="generative ambient drone">audio</div>
     </div>
     <div class="btns">
@@ -134,16 +142,7 @@
 /* ══════════════════════════════════════════════════════════════════
    LUMEN SPHERE
    Particle life × fluid dynamics on the INNER surface of a sphere.
-   All physics on WebGPU compute. Single file, vanilla JS, no alert().
-
-   Map of this file:
-     1. Constants & seeded RNG
-     2. WGSL — simulation (grid binning + forces)
-     3. WGSL — rendering (trails, glowing sprites, starfield composite)
-     4. GPU init, buffers, pipelines
-     5. Camera & input (orbit, stir, zoom, supernova)
-     6. Comets, rule evolution, generative audio
-     7. UI wiring & main loop
+   All physics on WebGPU compute. Single file, vanilla JS.
    ══════════════════════════════════════════════════════════════════ */
 
 /* ── 1. Constants & seeded RNG ─────────────────────────────────── */
@@ -161,6 +160,7 @@ const state = {
   force: 1.0, visc: 0.35, damp: 3.0, rmax: 0.06, trail: 0.90,
   gravity: 0.9, bombs: 1.0, mutate: 1.0,
   evolve: true, comets: true, audio: false, worm: true, tesseract: false,
+  geometry: 0,                         // 0: Sphere 3D, 1: Tesseract 4D, 2: Hypersphere 4D, 3: Hypertorus 4D
   seed: (Math.random() * 0xffffffff) >>> 0,
   time: 0, shockTime: -1, shockPos: [0, 0, 1],
   attractor: [0, 0, 0, 0],             // xyz + strength
@@ -209,8 +209,6 @@ function reseed(newSeed) {
 /* ── 2. WGSL — simulation ──────────────────────────────────────── */
 const WGSL_SIM = /* wgsl */`
 struct Particle { p: vec4f, v: vec4f, m: vec4f };
-// p = 4D position (w is identically 0 in sphere mode)   v = 4D velocity
-// m.x packs species (bits 0..3) + polarity flag (bit 4), m.y = radial pref
 
 struct SimParams {
   dt: f32, time: f32, numParticles: u32, numSpecies: u32,
@@ -222,7 +220,7 @@ struct SimParams {
   misc: vec4f,                            // x cometStrength, y shockSpeed, z beta, w gridExt
   sing: vec4f,                            // singularity: xyz pos, w strength envelope (0 = off)
   knobs: vec4f,                           // x gravity, y bombRate, z mutationRate, w blast impulse
-  extra: vec4f,                           // x spiral swirl, y mode (0 sphere / 1 tesseract)
+  extra: vec4f,                           // x spiral swirl, y mode (0=sphere, 1=tesseract, 2=hypersphere, 3=hypertorus)
   wormA: vec4f, wormB: vec4f,             // wormhole mouths: xyz pos, w radius (0 = off)
   wtA1: vec4f, wtA2: vec4f,               // tangent frame of mouth A (sphere mode)
   wtB1: vec4f, wtB2: vec4f,               // tangent frame of mouth B (sphere mode)
@@ -245,14 +243,11 @@ fn cellIndex(c: vec3i) -> u32 {
   return u32(c.x + c.y * d + c.z * d * d);
 }
 
-/* — pass A: clear cell counters — */
 @compute @workgroup_size(${WG})
 fn clearGrid(@builtin(global_invocation_id) id: vec3u) {
   if (id.x < ${NUM_CELLS}u) { atomicStore(&gridCount[id.x], 0u); }
 }
 
-/* — pass B: bin particles into the spatial hash grid (xyz only; the grid
-     is a superset filter — the force pass measures true 4D distances) — */
 @compute @workgroup_size(${WG})
 fn binParticles(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= P.numParticles) { return; }
@@ -261,7 +256,6 @@ fn binParticles(@builtin(global_invocation_id) id: vec3u) {
   if (slot < P.cellCap) { gridIdx[ci * P.cellCap + slot] = id.x; }
 }
 
-/* pull a particle tangentially toward a point on the shell (sphere mode) */
 fn tangentPull(pos: vec3f, n: vec3f, goal: vec3f, radius: f32) -> vec3f {
   let d = goal - pos;
   let dist = length(d);
@@ -273,7 +267,6 @@ fn tangentPull(pos: vec3f, n: vec3f, goal: vec3f, radius: f32) -> vec3f {
   return (dir / l) * fall * fall;
 }
 
-/* straight 4D pull toward a point (tesseract mode) */
 fn pull4(pos: vec4f, goal: vec4f, radius: f32) -> vec4f {
   let d = goal - pos;
   let dist = length(d);
@@ -282,9 +275,6 @@ fn pull4(pos: vec4f, goal: vec4f, radius: f32) -> vec4f {
   return (d / dist) * (fall * fall);
 }
 
-/* force bombs: in each 3-second epoch a tiny fraction of particles are
-   chosen (by hash — stateless, so neighbours and the renderer agree) to
-   detonate, blasting everything in reach outward with a decaying wave.  */
 fn bombAmp(idx: u32) -> f32 {
   let epoch = floor(P.time / 3.0);
   let h = fract(sin(f32(idx) * 12.9898 + epoch * 78.233) * 43758.5453);
@@ -293,7 +283,6 @@ fn bombAmp(idx: u32) -> f32 {
   return exp(-phase * 5.0);
 }
 
-/* ── WORMHOLE (sphere mode): matter that stops believing in distance ── */
 struct Warp { pos: vec3f, vel: vec3f, hit: f32 };
 fn portalWarp(pos: vec3f, vel: vec3f,
               aPos: vec3f, aT1: vec3f, aT2: vec3f,
@@ -316,10 +305,6 @@ fn portalWarp(pos: vec3f, vel: vec3f,
   return w;
 }
 
-/* — pass C: particle-life forces + fluid terms + world confinement.
-     The neighbour physics is dimension-agnostic: separations, viscosity
-     and bombs all use true 4D vectors, so the same living fluid exists
-     whether the world is a sphere shell or a unit hypercube.            — */
 @compute @workgroup_size(${WG})
 fn simulate(@builtin(global_invocation_id) id: vec3u) {
   let i = id.x;
@@ -331,9 +316,9 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
   let si    = raw & 15u;
   var flipped = (raw & 16u) != 0u;
   let rpref = pin[i].m.y;
-  let mode  = P.extra.y;                  // 0 = sphere shell, 1 = tesseract
+  let mode  = P.extra.y;                  // 0: sphere, 1: tesseract, 2: hypersphere, 3: hypertorus
 
-  /* polarity mutation: life species occasionally defect (repellers never do) */
+  /* polarity mutation */
   if (si < 8u) {
     let hm = fract(sin(f32(i) * 0.10723 + P.time * 91.317) * 24634.6345);
     if (hm < P.dt * 0.02 * P.knobs.z) { flipped = !flipped; }
@@ -368,11 +353,9 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
           else          { f = pol * a * (1.0 - abs(2.0 * r - 1.0 - beta) / (1.0 - beta)); }
           F += dir * (f * P.forceScale);
 
-          /* force bombs: if the neighbour is detonating, get blasted away */
           let ba = bombAmp(j);
           if (ba > 0.001) { F -= dir * (ba * 11.0 * (1.0 - r)); }
 
-          /* SPH-inspired viscosity in however many dimensions we have */
           let w = 1.0 - r;
           F += (pin[j].v - vel4) * (P.viscosity * w * w);
         }
@@ -381,7 +364,7 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
   }
 
   if (mode < 0.5) {
-    /* ───────────── sphere-shell world (the original) ───────────── */
+    /* ───────────── 0: Sphere 3D ───────────── */
     var F3  = F.xyz;
     let pos = pos4.xyz;
     let rlen = length(pos);
@@ -438,12 +421,10 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
     let targetR = P.shellR + rpref;
     F3 += n * ((targetR - rlen) * P.shellK);       // radial spring
     F = vec4f(F3, 0.0);
-    pos4.w = 0.0; vel4.w = 0.0;                    // the 4th dimension sleeps
+    pos4.w = 0.0; vel4.w = 0.0;
 
-  } else {
-    /* ───────────── tesseract world: same objects, four dimensions ───────
-       Every object lives in the w = 0 hyperplane, so its influence forms
-       3-dimensional sheets slicing through the 4D fluid.                  */
+  } else if (mode < 1.5) {
+    /* ───────────── 1: Tesseract 4D ───────────── */
     if (abs(P.attractor.w) > 0.001) {
       F += pull4(pos4, vec4f(P.attractor.xyz, 0.0), 0.62) * P.attractor.w;
     }
@@ -453,7 +434,7 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
       F += pull4(pos4, vec4f(P.comet1.xyz, 0.0), 0.45) * (cs * P.comet1.w);
       F += pull4(pos4, vec4f(P.comet2.xyz, 0.0), 0.45) * (cs * P.comet2.w);
     }
-    if (P.shock.w >= 0.0) {                        // supernova: expanding 3-sphere
+    if (P.shock.w >= 0.0) {
       let ts = P.time - P.shock.w;
       let d4 = pos4 - vec4f(P.shock.xyz, 0.0);
       let gd = length(d4);
@@ -463,32 +444,83 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
         F += (d4 / gd) * ((1.0 - x * x) * 6.0 * exp(-ts * 1.1));
       }
     }
-    if (P.sing.w > 0.001) {                        // the singularity drinks in 4D
+    if (P.sing.w > 0.001) {
       let ds = vec4f(P.sing.xyz, 0.0) - pos4;
       let dist = max(length(ds), 1e-5);
       let g = P.sing.w * P.knobs.x / max(dist * dist, 0.0036);
       F += (ds / dist) * min(g, 45.0);
-      let sw = P.extra.x;
-      if (abs(sw) > 0.001) {                       // spiral in the xyz hyperplane
-        var tS = cross(ds.xyz / dist, vec3f(0.0, 1.0, 0.0));
-        let tl = length(tS);
-        if (tl > 1e-4) {
-          let sMag = min(abs(sw) * P.knobs.x / max(dist * dist, 0.0036), 30.0);
-          F += vec4f((tS / tl) * (sMag * sign(sw)), 0.0);
-        }
-      }
     }
-    if (P.knobs.w > 0.001) {                       // collapse impulse, 4D
+    if (P.knobs.w > 0.001) {
       let ds = vec4f(P.sing.xyz, 0.0) - pos4;
       let dist = max(length(ds), 1e-5);
       F -= (ds / dist) * (P.knobs.w * max(1.0 - dist / 0.8, 0.0));
     }
-    /* soft hypercube walls at ±0.45 in all four dimensions */
-    let over = abs(pos4) - vec4f(0.45);
+    /* soft hypercube boundaries */
+    let over = abs(pos4) - vec4f(0.42);
     F -= sign(pos4) * (max(over, vec4f(0.0)) * 60.0);
+
+  } else if (mode < 2.5) {
+    /* ───────────── 2: Hypersphere 4D ───────────── */
+    let rlen = length(pos4);
+    let n = pos4 / max(rlen, 1e-5);
+
+    if (abs(P.attractor.w) > 0.001) {
+      F += pull4(pos4, vec4f(P.attractor.xyz, 0.0), 0.62) * P.attractor.w;
+    }
+    let cs = P.misc.x;
+    if (cs > 0.001) {
+      F += pull4(pos4, vec4f(P.comet0.xyz, 0.0), 0.45) * (cs * P.comet0.w);
+      F += pull4(pos4, vec4f(P.comet1.xyz, 0.0), 0.45) * (cs * P.comet1.w);
+      F += pull4(pos4, vec4f(P.comet2.xyz, 0.0), 0.45) * (cs * P.comet2.w);
+    }
+    if (P.shock.w >= 0.0) {
+      let ts = P.time - P.shock.w;
+      let d4 = pos4 - vec4f(P.shock.xyz, 0.0);
+      let gd = length(d4);
+      let ring = ts * P.misc.y * 0.6;
+      let x = (gd - ring) / 0.12;
+      if (abs(x) < 1.0 && ts < 4.0 && gd > 1e-4) {
+        F += (d4 / gd) * ((1.0 - x * x) * 6.0 * exp(-ts * 1.1));
+      }
+    }
+    if (P.sing.w > 0.001) {
+      let ds = vec4f(P.sing.xyz, 0.0) - pos4;
+      let dist = max(length(ds), 1e-5);
+      let g = P.sing.w * P.knobs.x / max(dist * dist, 0.0036);
+      F += (ds / dist) * min(g, 45.0);
+    }
+
+    // Project force onto the tangent space of the 3-sphere
+    F = F - n * dot(F, n);
+    let targetR = 0.45 + rpref * 0.18;
+    F += n * ((targetR - rlen) * P.shellK);
+
+  } else {
+    /* ───────────── 3: Hypertorus 4D ───────────── */
+    let r1 = length(pos4.xy);
+    let r2 = length(pos4.zw);
+    let n_xy = vec4f(pos4.x, pos4.y, 0.0, 0.0) / max(r1, 1e-5);
+    let n_zw = vec4f(0.0, 0.0, pos4.z, pos4.w) / max(r2, 1e-5);
+
+    if (abs(P.attractor.w) > 0.001) {
+      F += pull4(pos4, vec4f(P.attractor.xyz, 0.0), 0.62) * P.attractor.w;
+    }
+    let cs = P.misc.x;
+    if (cs > 0.001) {
+      F += pull4(pos4, vec4f(P.comet0.xyz, 0.0), 0.45) * (cs * P.comet0.w);
+      F += pull4(pos4, vec4f(P.comet1.xyz, 0.0), 0.45) * (cs * P.comet1.w);
+      F += pull4(pos4, vec4f(P.comet2.xyz, 0.0), 0.45) * (cs * P.comet2.w);
+    }
+
+    // Project force to tangent directions of both coordinate circles
+    F = F - n_xy * dot(F, n_xy) - n_zw * dot(F, n_zw);
+    let targetR1 = 0.35 + rpref * 0.1;
+    let targetR2 = 0.35 - rpref * 0.1;
+    F += n_xy * ((targetR1 - r1) * P.shellK);
+    F += n_zw * ((targetR2 - r2) * P.shellK);
   }
 
-  /* integrate — the update rule doesn't care how many dimensions it has */
+  /* integrate */
   vel4 += F * P.dt;
   vel4 *= exp(-P.damping * P.dt);
   let spd = length(vel4);
@@ -506,9 +538,6 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
       }
       pos4 = vec4f(wr.pos, 0.0); vel4 = vec4f(wr.vel, 0.0);
     } else {
-      /* 4D mouths: xyz-spheres that swallow across every w — and transit
-         MIRRORS the 4th coordinate, so matter exits on the far side of a
-         dimension it cannot see                                          */
       let offA = pos4.xyz - P.wormA.xyz;
       if (length(offA) < P.wormA.w && dot(vel4.xyz, offA) < 0.0) {
         pos4 = vec4f(P.wormB.xyz - offA, -pos4.w);
@@ -523,7 +552,7 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
     }
   }
 
-  /* safety nets — never let a particle escape its world */
+  /* confinement safety net */
   if (mode < 0.5) {
     let r2 = length(pos4.xyz);
     if (r2 > P.shellR * 1.3 || r2 < P.shellR * 0.35) {
@@ -552,13 +581,11 @@ struct RenderU {
   singR: vec4f,         // singularity: xyz world pos, w visual envelope (0 = off)
   wormA: vec4f, wormB: vec4f,  // wormhole mouths: xyz world pos, w radius (0 = off)
   tessA: vec4f,         // tesseract rotation angles XW, YW, ZW + projection distance
-  tessB: vec4f,         // xyz bounce offset, w = scale (0 = sphere mode)
+  tessB: vec4f,         // xyz bounce offset, w = mode (0:Sphere, 1:Tess, 2:Hypersphere, 3:Hypertorus)
 };
 @group(0) @binding(0) var<uniform> R: RenderU;
 @group(0) @binding(1) var<storage, read> parts: array<Particle>;
 
-/* 4D → 3D: rotate in the XW, YW, ZW planes, then perspective-divide
-   from the 4th dimension. Returns projected xyz + perspective factor. */
 fn rot4(p: vec4f) -> vec4f {
   var q = p;
   let ca = cos(R.tessA.x); let sa = sin(R.tessA.x);
@@ -569,14 +596,16 @@ fn rot4(p: vec4f) -> vec4f {
   q = vec4f(q.x, q.y, q.z * cc - q.w * sc, q.z * sc + q.w * cc);
   return q;
 }
+
 fn project4(p: vec4f) -> vec4f {
   let q = rot4(p);
   let f = R.tessA.w / max(R.tessA.w - q.w, 0.35);
-  return vec4f(q.xyz * (f * R.tessB.w) + R.tessB.xyz, f);
+  return vec4f(q.xyz * (f * 0.5) + R.tessB.xyz, f);
 }
 
 fn speciesColor(s: f32, hshift: f32) -> vec3f {
-  if (s >= 8.0) {   // repeller species: dim cold smoke that carves voids
+  if (s >= 8.0) {   
+    // Repeller species: dim cold smoke that carves voids
     let t = (s - 8.0) / 4.0;
     return mix(vec3f(0.40, 0.36, 0.55), vec3f(0.26, 0.44, 0.50), t) * 0.5;
   }
@@ -584,8 +613,6 @@ fn speciesColor(s: f32, hshift: f32) -> vec3f {
   return 0.5 + 0.5 * cos(6.28318 * (vec3f(t) + R.pal.xyz));
 }
 
-/* must mirror bombAmp() in the sim shader exactly, so the flash
-   appears on the same particles that are blasting their neighbours */
 fn bombAmpR(idx: u32) -> f32 {
   let epoch = floor(R.params.z / 3.0);
   let h = fract(sin(f32(idx) * 12.9898 + epoch * 78.233) * 43758.5453);
@@ -594,7 +621,6 @@ fn bombAmpR(idx: u32) -> f32 {
   return exp(-phase * 5.0);
 }
 
-/* — glowing billboard sprites — */
 struct VOut {
   @builtin(position) pos: vec4f,
   @location(0) uv: vec2f,
@@ -611,23 +637,19 @@ fn vsParticle(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
   let prt = parts[ii];
   let spd = length(prt.v.xyz);
 
-  /* decode packed m.x: species in bits 0..3, polarity flag in bit 4 */
   let raw = u32(prt.m.x);
   let sid = f32(raw & 15u);
   let inverted = (raw & 16u) != 0u;
 
   var sz = R.params.x;
-  if (sid >= 8.0) { sz *= 1.7; }        // repellers: big soft smoke puffs
+  if (sid >= 8.0) { sz *= 1.8; }
 
-  /* force bombs flare white-hot and swell as they detonate */
   let ba = bombAmpR(ii);
   sz *= 1.0 + ba * 3.5;
 
-  /* tesseract mode: 4D → 3D perspective projection; nearer in the 4th
-     dimension = literally bigger and brighter in ours                  */
   var world = prt.p.xyz;
   var pf = 1.0;
-  if (R.tessB.w > 0.001) {
+  if (R.tessB.w > 0.5) {
     let pr = project4(prt.p);
     world = pr.xyz;
     pf = pr.w;
@@ -641,37 +663,77 @@ fn vsParticle(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
   o.pos = R.viewProj * vec4f(wpos, 1.0);
   o.uv  = c;
   o.boost = clamp(spd * 1.4 + ba * 2.0, 0.0, 1.6);
-  /* polarity mutants wear the complementary hue — renegades in the colony */
+  
   var col = speciesColor(sid, select(0.0, 0.5, inverted));
   col = mix(col, vec3f(1.05, 1.02, 0.95), clamp(spd * 1.4, 0.0, 1.0) * 0.55);
-  if (R.tessB.w > 0.001) { col *= 0.45 + 0.55 * pf; }   // 4D depth shading
+  if (R.tessB.w > 0.5) { col *= 0.45 + 0.55 * pf; }
+  
   o.col = mix(col, vec3f(1.5, 1.35, 1.1), clamp(ba * 1.4, 0.0, 1.0));
   return o;
 }
 
-/* — tesseract wireframe: the 32 edges of the hypercube, projected live.
-     Corner bits come straight from the vertex index; no vertex buffer.  — */
 struct EOut { @builtin(position) pos: vec4f, @location(0) glow: f32 };
 @vertex
 fn vsEdge(@builtin(vertex_index) vi: u32) -> EOut {
-  let edge = vi >> 1u;                   // 0..31
-  let ep   = vi & 1u;                    // which endpoint
-  let dim  = edge >> 3u;                 // dimension this edge spans
-  let base = edge & 7u;                  // 3 fixed bits for the other dims
-  var bits = 0u; var bi = 0u;
-  for (var d = 0u; d < 4u; d++) {
-    if (d == dim) { bits |= ep << d; }
-    else { bits |= ((base >> bi) & 1u) << d; bi++; }
-  }
-  let corner = (vec4f(f32(bits & 1u), f32((bits >> 1u) & 1u),
+  let mode = R.tessB.w;
+  var corner = vec4f(0.0, 0.0, 0.0, 0.0);
+  
+  if (mode > 0.5 && mode < 1.5) {
+    // Tesseract: 32 edges (64 vertices)
+    if (vi < 64u) {
+      let edge = vi >> 1u;
+      let ep   = vi & 1u;
+      let dim  = edge >> 3u;
+      let base = edge & 7u;
+      var bits = 0u; var bi = 0u;
+      for (var d = 0u; d < 4u; d++) {
+        if (d == dim) { bits |= ep << d; }
+        else { bits |= ((base >> bi) & 1u) << d; bi++; }
+      }
+      corner = (vec4f(f32(bits & 1u), f32((bits >> 1u) & 1u),
                       f32((bits >> 2u) & 1u), f32((bits >> 3u) & 1u))
                 - 0.5) * 0.9;
+    }
+  } else if (mode > 1.5 && mode < 2.5) {
+    // Hypersphere: 6 coordinate circles
+    let ringIdx = vi / 128u;
+    let vertIdx = vi % 128u;
+    let segment = vertIdx >> 1u;
+    let ep      = f32(vertIdx & 1u);
+    let theta   = (f32(segment) + ep) / 64.0 * 6.2831853;
+    let R_val   = 0.45;
+    let c = cos(theta) * R_val;
+    let s = sin(theta) * R_val;
+    if (ringIdx == 0u) { corner = vec4f(c, s, 0.0, 0.0); }
+    if (ringIdx == 1u) { corner = vec4f(c, 0.0, s, 0.0); }
+    if (ringIdx == 2u) { corner = vec4f(c, 0.0, 0.0, s); }
+    if (ringIdx == 3u) { corner = vec4f(0.0, c, s, 0.0); }
+    if (ringIdx == 4u) { corner = vec4f(0.0, c, 0.0, s); }
+    if (ringIdx == 5u) { corner = vec4f(0.0, 0.0, c, s); }
+  } else if (mode > 2.5) {
+    // Hypertorus: nested circular planes
+    let ringIdx = vi / 128u;
+    let vertIdx = vi % 128u;
+    let segment = vertIdx >> 1u;
+    let ep      = f32(vertIdx & 1u);
+    let theta   = (f32(segment) + ep) / 64.0 * 6.2831853;
+    let R1 = 0.35;
+    let R2 = 0.35;
+    let c = cos(theta);
+    let s = sin(theta);
+    if (ringIdx == 0u) { corner = vec4f(c * R1, s * R1, 0.0, R2); }
+    if (ringIdx == 1u) { corner = vec4f(c * R1, s * R1, R2, 0.0); }
+    if (ringIdx == 2u) { corner = vec4f(0.0, R1, c * R2, s * R2); }
+    if (ringIdx == 3u) { corner = vec4f(R1, 0.0, c * R2, s * R2); }
+  }
+
   let pr = project4(corner);
   var o: EOut;
   o.pos = R.viewProj * vec4f(pr.xyz, 1.0);
   o.glow = pr.w;
   return o;
 }
+
 @fragment
 fn fsEdge(v: EOut) -> @location(0) vec4f {
   let a = 0.085 * v.glow;
@@ -688,7 +750,6 @@ fn fsParticle(v: VOut) -> @location(0) vec4f {
   return vec4f(v.col * a, a);
 }
 
-/* — trail fade: fullscreen quad, multiplies the accum buffer by a blend constant — */
 @vertex
 fn vsFull(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
   var p = array<vec2f, 3>(vec2f(-1.0,-1.0), vec2f(3.0,-1.0), vec2f(-1.0, 3.0));
@@ -697,7 +758,6 @@ fn vsFull(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 @fragment
 fn fsFade() -> @location(0) vec4f { return vec4f(0.0); }
 
-/* — final composite: starfield + nebula behind the tonemapped particle field — */
 @group(0) @binding(2) var accumTex: texture_2d<f32>;
 @group(0) @binding(3) var accumSmp: sampler;
 
@@ -708,13 +768,11 @@ fn vnoise(p: vec3f) -> f32 {
   let i = floor(p); let f = fract(p);
   let u = f * f * (3.0 - 2.0 * f);
   return mix(
-    mix(mix(hash3(i), hash3(i+vec3f(1,0,0)), u.x), mix(hash3(i+vec3f(0,1,0)), hash3(i+vec3f(1,1,0)), u.x), u.y),
-    mix(mix(hash3(i+vec3f(0,0,1)), hash3(i+vec3f(1,0,1)), u.x), mix(hash3(i+vec3f(0,1,1)), hash3(i+vec3f(1,1,1)), u.x), u.y),
+    mix(mix(hash3(i), hash3(i+vec3f(1,0,0)), u.x), mix(hash3(i+vec3f(1,0,1)), hash3(i+vec3f(1,1,0)), u.x), u.y),
+    mix(mix(hash3(i+vec3f(0,0,1)), hash3(i+vec3f(1,1,1)), u.x), mix(hash3(i+vec3f(0,1,1)), hash3(i+vec3f(1,1,1)), u.x), u.y),
     u.z);
 }
 
-/* wormhole mouth: lenses the HDR particle field pinched toward its centre,
-   with a chromatic shimmer and a breathing, tinted event-horizon rim      */
 fn portalFX(col: vec3f, uv: vec2f, dir: vec3f, portal: vec4f, tint: vec3f) -> vec3f {
   if (portal.w < 0.001) { return col; }
   var outCol = col;
@@ -722,9 +780,8 @@ fn portalFX(col: vec3f, uv: vec2f, dir: vec3f, portal: vec4f, tint: vec3f) -> ve
   let dist = max(length(toP), 0.05);
   let cosA = dot(dir, toP / dist);
   let ang  = acos(clamp(cosA, -1.0, 1.0));
-  let angR = portal.w / dist;                       // angular radius of the mouth
+  let angR = portal.w / dist;
   if (ang < angR * 3.0 && cosA > 0.0) {
-    /* lensing: re-sample the trail buffer pulled toward the mouth centre */
     let clip = R.viewProj * vec4f(portal.xyz, 1.0);
     if (clip.w > 0.0) {
       let ndcP = clip.xy / clip.w;
@@ -740,7 +797,6 @@ fn portalFX(col: vec3f, uv: vec2f, dir: vec3f, portal: vec4f, tint: vec3f) -> ve
                      inside * 0.9);
       }
     }
-    /* breathing event-horizon rim */
     let w   = 0.010 + angR * 0.10;
     let rim = exp(-pow((ang - angR) / w, 2.0))
             * (0.75 + 0.25 * sin(R.params.z * 3.1 + ang * 60.0));
@@ -759,7 +815,6 @@ fn fsFinal(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
     + R.right.xyz * (ndc.x * tanF * R.params.w)
     + R.up.xyz    * (ndc.y * tanF));
 
-  /* distant stars behind the shell, twinkling faintly */
   var stars = 0.0;
   for (var s = 0; s < 2; s++) {
     let scale = select(46.0, 92.0, s == 1);
@@ -771,41 +826,35 @@ fn fsFinal(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
     }
   }
 
-  /* whisper of nebula, coloured from the same palette as the particles */
   let n = vnoise(dir * 3.0 + vec3f(0.0, R.params.z * 0.008, 0.0)) * 0.6
         + vnoise(dir * 7.0) * 0.4;
   let nebCol = 0.5 + 0.5 * cos(6.28318 * (vec3f(n * 0.4 + 0.6) + R.pal.xyz));
   let neb = nebCol * pow(n, 3.0) * 0.045;
 
-  /* tonemap the HDR particle accumulation */
   let hdr  = textureSampleLevel(accumTex, accumSmp, uv, 0.0).rgb;
   let tone = vec3f(1.0) - exp(-hdr * R.post.x);
   let lum  = dot(tone, vec3f(0.299, 0.587, 0.114));
 
-  /* vignette to hold the eye at the heart of the sphere */
   let d = ndc * vec2f(R.params.w, 1.0) * 0.5;
   let vig = 1.0 - dot(d, d) * R.post.y;
 
   var col = (vec3f(stars) * R.post.z + neb) * max(1.0 - lum * 1.4, 0.0) + tone;
 
-  /* roving singularity: a dark core wrapped in a violet accretion glow */
   if (R.singR.w > 0.001) {
     let dS  = normalize(R.singR.xyz - R.camPos.xyz);
     let ang = acos(clamp(dot(dir, dS), -1.0, 1.0));
     let e   = min(R.singR.w, 1.0);
-    let ring = exp(-pow(ang * 42.0 - 1.6, 2.0));            // accretion ring
-    let glow = exp(-ang * 26.0) * 0.35;                     // soft halo
-    let hole = 1.0 - exp(-pow(ang * 70.0, 2.0)) * 0.92;     // devouring dark core
+    let ring = exp(-pow(ang * 42.0 - 1.6, 2.0));
+    let glow = exp(-ang * 26.0) * 0.35;
+    let hole = 1.0 - exp(-pow(ang * 70.0, 2.0)) * 0.92;
     col = col * mix(1.0, hole, e);
     col += vec3f(0.75, 0.55, 1.15) * ((ring + glow) * R.singR.w * 0.6);
   }
 
-  /* wormhole pair — a gold mouth and a cyan mouth, forever exchanging matter */
   col = portalFX(col, uv, dir, R.wormA, vec3f(1.00, 0.72, 0.25));
   col = portalFX(col, uv, dir, R.wormB, vec3f(0.30, 0.85, 1.00));
 
   col *= max(vig, 0.0);
-  /* subtle filmic lift so blacks breathe */
   col = pow(col, vec3f(0.92));
   return vec4f(col, 1.0);
 }
@@ -832,7 +881,7 @@ async function initGPU() {
   ctx.configure({ device, format: canvasFormat, alphaMode: "opaque" });
 
   /* — buffers — */
-  const pBytes = MAX_PARTICLES * 48;   // 3 × vec4 per particle (4D pos, 4D vel, meta)
+  const pBytes = MAX_PARTICLES * 48;
   for (let i = 0; i < 2; i++) {
     bufParticles[i] = device.createBuffer({
       size: pBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -843,7 +892,6 @@ async function initGPU() {
   bufSim       = device.createBuffer({ size: 288, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   bufRender    = device.createBuffer({ size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-  /* — compute pipelines share one explicit layout so bind groups can ping-pong — */
   const simModule = device.createShaderModule({ code: WGSL_SIM });
   const simBGL = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
@@ -871,7 +919,6 @@ async function initGPU() {
     ]});
   }
 
-  /* — render pipelines — */
   const rendModule = device.createShaderModule({ code: WGSL_RENDER });
 
   pipeFade = device.createRenderPipeline({
@@ -908,7 +955,6 @@ async function initGPU() {
     primitive: { topology: "triangle-list" },
   });
 
-  /* tesseract wireframe — 32 projected edges, drawn additively into the trails */
   pipeEdge = device.createRenderPipeline({
     layout: "auto",
     vertex:   { module: rendModule, entryPoint: "vsEdge" },
@@ -929,6 +975,7 @@ async function initGPU() {
 }
 
 function resize() {
+  if (!device) return; // Guard against early browser layout passes
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
   const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
@@ -949,36 +996,65 @@ function resize() {
 }
 window.addEventListener("resize", resize);
 
-/* seed particles — onto the shell, or uniformly through the unit hypercube */
 function respawnParticles() {
   const n = state.count, data = new Float32Array(n * 12);
   const layerGap = SHELL_T * 0.55;
   for (let i = 0; i < n; i++) {
-    // ~15% of particles become dark repellers (ids 8..12); rest are life species
     const isRep = rng() < 0.15;
     const sp = isRep ? 8 + Math.floor(rng() * REPELLERS)
                      : Math.floor(rng() * state.species);
     const o = i * 12;
-    if (state.tesseract) {
-      for (let d = 0; d < 4; d++) data[o + d]     = (rng() - 0.5) * 0.84;  // pos4
-      for (let d = 0; d < 4; d++) data[o + 4 + d] = (rng() - 0.5) * 0.06;  // vel4
-      data[o + 8] = sp; data[o + 9] = 0;
-    } else {
-      // gaussian → uniform direction on sphere
+
+    const layer = isRep
+      ? ((sp - 8) / (REPELLERS - 1) - 0.5) * layerGap * 0.6
+      : (sp / Math.max(state.species - 1, 1) - 0.5) * layerGap;
+    const rpref = layer + (rng() - 0.5) * SHELL_T * 0.5;
+
+    if (state.geometry === 0) { // Sphere 3D
       let x, y, z, l;
       do {
         x = rng() * 2 - 1; y = rng() * 2 - 1; z = rng() * 2 - 1;
         l = Math.hypot(x, y, z);
       } while (l < 1e-4 || l > 1);
       x /= l; y /= l; z /= l;
-      const layer = isRep
-        ? ((sp - 8) / (REPELLERS - 1) - 0.5) * layerGap * 0.6
-        : (sp / Math.max(state.species - 1, 1) - 0.5) * layerGap;
-      const rpref = layer + (rng() - 0.5) * SHELL_T * 0.5;
       const r = SHELL_R + rpref;
       data[o] = x * r; data[o + 1] = y * r; data[o + 2] = z * r; data[o + 3] = 0;
       data[o + 4] = (rng() - 0.5) * 0.05; data[o + 5] = (rng() - 0.5) * 0.05;
       data[o + 6] = (rng() - 0.5) * 0.05; data[o + 7] = 0;
+      data[o + 8] = sp; data[o + 9] = rpref;
+    } 
+    else if (state.geometry === 1) { // Tesseract 4D
+      for (let d = 0; d < 4; d++) data[o + d]     = (rng() - 0.5) * 0.84;
+      for (let d = 0; d < 4; d++) data[o + 4 + d] = (rng() - 0.5) * 0.06;
+      data[o + 8] = sp; data[o + 9] = 0;
+    }
+    else if (state.geometry === 2) { // Hypersphere 4D (S3 shell)
+      let x, y, z, w, l;
+      do {
+        const u1 = Math.max(rng(), 1e-9), u2 = rng();
+        const u3 = Math.max(rng(), 1e-9), u4 = rng();
+        x = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+        y = Math.sqrt(-2.0 * Math.log(u1)) * Math.sin(2.0 * Math.PI * u2);
+        z = Math.sqrt(-2.0 * Math.log(u3)) * Math.cos(2.0 * Math.PI * u4);
+        w = Math.sqrt(-2.0 * Math.log(u3)) * Math.sin(2.0 * Math.PI * u4);
+        l = Math.hypot(x, y, z, w);
+      } while (l < 1e-4);
+      x /= l; y /= l; z /= l; w /= l;
+      const r = 0.45 + rpref * 0.3;
+      data[o] = x * r; data[o + 1] = y * r; data[o + 2] = z * r; data[o + 3] = w * r;
+      for (let d = 0; d < 4; d++) data[o + 4 + d] = (rng() - 0.5) * 0.04;
+      data[o + 8] = sp; data[o + 9] = rpref;
+    }
+    else if (state.geometry === 3) { // Hypertorus 4D (Duocylinder)
+      const a1 = rng() * 2.0 * Math.PI;
+      const a2 = rng() * 2.0 * Math.PI;
+      const r1 = 0.35 + rpref * 0.1;
+      const r2 = 0.35 - rpref * 0.1;
+      data[o]     = Math.cos(a1) * r1;
+      data[o + 1] = Math.sin(a1) * r1;
+      data[o + 2] = Math.cos(a2) * r2;
+      data[o + 3] = Math.sin(a2) * r2;
+      for (let d = 0; d < 4; d++) data[o + 4 + d] = (rng() - 0.5) * 0.04;
       data[o + 8] = sp; data[o + 9] = rpref;
     }
   }
@@ -987,7 +1063,7 @@ function respawnParticles() {
   cur = 0;
 }
 
-/* ── 5. Camera & input (orbit, stir, zoom, supernova) ─────────── */
+/* ── 5. Camera & input ─────────────────────────────────────────── */
 const cam = { yaw: 0.6, pitch: 0.12, vyaw: 0, vpitch: 0, back: 0.25, fov: 75 * Math.PI / 180 };
 let lastInteract = 0, dragging = false, stirring = 0, mouse = [0, 0];
 
@@ -1002,7 +1078,7 @@ function camBasis() {
   const eye = fwd.map(v => -v * cam.back);
   return { fwd, rt, up, eye };
 }
-function mat4Mul(a, b) {           // column-major a*b
+function mat4Mul(a, b) {
   const o = new Float32Array(16);
   for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
     o[c*4+r] = a[r]*b[c*4] + a[4+r]*b[c*4+1] + a[8+r]*b[c*4+2] + a[12+r]*b[c*4+3];
@@ -1022,7 +1098,6 @@ function viewProj(basis, aspect) {
     0, 0, far / (near - far), -1,  0, 0, near * far / (near - far), 0]);
   return mat4Mul(proj, view);
 }
-/* ray through a screen point → intersection with the shell */
 function rayToShell(px, py, basis) {
   const aspect = canvas.clientWidth / canvas.clientHeight;
   const tanF = Math.tan(cam.fov / 2);
@@ -1041,7 +1116,7 @@ canvas.addEventListener("pointerdown", e => {
   canvas.setPointerCapture(e.pointerId);
   lastInteract = performance.now();
   mouse = [e.clientX, e.clientY];
-  if (e.button === 2 || e.buttons & 2) {          // right button = stir
+  if (e.button === 2 || e.buttons & 2) {
     stirring = e.shiftKey ? -2.6 : 2.6;
     AudioEngine.setStir(true);
   } else { dragging = true; }
@@ -1081,7 +1156,14 @@ window.addEventListener("keydown", e => {
     case "KeyR":   reseed((Math.random() * 0xffffffff) >>> 0); break;
     case "KeyC":   setToggle("togComets", state.comets = !state.comets); break;
     case "KeyW":   setToggle("togWorm", state.worm = !state.worm); break;
-    case "KeyT":   setTesseract(!state.tesseract); break;
+    case "KeyT": {
+      const nextGeom = (state.geometry + 1) % 4;
+      $("uiGeometry").value = nextGeom;
+      state.geometry = nextGeom;
+      state.tesseract = state.geometry >= 1;
+      respawnParticles();
+      break;
+    }
     case "KeyE":   setToggle("togEvolve", state.evolve = !state.evolve); break;
     case "KeyA":   toggleAudio(); break;
     case "KeyH": {
@@ -1094,17 +1176,11 @@ window.addEventListener("keydown", e => {
 });
 
 /* ── 6. Comets, evolution, audio ───────────────────────────────── */
-function randUnit(r) {
-  let v, l;
-  do { v = [r()*2-1, r()*2-1, r()*2-1]; l = Math.hypot(...v); } while (l < 1e-4 || l > 1);
-  return v.map(x => x / l);
-}
-function rodrigues(v, k, th) {       // rotate v around unit axis k by th
-  const c = Math.cos(th), s = Math.sin(th);
-  const kv = k[0]*v[0] + k[1]*v[1] + k[2]*v[2];
-  const cx = [k[1]*v[2]-k[2]*v[1], k[2]*v[0]-k[0]*v[2], k[0]*v[1]-k[1]*v[0]];
-  return [0,1,2].map(i => v[i]*c + cx[i]*s + k[i]*kv*(1-c));
-}
+const CUBE_OBJ = 0.34, TESS_SCALE = 0.5, TESS_PROJ = 1.9;
+const tess = { ang: [0, 0, 0] };
+const tessBounce = { p: [0, 0, 0], v: [0.045, 0.032, 0.05] };
+let lastSingWorld = [0, 0, 1];
+
 const comets = [];
 for (let i = 0; i < 3; i++) {
   comets.push({ pos: randUnit(Math.random), axis: randUnit(Math.random),
@@ -1115,25 +1191,16 @@ function updateComets(dt) {
   for (const c of comets) {
     c.driftT -= dt;
     if (c.driftT <= 0) { c.drift = randUnit(Math.random); c.driftT = 4 + Math.random() * 6; }
-    // axis wanders slowly → paths never repeat
     let a = [0,1,2].map(i => c.axis[i] + c.drift[i] * dt * 0.25);
     const al = Math.hypot(...a); c.axis = a.map(v => v / al);
     c.pos = rodrigues(c.pos, c.axis, c.speed * dt);
     const pl = Math.hypot(...c.pos); c.pos = c.pos.map(v => v / pl);
-    // periodic flares — the comet "breathes", tugging harder in pulses
     c.flare = 0.55 + 0.45 * Math.pow(Math.max(0, Math.sin(state.time * 0.31 + c.phase)), 6) * 2.2;
   }
 }
 
-/* roving inverse supernova — a singularity forms roughly every ten seconds,
-   roams the shell, hoovers particles with inverse-square gravity delivered
-   in gulping impulse pulses, then collapses in an outward impulse blast     */
 const sing = { active: false, pos: [0, 0, 1], axis: [0, 1, 0],
                birth: 0, life: 7, next: 6, env: 0, blast: 0, swirl: 0 };
-function smoothstepJS(a, b, x) {
-  const t = Math.min(Math.max((x - a) / (b - a), 0), 1);
-  return t * t * (3 - 2 * t);
-}
 function updateSingularity(dt) {
   sing.env = 0; sing.blast = 0; sing.swirl = 0;
   if (state.gravity <= 0.001) { sing.active = false; return; }
@@ -1151,42 +1218,22 @@ function updateSingularity(dt) {
   const age = state.time - sing.birth;
   if (age > sing.life) {
     sing.active = false;
-    sing.next = 7 + Math.random() * 6;      // ≈ one every ten seconds
-    AudioEngine.boom();                      // the collapse is audible
+    sing.next = 7 + Math.random() * 6;
+    AudioEngine.boom();
     return;
   }
-  // rove slowly across the shell
   sing.pos = rodrigues(sing.pos, sing.axis, 0.07 * dt);
   const pl = Math.hypot(...sing.pos); sing.pos = sing.pos.map(v => v / pl);
-  // gulping impulse pulses layered onto the steady inverse-square pull
   const pulse = 1 + 0.8 * Math.pow(Math.max(0, Math.sin(age * 3.2)), 8);
   sing.env = smoothstepJS(0, 1.3, age)
            * (1 - smoothstepJS(sing.life - 0.5, sing.life, age)) * pulse;
-  // chirping spiral: sin((k·age)³) — slow one-way swirl early, then the
-  // direction flips faster and faster as the singularity nears collapse
   sing.swirl = Math.sin(Math.pow(age * 0.62, 3)) * sing.env * 0.65;
-  // final half-second: the collapse impulse blows everything back out
   const dp = (age - (sing.life - 0.45)) / 0.45;
   if (dp > 0 && dp < 1) sing.blast = (1 - dp) * 9.0;
 }
 
-/* wormhole pair — two mouths of a bridge through nowhere, roving slowly,
-   breathing, and continuously exchanging any matter that flows into them */
-function makeMouth(pos) {
-  return { pos, axis: randUnit(Math.random), drift: randUnit(Math.random),
-           driftT: 0, phase: Math.random() * 20, r: 0.13, t1: [1,0,0], t2: [0,1,0] };
-}
 const worm = { A: makeMouth(randUnit(Math.random)), B: null };
-worm.B = makeMouth(worm.A.pos.map(v => -v));       // born antipodal
-function tangentFrame(m) {
-  const n = m.pos;
-  let t1 = Math.abs(n[1]) < 0.99
-    ? [n[2], 0, -n[0]]                              // cross([0,1,0], n)
-    : [1, 0, 0];
-  const l = Math.hypot(...t1); t1 = t1.map(v => v / l);
-  m.t1 = t1;
-  m.t2 = [n[1]*t1[2]-n[2]*t1[1], n[2]*t1[0]-n[0]*t1[2], n[0]*t1[1]-n[1]*t1[0]];
-}
+worm.B = makeMouth(worm.A.pos.map(v => -v));
 function updateWormhole(dt) {
   for (const m of [worm.A, worm.B]) {
     m.driftT -= dt;
@@ -1195,10 +1242,9 @@ function updateWormhole(dt) {
     const al = Math.hypot(...a); m.axis = a.map(v => v / al);
     m.pos = rodrigues(m.pos, m.axis, 0.045 * dt);
     const pl = Math.hypot(...m.pos); m.pos = m.pos.map(v => v / pl);
-    m.r = 0.125 + 0.03 * Math.sin(state.time * 0.8 + m.phase);   // breathing
+    m.r = 0.125 + 0.03 * Math.sin(state.time * 0.8 + m.phase);
     tangentFrame(m);
   }
-  // keep the mouths from wandering into each other
   const dAB = worm.A.pos[0]*worm.B.pos[0] + worm.A.pos[1]*worm.B.pos[1] + worm.A.pos[2]*worm.B.pos[2];
   if (dAB > 0.2) {
     const push = worm.A.pos.map((v, i) => worm.B.pos[i] - v * 0.03);
@@ -1207,14 +1253,6 @@ function updateWormhole(dt) {
   }
 }
 
-/* tesseract mode: the 4D→3D viewing apparatus. Rotation angles animate in
-   the XW/YW/ZW planes, and the whole projected hull bounces gently around.
-   project4JS must mirror rot4/project4 in the render shader EXACTLY, so
-   object glows (singularity, wormholes) land where the particles do.      */
-const CUBE_OBJ = 0.34, TESS_SCALE = 0.5, TESS_PROJ = 1.9;
-const tess = { ang: [0, 0, 0] };
-const tessBounce = { p: [0, 0, 0], v: [0.045, 0.032, 0.05] };
-let lastSingWorld = [0, 0, 1];
 function updateTesseract(dt) {
   tess.ang = [state.time * 0.31 + 0.4, state.time * 0.23, state.time * 0.17];
   for (let i = 0; i < 3; i++) {
@@ -1225,6 +1263,7 @@ function updateTesseract(dt) {
     }
   }
 }
+
 function project4JS(p) {
   let [x, y, z, w] = p, t;
   const [a, b, c] = tess.ang;
@@ -1236,19 +1275,19 @@ function project4JS(p) {
                  y * f * TESS_SCALE + tessBounce.p[1],
                  z * f * TESS_SCALE + tessBounce.p[2]], f };
 }
+
 let evolveTimer = 0;
 function updateEvolution(dt) {
   if (!state.evolve) return;
   evolveTimer -= dt;
-  if (evolveTimer <= 0) {            // pick a new destiny every ~14 s
+  if (evolveTimer <= 0) {
     randomizeRules(Math.random);
     evolveTimer = 14;
   }
-  const k = 1 - Math.exp(-dt / 9);   // glacial drift toward the target matrix
+  const k = 1 - Math.exp(-dt / 9);
   for (let i = 0; i < 256; i++) rules[i] += (rulesTarget[i] - rules[i]) * k;
 }
 
-/* generative ambient audio — a low drone that answers your hand */
 const AudioEngine = {
   ctx: null, filter: null, master: null, stirOsc: null, stirGain: null, noiseBuf: null,
   init() {
@@ -1272,7 +1311,6 @@ const AudioEngine = {
     const lfoG = ctx.createGain(); lfoG.gain.value = 85;
     lfo.connect(lfoG); lfoG.connect(this.filter.frequency); lfo.start();
 
-    // shimmer voice for stirring
     this.stirGain = ctx.createGain(); this.stirGain.gain.value = 0;
     this.stirOsc = ctx.createOscillator(); this.stirOsc.type = "sine"; this.stirOsc.frequency.value = 523;
     const vib = ctx.createOscillator(); vib.frequency.value = 5.2;
@@ -1280,7 +1318,6 @@ const AudioEngine = {
     vib.connect(vibG); vibG.connect(this.stirOsc.frequency); vib.start();
     this.stirOsc.connect(this.stirGain); this.stirGain.connect(this.master); this.stirOsc.start();
 
-    // 1 s of noise for supernova booms
     const nb = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
     const ch = nb.getChannelData(0);
     for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
@@ -1320,6 +1357,34 @@ function toggleAudio() {
   AudioEngine.setOn(state.audio);
 }
 
+/* ── Helper Functions ─────────────────────────────────────────── */
+function randUnit(r) {
+  let v, l;
+  do { v = [r()*2-1, r()*2-1, r()*2-1]; l = Math.hypot(...v); } while (l < 1e-4 || l > 1);
+  return v.map(x => x / l);
+}
+function rodrigues(v, k, th) {
+  const c = Math.cos(th), s = Math.sin(th);
+  const kv = k[0]*v[0] + k[1]*v[1] + k[2]*v[2];
+  const cx = [k[1]*v[2]-k[2]*v[1], k[2]*v[0]-k[0]*v[2], k[0]*v[1]-k[1]*v[0]];
+  return [0,1,2].map(i => v[i]*c + cx[i]*s + k[i]*kv*(1-c));
+}
+function smoothstepJS(a, b, x) {
+  const t = Math.min(Math.max((x - a) / (b - a), 0), 1);
+  return t * t * (3 - 2 * t);
+}
+function makeMouth(pos) {
+  return { pos, axis: randUnit(Math.random), drift: randUnit(Math.random),
+           driftT: 0, phase: Math.random() * 20, r: 0.13, t1: [1,0,0], t2: [0,1,0] };
+}
+function tangentFrame(m) {
+  const n = m.pos;
+  let t1 = Math.abs(n[1]) < 0.99 ? [n[2], 0, -n[0]] : [1, 0, 0];
+  const l = Math.hypot(...t1); t1 = t1.map(v => v / l);
+  m.t1 = t1;
+  m.t2 = [n[1]*t1[2]-n[2]*t1[1], n[2]*t1[0]-n[0]*t1[2], n[0]*t1[1]-n[1]*t1[0]];
+}
+
 /* ── 7. UI wiring & main loop ──────────────────────────────────── */
 const $ = id => document.getElementById(id);
 function setToggle(id, on) { $(id).classList.toggle("on", on); }
@@ -1328,6 +1393,13 @@ $("panelHead").addEventListener("click", () => {
   $("panel").classList.toggle("closed");
   $("panelChevron").textContent = $("panel").classList.contains("closed") ? "▸" : "▾";
 });
+
+$("uiGeometry").addEventListener("change", e => {
+  state.geometry = +e.target.value;
+  state.tesseract = state.geometry >= 1;
+  respawnParticles();
+});
+
 $("uiCount").addEventListener("input", e => {
   state.count = +e.target.value;
   $("oCount").textContent = state.count >= 1000 ? (state.count / 1000).toFixed(0) + " k" : state.count;
@@ -1345,11 +1417,10 @@ bindSlider("uiTrail", "oTrail", "trail", v => v.toFixed(2).slice(1));
 bindSlider("uiGrav",  "oGrav",  "gravity", v => v.toFixed(1));
 bindSlider("uiBombs", "oBombs", "bombs",   v => v.toFixed(1));
 bindSlider("uiMut",   "oMut",   "mutate",  v => v.toFixed(1));
+
 $("togEvolve").addEventListener("click", () => setToggle("togEvolve", state.evolve = !state.evolve));
 $("togComets").addEventListener("click", () => setToggle("togComets", state.comets = !state.comets));
 $("togWorm").addEventListener("click", () => setToggle("togWorm", state.worm = !state.worm));
-const setTesseract = on => { state.tesseract = on; setToggle("togTess", on); respawnParticles(); };
-$("togTess").addEventListener("click", () => setTesseract(!state.tesseract));
 $("togAudio").addEventListener("click", toggleAudio);
 $("btnShuffle").addEventListener("click", () => reseed((Math.random() * 0xffffffff) >>> 0));
 $("btnNova").addEventListener("click", supernova);
@@ -1362,7 +1433,7 @@ const simAB = new ArrayBuffer(288), simF = new Float32Array(simAB), simU = new U
 const renF = new Float32Array(64);
 
 function writeSimUniforms(dt) {
-  const oS = state.tesseract ? CUBE_OBJ : 1;   // objects live smaller in the cube
+  const oS = state.tesseract ? CUBE_OBJ : 1;
   simF[0] = dt; simF[1] = state.time; simU[2] = state.count; simU[3] = state.species + REPELLERS;
   simF[4] = state.rmax; simF[5] = state.force; simF[6] = state.visc; simF[7] = state.damp;
   simF[8] = SHELL_R; simF[9] = 42.0; simU[10] = GRID_DIM; simU[11] = CELL_CAP;
@@ -1376,24 +1447,25 @@ function writeSimUniforms(dt) {
   simF[28] = state.shockPos[0] * oS; simF[29] = state.shockPos[1] * oS;
   simF[30] = state.shockPos[2] * oS;
   simF[31] = state.shockTime;
-  simF[32] = state.comets ? 1.4 : 0.0;  // comet strength
-  simF[33] = 1.15;                      // shock ring speed
-  simF[34] = 0.28;                      // beta: repulsion/attraction crossover
+  simF[32] = state.comets ? 1.4 : 0.0;
+  simF[33] = 1.15;
+  simF[34] = 0.28;
   simF[35] = GRID_EXT;
   simF[36] = sing.pos[0] * oS; simF[37] = sing.pos[1] * oS;
   simF[38] = sing.pos[2] * oS; simF[39] = sing.env;
   simF[40] = state.gravity; simF[41] = state.bombs;
   simF[42] = state.mutate;  simF[43] = sing.blast;
-  simF[44] = sing.swirl;    simF[45] = state.tesseract ? 1 : 0;
+  simF[44] = sing.swirl;    simF[45] = state.geometry;
   simF[46] = 0; simF[47] = 0;
   const wOn = state.worm ? 1 : 0;
-  const wR = state.tesseract ? 0.55 : 1;       // mouth capture radius in cube space
+  const wR = state.tesseract ? 0.55 : 1;
   simF.set([worm.A.pos[0]*oS, worm.A.pos[1]*oS, worm.A.pos[2]*oS, worm.A.r * wR * wOn], 48);
   simF.set([worm.B.pos[0]*oS, worm.B.pos[1]*oS, worm.B.pos[2]*oS, worm.B.r * wR * wOn], 52);
   simF.set([...worm.A.t1, 0], 56); simF.set([...worm.A.t2, 0], 60);
   simF.set([...worm.B.t1, 0], 64); simF.set([...worm.B.t2, 0], 68);
   device.queue.writeBuffer(bufSim, 0, simAB);
 }
+
 function writeRenderUniforms(basis, aspect) {
   renF.set(viewProj(basis, aspect), 0);
   renF.set([...basis.rt, 0], 16);
@@ -1403,13 +1475,12 @@ function writeRenderUniforms(basis, aspect) {
   const size = state.count > 150000 ? 0.0052 : 0.0066;
   renF.set([size, state.species, state.time, aspect], 32);
   renF.set(palette, 36);
-  renF.set([1.5, 0.55, 0.9, state.bombs], 40);  // exposure, vignette, stars, bomb rate
+  renF.set([1.5, 0.55, 0.9, state.bombs], 40); // Restore star intensity constant 0.9
   const wV = state.worm ? 1 : 0;
   let singW = [sing.pos[0] * SHELL_R, sing.pos[1] * SHELL_R, sing.pos[2] * SHELL_R];
   let wA = [worm.A.pos[0]*SHELL_R, worm.A.pos[1]*SHELL_R, worm.A.pos[2]*SHELL_R, worm.A.r * wV];
   let wB = [worm.B.pos[0]*SHELL_R, worm.B.pos[1]*SHELL_R, worm.B.pos[2]*SHELL_R, worm.B.r * wV];
   if (state.tesseract) {
-    /* project the objects through the same 4D pipeline as the particles */
     const ps = project4JS([sing.pos[0]*CUBE_OBJ, sing.pos[1]*CUBE_OBJ, sing.pos[2]*CUBE_OBJ, 0]);
     singW = ps.xyz;
     const pa = project4JS([worm.A.pos[0]*CUBE_OBJ, worm.A.pos[1]*CUBE_OBJ, worm.A.pos[2]*CUBE_OBJ, 0]);
@@ -1422,7 +1493,7 @@ function writeRenderUniforms(basis, aspect) {
   renF.set(wA, 48);
   renF.set(wB, 52);
   renF.set([...tess.ang, TESS_PROJ], 56);
-  renF.set([...tessBounce.p, state.tesseract ? TESS_SCALE : 0], 60);
+  renF.set([...tessBounce.p, state.geometry], 60);
   device.queue.writeBuffer(bufRender, 0, renF);
 }
 
@@ -1436,13 +1507,11 @@ function frame(tms) {
   state.time += dt;
   fpsEMA += (1 / Math.max(delta, 1e-4) - fpsEMA) * 0.05;
 
-  /* camera inertia + idle drift */
   cam.yaw += cam.vyaw * 600 * dt; cam.pitch += cam.vpitch * 600 * dt;
   cam.vyaw *= Math.exp(-5 * dt); cam.vpitch *= Math.exp(-5 * dt);
   cam.pitch = Math.max(-1.45, Math.min(1.45, cam.pitch));
   const sinceInteract = performance.now() - lastInteract;
   if (sing.active && sinceInteract > 2500) {
-    /* auto-track: glide the view toward the singularity — a pan overrides */
     let td = sing.pos;
     if (state.tesseract) {
       const l = Math.hypot(...lastSingWorld) || 1;
@@ -1462,7 +1531,6 @@ function frame(tms) {
 
   const basis = camBasis();
 
-  /* the viewer's hand on the field */
   if (stirring !== 0) {
     const p = rayToShell(mouse[0], mouse[1], basis);
     state.attractor = [p[0], p[1], p[2], stirring];
@@ -1480,7 +1548,7 @@ function frame(tms) {
 
   const enc = device.createCommandEncoder();
 
-  /* — simulation: clear grid → bin → forces & integrate — */
+  /* — simulation — */
   {
     const cp = enc.beginComputePass();
     cp.setBindGroup(0, simBG[cur]);
@@ -1491,7 +1559,7 @@ function frame(tms) {
   }
   const drawFrom = 1 - cur;
 
-  /* — trails: fade the HDR accumulation buffer, then add new sprites — */
+  /* — trails accumulation — */
   {
     const rp = enc.beginRenderPass({ colorAttachments: [{
       view: accumView, loadOp: accumFresh ? "clear" : "load",
@@ -1503,15 +1571,19 @@ function frame(tms) {
     rp.setPipeline(pipeParticle);
     rp.setBindGroup(0, renderPartBG[drawFrom]);
     rp.draw(6, state.count);
-    if (state.tesseract) {                 // the cage of the 4th dimension
+    if (state.geometry >= 1) {
       rp.setPipeline(pipeEdge);
       rp.setBindGroup(0, edgeBG);
-      rp.draw(64);
+      
+      let vertCount = 64; // Tesseract
+      if (state.geometry === 2) vertCount = 768; // Hypersphere circles
+      if (state.geometry === 3) vertCount = 512; // Hypertorus loops
+      rp.draw(vertCount);
     }
     rp.end();
   }
 
-  /* — composite: starfield + nebula + tonemap → canvas — */
+  /* — final composite — */
   {
     const rp = enc.beginRenderPass({ colorAttachments: [{
       view: ctx.getCurrentTexture().createView(), loadOp: "clear",
@@ -1527,8 +1599,13 @@ function frame(tms) {
 
   statTimer -= dt;
   if (statTimer <= 0) {
+    let modeLabel = "Sphere 3D";
+    if (state.geometry === 1) modeLabel = "Tesseract 4D";
+    if (state.geometry === 2) modeLabel = "Hypersphere 4D";
+    if (state.geometry === 3) modeLabel = "Hypertorus 4D";
+
     $("stats").textContent =
-      `${Math.round(fpsEMA)} fps · ${(state.count / 1000).toFixed(0)}k particles · ` +
+      `${Math.round(fpsEMA)} fps · ${(state.count / 1000).toFixed(0)}k particles · ${modeLabel} · ` +
       `${state.evolve ? "rules evolving" : "rules frozen"}`;
     statTimer = 0.5;
   }
