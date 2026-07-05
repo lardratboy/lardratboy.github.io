@@ -139,12 +139,6 @@
 
 <script>
 "use strict";
-/* ══════════════════════════════════════════════════════════════════
-   LUMEN SPHERE
-   Particle life × fluid dynamics on the INNER surface of a sphere.
-   All physics on WebGPU compute. Single file, vanilla JS.
-   ══════════════════════════════════════════════════════════════════ */
-
 /* ── 1. Constants & seeded RNG ─────────────────────────────────── */
 const MAX_PARTICLES = 262144;
 const GRID_DIM   = 30;                 // grid cells per axis
@@ -167,7 +161,7 @@ const state = {
   paused: false,
 };
 
-function mulberry32(a) {               // tiny seeded PRNG
+function mulberry32(a) {
   return function () {
     a |= 0; a = (a + 0x6D2B79F5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
@@ -177,19 +171,13 @@ function mulberry32(a) {               // tiny seeded PRNG
 }
 let rng = mulberry32(state.seed);
 
-/* rule matrix: species × species attraction (+) / repulsion (−), 16×16 stride.
-   Species ids 0..7 are the colourful "life" species; ids 8..12 are five
-   permanent REPELLER species — dark smoke that pushes everything away,
-   carving voids and lanes through the fluid.                              */
 const REPELLERS   = 5;
-const rules       = new Float32Array(256);  // live values
-const rulesTarget = new Float32Array(256);  // evolution drifts toward these
-const palette     = new Float32Array(4);    // cosine-palette phases
+const rules       = new Float32Array(256);
+const rulesTarget = new Float32Array(256);
+const palette     = new Float32Array(4);
 function randomizeRules(r) {
   for (let i = 0; i < 256; i++) rulesTarget[i] = (r() * 2 - 1);
-  // gentle bias: species mildly like themselves → cohesive blobs
   for (let s = 0; s < 8; s++) rulesTarget[s * 16 + s] = 0.25 + r() * 0.6;
-  // repeller band: ids 8..12 repel everything, and everything repels them
   for (let a = 0; a < 16; a++) {
     for (let b = 8; b < 8 + REPELLERS; b++) {
       rulesTarget[a * 16 + b] = -(0.35 + r() * 0.6);
@@ -201,7 +189,7 @@ function reseed(newSeed) {
   state.seed = newSeed >>> 0;
   rng = mulberry32(state.seed);
   randomizeRules(rng);
-  rules.set(rulesTarget);                       // jump straight to the new world
+  rules.set(rulesTarget);
   palette[0] = rng(); palette[1] = rng(); palette[2] = rng(); palette[3] = rng();
   document.getElementById("seed").textContent = state.seed.toString(16).padStart(8, "0");
 }
@@ -214,16 +202,16 @@ struct SimParams {
   dt: f32, time: f32, numParticles: u32, numSpecies: u32,
   rmax: f32, forceScale: f32, viscosity: f32, damping: f32,
   shellR: f32, shellK: f32, gridDim: u32, cellCap: u32,
-  attractor: vec4f,                       // xyz pos, w strength
-  comet0: vec4f, comet1: vec4f, comet2: vec4f, // xyz pos, w flare
-  shock: vec4f,                           // xyz pos, w start time (−1 = off)
-  misc: vec4f,                            // x cometStrength, y shockSpeed, z beta, w gridExt
-  sing: vec4f,                            // singularity: xyz pos, w strength envelope (0 = off)
-  knobs: vec4f,                           // x gravity, y bombRate, z mutationRate, w blast impulse
-  extra: vec4f,                           // x spiral swirl, y mode (0=sphere, 1=tesseract, 2=hypersphere, 3=hypertorus)
-  wormA: vec4f, wormB: vec4f,             // wormhole mouths: xyz pos, w radius (0 = off)
-  wtA1: vec4f, wtA2: vec4f,               // tangent frame of mouth A (sphere mode)
-  wtB1: vec4f, wtB2: vec4f,               // tangent frame of mouth B (sphere mode)
+  attractor: vec4f,
+  comet0: vec4f, comet1: vec4f, comet2: vec4f,
+  shock: vec4f,
+  misc: vec4f,
+  sing: vec4f,
+  knobs: vec4f,
+  extra: vec4f,
+  wormA: vec4f, wormB: vec4f,
+  wtA1: vec4f, wtA2: vec4f,
+  wtB1: vec4f, wtB2: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> P: SimParams;
@@ -231,7 +219,7 @@ struct SimParams {
 @group(0) @binding(2) var<storage, read_write>  pout: array<Particle>;
 @group(0) @binding(3) var<storage, read_write>  gridCount: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write>  gridIdx:   array<u32>;
-@group(0) @binding(5) var<storage, read>        rules: array<f32>;   // 16×16
+@group(0) @binding(5) var<storage, read>        rules: array<f32>;
 
 fn cellCoord(p: vec3f) -> vec3i {
   let g = f32(P.gridDim);
@@ -295,7 +283,7 @@ fn portalWarp(pos: vec3f, vel: vec3f,
   let v   = dot(off, aT2);
   if (u * u + v * v < radius * radius) {
     let vt = vec2f(dot(vel, aT1), dot(vel, aT2));
-    if (dot(vt, vec2f(u, v)) < 0.0) {            // moving inward → swallowed
+    if (dot(vt, vec2f(u, v)) < 0.0) {
       let nB = normalize(bPos);
       w.pos = nB * length(pos) - bT1 * u - bT2 * v;
       w.vel = (-bT1 * vt.x - bT2 * vt.y + nB * dot(vel, nA)) * 1.15;
@@ -316,9 +304,8 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
   let si    = raw & 15u;
   var flipped = (raw & 16u) != 0u;
   let rpref = pin[i].m.y;
-  let mode  = P.extra.y;                  // 0: sphere, 1: tesseract, 2: hypersphere, 3: hypertorus
+  let mode  = P.extra.y;
 
-  /* polarity mutation */
   if (si < 8u) {
     let hm = fract(sin(f32(i) * 0.10723 + P.time * 91.317) * 24634.6345);
     if (hm < P.dt * 0.02 * P.knobs.z) { flipped = !flipped; }
@@ -328,7 +315,6 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
   var F = vec4f(0.0);
   let beta = P.misc.z;
 
-  /* neighbour search — 27 surrounding grid cells, 4D distances */
   let cc = cellCoord(pos4.xyz);
   let dmax = i32(P.gridDim);
   for (var dz = -1; dz <= 1; dz++) {
@@ -417,9 +403,9 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
       F3 -= (ds / dist) * (P.knobs.w * max(1.0 - dist / 0.8, 0.0));
     }
 
-    F3 -= n * dot(F3, n);                          // tangent-plane confinement
+    F3 -= n * dot(F3, n);
     let targetR = P.shellR + rpref;
-    F3 += n * ((targetR - rlen) * P.shellK);       // radial spring
+    F3 += n * ((targetR - rlen) * P.shellK);
     F = vec4f(F3, 0.0);
     pos4.w = 0.0; vel4.w = 0.0;
 
@@ -455,7 +441,6 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
       let dist = max(length(ds), 1e-5);
       F -= (ds / dist) * (P.knobs.w * max(1.0 - dist / 0.8, 0.0));
     }
-    /* soft hypercube boundaries */
     let over = abs(pos4) - vec4f(0.42);
     F -= sign(pos4) * (max(over, vec4f(0.0)) * 60.0);
 
@@ -490,7 +475,6 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
       F += (ds / dist) * min(g, 45.0);
     }
 
-    // Project force onto the tangent space of the 3-sphere
     F = F - n * dot(F, n);
     let targetR = 0.45 + rpref * 0.18;
     F += n * ((targetR - rlen) * P.shellK);
@@ -512,7 +496,6 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
       F += pull4(pos4, vec4f(P.comet2.xyz, 0.0), 0.45) * (cs * P.comet2.w);
     }
 
-    // Project force to tangent directions of both coordinate circles
     F = F - n_xy * dot(F, n_xy) - n_zw * dot(F, n_zw);
     let targetR1 = 0.35 + rpref * 0.1;
     let targetR2 = 0.35 - rpref * 0.1;
@@ -552,7 +535,6 @@ fn simulate(@builtin(global_invocation_id) id: vec3u) {
     }
   }
 
-  /* confinement safety net */
   if (mode < 0.5) {
     let r2 = length(pos4.xyz);
     if (r2 > P.shellR * 1.3 || r2 < P.shellR * 0.35) {
@@ -574,38 +556,65 @@ struct Particle { p: vec4f, v: vec4f, m: vec4f };
 struct RenderU {
   viewProj: mat4x4f,
   right: vec4f, up: vec4f, fwd: vec4f,
-  camPos: vec4f,        // w = tan(fov/2)
+  camPos: vec4f,
   params: vec4f,        // x sprite size, y numSpecies, z time, w aspect
-  pal: vec4f,           // cosine-palette phase offsets, w = hue shift
+  pal: vec4f,
   post: vec4f,          // x exposure, y vignette, z star intensity, w bomb rate
-  singR: vec4f,         // singularity: xyz world pos, w visual envelope (0 = off)
-  wormA: vec4f, wormB: vec4f,  // wormhole mouths: xyz world pos, w radius (0 = off)
-  tessA: vec4f,         // tesseract rotation angles XW, YW, ZW + projection distance
-  tessB: vec4f,         // xyz bounce offset, w = mode (0:Sphere, 1:Tess, 2:Hypersphere, 3:Hypertorus)
+  singR: vec4f,         // singularity: xyz pos, w visual envelope
+  wormA: vec4f, wormB: vec4f,
+  tessA: vec4f,         // rot angles XW, YW, ZW + projection distance
+  tessB: vec4f,         // xyz bounce offset, w = mode
 };
 @group(0) @binding(0) var<uniform> R: RenderU;
 @group(0) @binding(1) var<storage, read> parts: array<Particle>;
 
+/* ── Clifford Double Rotation in 4D ──
+   Performs simultaneous rotations in two completely orthogonal planes:
+   XW plane (angle a) and YZ plane (angle b = a * golden ratio).
+   Then tumbles globally in ZW plane (angle c). */
 fn rot4(p: vec4f) -> vec4f {
   var q = p;
-  let ca = cos(R.tessA.x); let sa = sin(R.tessA.x);
-  q = vec4f(q.x * ca - q.w * sa, q.y, q.z, q.x * sa + q.w * ca);
-  let cb = cos(R.tessA.y); let sb = sin(R.tessA.y);
-  q = vec4f(q.x, q.y * cb - q.w * sb, q.z, q.y * sb + q.w * cb);
-  let cc = cos(R.tessA.z); let sc = sin(R.tessA.z);
-  q = vec4f(q.x, q.y, q.z * cc - q.w * sc, q.z * sc + q.w * cc);
-  return q;
+  let a = R.tessA.x;
+  let b = R.tessA.x * 1.61803398875; // Orthogonal rotation speed ratio
+  
+  // XW Rotation
+  let cosA = cos(a); let sinA = sin(a);
+  let x1 = q.x * cosA - q.w * sinA;
+  let w1 = q.x * sinA + q.w * cosA;
+  
+  // YZ Rotation
+  let cosB = cos(b); let sinB = sin(b);
+  let y1 = q.y * cosB - q.z * sinB;
+  let z1 = q.y * sinB + q.z * cosB;
+  
+  q = vec4f(x1, y1, z1, w1);
+  
+  // ZW Tumbling
+  let c = R.tessA.y;
+  let cosC = cos(c); let sinC = sin(c);
+  let z2 = q.z * cosC - q.w * sinC;
+  let w2 = q.z * sinC + q.w * cosC;
+  
+  return vec4f(q.x, q.y, z2, w2);
 }
 
+/* ── 4D Space-Time Gravity Lensing ──
+   Alters the perspective projection divide (f) based on 4D distance
+   to active singularities or supernovas, warping geometry and matter. */
 fn project4(p: vec4f) -> vec4f {
   let q = rot4(p);
-  let f = R.tessA.w / max(R.tessA.w - q.w, 0.35);
+  
+  // Singularity 4D space warping
+  let singRot = rot4(vec4f(R.singR.xyz, 0.0));
+  let distToSing = length(q - singRot);
+  let lensFactor = 1.0 + (R.singR.w * 0.22) / (distToSing * distToSing + 0.05);
+
+  let f = R.tessA.w / max(R.tessA.w - q.w * lensFactor, 0.35);
   return vec4f(q.xyz * (f * 0.5) + R.tessB.xyz, f);
 }
 
 fn speciesColor(s: f32, hshift: f32) -> vec3f {
   if (s >= 8.0) {   
-    // Repeller species: dim cold smoke that carves voids
     let t = (s - 8.0) / 4.0;
     return mix(vec3f(0.40, 0.36, 0.55), vec3f(0.26, 0.44, 0.50), t) * 0.5;
   }
@@ -649,11 +658,17 @@ fn vsParticle(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
 
   var world = prt.p.xyz;
   var pf = 1.0;
+  var wCoord = prt.p.w;
+
   if (R.tessB.w > 0.5) {
     let pr = project4(prt.p);
     world = pr.xyz;
     pf = pr.w;
     sz *= pf * 0.9;
+    
+    // Track rotated 4D depth for the chromatic shift
+    let qRot = rot4(prt.p);
+    wCoord = qRot.w;
   }
 
   var o: VOut;
@@ -664,7 +679,11 @@ fn vsParticle(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
   o.uv  = c;
   o.boost = clamp(spd * 1.4 + ba * 2.0, 0.0, 1.6);
   
-  var col = speciesColor(sid, select(0.0, 0.5, inverted));
+  // ── Hyper-Chromatic Parallax ──
+  // Shifts the species palette phase based on the unprojected 4D coordinate
+  let spectralShift = wCoord * 0.45;
+  var col = speciesColor(sid, select(0.0, 0.5, inverted) + spectralShift);
+  
   col = mix(col, vec3f(1.05, 1.02, 0.95), clamp(spd * 1.4, 0.0, 1.0) * 0.55);
   if (R.tessB.w > 0.5) { col *= 0.45 + 0.55 * pf; }
   
@@ -679,7 +698,6 @@ fn vsEdge(@builtin(vertex_index) vi: u32) -> EOut {
   var corner = vec4f(0.0, 0.0, 0.0, 0.0);
   
   if (mode > 0.5 && mode < 1.5) {
-    // Tesseract: 32 edges (64 vertices)
     if (vi < 64u) {
       let edge = vi >> 1u;
       let ep   = vi & 1u;
@@ -695,7 +713,6 @@ fn vsEdge(@builtin(vertex_index) vi: u32) -> EOut {
                 - 0.5) * 0.9;
     }
   } else if (mode > 1.5 && mode < 2.5) {
-    // Hypersphere: 6 coordinate circles
     let ringIdx = vi / 128u;
     let vertIdx = vi % 128u;
     let segment = vertIdx >> 1u;
@@ -711,7 +728,6 @@ fn vsEdge(@builtin(vertex_index) vi: u32) -> EOut {
     if (ringIdx == 4u) { corner = vec4f(0.0, c, 0.0, s); }
     if (ringIdx == 5u) { corner = vec4f(0.0, 0.0, c, s); }
   } else if (mode > 2.5) {
-    // Hypertorus: nested circular planes
     let ringIdx = vi / 128u;
     let vertIdx = vi % 128u;
     let segment = vertIdx >> 1u;
@@ -844,6 +860,8 @@ fn fsFinal(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
     let dS  = normalize(R.singR.xyz - R.camPos.xyz);
     let ang = acos(clamp(dot(dir, dS), -1.0, 1.0));
     let e   = min(R.singR.w, 1.0);
+    
+    // Space-time visual lensing: accretion distortion around singularity
     let ring = exp(-pow(ang * 42.0 - 1.6, 2.0));
     let glow = exp(-ang * 26.0) * 0.35;
     let hole = 1.0 - exp(-pow(ang * 70.0, 2.0)) * 0.92;
@@ -975,7 +993,7 @@ async function initGPU() {
 }
 
 function resize() {
-  if (!device) return; // Guard against early browser layout passes
+  if (!device) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
   const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
@@ -1475,7 +1493,7 @@ function writeRenderUniforms(basis, aspect) {
   const size = state.count > 150000 ? 0.0052 : 0.0066;
   renF.set([size, state.species, state.time, aspect], 32);
   renF.set(palette, 36);
-  renF.set([1.5, 0.55, 0.9, state.bombs], 40); // Restore star intensity constant 0.9
+  renF.set([1.5, 0.55, 0.9, state.bombs], 40);
   const wV = state.worm ? 1 : 0;
   let singW = [sing.pos[0] * SHELL_R, sing.pos[1] * SHELL_R, sing.pos[2] * SHELL_R];
   let wA = [worm.A.pos[0]*SHELL_R, worm.A.pos[1]*SHELL_R, worm.A.pos[2]*SHELL_R, worm.A.r * wV];
