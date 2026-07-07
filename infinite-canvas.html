@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Infinite Canvas — draw at every depth</title>
+<style>
+  :root{
+    --bg:#0e1016;
+    --panel:rgba(21,24,34,.78);
+    --hairline:rgba(255,255,255,.09);
+    --text:#c9cdda;
+    --dim:#7b8297;
+    --accent:#8fb4ff;
+    --accent-soft:rgba(143,180,255,.16);
+    --danger:#ef6351;
+    --radius:14px;
+  }
+  *{ box-sizing:border-box; }
+  html,body{
+    margin:0; height:100%; overflow:hidden;
+    background:var(--bg); color:var(--text);
+    font:14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior:none;
+    -webkit-user-select:none; user-select:none;
+    -webkit-touch-callout:none;
+  }
+  #cv{
+    position:fixed; inset:0; display:block; touch-action:none;
+  }
+
+  /* ---------- floating glass bars ---------- */
+  .bar{
+    position:fixed; top:12px; z-index:10;
+    display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+    padding:7px 9px;
+    background:var(--panel);
+    border:1px solid var(--hairline);
+    border-radius:var(--radius);
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    box-shadow:0 6px 24px rgba(0,0,0,.35);
+    max-width:calc(100vw - 24px);
+  }
+  #barLeft{ left:12px; }
+  #barRight{ right:12px; }
+  .sep{ width:1px; height:22px; background:var(--hairline); margin:0 3px; flex:none; }
+
+  button.tb{
+    appearance:none; border:1px solid transparent; background:transparent;
+    color:var(--text); width:34px; height:34px; border-radius:9px;
+    display:inline-flex; align-items:center; justify-content:center;
+    cursor:pointer; padding:0; flex:none; touch-action:manipulation;
+  }
+  button.tb:hover{ background:rgba(255,255,255,.06); }
+  button.tb:active{ transform:translateY(1px); }
+  button.tb.on{ background:var(--accent-soft); border-color:rgba(143,180,255,.45); color:var(--accent); }
+  button.tb:disabled{ opacity:.32; cursor:default; transform:none; }
+  button.tb:disabled:hover{ background:transparent; }
+  button.tb.arm{ color:var(--danger); background:rgba(239,99,81,.14); border-color:rgba(239,99,81,.5); }
+  button.tb svg{ width:18px; height:18px; stroke:currentColor; fill:none;
+    stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+  :focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+
+  /* ---------- colors ---------- */
+  .swatches{ display:flex; align-items:center; gap:5px; padding:0 2px; }
+  .sw{
+    appearance:none; width:19px; height:19px; border-radius:50%;
+    border:2px solid transparent; padding:0; cursor:pointer; flex:none;
+    box-shadow:inset 0 0 0 1px rgba(0,0,0,.35);
+  }
+  .sw.on{ border-color:var(--accent); }
+  input[type=color]{
+    appearance:none; -webkit-appearance:none;
+    width:23px; height:23px; border:none; border-radius:50%;
+    padding:0; background:conic-gradient(#f66,#fc6,#6d6,#6cf,#96f,#f6c,#f66);
+    cursor:pointer; overflow:hidden; flex:none;
+  }
+  input[type=color]::-webkit-color-swatch-wrapper{ padding:2px; }
+  input[type=color]::-webkit-color-swatch{ border:none; border-radius:50%; }
+  input[type=color]::-moz-color-swatch{ border:none; border-radius:50%; }
+
+  /* ---------- size slider ---------- */
+  .sizer{ display:flex; align-items:center; gap:7px; padding:0 4px; color:var(--dim); }
+  .sizer input[type=range]{ width:86px; accent-color:var(--accent); }
+  .sizer output{ font:11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    min-width:2.2em; text-align:right; color:var(--text); }
+
+  /* ---------- depth gauge (signature) ---------- */
+  #gauge{
+    position:fixed; left:50%; bottom:14px; transform:translateX(-50%);
+    z-index:10; text-align:center; cursor:pointer;
+    padding:9px 18px 8px;
+    background:var(--panel); border:1px solid var(--hairline);
+    border-radius:999px;
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    box-shadow:0 6px 24px rgba(0,0,0,.35);
+    max-width:min(92vw, 460px);
+  }
+  #gauge .mag{
+    font:600 17px/1.15 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:#e7eaf4; letter-spacing:.02em; white-space:nowrap;
+  }
+  #gauge .mag sup{ font-size:.62em; color:var(--accent); }
+  #gauge .cap{
+    font-size:11px; color:var(--dim); letter-spacing:.14em; text-transform:uppercase;
+    margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  #gauge:hover{ border-color:rgba(143,180,255,.4); }
+
+  /* ---------- hint & ring ---------- */
+  #hint{
+    position:fixed; left:50%; top:44%; transform:translate(-50%,-50%);
+    z-index:5; pointer-events:none; text-align:center; color:var(--dim);
+    transition:opacity .8s ease; letter-spacing:.02em;
+  }
+  #hint .big{ font-size:17px; color:var(--text); margin-bottom:6px; }
+  #hint.gone{ opacity:0; }
+  #ring{
+    position:fixed; z-index:9; pointer-events:none; display:none;
+    border:1.5px solid rgba(231,234,244,.85); border-radius:50%;
+    box-shadow:0 0 0 1px rgba(0,0,0,.4);
+    transform:translate(-50%,-50%);
+  }
+  kbd{
+    font:11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background:rgba(255,255,255,.07); border:1px solid var(--hairline);
+    border-radius:4px; padding:1px 5px; color:var(--text);
+  }
+
+  @media (max-width:760px){
+    #barRight{ top:62px; }
+    #hint .keys{ display:none; }
+  }
+  @media (prefers-reduced-motion: reduce){
+    #hint{ transition:none; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="cv"></canvas>
+
+<div class="bar" id="barLeft" role="toolbar" aria-label="Drawing tools">
+  <button class="tb on" id="toolBrush" title="Brush — B">
+    <svg viewBox="0 0 20 20"><path d="M3 17l1-4L14 3l3 3L7 16l-4 1z"/><path d="M12.5 4.5l3 3"/></svg>
+  </button>
+  <button class="tb" id="toolEraser" title="Eraser (removes whole strokes) — E">
+    <svg viewBox="0 0 20 20"><path d="M8 15l-5-5 7-7 6 6-6 6H8z"/><path d="M3 17h14"/></svg>
+  </button>
+  <button class="tb" id="toolPan" title="Pan — V (or hold Space / right-drag)">
+    <svg viewBox="0 0 20 20"><path d="M10 2v16M2 10h16"/><path d="M10 2L7.8 4.2M10 2l2.2 2.2M10 18l-2.2-2.2M10 18l2.2-2.2M2 10l2.2-2.2M2 10l2.2 2.2M18 10l-2.2-2.2M18 10l-2.2 2.2"/></svg>
+  </button>
+  <div class="sep"></div>
+  <div class="swatches" id="swatches"></div>
+  <input type="color" id="colorPick" value="#ede9e0" title="Custom color">
+  <div class="sep"></div>
+  <div class="sizer">
+    <input type="range" id="size" min="1" max="80" step="1" value="5" title="Size — [ and ]">
+    <output id="sizeVal">5</output>
+  </div>
+</div>
+
+<div class="bar" id="barRight" role="toolbar" aria-label="View and file">
+  <button class="tb" id="btnUndo" title="Undo — Ctrl+Z">
+    <svg viewBox="0 0 20 20"><path d="M4 8h8a4 4 0 1 1 0 8H8"/><path d="M7 5L4 8l3 3"/></svg>
+  </button>
+  <button class="tb" id="btnRedo" title="Redo — Ctrl+Shift+Z">
+    <svg viewBox="0 0 20 20"><path d="M16 8H8a4 4 0 1 0 0 8h4"/><path d="M13 5l3 3-3 3"/></svg>
+  </button>
+  <div class="sep"></div>
+  <button class="tb on" id="btnGrid" title="Grid — G">
+    <svg viewBox="0 0 20 20"><path d="M3 7h14M3 13h14M7 3v14M13 3v14"/></svg>
+  </button>
+  <button class="tb" id="btnFit" title="Fly to your drawing — F">
+    <svg viewBox="0 0 20 20"><path d="M3 7V3h4M17 7V3h-4M3 13v4h4M17 13v4h-4"/></svg>
+  </button>
+  <button class="tb" id="btnHome" title="Back to start (×1) — R">
+    <svg viewBox="0 0 20 20"><path d="M4 9l6-6 6 6v7h-4v-4H8v4H4z"/></svg>
+  </button>
+  <div class="sep"></div>
+  <button class="tb" id="btnPNG" title="Export current view as PNG">
+    <svg viewBox="0 0 20 20"><path d="M3 5h14v10H3z"/><path d="M3 12.5l4-3 3 2 4-4 3 3"/><circle cx="7" cy="8" r="1"/></svg>
+  </button>
+  <button class="tb" id="btnSave" title="Save drawing (.json)">
+    <svg viewBox="0 0 20 20"><path d="M10 3v9M6 9l4 4 4-4M4 16h12"/></svg>
+  </button>
+  <button class="tb" id="btnLoad" title="Open drawing (.json)">
+    <svg viewBox="0 0 20 20"><path d="M10 13V4M6 8l4-4 4 4M4 16h12"/></svg>
+  </button>
+  <div class="sep"></div>
+  <button class="tb" id="btnClear" title="Clear everything (click twice)">
+    <svg viewBox="0 0 20 20"><path d="M4 6h12M8 6V4h4v2M6 6l1 10h6l1-10"/></svg>
+  </button>
+  <input type="file" id="loadFile" accept=".json,application/json" hidden>
+</div>
+
+<div id="gauge" title="Fly to your drawing">
+  <div class="mag" id="mag">×1</div>
+  <div class="cap" id="cap">view ≈ a person</div>
+</div>
+
+<div id="hint">
+  <div class="big">Draw anywhere, then scroll to dive in.</div>
+  <div>Every zoom level is a fresh canvas — details live inside details.</div>
+  <div class="keys" style="margin-top:10px"><kbd>scroll</kbd> zoom&ensp;·&ensp;<kbd>space</kbd>+drag pan&ensp;·&ensp;<kbd>F</kbd> find drawing&ensp;·&ensp;<kbd>R</kbd> start</div>
+</div>
+
+<div id="ring"></div>
+
+<script>
+'use strict';
+
+/* =====================================================================
+   Infinite Canvas
+   ---------------------------------------------------------------------
+   The world is one flat 2D plane, but the camera can zoom (in practice)
+   without limit. Precision is kept with a *floating origin*: whenever
+   the zoom leaves a safe window, every coordinate in the document is
+   re-expressed relative to the camera (p' = (p - c) * F). `baseLog2`
+   remembers how many powers of two we have re-based by, so the true
+   magnification is always 2^(baseLog2 + log2(cam.z)).
+   Doubles therefore only ever have to be precise *near the camera*,
+   which they are — everywhere, at every depth.
+   ===================================================================== */
+
+const canvas = document.getElementById('cv');
+const ctx = canvas.getContext('2d');
+
+let cw = 0, ch = 0, dpr = 1;
+
+/* camera: z = screen pixels per world unit (kept within 2^±26) */
+const cam = { x: 0, y: 0, z: 1 };
+let baseLog2 = 0;                 // accumulated rebase exponent
+const origin = { x: 0, y: 0 };    // where world (0,0) currently lives
+
+let strokes = [];                 // {pts:[x,y,...], w, c, bb:{minx,miny,maxx,maxy}}
+let undoStack = [], redoStack = [];
+
+let tool = 'brush';
+const sizes = { brush: 5, eraser: 36 };   // screen px
+let ink = '#ede9e0';
+let gridOn = true;
+
+let cur = null;                   // stroke being drawn
+let needRender = true, hudDirty = true;
+let anim = null;
+
+const LOG10_2 = Math.log10(2);
+const REB_HI = 2 ** 26, REB_LO = 2 ** -26, REB_F = 2 ** 20;
+const TOTAL_MAX = 995;            // |log2(total zoom)| hard cap (~10^300)
+const FADE0 = 1.5e5, FADE1 = 1.2e6;   // stroke px-width fade-out band
+const HUGE = 2.2e5;               // above this px-width, render analytically
+const SAFE = 3e4;                 // screen-coord box Canvas paths trust
+
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ---------------- coordinate frame ---------------- */
+
+function totalLog2() { return baseLog2 + Math.log2(cam.z); }
+function s2wx(sx) { return (sx - cw / 2) / cam.z + cam.x; }
+function s2wy(sy) { return (sy - ch / 2) / cam.z + cam.y; }
+function w2sx(x) { return (x - cam.x) * cam.z + cw / 2; }
+function w2sy(y) { return (y - cam.y) * cam.z + ch / 2; }
+
+function rebaseBy(f, cx, cy) {
+  for (const s of strokes) {
+    const p = s.pts;
+    for (let i = 0; i < p.length; i += 2) {
+      p[i] = (p[i] - cx) * f;
+      p[i + 1] = (p[i + 1] - cy) * f;
+    }
+    s.w *= f;
+    s.bb.minx = (s.bb.minx - cx) * f; s.bb.maxx = (s.bb.maxx - cx) * f;
+    s.bb.miny = (s.bb.miny - cy) * f; s.bb.maxy = (s.bb.maxy - cy) * f;
+  }
+  origin.x = (origin.x - cx) * f; origin.y = (origin.y - cy) * f;
+  cam.x = (cam.x - cx) * f; cam.y = (cam.y - cy) * f;
+  cam.z /= f;
+  baseLog2 += Math.log2(f);
+}
+
+/* Rebase around a point snapped to a power-of-two lattice so the
+   adaptive grid stays perfectly seamless across the switch. */
+function snapCenter() {
+  const unit = 2 ** Math.round(Math.log2(64 / cam.z));
+  return { x: Math.round(cam.x / unit) * unit, y: Math.round(cam.y / unit) * unit };
+}
+function maybeRebase() {
+  let guard = 0;
+  while (cam.z > REB_HI && guard++ < 90) { const c = snapCenter(); rebaseBy(REB_F, c.x, c.y); }
+  while (cam.z < REB_LO && guard++ < 90) { const c = snapCenter(); rebaseBy(1 / REB_F, c.x, c.y); }
+}
+
+function zoomAt(sx, sy, f) {
+  if (!(f > 0) || !isFinite(f)) return;
+  const t = totalLog2();
+  let lf = Math.log2(f);
+  lf = Math.min(lf, TOTAL_MAX - t);
+  lf = Math.max(lf, -TOTAL_MAX - t);
+  if (lf === 0) return;
+  f = 2 ** lf;
+  const wx = s2wx(sx), wy = s2wy(sy);
+  cam.z *= f;
+  cam.x = wx - (sx - cw / 2) / cam.z;
+  cam.y = wy - (sy - ch / 2) / cam.z;
+  maybeRebase();
+  needRender = true; hudDirty = true;
+}
+
+function panBy(dx, dy) {          // dx,dy in screen px (content follows)
+  cam.x -= dx / cam.z;
+  cam.y -= dy / cam.z;
+  needRender = true;
+}
+
+/* ---------------- strokes ---------------- */
+
+function newStroke(sx, sy) {
+  const x = s2wx(sx), y = s2wy(sy);
+  cur = {
+    pts: [x, y],
+    w: Math.max(sizes.brush, 0.5) / cam.z,
+    c: ink,
+    bb: { minx: x, maxx: x, miny: y, maxy: y }
+  };
+  strokes.push(cur);
+  needRender = true;
+}
+
+function extendStroke(sx, sy) {
+  if (!cur) return;
+  const x = s2wx(sx), y = s2wy(sy);
+  const p = cur.pts, n = p.length;
+  const dx = (x - p[n - 2]) * cam.z, dy = (y - p[n - 1]) * cam.z;
+  if (dx * dx + dy * dy < 2.25) return;   // < 1.5 px — skip
+  p.push(x, y);
+  const b = cur.bb;
+  if (x < b.minx) b.minx = x; if (x > b.maxx) b.maxx = x;
+  if (y < b.miny) b.miny = y; if (y > b.maxy) b.maxy = y;
+  needRender = true;
+}
+
+function endStroke() {
+  if (!cur) return;
+  pushOp({ t: 'add', s: cur });
+  cur = null;
+}
+
+function cancelStroke() {
+  if (!cur) return;
+  const i = strokes.indexOf(cur);
+  if (i >= 0) strokes.splice(i, 1);
+  cur = null;
+  needRender = true;
+}
+
+/* ---------------- history ---------------- */
+
+function pushOp(op) {
+  undoStack.push(op);
+  if (undoStack.length > 400) undoStack.shift();
+  redoStack.length = 0;
+  refreshHistoryUI();
+}
+function undo() {
+  const op = undoStack.pop();
+  if (!op) return;
+  if (op.t === 'add') {
+    const i = strokes.indexOf(op.s);
+    if (i >= 0) strokes.splice(i, 1);
+  } else if (op.t === 'erase') {
+    for (let k = op.items.length - 1; k >= 0; k--) {
+      const it = op.items[k];
+      strokes.splice(Math.min(it.i, strokes.length), 0, it.s);
+    }
+  } else if (op.t === 'clear') {
+    strokes = op.all.slice();
+  }
+  redoStack.push(op);
+  needRender = true; refreshHistoryUI();
+}
+function redo() {
+  const op = redoStack.pop();
+  if (!op) return;
+  if (op.t === 'add') {
+    strokes.push(op.s);
+  } else if (op.t === 'erase') {
+    for (const it of op.items) {
+      const i = strokes.indexOf(it.s);
+      if (i >= 0) strokes.splice(i, 1);
+    }
+  } else if (op.t === 'clear') {
+    strokes.length = 0;
+  }
+  undoStack.push(op);
+  needRender = true; refreshHistoryUI();
+}
+
+/* ---------------- eraser (whole-stroke) ---------------- */
+
+let eraseItems = null;
+
+function eraseAt(sx, sy) {
+  const x = s2wx(sx), y = s2wy(sy);
+  const r = Math.max(sizes.eraser, 2) / (2 * cam.z);
+  for (let i = strokes.length - 1; i >= 0; i--) {
+    const s = strokes[i];
+    const m = r + s.w / 2;
+    const b = s.bb;
+    if (x < b.minx - m || x > b.maxx + m || y < b.miny - m || y > b.maxy + m) continue;
+    if (nearestOnStroke(x, y, s).d <= m) {
+      strokes.splice(i, 1);
+      eraseItems.push({ s, i });
+      needRender = true;
+    }
+  }
+}
+function commitErase() {
+  if (eraseItems && eraseItems.length) pushOp({ t: 'erase', items: eraseItems });
+  eraseItems = null;
+}
+
+/* nearest point on a stroke's centreline (world units) */
+function nearestOnStroke(px, py, s) {
+  const p = s.pts;
+  if (p.length === 2) {
+    return { d: Math.hypot(px - p[0], py - p[1]), x: p[0], y: p[1] };
+  }
+  let bd = Infinity, bx = p[0], by = p[1];
+  for (let i = 0; i + 3 < p.length; i += 2) {
+    const ax = p[i], ay = p[i + 1];
+    const dx = p[i + 2] - ax, dy = p[i + 3] - ay;
+    const l2 = dx * dx + dy * dy;
+    let t = l2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const qx = ax + t * dx, qy = ay + t * dy;
+    const d = Math.hypot(px - qx, py - qy);
+    if (d < bd) { bd = d; bx = qx; by = qy; }
+  }
+  return { d: bd, x: bx, y: by };
+}
+
+/* ---------------- rendering ---------------- */
+
+let vr = { minx: 0, maxx: 0, miny: 0, maxy: 0 };  // world rect of the viewport
+
+function render() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0e1016';
+  ctx.fillRect(0, 0, cw, ch);
+  if (gridOn) drawGrid();
+
+  vr.minx = s2wx(0); vr.maxx = s2wx(cw);
+  vr.miny = s2wy(0); vr.maxy = s2wy(ch);
+  const diag = Math.hypot(cw, ch);
+
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (const s of strokes) {
+    const hw = s.w / 2, b = s.bb;
+    if (b.minx - hw > vr.maxx || b.maxx + hw < vr.minx ||
+        b.miny - hw > vr.maxy || b.maxy + hw < vr.miny) continue;
+
+    const pxw = s.w * cam.z;
+    if (!(pxw < FADE1)) continue;               // outgrown: faded away entirely
+
+    const extent = (Math.hypot(b.maxx - b.minx, b.maxy - b.miny) + s.w) * cam.z;
+    if (extent < 2) { drawMarker(s); continue; } // too small: leave a way-marker
+
+    const alpha = pxw > FADE0
+      ? 1 - (Math.log(pxw) - Math.log(FADE0)) / (Math.log(FADE1) - Math.log(FADE0))
+      : 1;
+
+    if (pxw > HUGE) drawHuge(s, alpha, diag);
+    else drawNormal(s, pxw, alpha);
+  }
+}
+
+function drawMarker(s) {
+  const x = w2sx((s.bb.minx + s.bb.maxx) / 2);
+  const y = w2sy((s.bb.miny + s.bb.maxy) / 2);
+  if (x < -4 || x > cw + 4 || y < -4 || y > ch + 4) return;
+  ctx.globalAlpha = 0.3;
+  ctx.fillStyle = s.c;
+  ctx.beginPath();
+  ctx.arc(x, y, 1.15, 0, 6.2832);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function drawNormal(s, pxw, alpha) {
+  const p = s.pts, n = p.length / 2;
+  const lw = Math.max(pxw, 0.7);
+  const a = alpha * Math.min(1, pxw / 0.7);   // sub-pixel strokes thin out via alpha
+  if (a <= 0.004) return;
+
+  ctx.globalAlpha = a;
+  ctx.strokeStyle = s.c;
+  ctx.fillStyle = s.c;
+  ctx.lineWidth = lw;
+
+  if (n === 1) {  // a dot
+    ctx.beginPath();
+    ctx.arc(w2sx(p[0]), w2sy(p[1]), lw / 2, 0, 6.2832);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  const sx0 = w2sx(s.bb.minx), sx1 = w2sx(s.bb.maxx);
+  const sy0 = w2sy(s.bb.miny), sy1 = w2sy(s.bb.maxy);
+  const safe = sx0 > -SAFE && sx1 < cw + SAFE && sy0 > -SAFE && sy1 < ch + SAFE;
+
+  ctx.beginPath();
+  if (safe) {
+    /* smooth path through midpoints */
+    ctx.moveTo(w2sx(p[0]), w2sy(p[1]));
+    if (n === 2) {
+      ctx.lineTo(w2sx(p[2]), w2sy(p[3]));
+    } else {
+      for (let i = 1; i < n - 1; i++) {
+        const cx = w2sx(p[2 * i]), cy = w2sy(p[2 * i + 1]);
+        const mx = (cx + w2sx(p[2 * i + 2])) / 2;
+        const my = (cy + w2sy(p[2 * i + 3])) / 2;
+        ctx.quadraticCurveTo(cx, cy, mx, my);
+      }
+      ctx.lineTo(w2sx(p[2 * n - 2]), w2sy(p[2 * n - 1]));
+    }
+  } else {
+    /* screen coords would overflow the rasterizer — clip each segment
+       (in world space, where doubles are happy) to the padded viewport */
+    const mW = (lw / 2 + 8) / cam.z;
+    const rct = { minx: vr.minx - mW, maxx: vr.maxx + mW, miny: vr.miny - mW, maxy: vr.maxy + mW };
+    for (let i = 0; i + 3 < p.length; i += 2) {
+      const seg = clipSeg(p[i], p[i + 1], p[i + 2], p[i + 3], rct);
+      if (seg) {
+        ctx.moveTo(w2sx(seg[0]), w2sy(seg[1]));
+        ctx.lineTo(w2sx(seg[2]), w2sy(seg[3]));
+      }
+    }
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+/* A stroke thousands of screens wide: fill analytically. Either the camera
+   is inside the ink (flood the view) or near its edge (a half-plane —
+   at this magnification the boundary is effectively straight). */
+function drawHuge(s, alpha, diag) {
+  const q = nearestOnStroke(cam.x, cam.y, s);
+  const r = s.w / 2;
+  if (!isFinite(q.d)) return;
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = s.c;
+  if (q.d <= r) {
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.globalAlpha = 1;
+    return;
+  }
+  if ((q.d - r) * cam.z > diag) { ctx.globalAlpha = 1; return; }
+  const nx = (cam.x - q.x) / q.d, ny = (cam.y - q.y) / q.d;
+  const bx = w2sx(q.x + nx * r), by = w2sy(q.y + ny * r);
+  const tx = -ny, ty = nx, L = diag * 3;
+  ctx.beginPath();
+  ctx.moveTo(bx + tx * L, by + ty * L);
+  ctx.lineTo(bx - tx * L, by - ty * L);
+  ctx.lineTo(bx - tx * L - nx * L, by - ty * L - ny * L);
+  ctx.lineTo(bx + tx * L - nx * L, by + ty * L - ny * L);
+  ctx.closePath();
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+/* Liang–Barsky segment/rect clip (world space) */
+function clipSeg(x0, y0, x1, y1, r) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const P = [-dx, dx, -dy, dy];
+  const Q = [x0 - r.minx, r.maxx - x0, y0 - r.miny, r.maxy - y0];
+  let t0 = 0, t1 = 1;
+  for (let i = 0; i < 4; i++) {
+    if (P[i] === 0) {
+      if (Q[i] < 0) return null;
+    } else {
+      const t = Q[i] / P[i];
+      if (P[i] < 0) { if (t > t1) return null; if (t > t0) t0 = t; }
+      else { if (t < t0) return null; if (t < t1) t1 = t; }
+    }
+  }
+  return [x0 + t0 * dx, y0 + t0 * dy, x0 + t1 * dx, y0 + t1 * dy];
+}
+
+/* Power-of-two grid: family e fades in as its spacing grows past ~45px,
+   family e+1 stays solid. Coarser families are subsets, so two levels
+   cover everything — forever, at any depth. */
+function drawGrid() {
+  const e = Math.floor(Math.log2(90 / cam.z));
+  for (let k = e; k <= e + 1; k++) {
+    const step = 2 ** k;
+    const px = step * cam.z;
+    const a = k === e ? 0.105 * Math.min(1, Math.max(0, (px - 45) / 45)) : 0.105;
+    if (a <= 0.004) continue;
+    ctx.strokeStyle = 'rgba(150,163,201,' + a.toFixed(3) + ')';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    /* |i| must stay below 2^52 or i++ can fall under the float ulp
+       and never terminate; healthy states keep |i| tiny anyway. */
+    let i0 = Math.ceil(s2wx(0) / step), i1 = Math.floor(s2wx(cw) / step);
+    if (i1 - i0 < 600 && Math.abs(i0) < 4.5e15 && Math.abs(i1) < 4.5e15) {
+      for (let i = i0; i <= i1; i++) {
+        const x = w2sx(i * step);
+        ctx.moveTo(x, 0); ctx.lineTo(x, ch);
+      }
+    }
+    i0 = Math.ceil(s2wy(0) / step); i1 = Math.floor(s2wy(ch) / step);
+    if (i1 - i0 < 600 && Math.abs(i0) < 4.5e15 && Math.abs(i1) < 4.5e15) {
+      for (let i = i0; i <= i1; i++) {
+        const y = w2sy(i * step);
+        ctx.moveTo(0, y); ctx.lineTo(cw, y);
+      }
+    }
+    ctx.stroke();
+  }
+}
+
+/* ---------------- depth gauge ---------------- */
+
+const magEl = document.getElementById('mag');
+const capEl = document.getElementById('cap');
+
+const SCALES = [
+  [26.9, 'the observable universe'], [24, 'a supercluster of galaxies'],
+  [22, 'a galaxy cluster'], [21, 'the Milky Way'], [18, 'a nebula'],
+  [16.6, 'the distance to the nearest star'], [13, 'the Solar System'],
+  [11.2, 'the Earth\u2013Sun distance'], [8.9, 'the Moon\u2019s orbit'],
+  [7.1, 'planet Earth'], [6, 'a country'], [5, 'a large city'], [4, 'a city'],
+  [3, 'a small town'], [2, 'a city block'], [1, 'a house'], [0.23, 'a person'],
+  [-0.8, 'a hand'], [-1.7, 'a coin'], [-3, 'a grain of sand'],
+  [-4, 'the width of a human hair'], [-4.9, 'a human cell'], [-6, 'a bacterium'],
+  [-7.1, 'a virus'], [-8, 'a protein'], [-8.7, 'a DNA helix'], [-10, 'an atom'],
+  [-12, 'deep inside an atom'], [-14.9, 'a proton'], [-18, 'a quark, probably'],
+  [-34.8, 'the Planck length']
+];
+
+function updateHud() {
+  const t = totalLog2();
+  const l10 = t * LOG10_2;
+  if (l10 > -3.01 && l10 < 4) {
+    const v = 2 ** t;
+    const txt = v >= 100 ? Math.round(v).toLocaleString('en-US')
+                         : String(parseFloat(v.toPrecision(3)));
+    magEl.textContent = '\u00d7' + txt;
+  } else {
+    const ex = Math.floor(l10);
+    const man = 10 ** (l10 - ex);
+    magEl.innerHTML = '\u00d7' + man.toFixed(2) + '\u00b710<sup>' + ex + '</sup>';
+  }
+  /* the view starts ~1 m tall (1 world unit = 1 mm at \u00d71) */
+  const lv = Math.log10(Math.max(ch, 1) / 1000) - l10;
+  let capText;
+  if (lv > 27.6) capText = 'beyond the observable universe';
+  else if (lv < -35.2) capText = 'below the Planck length \u2014 uncharted';
+  else {
+    let best = SCALES[0], bd = Infinity;
+    for (const sc of SCALES) {
+      const d = Math.abs(lv - sc[0]);
+      if (d < bd) { bd = d; best = sc; }
+    }
+    capText = 'view \u2248 ' + best[1];
+  }
+  capEl.textContent = capText;
+}
+
+/* ---------------- camera flights ---------------- */
+
+function homeTarget() {
+  return { x: origin.x, y: origin.y, t: 0 };
+}
+function fitTarget() {
+  let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+  for (const s of strokes) {
+    minx = Math.min(minx, s.bb.minx - s.w / 2);
+    maxx = Math.max(maxx, s.bb.maxx + s.w / 2);
+    miny = Math.min(miny, s.bb.miny - s.w / 2);
+    maxy = Math.max(maxy, s.bb.maxy + s.w / 2);
+  }
+  if (!isFinite(minx)) return homeTarget();
+  const bw = Math.max(maxx - minx, 1e-300);
+  const bh = Math.max(maxy - miny, 1e-300);
+  let z = 0.8 * Math.min(cw / bw, ch / bh);
+  if (!isFinite(z) || z <= 0) z = 1;
+  let t = baseLog2 + Math.log2(z);
+  t = Math.max(-TOTAL_MAX, Math.min(TOTAL_MAX, t));
+  return { x: (minx + maxx) / 2, y: (miny + maxy) / 2, t };
+}
+
+function jumpTo(getTarget) {
+  /* Move FIRST, zoom second: the rebases triggered by the zoom then
+     center on the destination, keeping coordinates near the camera
+     small (the floating-origin invariant). Zooming before moving would
+     park the camera at astronomically large frame coordinates. */
+  let tg = getTarget();
+  cam.x = tg.x; cam.y = tg.y;
+  zoomAt(cw / 2, ch / 2, 2 ** (tg.t - totalLog2()));
+  tg = getTarget();                    // fresh coords after possible rebase
+  cam.x = tg.x; cam.y = tg.y;
+  maybeRebase();
+  needRender = true; hudDirty = true;
+}
+function flyTo(getTarget) {
+  if (reducedMotion) { jumpTo(getTarget); return; }
+  anim = { getTarget, last: performance.now() };
+}
+function stepAnim(now) {
+  const dt = Math.min(0.05, (now - anim.last) / 1000);
+  anim.last = now;
+  const k = 1 - Math.exp(-dt * 7);
+  let tg = anim.getTarget();
+  panBy((cw / 2 - w2sx(tg.x)) * k, (ch / 2 - w2sy(tg.y)) * k);
+  zoomAt(cw / 2, ch / 2, 2 ** ((tg.t - totalLog2()) * k));
+  hudDirty = true;
+  tg = anim.getTarget();
+  if (Math.abs(tg.t - totalLog2()) < 0.004 &&
+      Math.abs(cw / 2 - w2sx(tg.x)) < 0.5 &&
+      Math.abs(ch / 2 - w2sy(tg.y)) < 0.5) {
+    const g = anim.getTarget;
+    anim = null;
+    jumpTo(g);
+  }
+}
+function goHome() { if (mode === 'draw' || mode === 'erase') return; hideHint(); flyTo(homeTarget); }
+function goFit() { if (mode === 'draw' || mode === 'erase') return; hideHint(); flyTo(fitTarget); }
+
+/* ---------------- input ---------------- */
+
+const pointers = new Map();
+let mode = null, primaryId = null, spaceDown = false;
+let pinchPrev = null;
+
+function pinchGeom() {
+  const it = pointers.values();
+  const a = it.next().value, b = it.next().value;
+  return { mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) };
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.button > 2) return;
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  anim = null;
+  hideHint();
+
+  if (pointers.size === 2) {
+    if (mode === 'draw') cancelStroke();
+    if (mode === 'erase') commitErase();
+    mode = 'pinch';
+    primaryId = null;
+    pinchPrev = pinchGeom();
+    return;
+  }
+  if (pointers.size > 2 || mode === 'pinch' || mode === 'wait') return;
+
+  if (e.button === 1 || e.button === 2 || spaceDown || tool === 'pan') {
+    mode = 'pan';
+    setCursor();
+    return;
+  }
+  primaryId = e.pointerId;
+  if (tool === 'brush') { mode = 'draw'; newStroke(e.clientX, e.clientY); }
+  else if (tool === 'eraser') { mode = 'erase'; eraseItems = []; eraseAt(e.clientX, e.clientY); }
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  moveRing(e.clientX, e.clientY);
+  const rec = pointers.get(e.pointerId);
+  const px = rec ? rec.x : e.clientX;
+  const py = rec ? rec.y : e.clientY;
+  if (rec) { rec.x = e.clientX; rec.y = e.clientY; }
+
+  if (mode === 'pinch') {
+    if (pointers.size < 2) return;
+    const g = pinchGeom();
+    panBy(g.mx - pinchPrev.mx, g.my - pinchPrev.my);
+    if (pinchPrev.d > 8 && g.d > 8) zoomAt(g.mx, g.my, g.d / pinchPrev.d);
+    pinchPrev = g;
+  } else if (mode === 'pan' && rec) {
+    panBy(e.clientX - px, e.clientY - py);
+  } else if (mode === 'draw' && e.pointerId === primaryId) {
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ce of evs) extendStroke(ce.clientX, ce.clientY);
+  } else if (mode === 'erase' && e.pointerId === primaryId) {
+    eraseAt(e.clientX, e.clientY);
+  }
+});
+
+function endPointer(e) {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+
+  if (mode === 'pinch') {
+    if (pointers.size >= 2) { pinchPrev = pinchGeom(); return; }
+    mode = pointers.size === 1 ? 'wait' : null;
+    return;
+  }
+  if (mode === 'wait') {
+    if (pointers.size === 0) mode = null;
+    return;
+  }
+  if (mode === 'draw') endStroke();
+  else if (mode === 'erase') commitErase();
+  mode = null;
+  primaryId = null;
+  setCursor();
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', (e) => {
+  if (mode === 'draw') cancelStroke();
+  endPointer(e);
+});
+canvas.addEventListener('pointerleave', () => { ring.style.display = 'none'; });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  anim = null;
+  hideHint();
+  let dy = e.deltaY, dx = e.deltaX;
+  if (e.deltaMode === 1) { dy *= 16; dx *= 16; }
+  else if (e.deltaMode === 2) { dy *= cw; dx *= cw; }
+  if (e.shiftKey && !e.ctrlKey) {
+    if (dx === 0) panBy(-dy, 0); else panBy(-dx, -dy);
+  } else {
+    const k = e.ctrlKey ? 0.011 : 0.0024;   // ctrl = trackpad pinch
+    zoomAt(e.clientX, e.clientY, Math.exp(-dy * k));
+  }
+}, { passive: false });
+
+window.addEventListener('keydown', (e) => {
+  const tgt = e.target;
+  if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'SELECT' || tgt.isContentEditable)) return;
+  if (e.code === 'Space') {
+    if (!spaceDown) { spaceDown = true; setCursor(); }
+    e.preventDefault();
+    return;
+  }
+  const modKey = e.ctrlKey || e.metaKey;
+  if (modKey && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
+  if (modKey && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+  if (modKey) return;
+  switch (e.key.toLowerCase()) {
+    case 'b': setTool('brush'); break;
+    case 'e': setTool('eraser'); break;
+    case 'v': case 'h': setTool('pan'); break;
+    case 'g': toggleGrid(); break;
+    case 'r': goHome(); break;
+    case 'f': goFit(); break;
+    case '[': bumpSize(-1); break;
+    case ']': bumpSize(1); break;
+    case 'escape': if (mode === 'draw') { cancelStroke(); mode = null; } break;
+  }
+});
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'Space') { spaceDown = false; setCursor(); }
+});
+
+/* ---------------- UI ---------------- */
+
+const ring = document.getElementById('ring');
+const hint = document.getElementById('hint');
+const sizeEl = document.getElementById('size');
+const sizeVal = document.getElementById('sizeVal');
+const colorPick = document.getElementById('colorPick');
+const btnUndo = document.getElementById('btnUndo');
+const btnRedo = document.getElementById('btnRedo');
+const toolBtns = {
+  brush: document.getElementById('toolBrush'),
+  eraser: document.getElementById('toolEraser'),
+  pan: document.getElementById('toolPan')
+};
+
+const PALETTE = ['#ede9e0', '#f2c14e', '#ef6351', '#e4699b', '#9b7ede', '#5aa9e6', '#63c7b2'];
+const swWrap = document.getElementById('swatches');
+for (const c of PALETTE) {
+  const b = document.createElement('button');
+  b.className = 'sw' + (c === ink ? ' on' : '');
+  b.style.background = c;
+  b.title = c;
+  b.addEventListener('click', () => setInk(c));
+  swWrap.appendChild(b);
+}
+function setInk(c) {
+  ink = c;
+  colorPick.value = c;
+  for (const b of swWrap.children) b.classList.toggle('on', b.title === c);
+}
+colorPick.addEventListener('input', () => {
+  ink = colorPick.value;
+  for (const b of swWrap.children) b.classList.remove('on');
+});
+
+function setTool(t) {
+  tool = t;
+  for (const k in toolBtns) toolBtns[k].classList.toggle('on', k === t);
+  syncSizeUI();
+  setCursor();
+}
+toolBtns.brush.addEventListener('click', () => setTool('brush'));
+toolBtns.eraser.addEventListener('click', () => setTool('eraser'));
+toolBtns.pan.addEventListener('click', () => setTool('pan'));
+
+function syncSizeUI() {
+  const isE = tool === 'eraser';
+  sizeEl.min = isE ? 6 : 1;
+  sizeEl.max = isE ? 160 : 80;
+  sizeEl.value = sizes[isE ? 'eraser' : 'brush'];
+  sizeVal.textContent = sizeEl.value;
+}
+sizeEl.addEventListener('input', () => {
+  sizes[tool === 'eraser' ? 'eraser' : 'brush'] = +sizeEl.value;
+  sizeVal.textContent = sizeEl.value;
+});
+function bumpSize(dir) {
+  const key = tool === 'eraser' ? 'eraser' : 'brush';
+  const lo = key === 'eraser' ? 6 : 1;
+  const hi = key === 'eraser' ? 160 : 80;
+  const step = Math.max(1, Math.round(sizes[key] * 0.15));
+  sizes[key] = Math.min(hi, Math.max(lo, sizes[key] + dir * step));
+  syncSizeUI();
+}
+
+function setCursor() {
+  const panning = tool === 'pan' || spaceDown || mode === 'pan';
+  if (panning) {
+    canvas.style.cursor = mode === 'pan' ? 'grabbing' : 'grab';
+    ring.style.display = 'none';
+  } else {
+    canvas.style.cursor = 'none';
+  }
+}
+function moveRing(x, y) {
+  if (tool === 'pan' || spaceDown || mode === 'pan' || mode === 'pinch') {
+    ring.style.display = 'none';
+    return;
+  }
+  const d = tool === 'eraser' ? Math.max(sizes.eraser, 6) : Math.max(sizes.brush, 3);
+  ring.style.width = d + 'px';
+  ring.style.height = d + 'px';
+  ring.style.left = x + 'px';
+  ring.style.top = y + 'px';
+  ring.style.display = 'block';
+}
+
+let hintGone = false;
+function hideHint() {
+  if (hintGone) return;
+  hintGone = true;
+  hint.classList.add('gone');
+}
+
+function refreshHistoryUI() {
+  btnUndo.disabled = undoStack.length === 0;
+  btnRedo.disabled = redoStack.length === 0;
+}
+btnUndo.addEventListener('click', undo);
+btnRedo.addEventListener('click', redo);
+
+const btnGrid = document.getElementById('btnGrid');
+function toggleGrid() {
+  gridOn = !gridOn;
+  btnGrid.classList.toggle('on', gridOn);
+  needRender = true;
+}
+btnGrid.addEventListener('click', toggleGrid);
+
+document.getElementById('btnHome').addEventListener('click', goHome);
+document.getElementById('btnFit').addEventListener('click', goFit);
+document.getElementById('gauge').addEventListener('click', goFit);
+
+/* clear: two-step confirm, no dialogs */
+const btnClear = document.getElementById('btnClear');
+let clearArmed = 0;
+btnClear.addEventListener('click', () => {
+  if (!clearArmed) {
+    clearArmed = setTimeout(() => {
+      clearArmed = 0;
+      btnClear.classList.remove('arm');
+      btnClear.title = 'Clear everything (click twice)';
+    }, 2500);
+    btnClear.classList.add('arm');
+    btnClear.title = 'Click again to clear everything';
+    return;
+  }
+  clearTimeout(clearArmed);
+  clearArmed = 0;
+  btnClear.classList.remove('arm');
+  btnClear.title = 'Clear everything (click twice)';
+  if (strokes.length) {
+    pushOp({ t: 'clear', all: strokes.slice() });
+    strokes.length = 0;
+    needRender = true;
+  }
+});
+
+/* ---------------- files ---------------- */
+
+function download(url, name) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+document.getElementById('btnPNG').addEventListener('click', () => {
+  render();
+  needRender = false;
+  canvas.toBlob((b) => {
+    if (!b) { console.warn('PNG export failed'); return; }
+    download(URL.createObjectURL(b), 'infinite-canvas.png');
+  });
+});
+document.getElementById('btnSave').addEventListener('click', () => {
+  const data = {
+    app: 'infinite-canvas', v: 1,
+    baseLog2,
+    cam: { x: cam.x, y: cam.y, z: cam.z },
+    origin: { x: origin.x, y: origin.y },
+    strokes: strokes.map((s) => ({ w: s.w, c: s.c, p: s.pts }))
+  };
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  download(URL.createObjectURL(blob), 'infinite-canvas.json');
+});
+const loadFile = document.getElementById('loadFile');
+document.getElementById('btnLoad').addEventListener('click', () => loadFile.click());
+loadFile.addEventListener('change', () => {
+  const f = loadFile.files && loadFile.files[0];
+  loadFile.value = '';
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    try {
+      const d = JSON.parse(rd.result);
+      if (!d || d.app !== 'infinite-canvas' || !Array.isArray(d.strokes)) {
+        console.warn('Not an infinite-canvas file.');
+        return;
+      }
+      const loaded = [];
+      for (const s of d.strokes) {
+        if (!s || !Array.isArray(s.p) || s.p.length < 2 || s.p.length % 2) continue;
+        if (!s.p.every(Number.isFinite) || !Number.isFinite(s.w) || s.w <= 0) continue;
+        const st = { pts: s.p.slice(), w: +s.w, c: String(s.c || '#ede9e0'), bb: null };
+        let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+        for (let i = 0; i < st.pts.length; i += 2) {
+          const x = st.pts[i], y = st.pts[i + 1];
+          if (x < minx) minx = x; if (x > maxx) maxx = x;
+          if (y < miny) miny = y; if (y > maxy) maxy = y;
+        }
+        st.bb = { minx, maxx, miny, maxy };
+        loaded.push(st);
+      }
+      strokes = loaded;
+      cur = null;
+      undoStack.length = 0; redoStack.length = 0;
+      cam.x = Number.isFinite(d.cam && d.cam.x) ? d.cam.x : 0;
+      cam.y = Number.isFinite(d.cam && d.cam.y) ? d.cam.y : 0;
+      cam.z = Number.isFinite(d.cam && d.cam.z) ? Math.min(REB_HI, Math.max(REB_LO, d.cam.z)) : 1;
+      baseLog2 = Number.isFinite(d.baseLog2) ? d.baseLog2 : 0;
+      origin.x = Number.isFinite(d.origin && d.origin.x) ? d.origin.x : 0;
+      origin.y = Number.isFinite(d.origin && d.origin.y) ? d.origin.y : 0;
+      maybeRebase();
+      hideHint();
+      refreshHistoryUI();
+      needRender = true; hudDirty = true;
+      console.log('Loaded ' + strokes.length + ' strokes from ' + f.name);
+    } catch (err) {
+      console.warn('Could not read that file:', err);
+    }
+  };
+  rd.readAsText(f);
+});
+
+/* ---------------- boot ---------------- */
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  cw = window.innerWidth;
+  ch = window.innerHeight;
+  canvas.width = Math.round(cw * dpr);
+  canvas.height = Math.round(ch * dpr);
+  canvas.style.width = cw + 'px';
+  canvas.style.height = ch + 'px';
+  needRender = true; hudDirty = true;
+}
+window.addEventListener('resize', resize);
+
+function frame(now) {
+  if (anim) stepAnim(now);
+  if (needRender) { render(); needRender = false; }
+  if (hudDirty) { updateHud(); hudDirty = false; }
+  requestAnimationFrame(frame);
+}
+
+resize();
+setTool('brush');
+refreshHistoryUI();
+requestAnimationFrame(frame);
+
+console.log(
+  '%cInfinite Canvas%c\n' +
+  'draw: drag \u00b7 zoom: scroll / pinch \u00b7 pan: space+drag, right-drag, or V\n' +
+  'B brush \u00b7 E eraser \u00b7 G grid \u00b7 F fly to drawing \u00b7 R back to \u00d71 \u00b7 [ ] size \u00b7 Ctrl+Z undo\n' +
+  'The gauge at the bottom tracks your depth \u2014 the canvas keeps going as far as you do.',
+  'font-weight:700;font-size:14px', ''
+);
+</script>
+</body>
+</html>
