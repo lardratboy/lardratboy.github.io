@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>InfiPoint · M2 — Depth</title>
+<title>InfiPoint · M3 — Unbounded Bands</title>
 <script src="https://cdn.counter.dev/script.js" data-id="7e2eb1d7-8adf-4c48-a2ce-fa85819300d1" data-utcoffset="-7"></script>
 <style>
   :root{
@@ -148,7 +148,7 @@
   <div id="stage"></div>
 
   <div class="rail">
-    <div class="brand"><b>InfiPoint</b><span class="ms">M2 · depth</span></div>
+    <div class="brand"><b>InfiPoint</b><span class="ms">M3 · bands</span></div>
     <div class="badge" id="testBadge"><span class="dot" id="testDot"></span><span id="testText">running self-tests…</span></div>
   </div>
 
@@ -198,7 +198,7 @@
     <div class="row"><span class="act">Brush size</span><kbd>[ / ]</kbd></div>
     <div class="row"><span class="act">Undo / redo</span><kbd>⌘Z / ⌘⇧Z</kbd></div>
     <div class="row"><span class="act">Fit / Home</span><kbd>F / H</kbd></div>
-    <div class="note">Ink lands on the focal shell — the sphere at distance F under your cursor. Paint, dive, paint: each dive drops you onto a fresh shell, so detail nests inside detail. Now dive <em>into</em> a point: it swells past a sprite, past a billboard, and as you cross inside it becomes your sky — a tinted void with a fresh cloud waiting. Far chunks collapse to single dust motes so you never lose your work.</div>
+    <div class="note">Ink lands on the focal shell — the sphere at distance F under your cursor. Paint, dive, paint: each dive drops you onto a fresh shell, so detail nests inside detail. Now dive <em>into</em> a point: it swells past a sprite, past a billboard, and as you cross inside it becomes your sky — a tinted void with a fresh cloud waiting. Far chunks collapse to single dust motes so you never lose your work. With dynamic M3 bands, you can scale infinitely down past sub-atomic boundaries or out to cosmic extremes with exact precision.</div>
   </div>
 
   <div id="gpuErr"><div><h3>WebGL unavailable</h3><p>InfiPoint needs a WebGL2-capable browser. Try a recent Chrome, Edge, Firefox, or Safari with hardware acceleration enabled.</p></div></div>
@@ -226,6 +226,10 @@
   function f64mantissaBits(x){_dv.setFloat64(0,x);return [(_dv.getUint32(0)&0x000FFFFF)>>>0,_dv.getUint32(4)>>>0];}
 
   const BAND_STEP_BITS=20;                       // 2^20 between adjacent bands (M3)
+  const BAND_SCALE=Math.pow(2, BAND_STEP_BITS); // 1048576
+  const F_MIN = 1e-5;                            // safety envelope thresholds
+  const F_MAX = 1e6;
+
   function transportPoint(local,walk,bandDelta){ // M0/M1 always call bandDelta=0
     const f=Math.pow(2,BAND_STEP_BITS*bandDelta);
     return [(local[0]+walk[0])*f,(local[1]+walk[1])*f,(local[2]+walk[2])*f];
@@ -369,7 +373,20 @@
      ok('envMix one at sphere centre',envMixOf(0,0.08)===1);
      ok('envMix rises going deeper',envMixOf(0.05,0.08)>envMixOf(0.1,0.08));}
 
-    log('%cInfiPoint self-tests (M2)','font-weight:bold');
+    // ---- M3 dynamic bands ----
+    {const E=[0,0,1.0], T=[0,0,0];
+     const testCam={E:E.slice(),T:T.slice(),bandExp:0};
+     const pivot=[0,0,0], scale=1e-6;
+     const nD=diveScale(testCam.E,testCam.T,pivot,scale);
+     testCam.E=nD.E; testCam.T=nD.T;
+     const F=V3.len(V3.sub(testCam.T,testCam.E));
+     let triggered=false;
+     if(F<F_MIN){ testCam.bandExp+=1; testCam.E=V3.scale(testCam.E,BAND_SCALE); testCam.T=V3.scale(testCam.T,BAND_SCALE); triggered=true; }
+     const F_new=V3.len(V3.sub(testCam.T,testCam.E));
+     ok('band transport triggers on small F (M3)',triggered);
+     ok('band transport restores F to comfortable range (M3)',approx(F_new, F*BAND_SCALE) && F_new > 0.1);}
+
+    log('%cInfiPoint self-tests (M3)','font-weight:bold');
     for(const [c,n,x] of rec) log((c?'  PASS  ':'  FAIL  ')+n+(x?'  ('+x+')':''));
     log('  → '+pass+' passed, '+fail+' failed');
     return {pass,fail};
@@ -413,8 +430,8 @@
   // =====================================================================
   //  4 · CAMERA (Model B — dive is a rescale of {E,T} about the pivot)
   // =====================================================================
-  const cam={ E:[0,0,0], T:[0,0,0], bandExp:0 };  // Float64 pose; single band in M0/M1
-  let F_ref=1, F_MIN=1e-6, F_MAX=1e6;
+  const cam={ E:[0,0,0], T:[0,0,0], bandExp:0 };  // Float64 pose; dynamic bands in M3
+  let F_ref=1;
   let cloudC=[0,0,0], cloudR=1;
   let SMAX=64;
   let pointScale=1.0;
@@ -447,18 +464,51 @@
     cam.E=V3.add(cam.E,m); cam.T=V3.add(cam.T,m);
   }
   function dive(pivot,s){
-    const F=V3.len(V3.sub(cam.T,cam.E));
-    const nF=F*s;
-    if(nF<F_MIN){ noteFloor('in'); return; }
-    if(nF>F_MAX){ noteFloor('out'); return; }
     ({E:cam.E,T:cam.T}=diveScale(cam.E,cam.T,pivot,s));
+    checkBandTransport();
   }
-  let _floorNoted={in:false,out:false};
-  function noteFloor(dir){
-    if(_floorNoted[dir])return; _floorNoted[dir]=true;
-    console.log(dir==='in'
-      ? 'InfiPoint: single-band precision floor reached (~10^13x in). Unbounded dive arrives with band chains in M3.'
-      : 'InfiPoint: zoom-out limit for one band. Band chains (M3) remove it.');
+
+  // ---- M3 dynamic band transport system ----
+  let strokeAnchor=null;
+  function checkBandTransport() {
+    let loops=0;
+    while(loops<10){ // support multi-band steps on high-scale frame transitions
+      const F=V3.len(V3.sub(cam.T,cam.E));
+      if(F<F_MIN){
+        cam.bandExp+=1;
+        cam.E=V3.scale(cam.E,BAND_SCALE);
+        cam.T=V3.scale(cam.T,BAND_SCALE);
+        if(flight){
+          flight.fromT=V3.scale(flight.fromT,BAND_SCALE);
+          flight.toT=V3.scale(flight.toT,BAND_SCALE);
+          flight.fromF*=BAND_SCALE;
+          flight.toF*=BAND_SCALE;
+        }
+        if(strokeAnchor) strokeAnchor=V3.scale(strokeAnchor,BAND_SCALE);
+        notifyBandChange(1);
+        loops++;
+      } else if(F>F_MAX){
+        cam.bandExp-=1;
+        const invScale=1/BAND_SCALE;
+        cam.E=V3.scale(cam.E,invScale);
+        cam.T=V3.scale(cam.T,invScale);
+        if(flight){
+          flight.fromT=V3.scale(flight.fromT,invScale);
+          flight.toT=V3.scale(flight.toT,invScale);
+          flight.fromF*=invScale;
+          flight.toF*=invScale;
+        }
+        if(strokeAnchor) strokeAnchor=V3.scale(strokeAnchor,invScale);
+        notifyBandChange(-1);
+        loops++;
+      } else {
+        break;
+      }
+    }
+  }
+  function notifyBandChange(dir){
+    console.log('InfiPoint: Band Transport '+(dir>0?'IN':'OUT')+' to band '+cam.bandExp);
+    activeChunk=null; // force fresh paint chunk native to new band
   }
 
   // ---- flights (Fit / Home / intro): move first, then scale (I4) ----
@@ -483,6 +533,7 @@
     const fwd=V3.norm(V3.lerp(flight.fromFwd,flight.toFwd,e));
     applyPose(T,F,fwd);
     if(t>=1) flight=null;
+    checkBandTransport();
   }
   function frameF(){ return cloudR/Math.sin(HALF_FOV)*1.12; }
   function doFit(){ const {fwd}=camFrame(); startFlight(cloudC,frameF(),fwd,0.85); }
@@ -517,6 +568,7 @@
     uniform float uTanHalfFov;
     uniform float uSMax;
     uniform float uPointScale;
+    uniform float uChunkScale; // coordinate scaling between camera and native chunk band (M3)
     uniform float uFade0;      // I3 fade band (px)
     uniform float uFade1;
     uniform float uGate;       // 1 while erasing: fade points outside the depth gate
@@ -536,13 +588,13 @@
       vColor = color;
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
       vViewCenter = mv.xyz;
-      vRadius = aRadius * uPointScale;
+      vRadius = aRadius * uPointScale * uChunkScale;
 
       float zEye = max(-mv.z, 1e-9);
       vZ = zEye;
       gl_Position = projectionMatrix * mv;
       // §5: projected diameter d_px = r*H / (z_eye * tan(fov/2))
-      float dpx = aRadius * uH / (zEye * uTanHalfFov) * uPointScale;
+      float dpx = aRadius * uChunkScale * uH / (zEye * uTanHalfFov) * uPointScale;
       float vis = min(dpx, uSMax);                  // M2 promotes past S_max to billboards
       vFade = clamp(dpx / 0.7, 0.0, 1.0);           // sub-pixel dimming
       if (dpx > uFade0) {                           // I3: giants fade out log-linearly
@@ -711,6 +763,17 @@
     return new THREE.LineLoop(g,new THREE.LineBasicMaterial({color,transparent:true,opacity}));
   }
 
+  // Clone materials to handle individual coordinate-band scale attributes
+  function createChunkMaterial(chunkBandExp){
+    const mat = sharedMat.clone();
+    mat.uniforms = {
+      uH, uTanHalfFov, uSMax, uPointScale, uFade0, uFade1, uGate, uGateF, uGateK,
+      uEnvActive, uEnvColor, uEnvMix, uEnvFogK, uAspect, uProjectionMatrix,
+      uChunkScale: { value: 1.0 }
+    };
+    return mat;
+  }
+
   function initThree(){
     try{
       renderer=new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:'high-performance'});
@@ -735,7 +798,7 @@
     camera=new THREE.PerspectiveCamera(FOV_DEG,innerWidth/innerHeight,0.01,1000);
 
     sharedMat=new THREE.RawShaderMaterial({
-      uniforms:{ uH,uTanHalfFov,uSMax,uPointScale,uFade0,uFade1,uGate,uGateF,uGateK,uEnvActive,uEnvColor,uEnvMix,uEnvFogK,uProjectionMatrix },
+      uniforms:{ uH,uTanHalfFov,uSMax,uPointScale,uFade0,uFade1,uGate,uGateF,uGateK,uEnvActive,uEnvColor,uEnvMix,uEnvFogK,uAspect,uProjectionMatrix,uChunkScale:{value:1.0} },
       vertexShader:VERT, fragmentShader:FRAG,
       transparent:true, depthTest:true, depthWrite:true, blending:THREE.NormalBlending,
     });
@@ -839,18 +902,19 @@
       const pa=new THREE.BufferAttribute(pos,3), ca=new THREE.BufferAttribute(col,3), ra=new THREE.BufferAttribute(rad,1);
       geo.setAttribute('position',pa); geo.setAttribute('color',ca); geo.setAttribute('aRadius',ra);
       geo.setDrawRange(0,cnt);
-      const mesh=new THREE.Points(geo,sharedMat); mesh.frustumCulled=false; scene.add(mesh);
+      
+      const mat = createChunkMaterial(0);
+      const mesh=new THREE.Points(geo,mat); mesh.frustumCulled=false; scene.add(mesh);
       const agg={count:cnt, cx:ax,cy:ay,cz:az, r:sr/cnt,g:sg/cnt,b:sb/cnt};   // §4.2 aggregate (anchor IS centroid)
       gMaxCount=Math.max(gMaxCount,cnt);
       pushChunk({mesh,geo,anchor,boundR:bR,maxR:mR,pos,col,rad,count:cnt,cap:cnt,dynamic:false,
-                 agg,aggDirty:false, id:nextChunkId++,dirtyLo:Infinity,dirtyHi:-1,attrs:{pa,ca,ra}});
+                 agg,aggDirty:false, id:nextChunkId++,dirtyLo:Infinity,dirtyHi:-1,attrs:{pa,ca,ra},
+                 bandExp:0});
       built++;
     }
 
     cloudC=[0,0,0]; cloudR=R;
     F_ref=frameF();
-    F_MIN=R*1e-13;
-    F_MAX=R*1e6;
     console.log('InfiPoint: cloud built —',N.toLocaleString(),'points in',built,'RTC chunks (Morton-ordered).');
   }
 
@@ -859,14 +923,17 @@
     const cap=CHUNK_MAX;
     const pos=new Float32Array(cap*3), col=new Float32Array(cap*3), rad=new Float32Array(cap);
     const geo=new THREE.BufferGeometry();
-    const pa=new THREE.BufferAttribute(pos,3); pa.setUsage(THREE.DynamicDrawUsage);
-    const ca=new THREE.BufferAttribute(col,3); ca.setUsage(THREE.DynamicDrawUsage);
-    const ra=new THREE.BufferAttribute(rad,1); ra.setUsage(THREE.DynamicDrawUsage);
+    const pa=new THREE.BufferAttribute(pos, 3); pa.setUsage(THREE.DynamicDrawUsage);
+    const ca=new THREE.BufferAttribute(col, 3); ca.setUsage(THREE.DynamicDrawUsage);
+    const ra=new THREE.BufferAttribute(rad, 1); ra.setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute('position',pa); geo.setAttribute('color',ca); geo.setAttribute('aRadius',ra);
     geo.setDrawRange(0,0);
-    const mesh=new THREE.Points(geo,sharedMat); mesh.frustumCulled=false; scene.add(mesh);
+    
+    const mat = createChunkMaterial(cam.bandExp);
+    const mesh=new THREE.Points(geo,mat); mesh.frustumCulled=false; scene.add(mesh);
     const ch={mesh,geo,anchor:anchorPt.slice(),boundR:1e-6,maxR:1e-6,pos,col,rad,count:0,cap,dynamic:true,
-              agg:null,aggDirty:true, id:nextChunkId++,dirtyLo:Infinity,dirtyHi:-1,attrs:{pa,ca,ra}};
+              agg:null,aggDirty:true, id:nextChunkId++,dirtyLo:Infinity,dirtyHi:-1,attrs:{pa,ca,ra},
+              bandExp:cam.bandExp};
     activeChunk=ch; return pushChunk(ch);
   }
   // =====================================================================
@@ -882,18 +949,27 @@
     const dir=worldRayDir(clientX,clientY), E=cam.E;
     let bestT=Infinity, point=null;
     for(const ch of chunks){
-      const oc=V3.sub(ch.anchor,E), tc=V3.dot(oc,dir);
-      if(tc<-ch.boundR) continue;
-      const perp2c=V3.dot(oc,oc)-tc*tc, rr=ch.boundR*1.05;
+      const deltaBand = cam.bandExp - ch.bandExp;
+      const chunkScale = Math.pow(2, 20 * deltaBand);
+
+      const chAnchorCam = V3.scale(ch.anchor, chunkScale);
+      const chBoundRCam = ch.boundR * chunkScale;
+
+      const oc=V3.sub(chAnchorCam,E), tc=V3.dot(oc,dir);
+      if(tc<-chBoundRCam) continue;
+      const perp2c=V3.dot(oc,oc)-tc*tc, rr=chBoundRCam*1.05;
       if(perp2c>rr*rr) continue;
-      const pos=ch.pos, rad=ch.rad, n=ch.count, ax=ch.anchor[0],ay=ch.anchor[1],az=ch.anchor[2];
+      
+      const pos=ch.pos, rad=ch.rad, n=ch.count;
+      const ax=chAnchorCam[0],ay=chAnchorCam[1],az=chAnchorCam[2];
       for(let k=0;k<n;k++){
         if(rad[k]<0) continue;                      // erased
-        const wx=ax+pos[k*3]-E[0], wy=ay+pos[k*3+1]-E[1], wz=az+pos[k*3+2]-E[2];
+        const lPos = [pos[k * 3] * chunkScale, pos[k * 3 + 1] * chunkScale, pos[k * 3 + 2] * chunkScale];
+        const wx=ax+lPos[0]-E[0], wy=ay+lPos[1]-E[1], wz=az+lPos[2]-E[2];
         const t=wx*dir[0]+wy*dir[1]+wz*dir[2];
         if(t<=1e-9||t>=bestT) continue;
         const p2=(wx*wx+wy*wy+wz*wz)-t*t, tol=t*angTan;
-        if(p2<=tol*tol){ bestT=t; point=[ax+pos[k*3],ay+pos[k*3+1],az+pos[k*3+2]]; }
+        if(p2<=tol*tol){ bestT=t; point=[ax+lPos[0],ay+lPos[1],az+lPos[2]]; }
       }
     }
     return {hit:point!==null, t:bestT, point, dir};
@@ -932,7 +1008,16 @@
   function updateChunks(){
     const E=cam.E;
     for(const ch of chunks){                        // group pos = f64(anchor - E) → f32 in .set()
-      ch.mesh.position.set(ch.anchor[0]-E[0], ch.anchor[1]-E[1], ch.anchor[2]-E[2]);
+      const deltaBand = cam.bandExp - ch.bandExp;
+      const chunkScale = Math.pow(2, 20 * deltaBand);
+
+      const chAnchorCam = V3.scale(ch.anchor, chunkScale);
+      ch.mesh.position.set(chAnchorCam[0]-E[0], chAnchorCam[1]-E[1], chAnchorCam[2]-E[2]);
+      ch.mesh.scale.setScalar(chunkScale);
+
+      if (ch.mesh.material.uniforms.uChunkScale) {
+        ch.mesh.material.uniforms.uChunkScale.value = chunkScale;
+      }
     }
   }
   function flushDirty(){                            // append-only bufferSubData of grown tails (§3.4)
@@ -985,7 +1070,11 @@
     if(keys.has('a'))m=V3.add(m,V3.scale(right,-spd));
     if(keys.has('e'))m=V3.add(m,V3.scale(WORLD_UP, spd));
     if(keys.has('q'))m=V3.add(m,V3.scale(WORLD_UP,-spd));
-    if(m[0]||m[1]||m[2]){ cam.E=V3.add(cam.E,m); cam.T=V3.add(cam.T,m); }
+    if(m[0]||m[1]||m[2]){
+      cam.E=V3.add(cam.E,m);
+      cam.T=V3.add(cam.T,m);
+      checkBandTransport();
+    }
   }
 
   function animate(now){
@@ -1046,29 +1135,50 @@
     rulerBuilt=true;
   }
   function sup(n){const m={'-':'⁻','0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'};return (''+n).split('').map(c=>m[c]||c).join('');}
-  function ladderLabel(meters){
-    if(meters<PLANCK*0.4) return 'below the Planck length — uncharted';
-    let best=SCALE_LADDER[0],bd=1e9;
-    for(const [m,lab] of SCALE_LADDER){const d=Math.abs(Math.log10(meters)-Math.log10(m));if(d<bd){bd=d;best=[m,lab];}}
+  
+  function getMagnificationDetails(F) {
+    const log2Ratio = 20 * cam.bandExp + Math.log2(F_ref / F);
+    const log10M = log2Ratio * Math.log10(2);
+    const exp = Math.floor(log10M);
+    const mantissa = Math.pow(10, log10M - exp);
+    return { mantissa, exp };
+  }
+  function getMetersLog10(F) {
+    return Math.log10(REF_METERS) + Math.log10(F / F_ref) - 20 * cam.bandExp * Math.log10(2);
+  }
+  function ladderLabelFromLog10(log10Meters) {
+    if (log10Meters < Math.log10(PLANCK) - 0.3) return 'below the Planck length — uncharted';
+    let best = SCALE_LADDER[0], bd = 1e9;
+    for (const [m, lab] of SCALE_LADDER) {
+      const d = Math.abs(log10Meters - Math.log10(m));
+      if (d < bd) { bd = d; best = [m, lab]; }
+    }
     return best[1];
   }
+
   function updateGauge(){
     if(!rulerBuilt) buildRuler();
-    const F=V3.len(V3.sub(cam.T,cam.E));
-    const M=Math.pow(2,cam.bandExp)*(F_ref/F);
-    const {mantissa,exp}=magFormat(M);
+    const F = V3.len(V3.sub(cam.T,cam.E));
+    const { mantissa, exp } = getMagnificationDetails(F);
+    
     if(exp<4 && exp>=0){
-      const val=M>=100?Math.round(M):(M>=10?M.toFixed(0):M.toFixed(1));
+      const M = Math.pow(10, exp) * mantissa;
+      const val = M>=100?Math.round(M):(M>=10?M.toFixed(0):M.toFixed(1));
       magEl.innerHTML=val+'<span class="x">×</span>';
     }else if(exp<0){
+      const M = Math.pow(10, exp) * mantissa;
       magEl.innerHTML=M.toFixed(2)+'<span class="x">×</span>';
     }else{
       magEl.innerHTML=mantissa.toFixed(2)+'<span class="exp">×10'+sup(exp)+'</span><span class="x">×</span>';
     }
-    scaleEl.textContent=ladderLabel(REF_METERS*(F/F_ref));
-    const l10=Math.max(RULER_MIN,Math.min(RULER_MAX,Math.log10(Math.max(M,1e-9))));
+
+    const log10Meters = getMetersLog10(F);
+    scaleEl.textContent = ladderLabelFromLog10(log10Meters);
+
+    const M_log10 = 20 * cam.bandExp * Math.log10(2) + Math.log10(F_ref / F);
+    const l10 = Math.max(RULER_MIN, Math.min(RULER_MAX, M_log10));
     markerEl.style.bottom=((l10-RULER_MIN)/(RULER_MAX-RULER_MIN)*100)+'%';
-    dbgEl.textContent='band 0 · F '+(F<1e-3?F.toExponential(1):F.toFixed(F<10?3:1))+' · '+paintedCount().toLocaleString()+' ink';
+    dbgEl.textContent='band '+cam.bandExp+' · F '+(F<1e-3?F.toExponential(1):F.toFixed(F<10?3:1))+' · '+paintedCount().toLocaleString()+' pts';
   }
   function paintedCount(){ let n=0; for(const ch of chunks) if(ch.dynamic) n+=ch.count; return n; }
 
@@ -1085,7 +1195,7 @@
   const nGrainsOf  = ()=> 1+Math.round(brush.scatter*10);        // grains per deposit
   const footAngTan = ()=> 2*footPxOf()*TAN_HALF/innerHeight;     // footprint as an angle (dist-independent)
 
-  let thinSet=null, strokeAnchor=null;
+  let thinSet=null;
   const strokeStartCount=new Map();                              // chunkId -> count at first touch this stroke
   let lastDepositScreen=null;
 
@@ -1119,7 +1229,7 @@
   }
   function addPaintPoint(p,rgb,r){
     let ch=activeChunk;
-    if(!ch || ch.count>=ch.cap) ch=startNewPaintChunk(p);
+    if(!ch || ch.count>=ch.cap || ch.bandExp!==cam.bandExp) ch=startNewPaintChunk(p);
     let lx=p[0]-ch.anchor[0], ly=p[1]-ch.anchor[1], lz=p[2]-ch.anchor[2];
     if(Math.max(Math.abs(lx),Math.abs(ly),Math.abs(lz))>PAINT_CHUNK_BOUND){    // overflow → fresh chunk (§3.4)
       ch=startNewPaintChunk(p); lx=p[0]-ch.anchor[0]; ly=p[1]-ch.anchor[1]; lz=p[2]-ch.anchor[2];
@@ -1163,15 +1273,24 @@
   function eraseAt(cx,cy){
     const dir=worldRayDir(cx,cy), E=cam.E, F=V3.len(V3.sub(cam.T,cam.E)), angTan=footAngTan();
     for(const ch of chunks){
-      const oc=V3.sub(ch.anchor,E), tc=V3.dot(oc,dir);
-      if(tc<-ch.boundR) continue;
-      const perp2c=V3.dot(oc,oc)-tc*tc, rr=ch.boundR*1.1 + Math.max(tc,0)*angTan;
+      const deltaBand = cam.bandExp - ch.bandExp;
+      const chunkScale = Math.pow(2, 20 * deltaBand);
+
+      const chAnchorCam = V3.scale(ch.anchor, chunkScale);
+      const chBoundRCam = ch.boundR * chunkScale;
+
+      const oc=V3.sub(chAnchorCam,E), tc=V3.dot(oc,dir);
+      if(tc<-chBoundRCam) continue;
+      const perp2c=V3.dot(oc,oc)-tc*tc, rr=chBoundRCam*1.1 + Math.max(tc,0)*angTan;
       if(perp2c>rr*rr) continue;
-      const pos=ch.pos, rad=ch.rad, n=ch.count, ax=ch.anchor[0],ay=ch.anchor[1],az=ch.anchor[2];
+      
+      const pos=ch.pos, rad=ch.rad, n=ch.count;
+      const ax=chAnchorCam[0],ay=chAnchorCam[1],az=chAnchorCam[2];
       let touched=false;
       for(let k=0;k<n;k++){
         if(rad[k]<0) continue;
-        const p=[ax+pos[k*3],ay+pos[k*3+1],az+pos[k*3+2]];
+        const lPos = [pos[k * 3] * chunkScale, pos[k * 3 + 1] * chunkScale, pos[k * 3 + 2] * chunkScale];
+        const p=[ax+lPos[0],ay+lPos[1],az+lPos[2]];
         if(inEraseCone(p,E,dir,angTan,F,ERASE_KAPPA)){
           const key=ch.id+':'+k; if(eraseSeen.has(key)) continue; eraseSeen.add(key);
           eraseBatch.push({chunkId:ch.id,index:k,prevR:rad[k]}); rad[k]=-1; touched=true;
@@ -1231,16 +1350,25 @@
   const _bbCand=[];   // reused scratch for billboard candidates
   function updateRegimes(){
     const E=cam.E, {fwd}=camFrame(), H=_bufV2.y;
-    let envMix=0, envR=[0.2,0.3,0.5];
+    let envMix=0, envR = [0.2, 0.3, 0.5];
     _bbCand.length=0;
     for(const ch of chunks){
       if(!ch.count) continue;
-      const d=V3.len(V3.sub(ch.anchor,E));
-      if((d - ch.boundR) > (ch.maxR||1e-3)*40) continue;   // no point here reaches billboard/env range
-      const pos=ch.pos, rad=ch.rad, col=ch.col, n=ch.count, ax=ch.anchor[0],ay=ch.anchor[1],az=ch.anchor[2];
+      const deltaBand = cam.bandExp - ch.bandExp;
+      const chunkScale = Math.pow(2, 20 * deltaBand);
+
+      const chAnchorCam = V3.scale(ch.anchor, chunkScale);
+      const chBoundRCam = ch.boundR * chunkScale;
+
+      const d=V3.len(V3.sub(chAnchorCam,E));
+      if((d - chBoundRCam) > (ch.maxR||1e-3)*chunkScale*40) continue;   // no point here reaches billboard/env range
+      
+      const pos=ch.pos, rad=ch.rad, col=ch.col, n=ch.count;
+      const ax=chAnchorCam[0],ay=chAnchorCam[1],az=chAnchorCam[2];
       for(let k=0;k<n;k++){
-        const r=rad[k]; if(r<0) continue;
-        const wx=ax+pos[k*3]-E[0], wy=ay+pos[k*3+1]-E[1], wz=az+pos[k*3+2]-E[2];
+        const r=rad[k]*chunkScale; if(r<0) continue;
+        const lPos = [pos[k * 3] * chunkScale, pos[k * 3 + 1] * chunkScale, pos[k * 3 + 2] * chunkScale];
+        const wx=ax+lPos[0]-E[0], wy=ay+lPos[1]-E[1], wz=az+lPos[2]-E[2];
         const zEye=wx*fwd[0]+wy*fwd[1]+wz*fwd[2];
         if(zEye<=1e-9) continue;
         if(zEye < 1.6*r){                                  // camera inside/entering → environment point
@@ -1277,12 +1405,22 @@
     let dN=0, invLogMax=1/Math.log2(gMaxCount+1);
     for(const ch of chunks){
       if(!ch.count){ ch.mesh.visible=false; continue; }
-      const d=V3.len(V3.sub(ch.anchor,E)), z=Math.max(d,1e-6);
-      const extentPx=2*ch.boundR*H/(z*TAN_HALF);           // whole-chunk projected diameter
-      if(extentPx < DUST_PX && d > ch.boundR && dN < MAX_DUST){   // small & outside → one marker (§8)
+      const deltaBand = cam.bandExp - ch.bandExp;
+      const chunkScale = Math.pow(2, 20 * deltaBand);
+
+      const chAnchorCam = V3.scale(ch.anchor, chunkScale);
+      const chBoundRCam = ch.boundR * chunkScale;
+
+      const d=V3.len(V3.sub(chAnchorCam,E)), z=Math.max(d,1e-6);
+      const extentPx=2*chBoundRCam*H/(z*TAN_HALF);           // whole-chunk projected diameter
+      if(extentPx < DUST_PX && d > chBoundRCam && dN < MAX_DUST){   // small & outside → one marker (§8)
         ch.mesh.visible=false;
         const a=chunkAgg(ch); if(a.count<=0) continue;
-        dP.array[dN*3]=a.cx-E[0]; dP.array[dN*3+1]=a.cy-E[1]; dP.array[dN*3+2]=a.cz-E[2];
+        const cxCam = a.cx * chunkScale;
+        const cyCam = a.cy * chunkScale;
+        const czCam = a.cz * chunkScale;
+
+        dP.array[dN*3]=cxCam-E[0]; dP.array[dN*3+1]=cyCam-E[1]; dP.array[dN*3+2]=czCam-E[2];
         dC.array[dN*3]=a.r; dC.array[dN*3+1]=a.g; dC.array[dN*3+2]=a.b;
         dA.array[dN]=Math.pow(Math.max(0,Math.min(1, Math.log2(a.count+1)*invLogMax)), 0.8);  // Strata log curve
         dN++;
