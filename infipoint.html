@@ -276,6 +276,7 @@
     return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
   }
   // ---- M2 render-regime math (pure, headless-tested) ----
+  // Note: projected diameter and fade are defined inside the shader to maintain GPU consistency.
   function projDiameter(r,z,tanHalf,H){ return r*H/(Math.max(z,1e-9)*tanHalf); }         // d_px (§5)
   function fadeAlpha(dpx,f0,f1){                                                          // I3 fade band
     if(dpx<=f0) return 1; if(dpx>=f1) return 0;
@@ -292,7 +293,7 @@
     const approx=(a,b,rel=1e-12,abs=1e-12)=>Math.abs(a-b)<=abs+rel*Math.max(Math.abs(a),Math.abs(b));
     const approxr=(a,b,rel=1e-9)=>Math.abs(a-b)<=rel*Math.max(1,Math.abs(a),Math.abs(b));
 
-    {let ex=true,mb=true;
+    {let ex=true, mb=true;
      for(const x of [1,3.5,-7.25,0.1,123456.789,1e-8,9.87654321e12]){
        const y=mul2exp(x,20); if(mul2exp(y,-20)!==x)ex=false;
        const bx=f64mantissaBits(x),by=f64mantissaBits(y); if(bx[0]!==by[0]||bx[1]!==by[1])mb=false;}
@@ -501,15 +502,16 @@
         uFade0={value:FADE0}, uFade1={value:FADE1},
         uGate={value:0}, uGateF={value:1}, uGateK={value:ERASE_KAPPA},
         uEnvActive={value:0}, uEnvColor={value:new THREE.Color(0.2,0.3,0.5)}, uEnvMix={value:0},
-        uEnvFogK={value:0.01}, uAspect={value:1}, uDustPx={value:3};
+        uEnvFogK={value:0.01}, uAspect={value:1}, uDustPx={value:3},
+        uProjectionMatrix={value:new THREE.Matrix4()};
 
-  const VERT=`
+  const VERT=`#version 300 es
     precision highp float;
     uniform mat4 modelViewMatrix;
     uniform mat4 projectionMatrix;
-    attribute vec3 position;
-    attribute vec3 color;
-    attribute float aRadius;
+    in vec3 position;
+    in vec3 color;
+    in float aRadius;
     uniform float uH;          // drawing-buffer height (px)
     uniform float uTanHalfFov;
     uniform float uSMax;
@@ -519,9 +521,11 @@
     uniform float uGate;       // 1 while erasing: fade points outside the depth gate
     uniform float uGateF;
     uniform float uGateK;
-    varying vec3 vColor;
-    varying float vFade;
-    varying float vZ;
+    out vec3 vColor;
+    out float vFade;
+    out float vZ;
+    out vec3 vViewCenter;
+    out float vRadius;
     void main(){
       if (aRadius < 0.0) {                          // tombstoned (erased) point → cull
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -530,6 +534,9 @@
       }
       vColor = color;
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vViewCenter = mv.xyz;
+      vRadius = aRadius * uPointScale;
+
       float zEye = max(-mv.z, 1e-9);
       vZ = zEye;
       gl_Position = projectionMatrix * mv;
@@ -546,15 +553,19 @@
       }
       gl_PointSize = max(vis, 1.0);
     }`;
-  const FRAG=`
+  const FRAG=`#version 300 es
     precision highp float;
     uniform float uEnvActive;
     uniform vec3 uEnvColor;
     uniform float uEnvMix;
     uniform float uEnvFogK;
-    varying vec3 vColor;
-    varying float vFade;
-    varying float vZ;
+    uniform mat4 uProjectionMatrix;
+    in vec3 vColor;
+    in float vFade;
+    in float vZ;
+    in vec3 vViewCenter;
+    in float vRadius;
+    out vec4 fragColor;
     void main(){
       vec2 uv = gl_PointCoord * 2.0 - 1.0;
       float r2 = dot(uv, uv);
@@ -571,29 +582,40 @@
       float edge = smoothstep(1.0, 0.82, r2);
       float a = vFade * edge;
       if (a < 0.004) discard;
-      gl_FragColor = vec4(col, a);
+
+      // Project precise depth of sphere surface
+      vec3 viewPos = vViewCenter + vec3(uv.x * vRadius, -uv.y * vRadius, z * vRadius);
+      vec4 clipPos = uProjectionMatrix * vec4(viewPos, 1.0);
+      gl_FragDepth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
+
+      fragColor = vec4(col, a);
     }`;
 
   // ---- billboard shader: instanced camera-facing quad, shares the fade band ----
-  const BB_VERT=`
+  const BB_VERT=`#version 300 es
     precision highp float;
     uniform mat4 modelViewMatrix;
     uniform mat4 projectionMatrix;
-    attribute vec3 position;      // quad corner in [-1,1]
-    attribute vec3 iCenter;       // instance centre (world - E)
-    attribute float iRadius;
-    attribute vec3 iColor;
+    in vec3 position;      // quad corner in [-1,1]
+    in vec3 iCenter;       // instance centre (world - E)
+    in float iRadius;
+    in vec3 iColor;
     uniform float uH;
     uniform float uTanHalfFov;
     uniform float uFade0;
     uniform float uFade1;
-    varying vec2 vUv;
-    varying vec3 vColor;
-    varying float vFade;
+    out vec2 vUv;
+    out vec3 vColor;
+    out float vFade;
+    out vec3 vViewCenter;
+    out float vRadius;
     void main(){
       vUv = position.xy;
       vColor = iColor;
       vec4 mvc = modelViewMatrix * vec4(iCenter, 1.0);   // centre in view space
+      vViewCenter = mvc.xyz;
+      vRadius = iRadius;
+
       vec4 mv = mvc; mv.xy += position.xy * iRadius;      // expand in the camera-aligned plane
       float zEye = max(-mvc.z, 1e-9);
       gl_Position = projectionMatrix * mv;
@@ -602,11 +624,15 @@
       if (dpx > uFade0) f = clamp((log2(uFade1)-log2(dpx))/(log2(uFade1)-log2(uFade0)), 0.0, 1.0);
       vFade = f;
     }`;
-  const BB_FRAG=`
+  const BB_FRAG=`#version 300 es
     precision highp float;
-    varying vec2 vUv;
-    varying vec3 vColor;
-    varying float vFade;
+    uniform mat4 uProjectionMatrix;
+    in vec2 vUv;
+    in vec3 vColor;
+    in float vFade;
+    in vec3 vViewCenter;
+    in float vRadius;
+    out vec4 fragColor;
     void main(){
       float r2 = dot(vUv, vUv);
       if (r2 > 1.0) discard;
@@ -617,49 +643,64 @@
       float edge = smoothstep(1.0, 0.9, r2);
       float a = vFade * edge;
       if (a < 0.003) discard;
-      gl_FragColor = vec4(vColor * shade, a);
+
+      // Project precise depth of sphere surface
+      vec3 viewPos = vViewCenter + vec3(vUv.x * vRadius, -vUv.y * vRadius, z * vRadius);
+      vec4 clipPos = uProjectionMatrix * vec4(viewPos, 1.0);
+      gl_FragDepth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
+
+      fragColor = vec4(vColor * shade, a);
     }`;
 
   // ---- dust marker shader: one fixed-size disc per distant chunk (§8) ----
-  const DUST_VERT=`
+  const DUST_VERT=`#version 300 es
     precision highp float;
     uniform mat4 modelViewMatrix;
     uniform mat4 projectionMatrix;
-    attribute vec3 position;
-    attribute vec3 color;
-    attribute float aAlpha;
+    in vec3 position;
+    in vec3 color;
+    in float aAlpha;
     uniform float uDustPx;
-    varying vec3 vColor;
-    varying float vA;
+    out vec3 vColor;
+    out float vA;
     void main(){
       vColor = color; vA = aAlpha;
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       gl_PointSize = uDustPx;
     }`;
-  const DUST_FRAG=`
+  const DUST_FRAG=`#version 300 es
     precision highp float;
-    varying vec3 vColor;
-    varying float vA;
+    in vec3 vColor;
+    in float vA;
+    out vec4 fragColor;
     void main(){
       vec2 uv = gl_PointCoord * 2.0 - 1.0;
       float r2 = dot(uv, uv);
       if (r2 > 1.0) discard;
       float edge = smoothstep(1.0, 0.55, r2);
-      gl_FragColor = vec4(vColor, vA * edge);
+      fragColor = vec4(vColor, vA * edge);
     }`;
 
   // ---- environment shader: fullscreen radial tint toward the containing point's colour ----
-  const ENV_VERT=`varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
-  const ENV_FRAG=`
+  const ENV_VERT=`#version 300 es
+    in vec2 uv;
+    in vec3 position;
+    out vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }`;
+  const ENV_FRAG=`#version 300 es
     precision highp float;
     uniform vec3 uEnvColor; uniform float uEnvMix; uniform float uAspect;
-    varying vec2 vUv;
+    in vec2 vUv;
+    out vec4 fragColor;
     void main(){
       vec2 p = (vUv - 0.5); p.x *= uAspect;
       float rad = 1.0 - smoothstep(0.0, 1.15, length(p) * 1.25);   // brighter toward centre
       vec3 base = vec3(0.019, 0.023, 0.047);                        // the void
       vec3 col = mix(base, uEnvColor, clamp(uEnvMix,0.0,1.0) * (0.5 + 0.5 * rad));
-      gl_FragColor = vec4(col, 1.0);
+      fragColor = vec4(col, 1.0);
     }`;
 
   function makeRing(color,opacity){
@@ -693,7 +734,7 @@
     camera=new THREE.PerspectiveCamera(FOV_DEG,innerWidth/innerHeight,0.01,1000);
 
     sharedMat=new THREE.RawShaderMaterial({
-      uniforms:{ uH,uTanHalfFov,uSMax,uPointScale,uFade0,uFade1,uGate,uGateF,uGateK,uEnvActive,uEnvColor,uEnvMix,uEnvFogK },
+      uniforms:{ uH,uTanHalfFov,uSMax,uPointScale,uFade0,uFade1,uGate,uGateF,uGateK,uEnvActive,uEnvColor,uEnvMix,uEnvFogK,uProjectionMatrix },
       vertexShader:VERT, fragmentShader:FRAG,
       transparent:true, depthTest:true, depthWrite:true, blending:THREE.NormalBlending,
     });
@@ -708,9 +749,9 @@
     bbGeo.setAttribute('iCenter',iC); bbGeo.setAttribute('iRadius',iR); bbGeo.setAttribute('iColor',iCol);
     bbGeo.instanceCount=0;
     bbMat=new THREE.RawShaderMaterial({
-      uniforms:{ uH,uTanHalfFov,uFade0,uFade1 },
+      uniforms:{ uH,uTanHalfFov,uFade0,uFade1,uProjectionMatrix },
       vertexShader:BB_VERT, fragmentShader:BB_FRAG,
-      transparent:true, depthTest:true, depthWrite:false, blending:THREE.NormalBlending,   // tint, don't occlude fresh work
+      transparent:true, depthTest:true, depthWrite:true, blending:THREE.NormalBlending,
     });
     bbMesh=new THREE.Mesh(bbGeo,bbMat); bbMesh.frustumCulled=false; bbMesh.renderOrder=2; bbMesh.visible=false; scene.add(bbMesh);
 
@@ -969,6 +1010,7 @@
     uGate.value = erasing?1:0;
     if(erasing){ uGateF.value=V3.len(V3.sub(cam.T,cam.E)); uGateK.value=ERASE_KAPPA; }
     uAspect.value=innerWidth/innerHeight;
+    uProjectionMatrix.value.copy(camera.projectionMatrix);
 
     updateRegimes();     // billboards + the point you are inside (§5, §4.1/4.3)
     updateDust();        // distant chunks collapse to markers (§8, §4.2)
