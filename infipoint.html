@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>InfiPoint · M3 — Unbounded Bands</title>
+<title>InfiPoint · M4 — Scale & Budgets</title>
 <script src="https://cdn.counter.dev/script.js" data-id="7e2eb1d7-8adf-4c48-a2ce-fa85819300d1" data-utcoffset="-7"></script>
 <style>
   :root{
@@ -148,7 +148,7 @@
   <div id="stage"></div>
 
   <div class="rail">
-    <div class="brand"><b>InfiPoint</b><span class="ms">M3 · bands</span></div>
+    <div class="brand"><b>InfiPoint</b><span class="ms">M4 · scale</span></div>
     <div class="badge" id="testBadge"><span class="dot" id="testDot"></span><span id="testText">running self-tests…</span></div>
   </div>
 
@@ -196,6 +196,7 @@
     <div class="row"><span class="act">Fly up / down</span><kbd>E / Q</kbd></div>
     <div class="row"><span class="act">Tool paint / erase</span><kbd>B / X</kbd></div>
     <div class="row"><span class="act">Brush size</span><kbd>[ / ]</kbd></div>
+    <div class="row"><span class="act">Toggle Bounds</span><kbd>O</kbd></div>
     <div class="row"><span class="act">Undo / redo</span><kbd>⌘Z / ⌘⇧Z</kbd></div>
     <div class="row"><span class="act">Fit / Home</span><kbd>F / H</kbd></div>
     <div class="note">Ink lands on the focal shell — the sphere at distance F under your cursor. Paint, dive, paint: each dive drops you onto a fresh shell, so detail nests inside detail. Now dive <em>into</em> a point: it swells past a sprite, past a billboard, and as you cross inside it becomes your sky — a tinted void with a fresh cloud waiting. Far chunks collapse to single dust motes so you never lose your work. With dynamic M3 bands, you can scale infinitely down past sub-atomic boundaries or out to cosmic extremes with exact precision.</div>
@@ -543,6 +544,9 @@
   // =====================================================================
   let renderer,scene,camera,pivotRing,brushRing,sharedMat;
   let bbMesh,bbGeo,bbMat, envScene,envCam,envMat, dustMesh,dustGeo,dustMat;   // M2 depth passes
+  let boxMesh,boxGeo,boxMat;                                                   // M4 bounds wireframes
+  let showBounds=false;
+  const POINT_BUDGET=250000;                                                   // M4 continuous point limit
   let envActive=false, gMaxCount=1;
   const chunks=[];                 // all render chunks (static cloud + painted), see §6/§10
   const chunkMap=new Map();        // id -> chunk
@@ -833,6 +837,50 @@
     });
     dustMesh=new THREE.Points(dustGeo,dustMat); dustMesh.frustumCulled=false; dustMesh.renderOrder=1; dustMesh.visible=false; scene.add(dustMesh);
 
+    // ---- Instanced wireframe bounding boxes (M4 bounds visualizer, §6.4) ----
+    const u = 0.5;
+    const boxVertices = new Float32Array([
+      -u,-u,-u,  u,-u,-u,   u,-u,-u,  u, u,-u,   u, u,-u, -u, u,-u,  -u, u,-u, -u,-u,-u,
+      -u,-u, u,  u,-u, u,   u,-u, u,  u, u, u,   u, u, u, -u, u, u,  -u, u, u, -u,-u, u,
+      -u,-u,-u, -u,-u, u,   u,-u,-u,  u,-u, u,   u, u,-u,  u, u, u,  -u, u,-u, -u, u, u
+    ]);
+    boxGeo = new THREE.InstancedBufferGeometry();
+    boxGeo.setAttribute('position', new THREE.BufferAttribute(boxVertices, 3));
+    const bC = new THREE.InstancedBufferAttribute(new Float32Array(1024 * 3), 3); bC.setUsage(THREE.DynamicDrawUsage);
+    const bS = new THREE.InstancedBufferAttribute(new Float32Array(1024 * 3), 3); bS.setUsage(THREE.DynamicDrawUsage);
+    const bCol = new THREE.InstancedBufferAttribute(new Float32Array(1024 * 3), 3); bCol.setUsage(THREE.DynamicDrawUsage);
+    boxGeo.setAttribute('iCenter', bC); boxGeo.setAttribute('iSize', bS); boxGeo.setAttribute('iColor', bCol);
+    boxGeo.instanceCount = 0;
+
+    boxMat = new THREE.RawShaderMaterial({
+      uniforms: {},
+      vertexShader: `#version 300 es
+        precision highp float;
+        uniform mat4 modelViewMatrix;
+        uniform mat4 projectionMatrix;
+        in vec3 position;
+        in vec3 iCenter;
+        in vec3 iSize;
+        in vec3 iColor;
+        out vec3 vColor;
+        void main(){
+          vColor = iColor;
+          vec3 transformed = position * iSize + iCenter;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+        }`,
+      fragmentShader: `#version 300 es
+        precision highp float;
+        in vec3 vColor;
+        out vec4 fragColor;
+        void main(){
+          fragColor = vec4(vColor, 0.72);
+        }`,
+      transparent: true, depthTest: true, depthWrite: false, blending: THREE.NormalBlending
+    });
+    boxMesh = new THREE.LineSegments(boxGeo, boxMat);
+    boxMesh.frustumCulled = false; boxMesh.renderOrder = 4; boxMesh.visible = false;
+    scene.add(boxMesh);
+
     // ---- environment pass: fullscreen tint toward the point you are inside (§4.3) ----
     envScene=new THREE.Scene();
     envCam=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
@@ -1103,6 +1151,7 @@
     uProjectionMatrix.value.copy(camera.projectionMatrix);
 
     updateRegimes();     // billboards + the point you are inside (§5, §4.1/4.3)
+    updateLODAndBudgets(); // M4 progressive detail scheduling
     updateDust();        // distant chunks collapse to markers (§8, §4.2)
     updateGauge();
 
@@ -1399,6 +1448,88 @@
     }
   }
 
+  // ---- M4 Progressive LOD and point budget allocator (§6.2, §6.3) ----
+  function updateLODAndBudgets() {
+    const E = cam.E;
+    const { fwd } = camFrame();
+    const H = _bufV2.y || innerHeight;
+
+    const list = [];
+    for (const ch of chunks) {
+      if (!ch.count) continue;
+      const deltaBand = cam.bandExp - ch.bandExp;
+      const chunkScale = Math.pow(2, 20 * deltaBand);
+
+      const chAnchorCam = V3.scale(ch.anchor, chunkScale);
+      const chBoundRCam = ch.boundR * chunkScale;
+
+      const wx = chAnchorCam[0] - E[0];
+      const wy = chAnchorCam[1] - E[1];
+      const wz = chAnchorCam[2] - E[2];
+      const zEye = wx * fwd[0] + wy * fwd[1] + wz * fwd[2];
+
+      let sse = 0;
+      if (zEye > 1e-9) {
+        sse = (chBoundRCam * H) / (zEye * TAN_HALF);
+      } else {
+        sse = 1e9;
+      }
+
+      list.push({ ch, sse, zEye, chunkScale, chBoundRCam, wx, wy, wz });
+    }
+
+    list.sort((a, b) => b.sse - a.sse); // Sort priority based on Screen-Space Error (largest error/nearest first)
+
+    let remainingBudget = POINT_BUDGET;
+    const boxes = [];
+
+    for (const item of list) {
+      const { ch, sse, zEye, chunkScale, chBoundRCam, wx, wy, wz } = item;
+      const isDust = (2 * chBoundRCam * H) / (Math.max(zEye, 1e-6) * TAN_HALF) < DUST_PX;
+
+      if (isDust) {
+        ch.geo.setDrawRange(0, 0); // demote point mesh entirely so dust marker takes over cleanly
+      } else {
+        let targetFrac = 1.0;
+        if (sse < 180) {
+          targetFrac = Math.max(0.04, sse / 180); // progressive LOD roll-off
+        }
+        let targetCount = Math.floor(ch.count * targetFrac);
+        targetCount = Math.min(targetCount, remainingBudget);
+        targetCount = Math.max(targetCount, Math.min(ch.count, 64)); // guarantee basic continuity
+
+        ch.geo.setDrawRange(0, targetCount);
+        remainingBudget -= targetCount;
+      }
+
+      if (showBounds && boxes.length < 1024) {
+        const ratio = ch.count ? (ch.geo.drawRange.count / ch.count) : 0;
+        const color = isDust ? [0.4, 0.4, 0.4] : [1.0 - ratio, ratio, 0.35]; // Gray for dust, red-green transition for details
+        boxes.push({ center: [wx, wy, wz], size: [chBoundRCam * 2, chBoundRCam * 2, chBoundRCam * 2], color });
+      }
+    }
+
+    if (showBounds && boxes.length > 0) {
+      const bC = boxGeo.getAttribute('iCenter');
+      const bS = boxGeo.getAttribute('iSize');
+      const bCol = boxGeo.getAttribute('iColor');
+      const limit = Math.min(boxes.length, 1024);
+      for (let i = 0; i < limit; i++) {
+        const b = boxes[i];
+        bC.setXYZ(i, b.center[0], b.center[1], b.center[2]);
+        bS.setXYZ(i, b.size[0], b.size[1], b.size[2]);
+        bCol.setXYZ(i, b.color[0], b.color[1], b.color[2]);
+      }
+      bC.needsUpdate = true;
+      bS.needsUpdate = true;
+      bCol.needsUpdate = true;
+      boxGeo.instanceCount = limit;
+      boxMesh.visible = true;
+    } else {
+      boxMesh.visible = false;
+    }
+  }
+
   function updateDust(){
     const E=cam.E, H=_bufV2.y;
     const dP=dustGeo.getAttribute('position'), dC=dustGeo.getAttribute('color'), dA=dustGeo.getAttribute('aAlpha');
@@ -1530,6 +1661,7 @@
       if(k==='h') doHome();
       if(k==='b') setTool(TOOL.PAINT);
       if(k==='x') setTool(TOOL.ERASE);
+      if(k==='o') { showBounds = !showBounds; console.log('InfiPoint: Toggle Chunk Bounds Wireframes', showBounds); }
       if(k===']') setSize(brush.size*1.2);
       if(k==='[') setSize(brush.size/1.2);
       if(k==='g') toggleHelp();
