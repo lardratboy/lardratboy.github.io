@@ -512,6 +512,40 @@
     activeChunk=null; // force fresh paint chunk native to new band
   }
 
+  // Translation rebase: keeps |cam.E| near zero so Float64 cancellation in
+  // orbit (E = T + rel) and RTC (chAnchor - E) doesn't snap motion to a coarse
+  // ULP grid at deep zoom. Band transport scales E,T by 2^20 without recentering;
+  // over several dives, |E| can reach 1e8+ while F stays tiny, giving Float64
+  // only a few significant digits of headroom over F. Rebasing all coords by
+  // -cam.E (with per-band scaling for foreign-band chunks) restores precision.
+  const REBASE_THRESHOLD = 1e4;
+  function rebaseOrigin(){
+    const eMag = Math.max(Math.abs(cam.E[0]), Math.abs(cam.E[1]), Math.abs(cam.E[2]));
+    if (eMag < REBASE_THRESHOLD) return;
+    const shift = cam.E.slice();
+    cam.T = V3.sub(cam.T, shift);
+    cam.E = [0,0,0];
+    if (strokeAnchor) strokeAnchor = V3.sub(strokeAnchor, shift);
+    if (flight){
+      flight.fromT = V3.sub(flight.fromT, shift);
+      flight.toT   = V3.sub(flight.toT,   shift);
+    }
+    for (const ch of chunks){
+      const deltaBand = cam.bandExp - ch.bandExp;
+      if (deltaBand === 0){
+        ch.anchor = V3.sub(ch.anchor, shift);
+      } else {
+        // ch.anchor lives in ch's own band coords; shift in current band coords
+        // maps to shift / chunkScale in ch's band. If chunkScale is huge (chunk
+        // from a shallower band), the ratio underflows to ~0 and ch.anchor is
+        // left effectively untouched — those chunks render as dust anyway.
+        const chunkScale = Math.pow(2, 20 * deltaBand);
+        const inv = 1 / chunkScale;
+        ch.anchor = [ch.anchor[0] - shift[0]*inv, ch.anchor[1] - shift[1]*inv, ch.anchor[2] - shift[2]*inv];
+      }
+    }
+  }
+
   // ---- flights (Fit / Home / intro): move first, then scale (I4) ----
   let flight=null;
   const easeInOut=t=>t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
@@ -1135,6 +1169,7 @@
     if(painting && !movedThisFrame && brush.scatter>0 && lastCursor.inside){ depositAt(lastCursor.x,lastCursor.y); } // airbrush hold
     movedThisFrame=false;
 
+    rebaseOrigin();  // keep |cam.E| small so orbit/RTC stay f64-precise at deep zoom
     updateCameraMatrices();
     updateChunks();
     updateNearFar();
