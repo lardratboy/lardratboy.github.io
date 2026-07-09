@@ -167,7 +167,7 @@
     </div>
     <div class="sep"></div>
     <button class="tbtn" id="snapBtn" title="Snap placement to existing points">Snap&nbsp;·&nbsp;off</button>
-    <button class="tbtn active" id="skyBtn" title="Tint the sky the color of the point you are inside">Sky&nbsp;·&nbsp;on</button>
+    <button class="tbtn" id="skyBtn" title="Tint the sky the color of the point you are inside">Sky&nbsp;·&nbsp;off</button>
     <div class="sep"></div>
     <div class="tgroup">
       <button class="ibtn" id="undoBtn" title="Undo (Ctrl/Cmd+Z)" disabled>↶</button>
@@ -1276,7 +1276,7 @@
     [1.0,0.72,0.30],[0.5,0.92,0.60],[1.0,0.5,0.35],[0.40,0.86,0.92],
   ];
   const brush={ tool:TOOL.PAINT, color:SWATCHES[1].slice(), size:6, scatter:0.25, depth:0.0, snap:false };
-  let skyEnabled=false;   // toggle for "inside a point → tint the sky"
+  let skyEnabled=false;  // toggle for "inside a point → tint the sky"
   const footPxOf   = ()=> brush.size*(1+brush.scatter*6);        // spray footprint (screen px radius)
   const nGrainsOf  = ()=> 1+Math.round(brush.scatter*10);        // grains per deposit
   const footAngTan = ()=> 2*footPxOf()*TAN_HALF/innerHeight;     // footprint as an angle (dist-independent)
@@ -1517,6 +1517,18 @@
 
     list.sort((a, b) => b.sse - a.sse); // Sort priority based on Screen-Space Error (largest error/nearest first)
 
+    // Only apply progressive LOD when total non-dust points exceed the budget.
+    // Otherwise the rolloff hollows out tight chunks (low SSE from small boundR)
+    // even though there's plenty of headroom — visible as "parts disappearing"
+    // when zoomed out on the default attractor.
+    let nonDustTotal = 0;
+    for (const item of list) {
+      const { chBoundRCam, zEye } = item;
+      const isDust = (2 * chBoundRCam * H) / (Math.max(zEye, 1e-6) * TAN_HALF) < DUST_PX;
+      if (!isDust) nonDustTotal += item.ch.count;
+    }
+    const budgetPressured = nonDustTotal > POINT_BUDGET;
+
     let remainingBudget = POINT_BUDGET;
     const boxes = [];
 
@@ -1528,8 +1540,8 @@
         ch.geo.setDrawRange(0, 0); // demote point mesh entirely so dust marker takes over cleanly
       } else {
         let targetFrac = 1.0;
-        if (sse < 180) {
-          targetFrac = Math.max(0.04, sse / 180); // progressive LOD roll-off
+        if (budgetPressured && sse < 180) {
+          targetFrac = Math.max(0.04, sse / 180); // progressive LOD roll-off (only when needed)
         }
         let targetCount = Math.floor(ch.count * targetFrac);
         targetCount = Math.min(targetCount, remainingBudget);
