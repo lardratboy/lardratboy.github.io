@@ -168,6 +168,7 @@
     <div class="sep"></div>
     <button class="tbtn" id="snapBtn" title="Snap placement to existing points">Snap&nbsp;·&nbsp;off</button>
     <button class="tbtn" id="skyBtn" title="Tint the sky the color of the point you are inside">Sky&nbsp;·&nbsp;off</button>
+    <button class="tbtn" id="logBtn" title="Toggle Logarithmic Depth mapping to eliminate far clipping">Log&nbsp;·&nbsp;off</button>
     <div class="sep"></div>
     <div class="tgroup">
       <button class="ibtn" id="undoBtn" title="Undo (Ctrl/Cmd+Z)" disabled>↶</button>
@@ -515,10 +516,7 @@
 
   // Translation rebase: keeps |cam.E| near zero so Float64 cancellation in
   // orbit (E = T + rel) and RTC (chAnchor - E) doesn't snap motion to a coarse
-  // ULP grid at deep zoom. Band transport scales E,T by 2^20 without recentering;
-  // over several dives, |E| can reach 1e8+ while F stays tiny, giving Float64
-  // only a few significant digits of headroom over F. Rebasing all coords by
-  // -cam.E (with per-band scaling for foreign-band chunks) restores precision.
+  // ULP grid at deep zoom.
   const REBASE_THRESHOLD = 1e4;
   function rebaseOrigin(){
     const eMag = Math.max(Math.abs(cam.E[0]), Math.abs(cam.E[1]), Math.abs(cam.E[2]));
@@ -536,10 +534,6 @@
       if (deltaBand === 0){
         ch.anchor = V3.sub(ch.anchor, shift);
       } else {
-        // ch.anchor lives in ch's own band coords; shift in current band coords
-        // maps to shift / chunkScale in ch's band. If chunkScale is huge (chunk
-        // from a shallower band), the ratio underflows to ~0 and ch.anchor is
-        // left effectively untouched — those chunks render as dust anyway.
         const chunkScale = Math.pow(2, 20 * deltaBand);
         const inv = 1 / chunkScale;
         ch.anchor = [ch.anchor[0] - shift[0]*inv, ch.anchor[1] - shift[1]*inv, ch.anchor[2] - shift[2]*inv];
@@ -587,8 +581,13 @@
   const chunkMap=new Map();        // id -> chunk
   let nextChunkId=0, activeChunk=null;
   const _bufV2=new THREE.Vector2();
-  // shared uniform objects — the SAME references drive the point and billboard materials,
-  // so a per-frame write to uH.value (etc.) updates every regime at once.
+
+  // ---- logarithmic depth configuration variables ----
+  let logDepthEnabled = false;
+  const uLogDepthActive = { value: 0.0 };
+  const uLogDepthBufFC = { value: 1.0 };
+
+  // shared uniform objects — the SAME references drive the point and billboard materials
   const uH={value:1}, uTanHalfFov={value:TAN_HALF}, uSMax={value:64}, uPointScale={value:1},
         uFade0={value:FADE0}, uFade1={value:FADE1},
         uGate={value:0}, uGateF={value:1}, uGateK={value:ERASE_KAPPA},
@@ -613,11 +612,13 @@
     uniform float uGate;       // 1 while erasing: fade points outside the depth gate
     uniform float uGateF;
     uniform float uGateK;
+    uniform float uLODAlpha;   // Dynamic LOD fade multiplier
     out vec3 vColor;
     out float vFade;
     out float vZ;
     out vec3 vViewCenter;
     out float vRadius;
+    out float vFragDepth;      // Pass perspective depth parameter for log computation
     void main(){
       if (aRadius < 0.0) {                          // tombstoned (erased) point → cull
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -632,10 +633,12 @@
       float zEye = max(-mv.z, 1e-9);
       vZ = zEye;
       gl_Position = projectionMatrix * mv;
+      vFragDepth = 1.0 + gl_Position.w;             // W component maps to view space depth
+
       // §5: projected diameter d_px = r*H / (z_eye * tan(fov/2))
       float dpx = aRadius * uChunkScale * uH / (zEye * uTanHalfFov) * uPointScale;
       float vis = min(dpx, uSMax);                  // M2 promotes past S_max to billboards
-      vFade = clamp(dpx / 0.7, 0.0, 1.0);           // sub-pixel dimming
+      vFade = clamp(dpx / 0.7, 0.0, 1.0) * uLODAlpha; // sub-pixel dimming modulated by dust crossfade
       if (dpx > uFade0) {                           // I3: giants fade out log-linearly
         vFade *= clamp((log2(uFade1)-log2(dpx))/(log2(uFade1)-log2(uFade0)), 0.0, 1.0);
       }
@@ -652,11 +655,14 @@
     uniform float uEnvMix;
     uniform float uEnvFogK;
     uniform mat4 uProjectionMatrix;
+    uniform float uLogDepthActive;
+    uniform float uLogDepthBufFC;
     in vec3 vColor;
     in float vFade;
     in float vZ;
     in vec3 vViewCenter;
     in float vRadius;
+    in float vFragDepth;
     out vec4 fragColor;
     void main(){
       vec2 uv = gl_PointCoord * 2.0 - 1.0;
@@ -678,7 +684,13 @@
       // Project precise depth of sphere surface
       vec3 viewPos = vViewCenter + vec3(uv.x * vRadius, -uv.y * vRadius, z * vRadius);
       vec4 clipPos = uProjectionMatrix * vec4(viewPos, 1.0);
-      gl_FragDepth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
+      
+      if (uLogDepthActive > 0.5) {
+        float surfaceDepth = 1.0 + clipPos.w;
+        gl_FragDepth = log2(surfaceDepth) * uLogDepthBufFC * 0.5;
+      } else {
+        gl_FragDepth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
+      }
 
       fragColor = vec4(col, a);
     }`;
@@ -701,6 +713,7 @@
     out float vFade;
     out vec3 vViewCenter;
     out float vRadius;
+    out float vFragDepth;
     void main(){
       vUv = position.xy;
       vColor = iColor;
@@ -711,6 +724,8 @@
       vec4 mv = mvc; mv.xy += position.xy * iRadius;      // expand in the camera-aligned plane
       float zEye = max(-mvc.z, 1e-9);
       gl_Position = projectionMatrix * mv;
+      vFragDepth = 1.0 + gl_Position.w;
+
       float dpx = iRadius * uH / (zEye * uTanHalfFov);
       float f = 1.0;
       if (dpx > uFade0) f = clamp((log2(uFade1)-log2(dpx))/(log2(uFade1)-log2(uFade0)), 0.0, 1.0);
@@ -719,11 +734,14 @@
   const BB_FRAG=`#version 300 es
     precision highp float;
     uniform mat4 uProjectionMatrix;
+    uniform float uLogDepthActive;
+    uniform float uLogDepthBufFC;
     in vec2 vUv;
     in vec3 vColor;
     in float vFade;
     in vec3 vViewCenter;
     in float vRadius;
+    in float vFragDepth;
     out vec4 fragColor;
     void main(){
       float r2 = dot(vUv, vUv);
@@ -739,7 +757,13 @@
       // Project precise depth of sphere surface
       vec3 viewPos = vViewCenter + vec3(vUv.x * vRadius, -vUv.y * vRadius, z * vRadius);
       vec4 clipPos = uProjectionMatrix * vec4(viewPos, 1.0);
-      gl_FragDepth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
+      
+      if (uLogDepthActive > 0.5) {
+        float surfaceDepth = 1.0 + clipPos.w;
+        gl_FragDepth = log2(surfaceDepth) * uLogDepthBufFC * 0.5;
+      } else {
+        gl_FragDepth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
+      }
 
       fragColor = vec4(vColor * shade, a);
     }`;
@@ -808,7 +832,9 @@
     mat.uniforms = {
       uH, uTanHalfFov, uSMax, uPointScale, uFade0, uFade1, uGate, uGateF, uGateK,
       uEnvActive, uEnvColor, uEnvMix, uEnvFogK, uAspect, uProjectionMatrix,
-      uChunkScale: { value: 1.0 }
+      uChunkScale: { value: 1.0 },
+      uLODAlpha: { value: 1.0 },
+      uLogDepthActive, uLogDepthBufFC
     };
     return mat;
   }
@@ -823,7 +849,7 @@
     renderer.setClearColor(0x05060c,1);
     document.getElementById('stage').appendChild(renderer.domElement);
 
-    renderer.autoClear=false;                       // we clear once and layer env → scene ourselves
+    renderer.autoClear=false;                       // clear once and layer env → scene ourselves
 
     const gl=renderer.getContext();
     const range=gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);   // §5: probe, never assume >64
@@ -837,7 +863,13 @@
     camera=new THREE.PerspectiveCamera(FOV_DEG,innerWidth/innerHeight,0.01,1000);
 
     sharedMat=new THREE.RawShaderMaterial({
-      uniforms:{ uH,uTanHalfFov,uSMax,uPointScale,uFade0,uFade1,uGate,uGateF,uGateK,uEnvActive,uEnvColor,uEnvMix,uEnvFogK,uAspect,uProjectionMatrix,uChunkScale:{value:1.0} },
+      uniforms:{
+        uH,uTanHalfFov,uSMax,uPointScale,uFade0,uFade1,uGate,uGateF,uGateK,
+        uEnvActive,uEnvColor,uEnvMix,uEnvFogK,uAspect,uProjectionMatrix,
+        uChunkScale:{value:1.0},
+        uLODAlpha:{value:1.0},
+        uLogDepthActive, uLogDepthBufFC
+      },
       vertexShader:VERT, fragmentShader:FRAG,
       transparent:true, depthTest:true, depthWrite:true, blending:THREE.NormalBlending,
     });
@@ -852,7 +884,7 @@
     bbGeo.setAttribute('iCenter',iC); bbGeo.setAttribute('iRadius',iR); bbGeo.setAttribute('iColor',iCol);
     bbGeo.instanceCount=0;
     bbMat=new THREE.RawShaderMaterial({
-      uniforms:{ uH,uTanHalfFov,uFade0,uFade1,uProjectionMatrix },
+      uniforms:{ uH,uTanHalfFov,uFade0,uFade1,uProjectionMatrix, uLogDepthActive, uLogDepthBufFC },
       vertexShader:BB_VERT, fragmentShader:BB_FRAG,
       transparent:true, depthTest:true, depthWrite:true, blending:THREE.NormalBlending,
     });
@@ -929,6 +961,7 @@
     brushRing=makeRing(0x5cb8ff,0.85); brushRing.visible=false; brushRing.renderOrder=3; scene.add(brushRing);  // paint footprint
 
     addEventListener('webglcontextlost',onCtxLost,false);
+    addEventListener('webglcontextrestored',onCtxRestored,false);
     return true;
   }
   // =====================================================================
@@ -1060,7 +1093,7 @@
   function pickPivot(clientX,clientY){
     const r=pickNearestPoint(clientX,clientY,PICK_TAN);
     if(r.hit) return r.point;
-    const F=V3.len(V3.sub(cam.T,cam.E));            // miss → focal point along the cursor ray
+    const F=V3.len(V3.sub(cam.T,cam.E));            // miss → focal point along cursor ray
     return V3.add(cam.E,V3.scale(r.dir,F));
   }
 
@@ -1082,9 +1115,19 @@
     camera.updateMatrixWorld(true);
   }
   function updateNearFar(){
-    const F=V3.len(V3.sub(cam.T,cam.E));            // depth brackets F (fixed ~4000:1 ratio, §5)
-    camera.near=Math.max(F*6e-3, 1e-12);
-    camera.far =Math.max(F*24, camera.near*8);
+    const F=V3.len(V3.sub(cam.T,cam.E));
+    if (logDepthEnabled) {
+      // Logarithmic depth configuration expands near/far limits to safe bounds
+      camera.near = Math.max(F * 1e-6, 1e-15);
+      camera.far = Math.max(F * 1e6, camera.near * 10);
+      uLogDepthActive.value = 1.0;
+      uLogDepthBufFC.value = 2.0 / (Math.log2(camera.far + 1.0) || 1.0);
+    } else {
+      camera.near=Math.max(F*6e-3, 1e-12);
+      camera.far =Math.max(F*24, camera.near*8);
+      uLogDepthActive.value = 0.0;
+      uLogDepthBufFC.value = 1.0;
+    }
     camera.fov=FOV_DEG; camera.aspect=innerWidth/innerHeight;
     camera.updateProjectionMatrix();
   }
@@ -1186,13 +1229,13 @@
     uAspect.value=innerWidth/innerHeight;
     uProjectionMatrix.value.copy(camera.projectionMatrix);
 
-    updateRegimes();     // billboards + the point you are inside (§5, §4.1/4.3)
-    updateLODAndBudgets(); // M4 progressive detail scheduling
-    updateDust();        // distant chunks collapse to markers (§8, §4.2)
+    updateRegimes();     // billboards + environment context
+    updateLODAndBudgets(); // progressive detail scheduling with smooth crossfading
+    updateDust();        // distant chunks collapse to markers with smooth crossfading
     updateGauge();
 
     try{
-      renderer.clear();                              // one clear; then layer env → scene
+      renderer.clear();                              // layer env → scene
       if(envActive) renderer.render(envScene,envCam);
       renderer.render(scene,camera);
     }catch(e){ console.error('render error:',e); if((''+e).includes('context')) ctxLost=true; }
@@ -1276,13 +1319,13 @@
     [1.0,0.72,0.30],[0.5,0.92,0.60],[1.0,0.5,0.35],[0.40,0.86,0.92],
   ];
   const brush={ tool:TOOL.PAINT, color:SWATCHES[1].slice(), size:6, scatter:0.25, depth:0.0, snap:false };
-  let skyEnabled=false;  // toggle for "inside a point → tint the sky"
-  const footPxOf   = ()=> brush.size*(1+brush.scatter*6);        // spray footprint (screen px radius)
+  let skyEnabled=false;  // toggle for sky context colorization
+  const footPxOf   = ()=> brush.size*(1+brush.scatter*6);        // spray footprint
   const nGrainsOf  = ()=> 1+Math.round(brush.scatter*10);        // grains per deposit
-  const footAngTan = ()=> 2*footPxOf()*TAN_HALF/innerHeight;     // footprint as an angle (dist-independent)
+  const footAngTan = ()=> 2*footPxOf()*TAN_HALF/innerHeight;     // footprint angle
 
   let thinSet=null;
-  const strokeStartCount=new Map();                              // chunkId -> count at first touch this stroke
+  const strokeStartCount=new Map();                              // chunkId -> count at first touch
   let lastDepositScreen=null;
 
   function beginStroke(){ thinSet=new Set(); strokeAnchor=null; strokeStartCount.clear(); }
@@ -1291,7 +1334,7 @@
   function depositAt(cx,cy){
     const dir=worldRayDir(cx,cy), {right,up,F}=camFrame();
     let shellDist=F;
-    if(brush.snap){ const h=pickNearestPoint(cx,cy,footAngTan()); if(h.hit) shellDist=h.t; }  // P2 surface snap
+    if(brush.snap){ const h=pickNearestPoint(cx,cy,footAngTan()); if(h.hit) shellDist=h.t; }
     const center=V3.add(cam.E,V3.scale(dir,shellDist));
     if(!strokeAnchor) strokeAnchor=center.slice();
     const footWorld=pxRadiusToWorld(footPxOf(),shellDist,TAN_HALF,innerHeight);
@@ -1317,7 +1360,7 @@
     let ch=activeChunk;
     if(!ch || ch.count>=ch.cap || ch.bandExp!==cam.bandExp) ch=startNewPaintChunk(p);
     let lx=p[0]-ch.anchor[0], ly=p[1]-ch.anchor[1], lz=p[2]-ch.anchor[2];
-    if(Math.max(Math.abs(lx),Math.abs(ly),Math.abs(lz))>PAINT_CHUNK_BOUND){    // overflow → fresh chunk (§3.4)
+    if(Math.max(Math.abs(lx),Math.abs(ly),Math.abs(lz))>PAINT_CHUNK_BOUND){    // overflow → fresh chunk
       ch=startNewPaintChunk(p); lx=p[0]-ch.anchor[0]; ly=p[1]-ch.anchor[1]; lz=p[2]-ch.anchor[2];
     }
     recordSpanStart(ch);
@@ -1330,10 +1373,10 @@
     ch.count++; ch.aggDirty=true;
     ch.dirtyLo=Math.min(ch.dirtyLo,i); ch.dirtyHi=Math.max(ch.dirtyHi,i);
   }
-  function ribbonTo(cx,cy){                                      // P4: beads spaced along the swept path
+  function ribbonTo(cx,cy){                                      // P4: screen-spaced ribbon spacing
     if(!lastDepositScreen){ depositAt(cx,cy); lastDepositScreen=[cx,cy]; return; }
     let [px,py]=lastDepositScreen; const dxs=cx-px,dys=cy-py,dist=Math.hypot(dxs,dys);
-    const spacing=Math.max(1.5, brush.size*0.9);                // screen-space gated at 1.5 px
+    const spacing=Math.max(1.5, brush.size*0.9);
     if(dist<spacing) return;
     const steps=Math.min(400,Math.floor(dist/spacing)), ux=dxs/dist, uy=dys/dist;
     for(let i=1;i<=steps;i++) depositAt(px+ux*spacing*i, py+uy*spacing*i);
@@ -1345,7 +1388,7 @@
     thinSet=null; strokeStartCount.clear(); lastDepositScreen=null;
     if(spans.length) pushOp({type:'stroke',spans});
   }
-  function cancelStroke(){                                       // Escape
+  function cancelStroke(){                                       // Escape recovery
     for(const [id,start] of strokeStartCount){ const ch=chunkMap.get(id); ch.count=start; ch.geo.setDrawRange(0,ch.count); }
     thinSet=null; strokeStartCount.clear(); lastDepositScreen=null;
   }
@@ -1358,6 +1401,9 @@
   function beginErase(){ eraseBatch=[]; eraseSeen=new Set(); }
   function eraseAt(cx,cy){
     const dir=worldRayDir(cx,cy), E=cam.E, F=V3.len(V3.sub(cam.T,cam.E)), angTan=footAngTan();
+    
+    // 1. Gather all points inside the eraser cone
+    const candidates = [];
     for(const ch of chunks){
       const deltaBand = cam.bandExp - ch.bandExp;
       const chunkScale = Math.pow(2, 20 * deltaBand);
@@ -1372,17 +1418,59 @@
       
       const pos=ch.pos, rad=ch.rad, n=ch.count;
       const ax=chAnchorCam[0],ay=chAnchorCam[1],az=chAnchorCam[2];
-      let touched=false;
       for(let k=0;k<n;k++){
         if(rad[k]<0) continue;
         const lPos = [pos[k * 3] * chunkScale, pos[k * 3 + 1] * chunkScale, pos[k * 3 + 2] * chunkScale];
         const p=[ax+lPos[0],ay+lPos[1],az+lPos[2]];
         if(inEraseCone(p,E,dir,angTan,F,ERASE_KAPPA)){
-          const key=ch.id+':'+k; if(eraseSeen.has(key)) continue; eraseSeen.add(key);
-          eraseBatch.push({chunkId:ch.id,index:k,prevR:rad[k]}); rad[k]=-1; touched=true;
+          const ox=p[0]-E[0], oy=p[1]-E[1], oz=p[2]-E[2];
+          const t=ox*dir[0]+oy*dir[1]+oz*dir[2];
+          candidates.push({ch, k, p, t, prevR: rad[k]});
         }
       }
-      if(touched){ markRadiusDirty(ch); ch.aggDirty=true; }
+    }
+
+    // 2. Sort candidates by depth (foreground-first erasure)
+    candidates.sort((a, b) => a.t - b.t);
+
+    // 3. Occlusion-aware sorting using screen sectors mapping
+    const GRID_SIZE = 6;
+    const grid = Array(GRID_SIZE * GRID_SIZE).fill(false);
+    const {right, up} = camFrame();
+
+    for (const cand of candidates) {
+      const p = cand.p;
+      const ox=p[0]-E[0], oy=p[1]-E[1], oz=p[2]-E[2];
+      const t = cand.t;
+      
+      // Calculate angular offset coordinates
+      const rx = ox*right[0] + oy*right[1] + oz*right[2];
+      const ry = ox*up[0] + oy*up[1] + oz*up[2];
+      
+      // Normalize location mapping relative to current cone profile
+      const limit = Math.max(t * angTan, 1e-9);
+      const nx = rx / limit;
+      const ny = ry / limit;
+      
+      const ix = Math.floor((nx + 1.0) * 0.5 * GRID_SIZE);
+      const iy = Math.floor((ny + 1.0) * 0.5 * GRID_SIZE);
+      
+      if (ix >= 0 && ix < GRID_SIZE && iy >= 0 && iy < GRID_SIZE) {
+        const idx = iy * GRID_SIZE + ix;
+        if (grid[idx]) {
+          // Visually occluded by a closer point. Protect from erasure.
+          continue;
+        }
+        grid[idx] = true; // Block subsequent occluded elements
+      }
+
+      const key=cand.ch.id+':'+cand.k;
+      if(eraseSeen.has(key)) continue;
+      eraseSeen.add(key);
+      eraseBatch.push({chunkId:cand.ch.id,index:cand.k,prevR:cand.prevR});
+      cand.ch.rad[cand.k]=-1;
+      markRadiusDirty(cand.ch);
+      cand.ch.aggDirty=true;
     }
   }
   function endErase(){ if(eraseBatch&&eraseBatch.length) pushOp({type:'erase',items:eraseBatch}); eraseBatch=null; eraseSeen=null; }
@@ -1417,8 +1505,6 @@
   // =====================================================================
   //  11.5 · DEPTH REGIMES  (billboards · environment · dust — the four-regime scan)
   // =====================================================================
-  // Lazy per-chunk aggregate: recomputed only when the chunk is dirty AND needs a marker.
-  // Hostile-scale-proof — no dense table, O(chunk) at most once per edit (§4.2).
   function chunkAgg(ch){
     if(ch.agg && !ch.aggDirty) return ch.agg;
     let n=0,sx=0,sy=0,sz=0,cr=0,cg=0,cb=0;
@@ -1447,7 +1533,7 @@
       const chBoundRCam = ch.boundR * chunkScale;
 
       const d=V3.len(V3.sub(chAnchorCam,E));
-      if((d - chBoundRCam) > (ch.maxR||1e-3)*chunkScale*40) continue;   // no point here reaches billboard/env range
+      if((d - chBoundRCam) > (ch.maxR||1e-3)*chunkScale*40) continue;   // bounds check
       
       const pos=ch.pos, rad=ch.rad, col=ch.col, n=ch.count;
       const ax=chAnchorCam[0],ay=chAnchorCam[1],az=chAnchorCam[2];
@@ -1457,16 +1543,16 @@
         const wx=ax+lPos[0]-E[0], wy=ay+lPos[1]-E[1], wz=az+lPos[2]-E[2];
         const zEye=wx*fwd[0]+wy*fwd[1]+wz*fwd[2];
         if(zEye<=1e-9) continue;
-        if(zEye < 1.6*r){                                  // camera inside/entering → environment point
+        if(zEye < 1.6*r){                                  // interior handoff
           const m=1 - zEye/(1.6*r);
           if(m>envMix){ envMix=m; envR=[col[k*3],col[k*3+1],col[k*3+2]]; }
-          continue;                                        // excluded from billboards (it IS the sky)
+          continue;
         }
         const dpx=r*H/(zEye*TAN_HALF);
         if(dpx>=SMAX && dpx<FADE1) _bbCand.push([zEye,wx,wy,wz,r,col[k*3],col[k*3+1],col[k*3+2]]);
       }
     }
-    _bbCand.sort((a,b)=>a[0]-b[0]);                         // nearest (largest) first
+    _bbCand.sort((a,b)=>a[0]-b[0]);                         // closest first
     const M=Math.min(_bbCand.length, MAX_BILLBOARDS);
     const iC=bbGeo.getAttribute('iCenter'), iR=bbGeo.getAttribute('iRadius'), iCol=bbGeo.getAttribute('iColor');
     for(let i=0;i<M;i++){ const c=_bbCand[i];
@@ -1481,11 +1567,14 @@
     if(envActive){
       uEnvColor.value.setRGB(envR[0],envR[1],envR[2]);
       uEnvMix.value=Math.min(1,envMix);
-      uEnvFogK.value = 1/Math.max(V3.len(V3.sub(cam.T,cam.E))*8, 1e-9);   // distant ink dissolves into the sky
+      uEnvFogK.value = 1/Math.max(V3.len(V3.sub(cam.T,cam.E))*8, 1e-9);   // tracking scaling context
     }
   }
 
   // ---- M4 Progressive LOD and point budget allocator (§6.2, §6.3) ----
+  const DUST_LOW = 1.5;   // Below this, rendering is 100% dust representation
+  const DUST_HIGH = 3.0;  // Above this, rendering is 100% point mesh representation
+
   function updateLODAndBudgets() {
     const E = cam.E;
     const { fwd } = camFrame();
@@ -1515,16 +1604,13 @@
       list.push({ ch, sse, zEye, chunkScale, chBoundRCam, wx, wy, wz });
     }
 
-    list.sort((a, b) => b.sse - a.sse); // Sort priority based on Screen-Space Error (largest error/nearest first)
+    list.sort((a, b) => b.sse - a.sse); // Sort priority based on Screen-Space Error
 
-    // Only apply progressive LOD when total non-dust points exceed the budget.
-    // Otherwise the rolloff hollows out tight chunks (low SSE from small boundR)
-    // even though there's plenty of headroom — visible as "parts disappearing"
-    // when zoomed out on the default attractor.
     let nonDustTotal = 0;
     for (const item of list) {
       const { chBoundRCam, zEye } = item;
-      const isDust = (2 * chBoundRCam * H) / (Math.max(zEye, 1e-6) * TAN_HALF) < DUST_PX;
+      const extentPx = (2 * chBoundRCam * H) / (Math.max(zEye, 1e-6) * TAN_HALF);
+      const isDust = extentPx < DUST_LOW;
       if (!isDust) nonDustTotal += item.ch.count;
     }
     const budgetPressured = nonDustTotal > POINT_BUDGET;
@@ -1534,26 +1620,49 @@
 
     for (const item of list) {
       const { ch, sse, zEye, chunkScale, chBoundRCam, wx, wy, wz } = item;
-      const isDust = (2 * chBoundRCam * H) / (Math.max(zEye, 1e-6) * TAN_HALF) < DUST_PX;
+      const extentPx = (2 * chBoundRCam * H) / (Math.max(zEye, 1e-6) * TAN_HALF);
+
+      // Smooth coordinate crossfades at LOD thresholds
+      let lodAlpha = 1.0;
+      let isDust = false;
+
+      if (extentPx < DUST_LOW) {
+        isDust = true;
+        lodAlpha = 0.0;
+      } else if (extentPx < DUST_HIGH) {
+        lodAlpha = (extentPx - DUST_LOW) / (DUST_HIGH - DUST_LOW);
+      }
+
+      // Assign attributes for standard coordination inside dust loops
+      ch._extentPx = extentPx;
+      ch._isDust = isDust;
+      ch._lodAlpha = lodAlpha;
+      ch._zEye = zEye;
+      ch._chBoundRCam = chBoundRCam;
 
       if (isDust) {
-        ch.geo.setDrawRange(0, 0); // demote point mesh entirely so dust marker takes over cleanly
+        ch.geo.setDrawRange(0, 0); // Swap mesh array with dust element
       } else {
         let targetFrac = 1.0;
         if (budgetPressured && sse < 180) {
-          targetFrac = Math.max(0.04, sse / 180); // progressive LOD roll-off (only when needed)
+          targetFrac = Math.max(0.04, sse / 180); // progressive LOD roll-off
         }
         let targetCount = Math.floor(ch.count * targetFrac);
         targetCount = Math.min(targetCount, remainingBudget);
-        targetCount = Math.max(targetCount, Math.min(ch.count, 64)); // guarantee basic continuity
+        targetCount = Math.max(targetCount, Math.min(ch.count, 64)); // basic continuity
 
         ch.geo.setDrawRange(0, targetCount);
         remainingBudget -= targetCount;
       }
 
+      // Sync computed crossfade value to chunk shader
+      if (ch.mesh.material.uniforms.uLODAlpha) {
+        ch.mesh.material.uniforms.uLODAlpha.value = lodAlpha;
+      }
+
       if (showBounds && boxes.length < 1024) {
         const ratio = ch.count ? (ch.geo.drawRange.count / ch.count) : 0;
-        const color = isDust ? [0.4, 0.4, 0.4] : [1.0 - ratio, ratio, 0.35]; // Gray for dust, red-green transition for details
+        const color = isDust ? [0.4, 0.4, 0.4] : [1.0 - ratio, ratio, 0.35];
         boxes.push({ center: [wx, wy, wz], size: [chBoundRCam * 2, chBoundRCam * 2, chBoundRCam * 2], color });
       }
     }
@@ -1583,18 +1692,21 @@
     const E=cam.E, H=_bufV2.y;
     const dP=dustGeo.getAttribute('position'), dC=dustGeo.getAttribute('color'), dA=dustGeo.getAttribute('aAlpha');
     let dN=0, invLogMax=1/Math.log2(gMaxCount+1);
+
     for(const ch of chunks){
       if(!ch.count){ ch.mesh.visible=false; continue; }
       const deltaBand = cam.bandExp - ch.bandExp;
       const chunkScale = Math.pow(2, 20 * deltaBand);
 
       const chAnchorCam = V3.scale(ch.anchor, chunkScale);
-      const chBoundRCam = ch.boundR * chunkScale;
+      const chBoundRCam = ch._chBoundRCam !== undefined ? ch._chBoundRCam : ch.boundR * chunkScale;
 
       const d=V3.len(V3.sub(chAnchorCam,E)), z=Math.max(d,1e-6);
-      const extentPx=2*chBoundRCam*H/(z*TAN_HALF);           // whole-chunk projected diameter
-      if(extentPx < DUST_PX && d > chBoundRCam && dN < MAX_DUST){   // small & outside → one marker (§8)
-        ch.mesh.visible=false;
+      const extentPx = ch._extentPx !== undefined ? ch._extentPx : (2 * chBoundRCam * H / (z * TAN_HALF));
+
+      // Dust runs as standard helper if geometry is below dust boundary
+      if(extentPx < DUST_HIGH && d > chBoundRCam && dN < MAX_DUST){
+        ch.mesh.visible = (extentPx >= DUST_LOW); // Keep mesh operating during crossfade transitions
         const a=chunkAgg(ch); if(a.count<=0) continue;
         const cxCam = a.cx * chunkScale;
         const cyCam = a.cy * chunkScale;
@@ -1602,7 +1714,17 @@
 
         dP.array[dN*3]=cxCam-E[0]; dP.array[dN*3+1]=cyCam-E[1]; dP.array[dN*3+2]=czCam-E[2];
         dC.array[dN*3]=a.r; dC.array[dN*3+1]=a.g; dC.array[dN*3+2]=a.b;
-        dA.array[dN]=Math.pow(Math.max(0,Math.min(1, Math.log2(a.count+1)*invLogMax)), 0.8);  // Strata log curve
+
+        // Base visual log curve profile
+        const baseAlpha = Math.pow(Math.max(0,Math.min(1, Math.log2(a.count+1)*invLogMax)), 0.8);
+        
+        let dustFade = 1.0;
+        if (extentPx > DUST_LOW) {
+          // Linear crossfade within transition interval
+          dustFade = 1.0 - (extentPx - DUST_LOW) / (DUST_HIGH - DUST_LOW);
+        }
+        
+        dA.array[dN] = baseAlpha * dustFade;
         dN++;
       } else {
         ch.mesh.visible=true;
@@ -1658,6 +1780,15 @@
     snapBtn.addEventListener('click',()=>{ brush.snap=!brush.snap; snapBtn.textContent='Snap · '+(brush.snap?'on':'off'); snapBtn.classList.toggle('active',brush.snap); });
     const skyBtn=document.getElementById('skyBtn');
     skyBtn.addEventListener('click',()=>{ skyEnabled=!skyEnabled; skyBtn.textContent='Sky · '+(skyEnabled?'on':'off'); skyBtn.classList.toggle('active',skyEnabled); });
+    
+    // Toggle logarithmic depth mapping
+    const logBtn=document.getElementById('logBtn');
+    logBtn.addEventListener('click',()=>{
+      logDepthEnabled=!logDepthEnabled;
+      logBtn.textContent='Log · '+(logDepthEnabled?'on':'off');
+      logBtn.classList.toggle('active',logDepthEnabled);
+    });
+
     document.getElementById('undoBtn').addEventListener('click',undo);
     document.getElementById('redoBtn').addEventListener('click',redoOp);
     document.getElementById('clearBtn').addEventListener('click',clearPaint);
@@ -1704,7 +1835,7 @@
       const k=e.key.toLowerCase(), meta=e.ctrlKey||e.metaKey;
       if(meta && k==='z'){ e.preventDefault(); if(e.shiftKey) redoOp(); else undo(); return; }
       if(meta && k==='y'){ e.preventDefault(); redoOp(); return; }
-      if(meta) return;                              // leave other browser shortcuts alone
+      if(meta) return;
       if(k===' '){ e.preventDefault(); spaceDown=true; setCursor(); }
       if(k==='shift') keys.add('shift');
       if('wasdeq'.includes(k)) keys.add(k);
@@ -1763,7 +1894,7 @@
       }else if(e.touches.length===2){
         const d=touchDist(e),mid=touchMid(e);
         if(tDist>0){ const s=Math.max(0.5,Math.min(2,tDist/d)); if(Math.abs(1-s)>0.001) dive(pickPivot(mid[0],mid[1]),s); }
-        orbit(mid[0]-tMid[0], mid[1]-tMid[1]);       // two-finger drag rotates
+        orbit(mid[0]-tMid[0], mid[1]-tMid[1]);
         tDist=d; tMid=mid;
       }
       e.preventDefault();
@@ -1783,9 +1914,22 @@
   document.getElementById('helpBtn').addEventListener('click',toggleHelp);
 
   // =====================================================================
-  //  14 · ROBUSTNESS KIT  (borrowed from DataPrism §2.5 — console-only)
+  //  14 · ROBUSTNESS KIT
   // =====================================================================
-  function onCtxLost(e){ e.preventDefault(); ctxLost=true; console.error('WebGL context lost — rendering paused. It restores from Float64 sources on recovery.'); }
+  function onCtxLost(e){ e.preventDefault(); ctxLost=true; console.error('WebGL context lost — rendering paused. Float64 array buffers will be preserved.'); }
+  function onCtxRestored() {
+    ctxLost = false;
+    console.log('InfiPoint: WebGL context successfully restored. Synchronizing coordinate arrays...');
+    for (const ch of chunks) {
+      ch.attrs.pa.needsUpdate = true;
+      ch.attrs.ca.needsUpdate = true;
+      ch.attrs.ra.needsUpdate = true;
+      ch.dirtyLo = 0;
+      ch.dirtyHi = ch.count - 1;
+    }
+    flushDirty();
+  }
+  
   addEventListener('visibilitychange',()=>{ console.log('InfiPoint: page',document.hidden?'hidden':'visible',new Date().toISOString()); });
   addEventListener('error',ev=>console.error('Global error:',{message:ev.message,src:ev.filename,line:ev.lineno,col:ev.colno}));
   addEventListener('unhandledrejection',ev=>console.error('Unhandled rejection:',ev.reason));
