@@ -171,6 +171,7 @@
     </div>
     <div class="sep"></div>
     <button class="tbtn" id="snapBtn" title="Drop at the depth of the instance under the cursor">Snap&nbsp;·&nbsp;off</button>
+    <button class="tbtn" id="logBtn" title="Logarithmic depth buffer — widens the frustum to 10^12:1 so nothing near-clips as you fly past it (L)">Log&nbsp;·&nbsp;off</button>
     <div class="sep"></div>
     <div class="tgroup">
       <button class="ibtn" id="undoBtn" title="Undo (Ctrl/Cmd+Z)" disabled>↶</button>
@@ -202,6 +203,7 @@
     <div class="row"><span class="act">Instance type</span><kbd>1 – 6</kbd></div>
     <div class="row"><span class="act">Drop size</span><kbd>[ / ]</kbd></div>
     <div class="row"><span class="act">Regime bounds</span><kbd>O</kbd></div>
+    <div class="row"><span class="act">Log depth</span><kbd>L</kbd></div>
     <div class="row"><span class="act">Undo / redo</span><kbd>⌘Z / ⌘⇧Z</kbd></div>
     <div class="row"><span class="act">Fit / Home</span><kbd>F / H</kbd></div>
     <div class="note">Every mark is now an <em>instance</em> — a solid with a pose, a seed, and a type — not a point. Instances land on the focal shell, so each dive drops smaller solids nested inside the last. Watch the regimes: real meshes up close, sphere impostors in the mid-field, one dust mote per distant chunk. Same infinite band ladder underneath — dive as deep as you like.</div>
@@ -584,6 +586,13 @@
         uFade0={value:FADE0}, uFade1={value:FADE1},
         uGate={value:0}, uGateF={value:1}, uGateK={value:ERASE_KAPPA},
         uDustPx={value:3}, uProjectionMatrix={value:new THREE.Matrix4()};
+  // Logarithmic depth (toggle, key L): swaps the breathing hyperbolic frustum
+  // (near F·6e-3 … far F·24, ratio 4000:1) for near F·1e-6 … far F·1e6 (10^12:1)
+  // with log2-mapped depth. Buys "fly past a giant without it near-clipping" at
+  // the cost of early-z on meshes while active. Same convention as InfiPoint:
+  // depth = log2(1+w_clip) · uLogDepthBufFC · 0.5, fc = 2/log2(far+1).
+  let logDepthEnabled=false;
+  const uLogDepthActive={value:0.0}, uLogDepthBufFC={value:1.0};
 
   // ---- instanced mesh shader: quat-rotated solids, RTC-local coordinates ----
   // The chunk's band scale rides in via the group transform; the shader reads it
@@ -599,6 +608,8 @@
     uniform float uGate;
     uniform float uGateF;
     uniform float uGateK;
+    uniform float uLogDepthActive;
+    uniform float uLogDepthBufFC;
     in vec3 position;      // base geometry (bounding radius 1)
     in vec3 normal;
     in vec3 iPos;          // instance offset from chunk anchor (f32, native band)
@@ -628,6 +639,9 @@
       }
       vFade = fade;
       gl_Position = projectionMatrix * mv;
+      if (uLogDepthActive > 0.5) {
+        gl_Position.z = (log2(max(1e-6, 1.0 + gl_Position.w)) * uLogDepthBufFC - 1.0) * gl_Position.w;
+      }
     }`;
   const MESH_FRAG=`#version 300 es
     precision highp float;
@@ -687,6 +701,8 @@
   const SPR_FRAG=`#version 300 es
     precision highp float;
     uniform mat4 uProjectionMatrix;
+    uniform float uLogDepthActive;
+    uniform float uLogDepthBufFC;
     in vec3 vColor;
     in float vFade;
     in vec3 vViewCenter;
@@ -705,7 +721,11 @@
       if (a < 0.004) discard;
       vec3 viewPos = vViewCenter + vec3(uv.x*vRadius, -uv.y*vRadius, z*vRadius);
       vec4 clipPos = uProjectionMatrix * vec4(viewPos, 1.0);
-      gl_FragDepth = (clipPos.z / clipPos.w) * 0.5 + 0.5; // true sphere depth
+      if (uLogDepthActive > 0.5) {
+        gl_FragDepth = log2(max(1e-6, 1.0 + clipPos.w)) * uLogDepthBufFC * 0.5;
+      } else {
+        gl_FragDepth = (clipPos.z / clipPos.w) * 0.5 + 0.5; // true sphere depth
+      }
       fragColor = vec4(col, a);
     }`;
 
@@ -717,11 +737,16 @@
     in vec3 color;
     in float aAlpha;
     uniform float uDustPx;
+    uniform float uLogDepthActive;
+    uniform float uLogDepthBufFC;
     out vec3 vColor;
     out float vA;
     void main(){
       vColor = color; vA = aAlpha;
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      if (uLogDepthActive > 0.5) {
+        gl_Position.z = (log2(max(1e-6, 1.0 + gl_Position.w)) * uLogDepthBufFC - 1.0) * gl_Position.w;
+      }
       gl_PointSize = uDustPx;
     }`;
   const DUST_FRAG=`#version 300 es
@@ -741,7 +766,7 @@
     const seg=64, p=new Float32Array(seg*3);
     for(let i=0;i<seg;i++){const a=i/seg*Math.PI*2;p[i*3]=Math.cos(a);p[i*3+1]=Math.sin(a);p[i*3+2]=0;}
     const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(p,3));
-    return new THREE.LineLoop(g,new THREE.LineBasicMaterial({color,transparent:true,opacity}));
+    return new THREE.LineLoop(g,new THREE.LineBasicMaterial({color,transparent:true,opacity,depthTest:false}));
   }
 
   function initThree(){
@@ -773,13 +798,13 @@
     }
 
     meshMat=new THREE.RawShaderMaterial({
-      uniforms:{ uH,uTanHalfFov,uFade0,uFade1,uGate,uGateF,uGateK },
+      uniforms:{ uH,uTanHalfFov,uFade0,uFade1,uGate,uGateF,uGateK,uLogDepthActive,uLogDepthBufFC },
       vertexShader:MESH_VERT, fragmentShader:MESH_FRAG,
       transparent:true, depthTest:true, depthWrite:true, blending:THREE.NormalBlending,
       side:THREE.FrontSide,
     });
     spriteBaseMat=new THREE.RawShaderMaterial({
-      uniforms:{ uH,uTanHalfFov,uSMax,uGate,uGateF,uGateK,uProjectionMatrix, uLODAlpha:{value:1.0} },
+      uniforms:{ uH,uTanHalfFov,uSMax,uGate,uGateF,uGateK,uProjectionMatrix,uLogDepthActive,uLogDepthBufFC, uLODAlpha:{value:1.0} },
       vertexShader:SPR_VERT, fragmentShader:SPR_FRAG,
       transparent:true, depthTest:true, depthWrite:true, blending:THREE.NormalBlending,
     });
@@ -792,7 +817,7 @@
     dustGeo.setAttribute('position',dP); dustGeo.setAttribute('color',dC); dustGeo.setAttribute('aAlpha',dA);
     dustGeo.setDrawRange(0,0);
     dustMat=new THREE.RawShaderMaterial({
-      uniforms:{ uDustPx },
+      uniforms:{ uDustPx,uLogDepthActive,uLogDepthBufFC },
       vertexShader:DUST_VERT, fragmentShader:DUST_FRAG,
       transparent:true, depthTest:true, depthWrite:false, blending:THREE.NormalBlending,
     });
@@ -813,16 +838,21 @@
     boxGeo.setAttribute('iCenter',bC); boxGeo.setAttribute('iSize',bS); boxGeo.setAttribute('iColor',bCol);
     boxGeo.instanceCount=0;
     boxMat=new THREE.RawShaderMaterial({
-      uniforms:{},
+      uniforms:{ uLogDepthActive,uLogDepthBufFC },
       vertexShader:`#version 300 es
         precision highp float;
         uniform mat4 modelViewMatrix;
         uniform mat4 projectionMatrix;
+        uniform float uLogDepthActive;
+        uniform float uLogDepthBufFC;
         in vec3 position; in vec3 iCenter; in vec3 iSize; in vec3 iColor;
         out vec3 vColor;
         void main(){
           vColor=iColor;
           gl_Position=projectionMatrix*modelViewMatrix*vec4(position*iSize+iCenter,1.0);
+          if (uLogDepthActive > 0.5) {
+            gl_Position.z = (log2(max(1e-6, 1.0 + gl_Position.w)) * uLogDepthBufFC - 1.0) * gl_Position.w;
+          }
         }`,
       fragmentShader:`#version 300 es
         precision highp float;
@@ -864,7 +894,7 @@
     sGeo.setAttribute('position',spa); sGeo.setAttribute('color',sca); sGeo.setAttribute('aRadius',sra);
     sGeo.setDrawRange(0,0);
     const sMat=spriteBaseMat.clone();
-    sMat.uniforms={ uH,uTanHalfFov,uSMax,uGate,uGateF,uGateK,uProjectionMatrix, uLODAlpha:{value:1.0} };
+    sMat.uniforms={ uH,uTanHalfFov,uSMax,uGate,uGateF,uGateK,uProjectionMatrix,uLogDepthActive,uLogDepthBufFC, uLODAlpha:{value:1.0} };
     const sMesh=new THREE.Points(sGeo,sMat); sMesh.frustumCulled=false; sMesh.visible=false;
     group.add(sMesh);
 
@@ -1260,8 +1290,18 @@
   }
   function updateNearFar(){
     const F=V3.len(V3.sub(cam.T,cam.E));
-    camera.near=Math.max(F*6e-3, 1e-12);            // frustum breathes with F: scale-invariant z-buffer
-    camera.far =Math.max(F*24, camera.near*8);
+    if(logDepthEnabled){
+      // log depth: frustum opens to 10^12:1 so nothing near-clips as you fly past it
+      camera.near=Math.max(F*1e-6, 1e-15);
+      camera.far =Math.max(F*1e6, camera.near*10);
+      uLogDepthActive.value=1.0;
+      uLogDepthBufFC.value=2.0/(Math.log2(camera.far+1.0)||1.0);
+    }else{
+      camera.near=Math.max(F*6e-3, 1e-12);          // frustum breathes with F: scale-invariant z-buffer
+      camera.far =Math.max(F*24, camera.near*8);
+      uLogDepthActive.value=0.0;
+      uLogDepthBufFC.value=1.0;
+    }
     camera.fov=FOV_DEG; camera.aspect=innerWidth/innerHeight;
     camera.updateProjectionMatrix();
   }
@@ -1554,6 +1594,8 @@
     document.getElementById('sScatter').addEventListener('input',e=>brush.scatter=parseFloat(e.target.value));
     const snapBtn=document.getElementById('snapBtn');
     snapBtn.addEventListener('click',()=>{ brush.snap=!brush.snap; snapBtn.innerHTML='Snap&nbsp;·&nbsp;'+(brush.snap?'on':'off'); snapBtn.classList.toggle('active',brush.snap); });
+    const logBtn=document.getElementById('logBtn');
+    if(logBtn) logBtn.addEventListener('click',toggleLogDepth);
     document.getElementById('undoBtn').addEventListener('click',undo);
     document.getElementById('redoBtn').addEventListener('click',redoOp);
     document.getElementById('clearBtn').addEventListener('click',clearDropped);
@@ -1609,6 +1651,7 @@
       if(k==='b') setTool(TOOL.DROP);
       if(k==='x') setTool(TOOL.ERASE);
       if(k==='o'){ showBounds=!showBounds; console.log('Scriptorium: regime bounds',showBounds); }
+      if(k==='l') toggleLogDepth();
       if(k>='1'&&k<='5') setType(parseInt(k,10)-1);
       if(k==='6') setType(-1);
       if(k===']') setSize(brush.size*1.2);
@@ -1677,6 +1720,12 @@
     },{passive:false});
   }
 
+  function toggleLogDepth(){
+    logDepthEnabled=!logDepthEnabled;
+    const b=document.getElementById('logBtn');
+    if(b){ b.innerHTML='Log&nbsp;·&nbsp;'+(logDepthEnabled?'on':'off'); b.classList.toggle('active',logDepthEnabled); }
+    console.log('Scriptorium: logarithmic depth',logDepthEnabled?'on (near F·1e-6, far F·1e6)':'off (near F·6e-3, far F·24)');
+  }
   function toggleHelp(){ document.getElementById('help').classList.toggle('show'); }
 
   // =====================================================================
