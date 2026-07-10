@@ -376,6 +376,21 @@
      const F=V3.len(V3.sub(t,e));
      ok('8×10⁻³ dives keep F in envelope', F>=F_MIN&&F<=F_MAX, 'band='+bandExp+' F='+F.toExponential(2));}
 
+    {// scale-relative rollover: the deep-in-band drop bound tightens with F
+     ok('drop bound is absolute at large F', !dropRollNeeded(9e3,0,0,1e3) && dropRollNeeded(1.1e4,0,0,1e3));
+     ok('drop bound tightens with F', dropRollNeeded(20,0,0,6.3e-5) && !dropRollNeeded(0.02,0,0,6.3e-5));}
+
+    {// re-anchor preserves world positions and collapses pivot-adjacent locals
+     const ipos=new Float32Array([18.25,-7.5,3.125, -12,4.75,-19.5]);
+     const isc=new Float32Array([0.5,0.5]);
+     const anchor=[100,200,300], nA=[118.2,192.6,303.1];   // nA ≈ world pos of instance 0
+     const w0=[]; for(let k=0;k<2;k++)w0.push([anchor[0]+ipos[k*3],anchor[1]+ipos[k*3+1],anchor[2]+ipos[k*3+2]]);
+     shiftLocals(ipos,isc,2,anchor[0]-nA[0],anchor[1]-nA[1],anchor[2]-nA[2]);
+     let maxErr=0;
+     for(let k=0;k<2;k++)for(let c=0;c<3;c++)maxErr=Math.max(maxErr,Math.abs(nA[c]+ipos[k*3+c]-w0[k][c]));
+     ok('re-anchor preserves world positions to f32 eps', maxErr<1e-5, 'maxErr='+maxErr.toExponential(1));
+     ok('re-anchor collapses pivot-adjacent locals', Math.hypot(ipos[0],ipos[1],ipos[2])<0.2);}
+
     log('Scriptorium self-tests — '+pass+' passed, '+fail+' failed');
     for(const [c,n,x] of rec) log((c?'  PASS  ':'  FAIL  ')+n+(x?'  ('+x+')':''));
     return {pass,fail};
@@ -395,7 +410,14 @@
   const ORBIT_SPD=0.006, PAN_SPD=0.0016, FLY_SPD=0.9;
   const PICK_TAN=Math.tan(3.2*Math.PI/180);
   const ERASE_KAPPA=4;                  // eraser depth gate half-width factor
-  const DROP_CHUNK_BOUND=1e4;           // local-offset cap before an append rolls to a new chunk (§2.2)
+  const DROP_CHUNK_BOUND=1e4;           // absolute local-offset cap before an append rolls to a new chunk (§2.2)
+  const DROP_BOUND_REL=1e3;             // …and a scale-relative cap: locals born ≤ 1e3·F keep f32 error ≲ 0.07 px.
+                                        // A fixed 1e4 bound only protects the TOP of a band; one band spans 11
+                                        // decades of F, so deep in-band drops need the bound to shrink with F.
+  const REANCHOR_RATIO=2e3;             // re-anchor a dived-into chunk once |anchor−E| exceeds this many focal
+                                        // lengths (f32 rounding of the RTC translation reaches ~0.13 px there)
+  const REANCHOR_NEAR=1.5;              // …but only if the camera is inside/near its bounds — outside them the
+                                        // rounding is a rigid shift of ~6e-8 rad, invisible at any distance
   const SCALE_LADDER=[
     [8.8e26,'the observable universe'],[1e21,'the Milky Way'],[9e16,'ten light-years'],
     [1.5e11,'Earth to Sun'],[1.3e7,'planet Earth'],[8.8e3,'Mount Everest'],[9.7e2,'a skyscraper'],
@@ -917,11 +939,20 @@
     return activeChunk;
   }
 
+  // f32 budget guard (§2.2), now scale-aware: the absolute 1e4 cap governs at
+  // the top of a band, but at the bottom (F near F_MIN) a 20-unit offset would
+  // quantize a drop to several times its own diameter. Bound = min(1e4, 1e3·F)
+  // keeps birth error ≤ 1e3·F·2⁻²⁴ ≈ 6e-5·F — comfortably sub-pixel at any F.
+  function dropRollNeeded(lx,ly,lz,F){
+    const bound=Math.min(DROP_CHUNK_BOUND, DROP_BOUND_REL*F);
+    return Math.max(Math.abs(lx),Math.abs(ly),Math.abs(lz))>bound;
+  }
   function addInstance(p,typeId,quat,scale,rgb,seed){
     let ch=activeChunk;
     if(!ch || ch.count>=ch.cap || ch.bandExp!==cam.bandExp) ch=startNewDropChunk(p);
     let lx=p[0]-ch.anchor[0], ly=p[1]-ch.anchor[1], lz=p[2]-ch.anchor[2];
-    if(Math.max(Math.abs(lx),Math.abs(ly),Math.abs(lz))>DROP_CHUNK_BOUND){   // f32 budget guard (§2.2)
+    const F=V3.len(V3.sub(cam.T,cam.E));
+    if(dropRollNeeded(lx,ly,lz,F)){
       ch=startNewDropChunk(p); lx=p[0]-ch.anchor[0]; ly=p[1]-ch.anchor[1]; lz=p[2]-ch.anchor[2];
     }
     recordSpanStart(ch);
@@ -1305,12 +1336,50 @@
     camera.fov=FOV_DEG; camera.aspect=innerWidth/innerHeight;
     camera.updateProjectionMatrix();
   }
+  // Dynamic re-anchor (the mag~10⁶ pocket fix). The RTC translation A−E is
+  // recomputed in f64 each frame but rounded to f32 at matrix upload; its
+  // error is ULP(|A−E|) ≈ |A−E|·6e-8, viewed against content at depth ~F.
+  // Once you've dived REANCHOR_RATIO focal lengths past a chunk's anchor
+  // while inside its bounds, that rounding hops on a lattice a visible
+  // fraction of the view wide. Cure: rebake the chunk's locals about the
+  // focal point so |A−E| collapses back to O(F). The shift delta is f64;
+  // each rebake adds ≤ one f32 rounding at the NEW (smaller near the pivot)
+  // local magnitude, and refires only after another ~3 decades of zoom.
+  function shiftLocals(ipos,iscale,count,dx,dy,dz){
+    let bR=1e-9;
+    for(let k=0;k<count;k++){
+      const x=fr(ipos[k*3]+dx), y=fr(ipos[k*3+1]+dy), z=fr(ipos[k*3+2]+dz);
+      ipos[k*3]=x; ipos[k*3+1]=y; ipos[k*3+2]=z;
+      const r=Math.hypot(x,y,z)+Math.abs(iscale[k]);   // abs: tombstones can be undone
+      if(r>bR)bR=r;
+    }
+    return bR;
+  }
+  function reanchorChunk(ch,chunkScale){
+    const inv=1/chunkScale;
+    const nA=[cam.T[0]*inv, cam.T[1]*inv, cam.T[2]*inv];      // focal point in the chunk's native band
+    const dx=ch.anchor[0]-nA[0], dy=ch.anchor[1]-nA[1], dz=ch.anchor[2]-nA[2];  // f64 delta
+    ch.boundR=shiftLocals(ch.ipos,ch.iscale,ch.count,dx,dy,dz);
+    ch.anchor=nA;
+    ch.dirty=true; ch.aggDirty=true;                          // rebuildChunk repacks mesh+sprite buffers this frame
+    console.log('Scriptorium: re-anchored chunk '+ch.id+' (band '+ch.bandExp+', '+ch.count+' inst, boundR '+ch.boundR.toExponential(2)+')');
+  }
+
   function updateChunks(){
-    const E=cam.E;
+    const E=cam.E, F=V3.len(V3.sub(cam.T,cam.E));
+    let reanchored=false;                                     // ≤ 1 rebake per frame
     for(const ch of chunks){
       const chunkScale=Math.pow(2, 20*(cam.bandExp-ch.bandExp));
       if(!isFinite(chunkScale)||chunkScale===0){ ch.group.visible=false; continue; }
-      const A=V3.scale(ch.anchor,chunkScale);
+      let A=V3.scale(ch.anchor,chunkScale);
+      if(!reanchored && isFinite(F) && F>0){
+        const d=Math.hypot(A[0]-E[0],A[1]-E[1],A[2]-E[2]);
+        if(d>REANCHOR_RATIO*F && d<ch.boundR*chunkScale*REANCHOR_NEAR+4*F){
+          reanchorChunk(ch,chunkScale);
+          reanchored=true;
+          A=V3.scale(ch.anchor,chunkScale);
+        }
+      }
       ch.group.position.set(A[0]-E[0], A[1]-E[1], A[2]-E[2]);   // f64 → one f32 rounding, rigid per chunk
       ch.group.scale.setScalar(chunkScale);
       ch._chunkScale=chunkScale;
