@@ -110,6 +110,39 @@
         letter-spacing:.02em;opacity:.85}
 
   /* ---- help (bottom-right) ---- */
+  #views{position:fixed;right:16px;top:50px;z-index:7;pointer-events:none;
+        display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+  #viewsBtn{pointer-events:auto;font-family:var(--sans);font-size:12px;color:var(--ink);cursor:pointer;
+        background:var(--panel);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);
+        border:1px solid var(--hair);border-radius:9px;padding:6px 11px}
+  #viewsBtn:hover{color:var(--ink-bright)}
+  #views.open #viewsBtn{color:var(--ink-bright);background:var(--panel-solid)}
+  #viewsCount{font-family:var(--mono);font-size:10px;color:var(--dim);margin-left:6px}
+  #viewsPanel{pointer-events:auto;display:none;width:252px;max-height:min(54vh,430px);overflow:auto;
+        background:var(--panel-solid);border:1px solid var(--hair);border-radius:11px;
+        padding:10px 12px;box-shadow:0 18px 50px rgba(0,0,0,.5)}
+  #views.open #viewsPanel{display:block}
+  #viewsHead{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+  #viewsHead h4{margin:0;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);font-weight:600}
+  #viewsAdd{font-family:var(--sans);font-size:11.5px;color:var(--ink);cursor:pointer;
+        background:rgba(150,170,215,.08);border:1px solid var(--hair);border-radius:7px;padding:4px 9px}
+  #viewsAdd:hover{color:var(--ink-bright)}
+  .vrow{display:flex;align-items:center;justify-content:space-between;gap:8px;
+        padding:7px 4px;cursor:pointer}
+  .vrow + .vrow{border-top:1px solid var(--hair)}
+  .vrow:hover .vname{color:var(--ink-bright)}
+  .vinfo{min-width:0;flex:1}
+  .vname{font-size:12.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .vname.editing{outline:1px solid var(--hair);border-radius:4px;padding:0 3px;
+        background:rgba(150,170,215,.08);color:var(--ink-bright)}
+  .vmeta{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:2px;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .vdel{font-family:var(--mono);font-size:13px;line-height:1;color:var(--dim);cursor:pointer;
+        background:none;border:none;padding:2px 6px;border-radius:5px}
+  .vdel:hover{color:#ff8f7a;background:rgba(255,120,90,.08)}
+  #viewsEmpty{font-size:10.5px;color:var(--dim);line-height:1.45;padding:4px 2px 2px}
+  @media (max-width:900px){ #views{top:100px} }
+
   #helpBtn{position:fixed;right:16px;bottom:16px;z-index:6;pointer-events:auto;
         width:34px;height:34px;border-radius:9px;border:1px solid var(--hair);
         background:var(--panel);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);
@@ -155,6 +188,15 @@
     <div class="badge" id="testBadge"><span class="dot" id="testDot"></span><span id="testText">running self-tests…</span></div>
   </div>
 
+  <div id="views">
+    <button id="viewsBtn" title="Saved camera views (V)">◈&nbsp;Views<span id="viewsCount"></span></button>
+    <div id="viewsPanel">
+      <div id="viewsHead"><h4>Saved views</h4><button id="viewsAdd" title="Bookmark the current camera pose">+&nbsp;Save&nbsp;current</button></div>
+      <div id="viewsList"></div>
+      <div id="viewsEmpty">No saved views yet — frame something and hit “+ Save current”. Click a view to fly back to it; double-click its name to rename.</div>
+    </div>
+  </div>
+
   <div id="tools">
     <div class="tgroup" id="toolBtns">
       <button class="tbtn active" data-tool="drop" title="Drop instances (B)">✛&nbsp;Drop</button>
@@ -171,7 +213,7 @@
     </div>
     <div class="sep"></div>
     <button class="tbtn" id="snapBtn" title="Drop at the depth of the instance under the cursor">Snap&nbsp;·&nbsp;off</button>
-    <button class="tbtn" id="logBtn" title="Logarithmic depth buffer — widens the frustum to 10^12:1 so nothing near-clips as you fly past it (L)">Log&nbsp;·&nbsp;off</button>
+    <button class="tbtn active" id="logBtn" title="Logarithmic depth buffer — widens the frustum to 10^12:1 so nothing near-clips as you fly past it (L)">Log&nbsp;·&nbsp;on</button>
     <div class="sep"></div>
     <div class="tgroup">
       <button class="ibtn" id="undoBtn" title="Undo (Ctrl/Cmd+Z)" disabled>↶</button>
@@ -202,6 +244,7 @@
     <div class="row"><span class="act">Tool drop / erase</span><kbd>B / X</kbd></div>
     <div class="row"><span class="act">Instance type</span><kbd>1 – 6</kbd></div>
     <div class="row"><span class="act">Drop size</span><kbd>[ / ]</kbd></div>
+    <div class="row"><span class="act">Saved views</span><kbd>V</kbd></div>
     <div class="row"><span class="act">Regime bounds</span><kbd>O</kbd></div>
     <div class="row"><span class="act">Log depth</span><kbd>L</kbd></div>
     <div class="row"><span class="act">Undo / redo</span><kbd>⌘Z / ⌘⇧Z</kbd></div>
@@ -391,6 +434,18 @@
      ok('re-anchor preserves world positions to f32 eps', maxErr<1e-5, 'maxErr='+maxErr.toExponential(1));
      ok('re-anchor collapses pivot-adjacent locals', Math.hypot(ipos[0],ipos[1],ipos[2])<0.2);}
 
+    {// saved-view frame correction: X_now = X_saved + (cloudC_now−cloudC_saved)·2^(20b)
+     // dyadic inputs → the identity must hold EXACTLY in f64
+     const b=2, f=Math.pow(2,20*b);
+     const P=[3.25,-1.5,0.75], c0=[5,-2,1], c1=[1.5,0.25,-4];
+     const Xs=[(c0[0]+P[0])*f,(c0[1]+P[1])*f,(c0[2]+P[2])*f];      // saved-session coordinate
+     const Xn=viewFrameCorrection(Xs,b,c1,c0);                     // restored into this session
+     const want=[(c1[0]+P[0])*f,(c1[1]+P[1])*f,(c1[2]+P[2])*f];
+     ok('view frame correction is exact across sessions',
+        Xn[0]===want[0]&&Xn[1]===want[1]&&Xn[2]===want[2]);
+     const deep=viewFrameCorrection([1,2,3],60,c1,c0);             // 2^1200 overflows f64
+     ok('view correction degrades safely past f64 range', deep[0]===1&&deep[1]===2&&deep[2]===3);}
+
     log('Scriptorium self-tests — '+pass+' passed, '+fail+' failed');
     for(const [c,n,x] of rec) log((c?'  PASS  ':'  FAIL  ')+n+(x?'  ('+x+')':''));
     return {pass,fail};
@@ -542,6 +597,19 @@
     // sub-atomic band-0 amount).
     const inv0=Math.pow(2,-20*cam.bandExp);
     if(isFinite(inv0)) cloudC=[cloudC[0]-shift[0]*inv0, cloudC[1]-shift[1]*inv0, cloudC[2]-shift[2]*inv0];
+    // Saved views are absolute quantities too — shift them like chunk anchors,
+    // expressed in each bookmark's own band. Non-finite factors (|Δband| ≳ 50)
+    // are skipped: those bookmarks are beyond a single f64 shift's reach, and
+    // their content is sub-representable from the current band regardless.
+    for(const bm of bookmarks){
+      const f=Math.pow(2, 20*(bm.bandExp-cam.bandExp));
+      if(!isFinite(f)) continue;
+      const sx=shift[0]*f, sy=shift[1]*f, sz=shift[2]*f;
+      if(!isFinite(sx)||!isFinite(sy)||!isFinite(sz)) continue;
+      bm.E=[bm.E[0]-sx, bm.E[1]-sy, bm.E[2]-sz];
+      bm.T=[bm.T[0]-sx, bm.T[1]-sy, bm.T[2]-sz];
+    }
+    if(bookmarks.length) persistViews();   // keep the stored snapshot frame-consistent
   }
 
   let flight=null;
@@ -613,8 +681,8 @@
   // with log2-mapped depth. Buys "fly past a giant without it near-clipping" at
   // the cost of early-z on meshes while active. Same convention as InfiPoint:
   // depth = log2(1+w_clip) · uLogDepthBufFC · 0.5, fc = 2/log2(far+1).
-  let logDepthEnabled=false;
-  const uLogDepthActive={value:0.0}, uLogDepthBufFC={value:1.0};
+  let logDepthEnabled=true;             // default ON: the wider frustum is the friendlier default for exploration
+  const uLogDepthActive={value:1.0}, uLogDepthBufFC={value:1.0};
 
   // ---- instanced mesh shader: quat-rotated solids, RTC-local coordinates ----
   // The chunk's band scale rides in via the group transform; the shader reads it
@@ -1606,6 +1674,139 @@
   }
 
   // =====================================================================
+  //  13.5 · SAVED VIEWS (camera bookmarks)
+  // =====================================================================
+  // A bookmark is a full pose {bandExp, E, T}, stored in the band it was
+  // taken in. Like chunk anchors, bookmark coordinates are ABSOLUTE
+  // quantities, so they must ride along with every origin rebase (see the
+  // hook in rebaseOrigin) — otherwise a bookmark silently drifts by the
+  // accumulated shift and "return" lands somewhere else.
+  //
+  // Cross-session restores are corrected via the cloudC delta: cloudC is the
+  // fixture centre expressed in the current session's frame, so a world
+  // point's band-b coordinate is X = (P_fix + cloudC)·2^(20b), and
+  // X_now = X_saved + (cloudC_now − cloudC_saved)·2^(20·band). The correction
+  // is exact in f64 whenever the factor is finite; for |band| ≳ 50 it
+  // overflows and is skipped — at that depth a cross-session bookmark points
+  // into unrecoverable coordinates anyway (dropped content isn't persisted).
+  let bookmarks=[]; let bookmarkSeq=1;
+  const VIEWS_LS_KEY='scriptorium.views.v1';
+
+  function viewFrameCorrection(X, band, cNow, cSaved){   // pure, self-testable
+    const f=Math.pow(2,20*band);
+    if(!isFinite(f)) return X.slice();
+    const dx=(cNow[0]-cSaved[0])*f, dy=(cNow[1]-cSaved[1])*f, dz=(cNow[2]-cSaved[2])*f;
+    if(!isFinite(dx)||!isFinite(dy)||!isFinite(dz)) return X.slice();
+    return [X[0]+dx, X[1]+dy, X[2]+dz];
+  }
+
+  function addBookmark(){
+    const F=V3.len(V3.sub(cam.T,cam.E));
+    const {mantissa,exp}=getMagnificationDetails(F);
+    const mag=((exp>=4||exp<0)?mantissa.toFixed(1)+'×10'+sup(exp):String(Math.round(mantissa*Math.pow(10,exp))))+'×';
+    const bm={ id:Date.now()+':'+bookmarkSeq, name:'View '+bookmarkSeq,
+               bandExp:cam.bandExp, E:cam.E.slice(), T:cam.T.slice(),
+               mag, scale:ladderLabelFromLog10(getMetersLog10(F)) };
+    bookmarkSeq++;
+    bookmarks.push(bm); persistViews(); renderViews();
+    document.getElementById('views').classList.add('open');
+    console.log('Scriptorium: saved "'+bm.name+'" (band '+bm.bandExp+' · '+bm.mag+')');
+  }
+  function removeBookmark(id){
+    bookmarks=bookmarks.filter(b=>b.id!==id);
+    persistViews(); renderViews();
+  }
+  function gotoBookmark(bm){
+    const Fbm=V3.len(V3.sub(bm.T,bm.E));
+    if(!isFinite(Fbm)||Fbm===0) return;
+    const fwd=V3.norm(V3.sub(bm.T,bm.E));                    // direction is band-invariant
+    const factor=Math.pow(2, 20*(cam.bandExp-bm.bandExp));   // bm-band → current-band units
+    const Tt=V3.scale(bm.T,factor), Ft=Fbm*factor;
+    if(isFinite(factor)&&factor>0&&isFinite(Ft)&&Ft>0&&isFinite(Tt[0]+Tt[1]+Tt[2])){
+      // flyable: express the target in the CURRENT band and let stepFlight's
+      // mid-flight band transports walk the ladder (same trick as homeTarget);
+      // duration scales with the zoom distance so deep returns don't lurch
+      const Fnow=V3.len(V3.sub(cam.T,cam.E));
+      const decades=Math.abs(Math.log10(Math.max(Ft,1e-300))-Math.log10(Math.max(Fnow,1e-300)));
+      startFlight(Tt, Ft, fwd, reduceMotion?0:Math.min(4, 0.8+0.12*decades));
+    }else{
+      // Δband too wide for one f64 similarity — hard cut; the pose is exact
+      flight=null;
+      cam.bandExp=bm.bandExp; cam.E=bm.E.slice(); cam.T=bm.T.slice();
+      checkBandTransport();
+    }
+  }
+
+  function persistViews(){
+    try{
+      localStorage.setItem(VIEWS_LS_KEY, JSON.stringify({
+        cloudC0:cloudC, seq:bookmarkSeq,
+        items:bookmarks.map(b=>({id:b.id,name:b.name,bandExp:b.bandExp,E:b.E,T:b.T,mag:b.mag,scale:b.scale}))
+      }));
+    }catch(err){ /* storage unavailable (privacy mode / quota) — views stay session-only */ }
+  }
+  function loadViews(){
+    try{
+      const raw=localStorage.getItem(VIEWS_LS_KEY); if(!raw) return;
+      const data=JSON.parse(raw); if(!data||!Array.isArray(data.items)) return;
+      const c0=Array.isArray(data.cloudC0)?data.cloudC0:[0,0,0];
+      for(const it of data.items){
+        if(!Array.isArray(it.E)||!Array.isArray(it.T)) continue;
+        const band=it.bandExp|0;
+        const bm={ id:String(it.id), name:String(it.name||'View'), bandExp:band,
+                   E:viewFrameCorrection(it.E.map(Number),band,cloudC,c0),
+                   T:viewFrameCorrection(it.T.map(Number),band,cloudC,c0),
+                   mag:String(it.mag||''), scale:String(it.scale||'') };
+        if(bm.E.every(isFinite)&&bm.T.every(isFinite)) bookmarks.push(bm);
+      }
+      bookmarkSeq=Math.max(1, data.seq|0, bookmarks.length+1);
+      renderViews();
+      if(bookmarks.length) console.log('Scriptorium: restored '+bookmarks.length+' saved view(s)');
+    }catch(err){ console.log('Scriptorium: saved views unavailable ('+err.message+')'); }
+  }
+
+  function renderViews(){
+    const list=document.getElementById('viewsList'), empty=document.getElementById('viewsEmpty'),
+          cnt=document.getElementById('viewsCount');
+    if(!list) return;
+    list.innerHTML='';
+    empty.style.display=bookmarks.length?'none':'block';
+    cnt.textContent=bookmarks.length?String(bookmarks.length):'';
+    for(const bm of bookmarks){
+      const row=document.createElement('div'); row.className='vrow';
+      row.title='Fly to this view · double-click the name to rename';
+      const info=document.createElement('div'); info.className='vinfo';
+      const nm=document.createElement('div'); nm.className='vname'; nm.textContent=bm.name;
+      const meta=document.createElement('div'); meta.className='vmeta';
+      meta.textContent=bm.mag+' · band '+bm.bandExp+(bm.scale?' · '+bm.scale:'');
+      info.appendChild(nm); info.appendChild(meta);
+      const del=document.createElement('button'); del.className='vdel'; del.textContent='×'; del.title='Remove view';
+      row.appendChild(info); row.appendChild(del);
+      row.addEventListener('click',e=>{ if(e.target===del||nm.isContentEditable) return; gotoBookmark(bm); });
+      del.addEventListener('click',e=>{ e.stopPropagation(); removeBookmark(bm.id); });
+      nm.addEventListener('dblclick',e=>{
+        e.stopPropagation();
+        nm.contentEditable='true'; nm.classList.add('editing'); nm.focus();
+        const sel=getSelection(); if(sel) sel.selectAllChildren(nm);
+      });
+      const commit=()=>{
+        if(nm.contentEditable!=='true') return;
+        nm.contentEditable='false'; nm.classList.remove('editing');
+        const v=nm.textContent.trim(); if(v) bm.name=v;
+        nm.textContent=bm.name; persistViews();
+      };
+      nm.addEventListener('blur',commit);
+      nm.addEventListener('keydown',e=>{
+        e.stopPropagation();
+        if(e.key==='Enter'){ e.preventDefault(); nm.blur(); }
+        if(e.key==='Escape'){ nm.textContent=bm.name; nm.blur(); }
+      });
+      list.appendChild(row);
+    }
+  }
+  function toggleViews(){ document.getElementById('views').classList.toggle('open'); }
+
+  // =====================================================================
   //  14 · INPUT + TOOLBAR
   // =====================================================================
   function setCursor(){
@@ -1665,6 +1866,8 @@
     snapBtn.addEventListener('click',()=>{ brush.snap=!brush.snap; snapBtn.innerHTML='Snap&nbsp;·&nbsp;'+(brush.snap?'on':'off'); snapBtn.classList.toggle('active',brush.snap); });
     const logBtn=document.getElementById('logBtn');
     if(logBtn) logBtn.addEventListener('click',toggleLogDepth);
+    document.getElementById('viewsBtn').addEventListener('click',toggleViews);
+    document.getElementById('viewsAdd').addEventListener('click',addBookmark);
     document.getElementById('undoBtn').addEventListener('click',undo);
     document.getElementById('redoBtn').addEventListener('click',redoOp);
     document.getElementById('clearBtn').addEventListener('click',clearDropped);
@@ -1708,6 +1911,7 @@
     },{passive:false});
 
     addEventListener('keydown',e=>{
+      if(e.target&&(e.target.isContentEditable||/^(input|textarea)$/i.test(e.target.tagName))) return;   // renaming a view / focused control
       const k=e.key.toLowerCase(), meta=e.ctrlKey||e.metaKey;
       if(meta && k==='z'){ e.preventDefault(); if(e.shiftKey) redoOp(); else undo(); return; }
       if(meta && k==='y'){ e.preventDefault(); redoOp(); return; }
@@ -1719,6 +1923,7 @@
       if(k==='h') doHome();
       if(k==='b') setTool(TOOL.DROP);
       if(k==='x') setTool(TOOL.ERASE);
+      if(k==='v') toggleViews();
       if(k==='o'){ showBounds=!showBounds; console.log('Scriptorium: regime bounds',showBounds); }
       if(k==='l') toggleLogDepth();
       if(k>='1'&&k<='5') setType(parseInt(k,10)-1);
@@ -1831,6 +2036,7 @@
 
     if(!initThree()) return;
     generateFixture();
+    loadViews();                 // after generateFixture: cloudC must exist for frame correction
     bindInput();
 
     applyPose(cloudC, F_ref*5, HOME_DIR);
