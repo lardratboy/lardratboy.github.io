@@ -201,6 +201,7 @@
     <div class="tgroup" id="toolBtns">
       <button class="tbtn active" data-tool="drop" title="Drop instances (B)">✛&nbsp;Drop</button>
       <button class="tbtn" data-tool="erase" title="Erase (X)">⌫&nbsp;Erase</button>
+      <button class="tbtn" data-tool="select" title="Select &amp; transform an instance (T)">➤&nbsp;Select</button>
     </div>
     <div class="sep"></div>
     <div class="tgroup" id="typeBtns" title="Instance type (1–6)"></div>
@@ -241,7 +242,10 @@
     <div class="row"><span class="act">Dive at cursor</span><kbd>scroll</kbd></div>
     <div class="row"><span class="act">Fly</span><kbd>W A S D</kbd></div>
     <div class="row"><span class="act">Fly up / down</span><kbd>E / Q</kbd></div>
-    <div class="row"><span class="act">Tool drop / erase</span><kbd>B / X</kbd></div>
+    <div class="row"><span class="act">Tool drop / erase / select</span><kbd>B / X / T</kbd></div>
+    <div class="row"><span class="act">Select instance</span><kbd>click</kbd></div>
+    <div class="row"><span class="act">Move / rotate / scale</span><kbd>drag gizmo</kbd></div>
+    <div class="row"><span class="act">Delete selected</span><kbd>⌫ / Del</kbd></div>
     <div class="row"><span class="act">Instance type</span><kbd>1 – 6</kbd></div>
     <div class="row"><span class="act">Drop size</span><kbd>[ / ]</kbd></div>
     <div class="row"><span class="act">Saved views</span><kbd>V</kbd></div>
@@ -445,6 +449,26 @@
         Xn[0]===want[0]&&Xn[1]===want[1]&&Xn[2]===want[2]);
      const deep=viewFrameCorrection([1,2,3],60,c1,c0);             // 2^1200 overflows f64
      ok('view correction degrades safely past f64 range', deep[0]===1&&deep[1]===2&&deep[2]===3);}
+
+    {// gizmo rotation: Q.mul(Δ,q0) must equal "apply q0, then world-axis Δ"
+     const rng=mulberry32(7), q0=randQuat(rng), v=[0.3,-0.8,0.51], ax=V3.norm([1,2,-0.5]), a=0.83;
+     const got=quatRotate(Q.norm(Q.mul(Q.axisAngle(ax,a),q0)), v);
+     const want=rotateAxis(quatRotate(q0,v), ax, a);
+     ok('gizmo world-axis pre-rotation matches Rodrigues reference',
+        V3.len(V3.sub(got,want))<1e-12);}
+    {// ring drag angle: reconstructing the in-plane angle round-trips
+     const n=[0,1,0], u=[1,0,0], w=V3.cross(n,u), a0=1.234;
+     const v=rotateAxis(u,n,a0);
+     const a=Math.atan2(V3.dot(v,w), V3.dot(v,u));
+     ok('ring drag angle reconstruction is exact', Math.abs(a-a0)<1e-12);}
+    {// translate drag: rayLineParam recovers the axis param of a sighted point
+     const P0=[2,-1,-8], n=V3.norm([0.3,0.9,0.1]), sTrue=1.75;
+     const Ptarget=V3.add(P0,V3.scale(n,sTrue));
+     const dir=V3.norm(Ptarget);                                   // ray straight through the point
+     const r=rayLineParam(dir,P0,n);
+     ok('rayLineParam recovers the drag-line parameter', r&&Math.abs(r.s-sTrue)<1e-10);
+     const rp=rayLineParam(n,P0,n);                                // axis parallel to view
+     ok('rayLineParam rejects view-parallel axes', rp===null);}
 
     log('Scriptorium self-tests — '+pass+' passed, '+fail+' failed');
     for(const [c,n,x] of rec) log((c?'  PASS  ':'  FAIL  ')+n+(x?'  ('+x+')':''));
@@ -956,6 +980,7 @@
 
     pivotRing=makeRing(0x9fb0d8,0.26); pivotRing.visible=false; pivotRing.renderOrder=3; scene.add(pivotRing);
     brushRing=makeRing(0x5cb8ff,0.85); brushRing.visible=false; brushRing.renderOrder=3; scene.add(brushRing);
+    initSelectionObjects();
 
     addEventListener('webglcontextlost',onCtxLost,false);
     addEventListener('webglcontextrestored',onCtxRestored,false);
@@ -1145,7 +1170,7 @@
   }
   function pickNearestInstance(clientX,clientY,angTan){
     const dir=worldRayDir(clientX,clientY), E=cam.E;
-    let bestT=Infinity, point=null, bestR=0;
+    let bestT=Infinity, point=null, bestR=0, bestCh=-1, bestK=-1;
     for(const ch of chunks){
       const chunkScale=Math.pow(2, 20*(cam.bandExp-ch.bandExp));
       if(!isFinite(chunkScale)||chunkScale===0) continue;
@@ -1164,10 +1189,10 @@
         const t=wx*dir[0]+wy*dir[1]+wz*dir[2];
         if(t<=1e-12||t>=bestT) continue;
         const p2=(wx*wx+wy*wy+wz*wz)-t*t, tol=t*angTan+r;
-        if(p2<=tol*tol){ bestT=t; bestR=r; point=[wx+E[0],wy+E[1],wz+E[2]]; }
+        if(p2<=tol*tol){ bestT=t; bestR=r; point=[wx+E[0],wy+E[1],wz+E[2]]; bestCh=ch.id; bestK=k; }
       }
     }
-    return {hit:point!==null, t:bestT, r:bestR, point, dir};
+    return {hit:point!==null, t:bestT, r:bestR, point, dir, chunkId:bestCh, index:bestK};
   }
   function pickPivot(clientX,clientY){
     const r=pickNearestInstance(clientX,clientY,PICK_TAN);
@@ -1179,7 +1204,7 @@
   // =====================================================================
   //  9 · DROP  (the first verb: instantiate on the focal shell)
   // =====================================================================
-  const TOOL={DROP:'drop',ERASE:'erase'};
+  const TOOL={DROP:'drop',ERASE:'erase',SELECT:'select'};
   const SWATCHES=[
     [0.98,0.98,1.0],[0.36,0.72,1.0],[0.58,0.5,1.0],[1.0,0.42,0.62],
     [1.0,0.72,0.30],[0.5,0.92,0.60],[1.0,0.5,0.35],[0.40,0.86,0.92],
@@ -1293,6 +1318,354 @@
   }
 
   // =====================================================================
+  //  10.5 · SELECT + TRANSFORM GIZMO
+  //      Selection is an IDENTITY, not a position: {chunkId, index}. The
+  //      instance's RTC pose is re-resolved from chunk data every frame, so
+  //      selection survives band transports, origin rebases, and dynamic
+  //      re-anchors for free — the same "read only differences" discipline
+  //      as everything else. Gizmo: three world-axis rotation rings + a
+  //      center handle for uniform scale (iscale is a single scalar).
+  //      Quats are band-invariant; scale is band-relative, so edits divide
+  //      the world delta back out by chunkScale before storage.
+  // =====================================================================
+  let selection=null;                   // {chunkId,index} or null
+  let hoverPick=null;                   // last hover hit (select tool only)
+  let hoverGizmo=null;                  // 'rx'|'ry'|'rz'|'scale'|null
+  let gdrag=null;                       // active gizmo drag state
+  let selDown=null;                     // mousedown pos for click-vs-drag discrimination
+  const GIZMO_PX=58;                    // ring radius in screen px (constant apparent size)
+  const GIZMO_TOL_PX=9;                 // ring grab tolerance in px
+
+  // ---- f64 quaternion kit (arrays [x,y,z,w]) ----
+  const Q={
+    axisAngle:(n,a)=>{const s=Math.sin(a/2);return [n[0]*s,n[1]*s,n[2]*s,Math.cos(a/2)];},
+    mul:(a,b)=>[ a[3]*b[0]+a[0]*b[3]+a[1]*b[2]-a[2]*b[1],
+                 a[3]*b[1]-a[0]*b[2]+a[1]*b[3]+a[2]*b[0],
+                 a[3]*b[2]+a[0]*b[1]-a[1]*b[0]+a[2]*b[3],
+                 a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2] ],
+    norm:(q)=>{const l=Math.hypot(q[0],q[1],q[2],q[3])||1;return [q[0]/l,q[1]/l,q[2]/l,q[3]/l];},
+  };
+  const AXES=[[1,0,0],[0,1,0],[0,0,1]];
+  const AXIS_KEY=['rx','ry','rz'];
+  const ARROW_KEY=['tx','ty','tz'];
+
+  // Closest-approach parameter s of the line (P0 + s·n) to the cursor ray
+  // (t·dir from the RTC origin). Both directions unit. Returns {s,t} or null
+  // when the axis is view-parallel (no stable solution).
+  function rayLineParam(dir,P0,n){
+    const b=V3.dot(dir,n), den=1-b*b;
+    if(den<1e-9) return null;
+    const dP=V3.dot(dir,P0), nP=V3.dot(n,P0);
+    const t=(dP - b*nP)/den;
+    return { s: t*b - nP, t };
+  }
+
+  // ---- gizmo scene objects (built once THREE exists) ----
+  let selWire=null, hovWire=null, gizmo=null, gRings=[], gArrows=[], gHandle=null;
+  const GIZ_COLORS=[0xff6b7a,0x66d19e,0x5cb8ff], GIZ_HANDLE=0xffb454;
+  const ARROW_IN=1.08, ARROW_OUT=1.62;             // arrow span along each axis, in gizmo (ring-radius) units
+  function initSelectionObjects(){
+    const wireMat=(color,op)=>new THREE.MeshBasicMaterial({color,wireframe:true,transparent:true,opacity:op,depthTest:false,depthWrite:false});
+    selWire=new THREE.Mesh(baseGeos[0],wireMat(0xffffff,0.85)); selWire.visible=false; selWire.renderOrder=5; selWire.frustumCulled=false; scene.add(selWire);
+    hovWire=new THREE.Mesh(baseGeos[0],wireMat(0x9fb0d8,0.35)); hovWire.visible=false; hovWire.renderOrder=5; hovWire.frustumCulled=false; scene.add(hovWire);
+    gizmo=new THREE.Group(); gizmo.visible=false; gizmo.renderOrder=6; scene.add(gizmo);
+    const torus=new THREE.TorusGeometry(1,0.014,8,72);
+    const shaft=new THREE.CylinderGeometry(0.016,0.016,ARROW_OUT-ARROW_IN-0.12,6);
+    const tip=new THREE.ConeGeometry(0.055,0.14,10);
+    for(let i=0;i<3;i++){
+      const m=new THREE.MeshBasicMaterial({color:GIZ_COLORS[i],transparent:true,opacity:0.55,depthTest:false,depthWrite:false});
+      const ring=new THREE.Mesh(torus,m); ring.renderOrder=6; ring.frustumCulled=false;
+      if(i===0) ring.rotation.y=Math.PI/2;        // torus axis Z → X
+      else if(i===1) ring.rotation.x=Math.PI/2;   // → Y
+      gizmo.add(ring); gRings.push(ring);
+      // translate arrow along +axis, outside the ring (cylinder/cone default along +Y)
+      const am=new THREE.MeshBasicMaterial({color:GIZ_COLORS[i],transparent:true,opacity:0.55,depthTest:false,depthWrite:false});
+      const arrow=new THREE.Group();
+      const sh=new THREE.Mesh(shaft,am); sh.position.y=(ARROW_IN+ARROW_OUT-0.14)/2; sh.renderOrder=6; sh.frustumCulled=false;
+      const tp=new THREE.Mesh(tip,am);   tp.position.y=ARROW_OUT-0.07;              tp.renderOrder=6; tp.frustumCulled=false;
+      arrow.add(sh); arrow.add(tp);
+      if(i===0) arrow.rotation.z=-Math.PI/2;      // +Y → +X
+      else if(i===2) arrow.rotation.x=Math.PI/2;  // +Y → +Z
+      gizmo.add(arrow); gArrows.push({group:arrow,mat:am});
+    }
+    gHandle=new THREE.Mesh(new THREE.OctahedronGeometry(0.16),
+      new THREE.MeshBasicMaterial({color:GIZ_HANDLE,transparent:true,opacity:0.75,depthTest:false,depthWrite:false}));
+    gHandle.renderOrder=6; gHandle.frustumCulled=false; gizmo.add(gHandle);
+  }
+
+  // Resolve an identity to live pose data, in f64 and the CURRENT camera
+  // band. Returns null (and clears the ref via the caller) if the record
+  // died (undone past, cleared, tombstoned, or its band is unreachable).
+  function resolveInstance(ref){
+    if(!ref) return null;
+    const ch=chunkMap.get(ref.chunkId);
+    if(!ch || ref.index>=ch.count) return null;
+    const k=ref.index, s=ch.iscale[k];
+    if(!(s>0)) return null;
+    const cs=Math.pow(2, 20*(cam.bandExp-ch.bandExp));
+    if(!isFinite(cs)||cs===0) return null;
+    const E=cam.E;
+    return { ch, k, cs,
+      // RTC position (f64): anchor and local both scaled to the camera band
+      rtc:[ ch.anchor[0]*cs + ch.ipos[k*3]*cs   - E[0],
+            ch.anchor[1]*cs + ch.ipos[k*3+1]*cs - E[1],
+            ch.anchor[2]*cs + ch.ipos[k*3+2]*cs - E[2] ],
+      rWorld:s*cs,
+      quat:[ch.iquat[k*4],ch.iquat[k*4+1],ch.iquat[k*4+2],ch.iquat[k*4+3]],
+      typeId:ch.itype[k] };
+  }
+  function clearSelection(){ selection=null; gdrag=null; hoverGizmo=null; }
+
+  function gizmoRadius(inst){
+    const d=V3.len(inst.rtc);
+    return Math.max(pxRadiusToWorld(GIZMO_PX,d,TAN_HALF,innerHeight)*0.5, inst.rWorld*1.45);
+  }
+
+  // Ray-vs-gizmo in the RTC frame (ray origin = 0, camera at origin).
+  function gizmoHitTest(cx,cy,inst){
+    const dir=worldRayDir(cx,cy), C=inst.rtc, d=V3.len(C);
+    const gR=gizmoRadius(inst);
+    const tol=pxRadiusToWorld(GIZMO_TOL_PX,d,TAN_HALF,innerHeight)*0.5;
+    let best=null, bestT=Infinity;
+    // center scale handle: ray-sphere
+    {
+      const hr=gR*0.22, tc=V3.dot(C,dir);
+      if(tc>0){
+        const p2=V3.dot(C,C)-tc*tc;
+        if(p2<=(hr+tol*0.5)*(hr+tol*0.5) && tc<bestT){ bestT=tc; best={part:'scale',t:tc}; }
+      }
+    }
+    // rotation rings: ray-plane, then |dist-to-center − gR|
+    for(let i=0;i<3;i++){
+      const n=AXES[i], den=V3.dot(dir,n);
+      if(Math.abs(den)<1e-6) continue;
+      const t=V3.dot(C,n)/den;
+      if(t<=0||t>=bestT) continue;
+      const P=V3.scale(dir,t), v=V3.sub(P,C);
+      if(Math.abs(V3.len(v)-gR)<=tol){ bestT=t; best={part:AXIS_KEY[i],axis:i,t}; }
+    }
+    // translate arrows: segment C + n·[ARROW_IN, ARROW_OUT]·gR vs ray
+    for(let i=0;i<3;i++){
+      const n=AXES[i];
+      const r=rayLineParam(dir,C,n);
+      if(!r||r.t<=0||r.t>=bestT) continue;
+      const s=Math.max(ARROW_IN*gR, Math.min(ARROW_OUT*gR, r.s));
+      const P=V3.add(C,V3.scale(n,s)), q=V3.scale(dir,r.t);
+      if(V3.len(V3.sub(q,P))<=tol*1.3){ bestT=r.t; best={part:ARROW_KEY[i],axis:i,t:r.t}; }
+    }
+    return best;
+  }
+
+  // Current in-plane vector of the cursor around a ring's axis (f64).
+  function ringVector(cx,cy,inst,axisIdx){
+    const dir=worldRayDir(cx,cy), n=AXES[axisIdx], den=V3.dot(dir,n);
+    if(Math.abs(den)<1e-6) return null;
+    const t=V3.dot(inst.rtc,n)/den;
+    if(t<=0) return null;
+    return V3.sub(V3.scale(dir,t), inst.rtc);
+  }
+
+  function gizmoDragStart(cx,cy,hit){
+    const inst=resolveInstance(selection); if(!inst) return false;
+    gdrag={ part:hit.part, axis:hit.axis,
+            q0:inst.quat.slice(), s0:inst.ch.iscale[inst.k],
+            y0:cy, u:null, w:null };
+    if(hit.part[0]==='t'){                       // translate: line param drag
+      const k=inst.k, ch=inst.ch;
+      gdrag.l0=[ch.ipos[k*3],ch.ipos[k*3+1],ch.ipos[k*3+2]];   // pre-drag local (native band)
+      gdrag.band=cam.bandExp;
+      const r=rayLineParam(worldRayDir(cx,cy),inst.rtc,AXES[hit.axis]);
+      if(!r){ gdrag=null; return false; }
+      gdrag.p0=r.s;                              // drag-line param at grab, current-band units
+    }else if(hit.part!=='scale'){
+      const v=ringVector(cx,cy,inst,hit.axis);
+      if(!v) { gdrag=null; return false; }
+      gdrag.u=V3.norm(v); gdrag.w=V3.cross(AXES[hit.axis],gdrag.u);
+    }
+    return true;
+  }
+  function gizmoDragMove(cx,cy){
+    const inst=resolveInstance(selection);
+    if(!inst){ gdrag=null; return; }
+    const ch=inst.ch, k=inst.k;
+    if(gdrag.part[0]==='t'){
+      // Mid-drag band transport rescales all current-band lengths by an exact
+      // power of two — rebase the stored grab param the same way (lossless).
+      if(cam.bandExp!==gdrag.band){
+        gdrag.p0*=Math.pow(2, 20*(cam.bandExp-gdrag.band));
+        gdrag.band=cam.bandExp;
+      }
+      // Drag line is anchored at the PRE-DRAG world position (native band),
+      // re-expressed in RTC each move — dive/rebase/re-anchor safe by construction.
+      const C0=[ (ch.anchor[0]+gdrag.l0[0])*inst.cs - cam.E[0],
+                 (ch.anchor[1]+gdrag.l0[1])*inst.cs - cam.E[1],
+                 (ch.anchor[2]+gdrag.l0[2])*inst.cs - cam.E[2] ];
+      const r=rayLineParam(worldRayDir(cx,cy),C0,AXES[gdrag.axis]);
+      if(!r) return;
+      const dLocal=(r.s-gdrag.p0)/inst.cs;       // world delta → native-band units
+      const n=AXES[gdrag.axis];
+      const nx=gdrag.l0[0]+n[0]*dLocal, ny=gdrag.l0[1]+n[1]*dLocal, nz=gdrag.l0[2]+n[2]*dLocal;
+      ch.ipos[k*3]=fr(nx); ch.ipos[k*3+1]=fr(ny); ch.ipos[k*3+2]=fr(nz);
+      const br=Math.hypot(nx,ny,nz)+ch.iscale[k];
+      if(br>ch.boundR)ch.boundR=br;
+    }else if(gdrag.part==='scale'){
+      const factor=Math.exp((gdrag.y0-cy)*0.008);
+      const ns=Math.max(gdrag.s0*factor, 1e-30);
+      ch.iscale[k]=fr(ns);
+      const br=Math.hypot(ch.ipos[k*3],ch.ipos[k*3+1],ch.ipos[k*3+2])+ns;
+      if(br>ch.boundR)ch.boundR=br;
+      if(ns>ch.maxInstR)ch.maxInstR=ns;
+    }else{
+      const v=ringVector(cx,cy,inst,gdrag.axis);
+      if(!v) return;
+      const a=Math.atan2(V3.dot(v,gdrag.w), V3.dot(v,gdrag.u));
+      const nq=Q.norm(Q.mul(Q.axisAngle(AXES[gdrag.axis],a), gdrag.q0));
+      ch.iquat[k*4]=fr(nq[0]); ch.iquat[k*4+1]=fr(nq[1]); ch.iquat[k*4+2]=fr(nq[2]); ch.iquat[k*4+3]=fr(nq[3]);
+    }
+    ch.dirty=true; ch.aggDirty=true;
+  }
+  function gizmoDragEnd(){
+    if(!gdrag) return;
+    const inst=resolveInstance(selection);
+    if(inst){
+      const ch=inst.ch, k=inst.k;
+      if(gdrag.part[0]==='t'){
+        const nextPos=[ch.ipos[k*3],ch.ipos[k*3+1],ch.ipos[k*3+2]];
+        const moved = nextPos[0]!==gdrag.l0[0]||nextPos[1]!==gdrag.l0[1]||nextPos[2]!==gdrag.l0[2];
+        if(moved){
+          const mig=maybeMigrate(inst,gdrag.l0);
+          if(mig) pushOp(mig);
+          else pushOp({type:'xform',chunkId:ch.id,index:k,
+                       prevQuat:gdrag.q0.slice(),prevScale:gdrag.s0,prevPos:gdrag.l0.slice(),
+                       nextQuat:gdrag.q0.slice(),nextScale:gdrag.s0,nextPos});
+        }
+      }else{
+        const nextQuat=[ch.iquat[k*4],ch.iquat[k*4+1],ch.iquat[k*4+2],ch.iquat[k*4+3]];
+        const nextScale=ch.iscale[k];
+        const changed = nextScale!==gdrag.s0 ||
+          nextQuat[0]!==gdrag.q0[0]||nextQuat[1]!==gdrag.q0[1]||nextQuat[2]!==gdrag.q0[2]||nextQuat[3]!==gdrag.q0[3];
+        if(changed) pushOp({type:'xform',chunkId:ch.id,index:k,
+                            prevQuat:gdrag.q0.slice(),prevScale:gdrag.s0,
+                            nextQuat,nextScale});
+      }
+    }
+    gdrag=null;
+  }
+
+  // ---- chunk migration: re-home a record whose local offset outgrew its
+  //      chunk's f32 budget. Same bounds as dropRollNeeded, expressed for a
+  //      possibly foreign-band chunk: the absolute cap is native-band, the
+  //      scale-relative cap compares in current-band units against F.
+  function localExceedsBudget(l,cs){
+    const F=V3.len(V3.sub(cam.T,cam.E));
+    const mNative=Math.max(Math.abs(l[0]),Math.abs(l[1]),Math.abs(l[2]));
+    return mNative>DROP_CHUNK_BOUND || mNative*cs>DROP_BOUND_REL*F;
+  }
+  // Find (or create) a current-band chunk whose anchor is close to world
+  // point w (current-band absolute coords). Never touches activeChunk — the
+  // brush keeps its own stream.
+  function findHomeChunk(w){
+    const F=V3.len(V3.sub(cam.T,cam.E));
+    const bound=Math.min(DROP_CHUNK_BOUND, DROP_BOUND_REL*F);
+    for(const ch of chunks){
+      if(ch.bandExp!==cam.bandExp || ch.count>=ch.cap) continue;
+      if(Math.max(Math.abs(w[0]-ch.anchor[0]),Math.abs(w[1]-ch.anchor[1]),Math.abs(w[2]-ch.anchor[2]))<=bound)
+        return ch;
+    }
+    const ch=newChunk(w,cam.bandExp); ch.userMade=true;
+    return ch;
+  }
+  function maybeMigrate(inst,prevLocal){
+    const ch=inst.ch, k=inst.k;
+    const l=[ch.ipos[k*3],ch.ipos[k*3+1],ch.ipos[k*3+2]];
+    if(!localExceedsBudget(l,inst.cs)) return null;
+    // world position in current-band absolute coords (f64: anchor+local native, × cs)
+    const w=[ (ch.anchor[0]+l[0])*inst.cs, (ch.anchor[1]+l[1])*inst.cs, (ch.anchor[2]+l[2])*inst.cs ];
+    const rec={ quat:[ch.iquat[k*4],ch.iquat[k*4+1],ch.iquat[k*4+2],ch.iquat[k*4+3]],
+                scale:ch.iscale[k]*inst.cs,           // re-express band-relative scale in the dst band
+                rgb:[ch.icol[k*3],ch.icol[k*3+1],ch.icol[k*3+2]],
+                typeId:ch.itype[k], seed:ch.iseed[k] };
+    const dst=findHomeChunk(w);
+    const dl=[w[0]-dst.anchor[0], w[1]-dst.anchor[1], w[2]-dst.anchor[2]];
+    const di=dst.count;
+    writeInstance(dst,di,dl,rec.typeId,rec.quat,rec.scale,rec.rgb,rec.seed);
+    dst.count++; dst.alive++; dst.dirty=true; dst.aggDirty=true;
+    // tombstone the source
+    ch.iscale[k]=-Math.abs(gdrag?gdrag.s0:ch.iscale[k]);
+    ch.alive--; ch.dirty=true; ch.aggDirty=true;
+    selection={chunkId:dst.id,index:di};          // selection follows the record
+    console.log('Scriptorium: migrated instance '+ch.id+':'+k+' → '+dst.id+':'+di+' (band '+ch.bandExp+' → '+cam.bandExp+')');
+    return { type:'migrate',
+             src:{chunkId:ch.id,index:k,prevPos:prevLocal.slice(),scale:Math.abs(gdrag?gdrag.s0:rec.scale)},
+             dst:{chunkId:dst.id,index:di,pos:dl.map(fr),quat:rec.quat.slice(),scale:fr(rec.scale),
+                  rgb:rec.rgb.slice(),typeId:rec.typeId,seed:rec.seed} };
+  }
+
+  function deleteSelected(){
+    const inst=resolveInstance(selection); if(!inst) return;
+    const ch=inst.ch, k=inst.k, s=ch.iscale[k];
+    ch.iscale[k]=-s; ch.alive--; ch.dirty=true; ch.aggDirty=true;
+    pushOp({type:'erase',items:[{chunkId:ch.id,index:k,prevScale:s}]});
+    clearSelection();
+  }
+
+  // Per-frame hover: one cone pick per frame (never per mousemove), plus a
+  // gizmo hover test when something is selected. Sets the cursor.
+  function updateSelectionHover(){
+    hoverGizmo=null;
+    if(brush.tool!==TOOL.SELECT || !lastCursor.inside || orbiting || panning || spaceDown || flight){
+      hoverPick=null;
+      return;
+    }
+    if(gdrag){ hoverGizmo=gdrag.part; renderer.domElement.style.cursor='grabbing'; return; }
+    const inst=resolveInstance(selection);
+    if(inst){
+      const hit=gizmoHitTest(lastCursor.x,lastCursor.y,inst);
+      if(hit){ hoverGizmo=hit.part; hoverPick=null; renderer.domElement.style.cursor='grab'; return; }
+    }
+    const r=pickNearestInstance(lastCursor.x,lastCursor.y,PICK_TAN);
+    hoverPick = r.hit ? {chunkId:r.chunkId,index:r.index} : null;
+    renderer.domElement.style.cursor = hoverPick ? 'pointer' : 'crosshair';
+  }
+
+  // Per-frame: validate refs, place highlight wires + gizmo in RTC coords.
+  function updateSelectionVisuals(){
+    if(!selWire) return;
+    const selecting = brush.tool===TOOL.SELECT;
+    // hover wire
+    let h = selecting && !gdrag ? resolveInstance(hoverPick) : null;
+    if(h && selection && hoverPick && hoverPick.chunkId===selection.chunkId && hoverPick.index===selection.index) h=null;
+    if(h){
+      hovWire.geometry=baseGeos[h.typeId];
+      hovWire.position.set(h.rtc[0],h.rtc[1],h.rtc[2]);
+      hovWire.quaternion.set(h.quat[0],h.quat[1],h.quat[2],h.quat[3]);
+      hovWire.scale.setScalar(h.rWorld*1.03);
+      hovWire.visible=true;
+    } else hovWire.visible=false;
+    // selection wire + gizmo
+    const inst=resolveInstance(selection);
+    if(!inst){ if(selection) clearSelection(); selWire.visible=false; gizmo.visible=false; return; }
+    selWire.geometry=baseGeos[inst.typeId];
+    selWire.position.set(inst.rtc[0],inst.rtc[1],inst.rtc[2]);
+    selWire.quaternion.set(inst.quat[0],inst.quat[1],inst.quat[2],inst.quat[3]);
+    selWire.scale.setScalar(inst.rWorld*1.03);
+    selWire.visible=true;
+    if(selecting){
+      const gR=gizmoRadius(inst);
+      gizmo.position.set(inst.rtc[0],inst.rtc[1],inst.rtc[2]);
+      gizmo.scale.setScalar(gR);
+      gizmo.visible=true;
+      const active = gdrag?gdrag.part:hoverGizmo;
+      for(let i=0;i<3;i++){
+        gRings[i].material.opacity = active===AXIS_KEY[i]?1.0:0.55;
+        gArrows[i].mat.opacity = active===ARROW_KEY[i]?1.0:0.55;
+      }
+      gHandle.material.opacity = active==='scale'?1.0:0.75;
+      const hs = active==='scale'?0.2:0.16; gHandle.scale.setScalar(hs/0.16);
+    } else gizmo.visible=false;
+  }
+
+  // =====================================================================
   //  11 · UNDO / REDO  (op-log: drop = O(1) truncation, erase = sign restore)
   // =====================================================================
   let ops=[], redoStack=[];
@@ -1306,6 +1679,8 @@
     else if(op.type==='clear'){ for(const s of op.prev){ const ch=chunkMap.get(s.chunkId);
       ch.count=s.count; ch.alive=0; for(let k=0;k<ch.count;k++) if(ch.iscale[k]>0) ch.alive++;
       ch.dirty=true; ch.aggDirty=true; } }
+    else if(op.type==='xform'){ applyXform(op, op.prevQuat, op.prevScale, op.prevPos); }
+    else if(op.type==='migrate'){ undoMigrate(op); }
     redoStack.push(op); updateEditUI();
   }
   function redoOp(){
@@ -1315,7 +1690,56 @@
       ch.dirty=true; ch.aggDirty=true; } }
     else if(op.type==='erase'){ for(const it of op.items){ const ch=chunkMap.get(it.chunkId); if(ch.iscale[it.index]>0){ch.iscale[it.index]=-ch.iscale[it.index]; ch.alive--;} ch.dirty=true; ch.aggDirty=true; } }
     else if(op.type==='clear'){ for(const s of op.prev){ const ch=chunkMap.get(s.chunkId); ch.count=0; ch.alive=0; ch.dirty=true; ch.aggDirty=true; } }
+    else if(op.type==='xform'){ applyXform(op, op.nextQuat, op.nextScale, op.nextPos); }
+    else if(op.type==='migrate'){ redoMigrate(op); }
     ops.push(op); updateEditUI();
+  }
+  function applyXform(op,quat,scale,pos){
+    const ch=chunkMap.get(op.chunkId); if(!ch||op.index>=ch.count) return;
+    const k=op.index;
+    ch.iquat[k*4]=quat[0]; ch.iquat[k*4+1]=quat[1]; ch.iquat[k*4+2]=quat[2]; ch.iquat[k*4+3]=quat[3];
+    ch.iscale[k]=scale;
+    if(pos){ ch.ipos[k*3]=pos[0]; ch.ipos[k*3+1]=pos[1]; ch.ipos[k*3+2]=pos[2]; }
+    const br=Math.hypot(ch.ipos[k*3],ch.ipos[k*3+1],ch.ipos[k*3+2])+Math.abs(scale);
+    if(br>ch.boundR)ch.boundR=br;
+    if(Math.abs(scale)>ch.maxInstR)ch.maxInstR=Math.abs(scale);
+    ch.dirty=true; ch.aggDirty=true;
+  }
+  function undoMigrate(op){
+    const d=op.dst, s=op.src;
+    const dch=chunkMap.get(d.chunkId);
+    if(dch && d.index<dch.count){
+      if(d.index===dch.count-1){ if(dch.iscale[d.index]>0) dch.alive--; dch.count--; }   // it was the last append: pop it
+      else if(dch.iscale[d.index]>0){ dch.iscale[d.index]=-dch.iscale[d.index]; dch.alive--; }
+      dch.dirty=true; dch.aggDirty=true;
+    }
+    const sch=chunkMap.get(s.chunkId);
+    if(sch && s.index<sch.count){
+      if(sch.iscale[s.index]<=0) sch.alive++;
+      sch.iscale[s.index]=s.scale;
+      sch.ipos[s.index*3]=s.prevPos[0]; sch.ipos[s.index*3+1]=s.prevPos[1]; sch.ipos[s.index*3+2]=s.prevPos[2];
+      sch.dirty=true; sch.aggDirty=true;
+    }
+    if(selection&&selection.chunkId===d.chunkId&&selection.index===d.index)
+      selection={chunkId:s.chunkId,index:s.index};
+  }
+  function redoMigrate(op){
+    const d=op.dst, s=op.src;
+    const sch=chunkMap.get(s.chunkId);
+    if(sch && s.index<sch.count && sch.iscale[s.index]>0){
+      sch.iscale[s.index]=-sch.iscale[s.index]; sch.alive--; sch.dirty=true; sch.aggDirty=true;
+    }
+    const dch=chunkMap.get(d.chunkId);
+    if(dch){
+      if(d.index===dch.count){ writeInstance(dch,d.index,d.pos,d.typeId,d.quat,d.scale,d.rgb,d.seed); dch.count++; dch.alive++; }
+      else if(d.index<dch.count){
+        if(dch.iscale[d.index]<=0) dch.alive++;
+        writeInstance(dch,d.index,d.pos,d.typeId,d.quat,d.scale,d.rgb,d.seed);
+      }
+      dch.dirty=true; dch.aggDirty=true;
+    }
+    if(selection&&selection.chunkId===s.chunkId&&selection.index===s.index)
+      selection={chunkId:d.chunkId,index:d.index};
   }
   function clearDropped(){
     const prev=[];
@@ -1492,7 +1916,7 @@
     const s=F*0.028; pivotRing.scale.set(s,s,s);
   }
   function updateBrushRing(){
-    const show=lastCursor.inside && !orbiting && !panning && !spaceDown && !flight;
+    const show=lastCursor.inside && !orbiting && !panning && !spaceDown && !flight && brush.tool!==TOOL.SELECT;
     brushRing.visible=show;
     if(!show) return;
     const dir=worldRayDir(lastCursor.x,lastCursor.y), {F}=camFrame();
@@ -1549,6 +1973,8 @@
     updateNearFar();
     updatePivotRing();
     updateBrushRing();
+    updateSelectionHover();
+    updateSelectionVisuals();
     flushDirty();
 
     renderer.getDrawingBufferSize(_bufV2);
@@ -1776,6 +2202,7 @@
   }
   function setTool(t){
     brush.tool=t;
+    if(t!==TOOL.SELECT){ clearSelection(); hoverPick=null; }
     for(const b of document.querySelectorAll('#toolBtns .tbtn')) b.classList.toggle('active', b.dataset.tool===t);
     setCursor();
   }
@@ -1842,6 +2269,12 @@
       else if(e.button===0){
         if(spaceDown){ orbiting=true; }
         else if(brush.tool===TOOL.DROP){ dropping=true; beginStroke(); dropAt(lx,ly); lastDropScreen=[lx,ly]; }
+        else if(brush.tool===TOOL.SELECT){
+          const inst=resolveInstance(selection);
+          const hit=inst?gizmoHitTest(lx,ly,inst):null;
+          if(hit&&gizmoDragStart(lx,ly,hit)){ /* gizmo drag owns the pointer */ }
+          else { selDown=[lx,ly]; orbiting=true; }   // drag orbits; a still click selects
+        }
         else { erasing=true; beginErase(); eraseAt(lx,ly); }
       }
       setCursor();
@@ -1849,6 +2282,8 @@
     addEventListener('mousemove',e=>{
       const dx=e.clientX-lx, dy=e.clientY-ly; lx=e.clientX; ly=e.clientY;
       lastCursor.x=lx; lastCursor.y=ly;
+      if(gdrag){ gizmoDragMove(lx,ly); return; }
+      if(selDown && Math.hypot(lx-selDown[0],ly-selDown[1])>4) selDown=null;   // moved: it's an orbit, not a click
       if(orbiting) orbit(dx,dy);
       else if(panning) pan(dx,dy);
       else if(dropping){ ribbonTo(lx,ly); movedThisFrame=true; }
@@ -1857,6 +2292,13 @@
     addEventListener('mouseup',()=>{
       if(dropping){ endStroke(); dropping=false; }
       if(erasing){ endErase(); erasing=false; }
+      if(gdrag) gizmoDragEnd();
+      if(selDown){                                   // a still click: pick or deselect
+        const r=pickNearestInstance(selDown[0],selDown[1],PICK_TAN);
+        selection = r.hit ? {chunkId:r.chunkId,index:r.index} : null;
+        if(selection) console.log('Scriptorium: selected instance '+selection.chunkId+':'+selection.index);
+        selDown=null;
+      }
       orbiting=false; panning=false; setCursor();
     });
     cv.addEventListener('contextmenu',e=>e.preventDefault());
@@ -1879,6 +2321,8 @@
       if(k==='h') doHome();
       if(k==='b') setTool(TOOL.DROP);
       if(k==='x') setTool(TOOL.ERASE);
+      if(k==='t') setTool(TOOL.SELECT);
+      if((k==='delete'||k==='backspace')&&brush.tool===TOOL.SELECT){ e.preventDefault(); deleteSelected(); }
       if(k==='v') toggleViews();
       if(k==='o'){ showBounds=!showBounds; console.log('Scriptorium: regime bounds',showBounds); }
       if(k==='l') toggleLogDepth();
@@ -1887,7 +2331,9 @@
       if(k===']') setSize(brush.size*1.2);
       if(k==='[') setSize(brush.size/1.2);
       if(k==='g') toggleHelp();
-      if(k==='escape'){ if(dropping){cancelStroke();dropping=false;} if(erasing){cancelErase();erasing=false;} }
+      if(k==='escape'){ if(dropping){cancelStroke();dropping=false;} if(erasing){cancelErase();erasing=false;}
+        if(gdrag&&selection){ applyXform({chunkId:selection.chunkId,index:selection.index},gdrag.q0,gdrag.s0,gdrag.l0); gdrag=null; }  // revert in-flight transform
+        else if(selection) clearSelection(); }
     });
     addEventListener('keyup',e=>{
       const k=e.key.toLowerCase();
@@ -1999,7 +2445,8 @@
     startFlight(cloudC, F_ref, HOME_DIR, reduceMotion?0:1.4);
 
     // dev hook: inspect chunks/camera from the console
-    window.__scriptorium={chunks,cam,brush,camFrame,totalAlive,setTool,TOOL,pickNearestInstance,worldRayDir,footAngTan,beginErase,eraseAt,endErase};
+    window.__scriptorium={chunks,cam,brush,camFrame,totalAlive,setTool,TOOL,pickNearestInstance,worldRayDir,footAngTan,beginErase,eraseAt,endErase,
+      getSelection:()=>selection, select:(chunkId,index)=>{selection={chunkId,index};}, clearSelection, resolveInstance, deleteSelected};
 
     lastT=performance.now();
     requestAnimationFrame(animate);
