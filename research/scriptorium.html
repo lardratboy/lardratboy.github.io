@@ -469,6 +469,30 @@
      ok('rayLineParam recovers the drag-line parameter', r&&Math.abs(r.s-sTrue)<1e-10);
      const rp=rayLineParam(n,P0,n);                                // axis parallel to view
      ok('rayLineParam rejects view-parallel axes', rp===null);}
+    {// exact pick, D1: cube faces vs bounding sphere (half-extent 1/√3)
+     const h=1/Math.sqrt(3), tris=[];
+     const quad=(a,b,c,d)=>{tris.push(...a,...b,...c, ...a,...c,...d);};
+     quad([-h,-h,h],[h,-h,h],[h,h,h],[-h,h,h]);       // +Z
+     quad([h,-h,-h],[-h,-h,-h],[-h,h,-h],[h,h,-h]);   // −Z
+     quad([h,-h,h],[h,-h,-h],[h,h,-h],[h,h,h]);       // +X
+     quad([-h,-h,-h],[-h,-h,h],[-h,h,h],[-h,h,-h]);   // −X
+     quad([-h,h,h],[h,h,h],[h,h,-h],[-h,h,-h]);       // +Y
+     quad([-h,-h,-h],[h,-h,-h],[h,-h,h],[-h,-h,h]);   // −Y
+     const tHit=rayTriangles([0,0,5],[0,0,-1],tris);
+     ok('exact pick: ray through cube face hits at the face', approx(tHit,5-h,1e-12,1e-12));
+     const tMiss=rayTriangles([0.8,0,5],[0,0,-1],tris);           // inside bounding sphere, outside the solid
+     ok('exact pick: 0.8·boundR off the face misses the cube', tMiss<0);}
+    {// exact pick frame math: unit-frame round-trip matches direct world intersection
+     const rng=mulberry32(11), q=randQuat(rng), C=[3,-2,7], r=0.5;
+     const dir=V3.norm(C);                                         // ray through the center
+     const o1=conjRotate(q,[-C[0]/r,-C[1]/r,-C[2]/r]), d1=conjRotate(q,dir);
+     const tw=rayUnitSphere(o1,d1)*r;
+     ok('exact pick: t_world matches direct sphere intersection', approx(tw,V3.len(C)-r,1e-10,1e-10));
+     ok('exact pick: from inside, the sphere is a miss', rayUnitSphere([0,0,0],[0,0,1])<0);}
+    {// conjRotate is the exact inverse of quatRotate
+     const rng=mulberry32(13), q=randQuat(rng), v=[0.4,-1.1,0.7];
+     const back=conjRotate(q,quatRotate(q,v));
+     ok('conjRotate inverts quatRotate', V3.len(V3.sub(back,v))<1e-12);}
 
     log('Scriptorium self-tests — '+pass+' passed, '+fail+' failed');
     for(const [c,n,x] of rec) log((c?'  PASS  ':'  FAIL  ')+n+(x?'  ('+x+')':''));
@@ -488,6 +512,7 @@
   const ZOOM_K=0.0018;                  // wheel → scale sensitivity
   const ORBIT_SPD=0.006, PAN_SPD=0.0016, FLY_SPD=0.9;
   const PICK_TAN=Math.tan(3.2*Math.PI/180);
+  const FUZZ_PX=8;                      // below this projected diameter, the legacy cone accept applies (pickfix.md §2.3)
   const ERASE_KAPPA=4;                  // eraser depth gate half-width factor
   const DROP_CHUNK_BOUND=1e4;           // absolute local-offset cap before an append rolls to a new chunk (§2.2)
   const DROP_BOUND_REL=1e3;             // …and a scale-relative cap: locals born ≤ 1e3·F keep f32 error ≲ 0.07 px.
@@ -524,6 +549,7 @@
   ];
   const N_TYPES=TYPE_DEFS.length;
   const baseGeos=[];                    // built in initThree (needs THREE)
+  const pickTris=[];                    // per-type f64 triangle lists for exact picking (sphere = null, analytic)
 
   // =====================================================================
   //  4 · CAMERA MODEL B  +  BAND TRANSPORT  +  ORIGIN REBASE  +  FLIGHTS
@@ -909,6 +935,16 @@
       const g=def.make();
       if(!g.getAttribute('normal')) g.computeVertexNormals();
       baseGeos.push(g);
+      // bake exact-pick triangles (deindexed, f64); type 0 (sphere) is analytic
+      if(pickTris.length===0){ pickTris.push(null); continue; }
+      const pos=g.getAttribute('position').array, idx=g.getIndex();
+      const n=idx?idx.count:pos.length/3;
+      const tris=new Float64Array(n*3);
+      for(let i=0;i<n;i++){
+        const vi=idx?idx.array[i]:i;
+        tris[i*3]=pos[vi*3]; tris[i*3+1]=pos[vi*3+1]; tris[i*3+2]=pos[vi*3+2];
+      }
+      pickTris.push(tris);
     }
 
     meshMat=new THREE.RawShaderMaterial({
@@ -1160,7 +1196,9 @@
   }
 
   // =====================================================================
-  //  8 · PICKING  (cone scan over instance bounding spheres)
+  //  8 · PICKING  (two-phase: bounding-sphere cone broad phase → exact
+  //      ray-primitive narrow phase; cone accept survives only as a
+  //      fallback for sub-FUZZ_PX instances. See pickfix.md.)
   // =====================================================================
   function worldRayDir(clientX,clientY){
     const nx=(clientX/innerWidth)*2-1, ny=-((clientY/innerHeight)*2-1);
@@ -1168,15 +1206,53 @@
     const v=new THREE.Vector3(nx*TAN_HALF*asp, ny*TAN_HALF, -1).applyQuaternion(camera.quaternion).normalize();
     return [v.x,v.y,v.z];
   }
+  function conjRotate(q,v){                       // rotate by the inverse of q
+    return quatRotate([-q[0],-q[1],-q[2],q[3]],v);
+  }
+  // Ray vs the unit sphere at origin. Entry root only (t>eps): from inside,
+  // this misses — a pick you're inside of is never what a click means.
+  function rayUnitSphere(o,d){
+    const b=V3.dot(o,d), c=V3.dot(o,o)-1;
+    const disc=b*b-c;
+    if(disc<0) return -1;
+    const t=-b-Math.sqrt(disc);
+    return t>1e-12 ? t : -1;
+  }
+  // Möller–Trumbore over a baked triangle list (flat f64: 9 numbers/tri),
+  // front faces only (CCW outward — matches THREE geometry winding).
+  function rayTriangles(o,d,tris){
+    let best=-1;
+    for(let i=0;i<tris.length;i+=9){
+      const ax=tris[i],ay=tris[i+1],az=tris[i+2];
+      const e1x=tris[i+3]-ax, e1y=tris[i+4]-ay, e1z=tris[i+5]-az;
+      const e2x=tris[i+6]-ax, e2y=tris[i+7]-ay, e2z=tris[i+8]-az;
+      const px=d[1]*e2z-d[2]*e2y, py=d[2]*e2x-d[0]*e2z, pz=d[0]*e2y-d[1]*e2x;
+      const det=e1x*px+e1y*py+e1z*pz;
+      if(det<1e-12) continue;                     // backface or parallel
+      const tx=o[0]-ax, ty=o[1]-ay, tz=o[2]-az;
+      const u=(tx*px+ty*py+tz*pz)/det;
+      if(u<0||u>1) continue;
+      const qx=ty*e1z-tz*e1y, qy=tz*e1x-tx*e1z, qz=tx*e1y-ty*e1x;
+      const v=(d[0]*qx+d[1]*qy+d[2]*qz)/det;
+      if(v<0||u+v>1) continue;
+      const t=(e2x*qx+e2y*qy+e2z*qz)/det;
+      if(t>1e-12&&(best<0||t<best)) best=t;
+    }
+    return best;
+  }
   function pickNearestInstance(clientX,clientY,angTan){
     const dir=worldRayDir(clientX,clientY), E=cam.E;
-    let bestT=Infinity, point=null, bestR=0, bestCh=-1, bestK=-1;
+    // exact accept (surface hits) — always wins when present
+    let exT=Infinity, exPoint=null, exR=0, exCh=-1, exK=-1;
+    // fuzzy fallback (cone hits on sub-FUZZ_PX instances) — legacy behavior
+    let fzT=Infinity, fzPoint=null, fzR=0, fzCh=-1, fzK=-1;
     for(const ch of chunks){
       const chunkScale=Math.pow(2, 20*(cam.bandExp-ch.bandExp));
       if(!isFinite(chunkScale)||chunkScale===0) continue;
       const A=V3.scale(ch.anchor,chunkScale), bR=ch.boundR*chunkScale;
       const oc=V3.sub(A,E), tc=V3.dot(oc,dir);
       if(tc<-bR) continue;
+      if(tc-bR>=exT && tc-bR>=fzT) continue;      // can't improve either accept
       const perp2c=V3.dot(oc,oc)-tc*tc, rr=bR*1.05+Math.max(tc,0)*angTan;
       if(perp2c>rr*rr) continue;
       const ax=A[0],ay=A[1],az=A[2];
@@ -1187,12 +1263,28 @@
               wy=ay+ch.ipos[k*3+1]*chunkScale-E[1],
               wz=az+ch.ipos[k*3+2]*chunkScale-E[2];
         const t=wx*dir[0]+wy*dir[1]+wz*dir[2];
-        if(t<=1e-12||t>=bestT) continue;
+        if(t<=1e-12) continue;
+        if(t-r>=exT && t>=fzT) continue;          // can't improve either accept
         const p2=(wx*wx+wy*wy+wz*wz)-t*t, tol=t*angTan+r;
-        if(p2<=tol*tol){ bestT=t; bestR=r; point=[wx+E[0],wy+E[1],wz+E[2]]; bestCh=ch.id; bestK=k; }
+        if(p2>tol*tol) continue;                  // broad phase: not a candidate
+        // ---- narrow phase: ray in the unit-primitive frame (pickfix.md §2.2)
+        const q=[ch.iquat[k*4],ch.iquat[k*4+1],ch.iquat[k*4+2],ch.iquat[k*4+3]];
+        const o1=conjRotate(q,[-wx/r,-wy/r,-wz/r]);
+        const d1=conjRotate(q,dir);
+        const typeId=ch.itype[k];
+        const tl = typeId===0 ? rayUnitSphere(o1,d1) : rayTriangles(o1,d1,pickTris[typeId]);
+        if(tl>0){
+          const tw=tl*r;                          // back to world units
+          if(tw<exT){ exT=tw; exR=r; exCh=ch.id; exK=k;
+                      exPoint=[E[0]+dir[0]*tw, E[1]+dir[1]*tw, E[2]+dir[2]*tw]; }
+        }else if(t<fzT && projDiameter(2*r,t,TAN_HALF,innerHeight)<FUZZ_PX){
+          fzT=t; fzR=r; fzCh=ch.id; fzK=k;
+          fzPoint=[wx+E[0],wy+E[1],wz+E[2]];
+        }
       }
     }
-    return {hit:point!==null, t:bestT, r:bestR, point, dir, chunkId:bestCh, index:bestK};
+    if(exPoint) return {hit:true, t:exT, r:exR, point:exPoint, dir, chunkId:exCh, index:exK};
+    return {hit:fzPoint!==null, t:fzT, r:fzR, point:fzPoint, dir, chunkId:fzCh, index:fzK};
   }
   function pickPivot(clientX,clientY){
     const r=pickNearestInstance(clientX,clientY,PICK_TAN);
