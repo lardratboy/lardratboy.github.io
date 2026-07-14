@@ -1,0 +1,1297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Scriptorium · Blocks all the way down</title>
+<style>
+  :root{
+    --void:#05060c;
+    --panel:rgba(11,15,26,.72);
+    --hair:rgba(150,170,215,.14);
+    --hair-strong:rgba(150,170,215,.30);
+    --dim:#6f7b97;
+    --ink:#c7d1e6;
+    --ink-bright:#e8eefc;
+    --heat:#ffb454;
+    --ok:#66d19e;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Consolas", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", system-ui, sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;background:var(--void)}
+  body{font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased;touch-action:none;user-select:none}
+  #stage{position:fixed;inset:0;
+    background:linear-gradient(180deg,#0a1024 0%,#13203c 42%,#2a3b5e 78%,#4a5f84 100%)}
+  canvas{display:block;width:100%;height:100%}
+
+  .panel{background:var(--panel);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);
+         border:1px solid var(--hair);border-radius:10px}
+
+  /* brand */
+  #brand{position:fixed;top:14px;left:16px;z-index:5;padding:7px 12px;display:flex;gap:10px;align-items:baseline}
+  #brand b{font-weight:600;font-size:13px;color:var(--ink-bright);letter-spacing:.02em}
+  #brand span{font-family:var(--mono);font-size:10.5px;color:var(--dim);letter-spacing:.08em;text-transform:uppercase}
+
+  /* depth readout */
+  #depth{position:fixed;top:14px;right:16px;z-index:5;padding:9px 13px;min-width:196px;text-align:right}
+  #depth .cap{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+  #mag{font-family:var(--mono);font-size:24px;color:var(--heat);line-height:1.15;font-weight:500}
+  #mag i{font-style:normal;font-size:13px;color:var(--dim);margin-left:1px}
+  #sizeline{font-size:12px;color:var(--ink-bright);margin-top:3px}
+  #sizeline em{font-style:normal;color:var(--dim)}
+  #aimline{margin-top:3px;font-size:11.5px;color:var(--ink)}
+  #aimline em{color:var(--dim);font-style:normal}
+  #aimline b{color:var(--heat);font-weight:500}
+  #stats{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:5px;letter-spacing:.04em}
+
+  /* size ladder */
+  #ladder{position:fixed;right:16px;top:132px;bottom:120px;width:196px;z-index:5;
+          display:flex;flex-direction:column;justify-content:space-between;padding:10px 12px;pointer-events:none}
+  #ladder .rung{display:flex;justify-content:flex-end;align-items:center;gap:8px;
+                font-size:11px;color:var(--dim);white-space:nowrap;opacity:.5;transition:opacity .18s,color .18s}
+  #ladder .rung .m{font-family:var(--mono);font-size:9.5px;letter-spacing:.03em;opacity:.7}
+  #ladder .rung .tick{width:14px;height:1px;background:var(--hair-strong);flex:none}
+  #ladder .rung.on{opacity:1;color:var(--heat)}
+  #ladder .rung.on .tick{background:var(--heat);width:26px}
+
+  /* crosshair */
+  #cross{position:fixed;left:50%;top:50%;width:18px;height:18px;margin:-9px 0 0 -9px;z-index:4;pointer-events:none;opacity:.85}
+  #cross:before,#cross:after{content:"";position:absolute;background:#e8eefc;box-shadow:0 0 2px rgba(0,0,0,.8)}
+  #cross:before{left:8px;top:0;width:2px;height:18px}
+  #cross:after{top:8px;left:0;height:2px;width:18px}
+
+  /* hotbar */
+  #hotbar{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:5;
+          display:flex;gap:6px;padding:7px}
+  .slot{width:48px;height:48px;border-radius:7px;border:1px solid var(--hair);position:relative;cursor:pointer;
+        display:flex;align-items:flex-end;justify-content:center;padding-bottom:3px}
+  .slot .sw{position:absolute;inset:6px 6px 14px 6px;border-radius:4px;box-shadow:inset 0 -10px 14px rgba(0,0,0,.35),inset 0 6px 10px rgba(255,255,255,.22)}
+  .slot .k{font-family:var(--mono);font-size:9px;color:var(--dim);position:relative;z-index:1}
+  .slot.on{border-color:var(--heat);box-shadow:0 0 0 1px rgba(255,180,84,.35)}
+  .slot.on .k{color:var(--heat)}
+
+  /* hint line */
+  #hint{position:fixed;bottom:82px;left:50%;transform:translateX(-50%);z-index:5;
+        font-size:12.5px;color:var(--ink);padding:7px 13px;opacity:0;transition:opacity .25s;pointer-events:none;white-space:nowrap}
+  #hint.on{opacity:1}
+  #hint b{color:var(--heat);font-weight:600}
+
+  /* the stamp slot: a block you are carrying, with its interior */
+  #hotbar .slot.stamp{opacity:.32}
+  #hotbar .slot.stamp.has{opacity:1}
+  #hotbar .slot.stamp .sw{position:relative;overflow:hidden}
+  #hotbar .slot.stamp.deep .sw::after{content:'';position:absolute;inset:24%;
+        border:1px solid rgba(0,0,0,.5);box-shadow:inset 0 0 0 1px rgba(255,255,255,.42),
+        0 0 0 1px rgba(255,255,255,.16)}
+  #hotbar .slot.stamp.deep .sw::before{content:'';position:absolute;inset:40%;
+        background:rgba(255,255,255,.30)}
+  #hotbar .slot.stamp.up{box-shadow:0 0 0 1px var(--heat), 0 0 14px rgba(255,180,84,.35)}
+
+  /* help */
+  #helpBtn{position:fixed;bottom:18px;right:16px;z-index:10;width:34px;height:34px;border-radius:9px;
+           background:var(--panel);border:1px solid var(--hair);color:var(--ink);font-size:14px;cursor:pointer}
+  #help{position:fixed;bottom:60px;right:16px;z-index:10;width:290px;padding:14px;display:none}
+  #help.on{display:block}
+  #help h4{margin:0 0 9px;font-size:12px;color:var(--ink-bright);letter-spacing:.03em}
+  #help .row{display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:12px;color:var(--dim)}
+  #help kbd{font-family:var(--mono);font-size:10.5px;color:var(--ink);background:rgba(150,170,215,.10);
+            border:1px solid var(--hair);border-radius:5px;padding:1px 6px}
+  #help .note{margin-top:10px;padding-top:9px;border-top:1px solid var(--hair);font-size:11.5px;line-height:1.5;color:var(--dim)}
+  #help .note em{color:var(--heat);font-style:normal}
+
+  /* lock overlay */
+  #lock{position:fixed;inset:0;z-index:9;display:flex;align-items:center;justify-content:center;
+        background:rgba(4,6,12,.72);backdrop-filter:blur(3px);cursor:pointer}
+  #lock.off{display:none}
+  #lock .card{text-align:center;max-width:430px;padding:26px 30px}
+  #lock h1{margin:0 0 6px;font-size:21px;color:var(--ink-bright);font-weight:600;letter-spacing:.01em}
+  #lock h2{margin:0 0 16px;font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--heat);font-weight:500}
+  #lock p{margin:0 0 6px;font-size:13px;line-height:1.6;color:var(--dim)}
+  #lock .go{margin-top:18px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-bright)}
+  #lock .go span{color:var(--heat)}
+</style>
+</head>
+<body>
+  <div id="stage"></div>
+
+  <div id="brand" class="panel"><b>Scriptorium</b><span>blocks all the way down</span></div>
+
+  <div id="depth" class="panel">
+    <div class="cap">magnification</div>
+    <div id="mag">1<i>×</i></div>
+    <div id="sizeline"><em>you are</em> 1 m tall</div>
+    <div id="aimline"><em>aiming at</em> the finest blocks in view</div>
+    <div id="stats">level 0 · 0 worlds · 0 blocks</div>
+  </div>
+
+  <div id="ladder" class="panel"></div>
+
+  <div id="cross"></div>
+  <div id="hotbar" class="panel"></div>
+  <div id="hint"></div>
+
+  <button id="helpBtn">?</button>
+  <div id="help" class="panel on">
+    <h4>Controls</h4>
+    <div class="row"><span>Look</span><kbd>mouse</kbd></div>
+    <div class="row"><span>Move</span><kbd>W A S D</kbd></div>
+    <div class="row"><span>Walk / fly</span><kbd>F</kbd></div>
+    <div class="row"><span>Jump &nbsp;<i style="opacity:.5">(walk)</i></span><kbd>space</kbd></div>
+    <div class="row"><span>Up / down &nbsp;<i style="opacity:.5">(fly)</i></span><kbd>space / shift</kbd></div>
+    <div class="row"><span>Sprint / boost</span><kbd>ctrl</kbd></div>
+    <div class="row"><span>Break block</span><kbd>left click</kbd></div>
+    <div class="row"><span>Place block</span><kbd>right click</kbd></div>
+    <div class="row"><span>Open a block</span><kbd>E</kbd></div>
+    <div class="row"><span>Pick up a block <i style="opacity:.5">(+ its interior)</i></span><kbd>G</kbd></div>
+    <div class="row"><span>Aim bigger / smaller</span><kbd>[</kbd> <kbd>]</kbd></div>
+    <div class="row"><span>Promote what's in hand</span><kbd>,</kbd> <kbd>.</kbd></div>
+    <div class="row"><span>Shrink (dive)</span><kbd>Q</kbd> <kbd>scroll &uarr;</kbd></div>
+    <div class="row"><span>Grow (surface)</span><kbd>Z</kbd> <kbd>scroll &darr;</kbd></div>
+    <div class="row"><span>Material</span><kbd>1 – 6</kbd></div>
+    <div class="row"><span>Release cursor</span><kbd>esc</kbd></div>
+    <div class="row"><span>This panel</span><kbd>?</kbd></div>
+    <div class="note">Every block is made of blocks. Press <em>E</em> on one to open it: it becomes 8×8×8 smaller blocks of the same stuff. Mine a shaft down into it and <em>scroll to shrink</em> until you fit — you'll drop inside, and it's a whole world. Repeat forever. Scroll the other way to grow back out; the world you left is still there, above you, enormous.<br><br>Once a block is open you are looking at its 512 children, so the crosshair grabs <em>them</em>. Press <em>[</em> to aim at bigger blocks: the open block folds back up into one block you can break, grab or stamp whole. <em>]</em> aims finer again. The aim is held as a size <b>relative to you</b>, so it follows you down.<br><br><em>G</em> picks up the block you're looking at <b>together with everything inside it</b> — every sub-block, every sub-sub-block, however deep you carved. Right-click stamps it back down. A subtree has no scale, so you can stamp what you built at 10⁶× as a mountain, or stamp it inside itself.<br><br>And you can <b>promote</b> it. Press <em>.</em> and the thing in your hand stamps <em>one level up</em>: its 512 children stop being the inside of a block and become 8×8×8 blocks of the world you're standing in, each eight times the size it was, each still carrying whatever was inside <em>it</em>. Press <em>.</em> again for 64³. Carve at the scale of a grain of salt; stamp it out as terrain. <em>,</em> steps back down.<br><br>Press <em>F</em> to stand up and walk. Gravity is written in units of <em>you</em>, so a fall from a block feels the same whether the block is a metre wide or a nanometre.</div>
+  </div>
+
+  <div id="lock">
+    <div class="card panel">
+      <h2>Scriptorium</h2>
+      <h1>Blocks all the way down.</h1>
+      <p>A block world you can fall into. Look at a block, press <b>E</b>: it opens, and turns out to be made of 512 smaller blocks of the same stuff.</p>
+      <p>Mine a tunnel into it, then <b>scroll to shrink</b>. You'll drop inside, and it's a world — with its own stone, its own dirt, its own ore. Do it again. And again.</p>
+      <div class="go">click to <span>play</span> · esc to release the cursor</div>
+    </div>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+  "use strict";
+
+  // ===================================================================
+  //  0 · THE IDEA, IN NUMBERS
+  //
+  //  This is InfiPoint's substrate with the payload swapped for voxels,
+  //  and one simplification the voxel model buys us for free:
+  //
+  //  In a *nested* world, everything near you is small and everything
+  //  big is far away — automatically. So we never need an absolute
+  //  coordinate at all. Each world (an 8³ grid living inside one block
+  //  of its parent) is a BAND: scale relative to the parent is exactly
+  //  1/8, tracked as an integer level, never as a float. The camera's
+  //  frame of reference is one such world; everything else is expressed
+  //  relative to it, and worlds more than a few levels away in scale are
+  //  either invisible or collapsed to a single solid cube by LOD.
+  //
+  //  Result: f64 coordinates stay inside [1e-3, 1e6] forever, the f32
+  //  the GPU sees is always a small local offset (RTC, ubertheory §2),
+  //  and the depth you can reach is bounded only by the integer `level`.
+  // ===================================================================
+
+  const N        = 8;      // a block subdivides into N³ sub-blocks
+  const R_MIN    = 1/N;    // player-scale envelope, in cells of the reference world
+  const R_MAX    = 1.0;    //   ...crossing it triggers a band transport (descend/ascend)
+  const R_ROOF   = 90;     // at the root there is no parent, so we just cap the zoom-out
+  const ANCESTORS= 5;      // how many levels of parent world we keep on screen (8^5 = 32768×)
+  const CELL_PX  = 3.0;    // a child world is drawn only while its cells are ≥ this many px
+  const CELL_PX_H= 2.1;    //   ...hysteresis: once drawn, it survives down to this (ubertheory §6.4)
+  const MAX_WORLDS = 64;
+  const REACH    = 5.0;    // in reference-world cells. Minecraft's arm, basically.
+  const FOV      = 70;
+  const TANHALF  = Math.tan(FOV*Math.PI/360);
+  const ROOT_METERS = 1.0; // a root block is one metre. Everything else follows.
+
+  // ---- materials -------------------------------------------------
+  const MAT = [
+    null,
+    { id:1, name:'grass',  c:0x6cbf4b },
+    { id:2, name:'dirt',   c:0x8a6141 },
+    { id:3, name:'stone',  c:0x8d939c },
+    { id:4, name:'sand',   c:0xdccf9e },
+    { id:5, name:'wood',   c:0x7a5230 },
+    { id:6, name:'leaves', c:0x4f9e3a },
+    { id:7, name:'gold',   c:0xe8b73c },  // only found by going deeper
+  ];
+
+  // ===================================================================
+  //  1 · WORLDS  (the tree)
+  //     A world is a voxel grid. Every world except the root occupies
+  //     exactly one block of its parent. That block is "open".
+  // ===================================================================
+  let nextWorldId = 1;
+  const worlds = new Map();
+
+  function makeWorld(dims, parent){
+    const w = {
+      id: nextWorldId++,
+      dims,                                    // [nx,ny,nz]
+      level: parent ? worlds.get(parent.w).level+1 : 0,
+      vox: new Uint8Array(dims[0]*dims[1]*dims[2]),
+      kids: new Map(),                         // block index -> child world id
+      parent,                                  // {w, i, j, k} or null
+      dirty: true,
+      solid: null, open: null,                 // InstancedMeshes
+      visCount: 0,
+    };
+    worlds.set(w.id, w);
+    return w;
+  }
+  const idx3 = (w,i,j,k)=> i + w.dims[0]*(j + w.dims[1]*k);
+  function get(w,i,j,k){
+    const [nx,ny,nz]=w.dims;
+    if(i<0||j<0||k<0||i>=nx||j>=ny||k>=nz) return -1;   // -1 = outside this world
+    return w.vox[idx3(w,i,j,k)];
+  }
+  function inb(w,i,j,k){
+    const [nx,ny,nz]=w.dims;
+    return i>=0&&j>=0&&k>=0&&i<nx&&j<ny&&k<nz;
+  }
+
+  // ---- the root: a small floating island --------------------------
+  function hash2(x,z,s){ const n=Math.sin(x*127.1+z*311.7+s*74.7)*43758.5453; return n-Math.floor(n); }
+  function vnoise(x,z,s){
+    const xi=Math.floor(x), zi=Math.floor(z), xf=x-xi, zf=z-zi;
+    const u=xf*xf*(3-2*xf), v=zf*zf*(3-2*zf);
+    const a=hash2(xi,zi,s), b=hash2(xi+1,zi,s), c=hash2(xi,zi+1,s), d=hash2(xi+1,zi+1,s);
+    return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v;
+  }
+  function buildRoot(){
+    const RX=30, RY=18, RZ=30;
+    const w = makeWorld([RX,RY,RZ], null);
+    const cx=(RX-1)/2, cz=(RZ-1)/2;
+    const set=(i,j,k,m)=>{ if(inb(w,i,j,k)) w.vox[idx3(w,i,j,k)]=m; };
+    for(let i=0;i<RX;i++) for(let k=0;k<RZ;k++){
+      const dx=(i-cx)/(RX/2), dz=(k-cz)/(RZ/2);
+      const rad=Math.sqrt(dx*dx+dz*dz);
+      if(rad>0.98) continue;
+      const fall = 1 - Math.pow(Math.min(1,rad/0.98), 2.4);
+      let h = Math.round(7 + fall*(2 + 4.0*vnoise(i/8,k/8,1) + 1.6*vnoise(i/3.4,k/3.4,2)));
+      if(fall<0.06) continue;
+      const thick = Math.round(2 + 5*fall + 2*vnoise(i/5,k/5,7));
+      const base  = Math.max(0, h - thick);
+      const beach = h<=8;
+      for(let j=base;j<=h;j++){
+        let m;
+        if(j===h)      m = beach?4:1;
+        else if(j>h-3) m = beach?4:2;
+        else           m = 3;
+        set(i,j,k,m);
+      }
+    }
+    // trees — the familiar object you will end up inside of
+    for(let t=0;t<7;t++){
+      const i=4+Math.floor(hash2(t,3,11)*(RX-8)), k=4+Math.floor(hash2(t,9,13)*(RZ-8));
+      let h=-1; for(let j=RY-1;j>=0;j--) if(get(w,i,j,k)===1){h=j;break;}
+      if(h<0) continue;
+      const th = 3+Math.floor(hash2(t,1,17)*3);
+      for(let j=1;j<=th;j++) set(i,h+j,k,5);
+      for(let di=-2;di<=2;di++) for(let dk=-2;dk<=2;dk++) for(let dj=0;dj<=2;dj++){
+        const d=Math.abs(di)+Math.abs(dk)+dj;
+        if(d>3) continue;
+        if(get(w,i+di,h+th+dj,k+dk)===0) set(i+di,h+th+dj,k+dk,6);
+      }
+    }
+    return w;
+  }
+
+  // ---- opening a block: the whole game, in one function ------------
+  //  The block does not vanish. It becomes N³ blocks of what it is made of.
+  function openBlock(w,i,j,k){
+    const ii = idx3(w,i,j,k);
+    const m  = w.vox[ii];
+    if(!m || w.kids.has(ii)) return null;
+    const c = makeWorld([N,N,N], {w:w.id,i,j,k});
+    for(let z=0;z<N;z++) for(let y=0;y<N;y++) for(let x=0;x<N;x++){
+      let s = m;
+      if(m===1)      s = (y===N-1) ? 1 : 2;                       // grass is a skin on dirt
+      else if(m===6) s = (hash2(x*3+z,y*7,w.id)>0.45) ? 6 : 0;    // leaves are mostly air
+      else if(m===3) s = (hash2(x+y*5,z*3,w.id+91)>0.965) ? 7 : 3;// stone hides ore, if you look closely
+      c.vox[idx3(c,x,y,z)] = s;
+    }
+    w.kids.set(ii, c.id);
+    w.dirty = true;                                  // its neighbours are exposed now
+    return c;
+  }
+  function closeBlock(w,ii){                          // breaking an open block frees its world
+    const cid = w.kids.get(ii);
+    if(cid===undefined) return;
+    const stack=[cid];
+    while(stack.length){
+      const c = worlds.get(stack.pop());
+      if(!c) continue;
+      for(const kid of c.kids.values()) stack.push(kid);
+      if(c.solid){ scene.remove(c.solid); c.solid.geometry.dispose(); c.solid.material.dispose(); }
+      if(c.open){  scene.remove(c.open);  c.open.material.dispose(); }   // geometry is shared
+      worlds.delete(c.id);
+    }
+    w.kids.delete(ii);
+  }
+
+  // ===================================================================
+  //  2 · CAMERA  —  (reference world, f64 position, player scale R)
+  //     R is the player's size in cells of the reference world. It is
+  //     held inside [1/8, 1] by descending / ascending the world tree:
+  //     the exact structure of ubertheory §3, with BAND_SCALE = 8 and
+  //     bandExp = the world's level.
+  // ===================================================================
+  const cam = { world:null, pos:[0,0,0], R:1.0, yaw:0.6, pitch:-0.28,
+                vel:[0,0,0], fly:true, onGround:false };
+
+  function camDir(){
+    const cp=Math.cos(cam.pitch);
+    return [ -Math.sin(cam.yaw)*cp, Math.sin(cam.pitch), -Math.cos(cam.yaw)*cp ];
+  }
+  function bandTransport(){
+    let guard=0;
+    while(guard++<8){
+      const w = cam.world;
+      if(cam.R > R_MAX && w.parent){                       // ascend: grow past a whole cell
+        const p = worlds.get(w.parent.w);
+        cam.pos = [ w.parent.i + cam.pos[0]/N,
+                    w.parent.j + cam.pos[1]/N,
+                    w.parent.k + cam.pos[2]/N ];
+        cam.R /= N; cam.world = p;
+        cam.vel = [cam.vel[0]/N, cam.vel[1]/N, cam.vel[2]/N];   // velocity is in cells/s
+        flash('surfaced — you are back in the '+(p.parent?'block above':'world above'));
+        continue;
+      }
+      if(cam.R < R_MIN){                                   // descend: shrink below a sub-cell
+        const i=Math.floor(cam.pos[0]), j=Math.floor(cam.pos[1]), k=Math.floor(cam.pos[2]);
+        const cid = inb(w,i,j,k) ? w.kids.get(idx3(w,i,j,k)) : undefined;
+        if(cid!==undefined){
+          const c = worlds.get(cid);
+          cam.pos = [ (cam.pos[0]-i)*N, (cam.pos[1]-j)*N, (cam.pos[2]-k)*N ];
+          cam.R *= N; cam.world = c;
+          cam.vel = [cam.vel[0]*N, cam.vel[1]*N, cam.vel[2]*N];
+          flash('you are inside a block of '+MAT[parentMat(c)].name);
+          continue;
+        }
+        cam.R = R_MIN;                                     // nothing to fall into — hold here
+        hint('open a block with <b>E</b>, mine into it, then shrink');
+      }
+      if(!cam.world.parent) cam.R = Math.min(cam.R, R_ROOF);
+      break;
+    }
+  }
+  function parentMat(c){
+    const p=worlds.get(c.parent.w);
+    return p.vox[idx3(p,c.parent.i,c.parent.j,c.parent.k)] || 3;
+  }
+  // the camera's absolute level: how many times you have descended.
+  const camLevel = ()=> cam.world.level;
+
+  // ===================================================================
+  //  2b · GRAVITY, COLLISION, WALKING
+  //
+  //  solidAt() is the one interesting function. A point is solid if the
+  //  world tree says so — and answering that means walking the tree, not
+  //  indexing a grid:
+  //
+  //    · cell is air            -> not solid
+  //    · cell is a plain block  -> solid
+  //    · cell is an OPEN block  -> descend into its child world and ask again
+  //    · point is out of bounds -> ascend to the parent world and ask again
+  //
+  //  So you can stand on a block, on a sub-block of that block, or on a
+  //  sub-sub-block, with no special cases anywhere: the recursion resolves
+  //  the surface at whatever depth it actually exists. Walk off the edge of
+  //  a block you're inside and you fall out into the world above it.
+  //
+  //  All the constants are linear in cam.R (your height), which is why
+  //  gravity feels identical at every magnification: the whole physics is
+  //  written in units of *you*.
+  // ===================================================================
+  const G_ACCEL = 10.9;      // cells/s^2 per unit of R  (= 9.8 m/s^2 at spawn)
+  const V_JUMP  =  5.6;      // ~1.3 blocks of hop
+  const V_WALK  =  4.6;
+  const P_WIDTH =  0.30;     // half-width, in player heights
+  const EYE     =  0.80;     // eye height above the feet
+
+  function solidAtIn(w, p, depth){
+    if(depth>14) return false;
+    const i=Math.floor(p[0]), j=Math.floor(p[1]), k=Math.floor(p[2]);
+    if(!inb(w,i,j,k)){
+      if(!w.parent) return false;                          // outside the root = sky
+      const P=worlds.get(w.parent.w);
+      return solidAtIn(P, [ w.parent.i + p[0]/N,
+                            w.parent.j + p[1]/N,
+                            w.parent.k + p[2]/N ], depth+1);
+    }
+    const ii=idx3(w,i,j,k), m=w.vox[ii];
+    if(!m) return false;
+    const cid=w.kids.get(ii);
+    if(cid!==undefined){
+      const c=worlds.get(cid);
+      return solidAtIn(c, [ (p[0]-i)*N, (p[1]-j)*N, (p[2]-k)*N ], depth+1);
+    }
+    return true;
+  }
+  const solidAt = p => solidAtIn(cam.world, p, 0);
+
+  //  Sample the player's box. Cheap, and correct at the scale that matters:
+  //  the blocks you stand on are never much smaller than you are.
+  function hits(p){
+    const hw=P_WIDTH*cam.R, H=cam.R;
+    const y0=p[1]-EYE*H+1e-4, y1=p[1]+(1-EYE)*H-1e-4;
+    for(let sx=-1;sx<=1;sx++) for(let sz=-1;sz<=1;sz++){
+      const x=p[0]+sx*hw, z=p[2]+sz*hw;
+      for(let t=0;t<=3;t++){
+        if(solidAt([x, y0+(y1-y0)*t/3, z])) return true;
+      }
+    }
+    return false;
+  }
+
+  function movePhysical(dt){
+    let dx=cam.vel[0]*dt, dy=cam.vel[1]*dt, dz=cam.vel[2]*dt;
+    if(hits(cam.pos)){                     // embedded — you grew, or the ground grew into you
+      cam.vel[1]=0;                        // don't sink to the void: hang, and walk yourself out
+      cam.pos[0]+=dx; cam.pos[2]+=dz;
+      return;
+    }
+    const step = 0.18*cam.R;
+    const n = Math.max(1, Math.ceil(Math.max(Math.abs(dx),Math.abs(dy),Math.abs(dz))/step));
+    cam.onGround=false;
+    //  Move one axis. If we hit, back off and bisect down to contact — without
+    //  this you hover up to a substep above the floor, which at these scales is
+    //  visible (and would make solidAt-under-your-feet lie to the rest of the app).
+    const axis=(a, s)=>{
+      const p=cam.pos;
+      p[a]+=s;
+      if(!hits(p)) return false;
+      p[a]-=s;
+      let rem=s;
+      for(let it=0; it<7; it++){ rem*=0.5; p[a]+=rem; if(hits(p)) p[a]-=rem; }
+      return true;
+    };
+    for(let q=0;q<n;q++){
+      const sx=dx/n, sy=dy/n, sz=dz/n;
+      if(axis(0,sx)) cam.vel[0]=0;
+      if(axis(2,sz)) cam.vel[2]=0;
+      if(axis(1,sy)){ if(sy<0) cam.onGround=true; cam.vel[1]=0; }
+    }
+  }
+
+  // ===================================================================
+  //  3 · THREE  —  RTC: the camera sits at the origin, forever.
+  // ===================================================================
+  let renderer, scene, camera, cube, highlight, ghost;
+  const TINT = {px:0.82, nx:0.72, py:1.0, ny:0.52, pz:0.90, nz:0.66};
+
+  //  Face bookkeeping for the mesher.  For axis a, (u0,v0) is the pair of
+  //  other axes with  u0 x v0 = +a.  A +face uses (u0,v0), a -face swaps
+  //  them, so the quad -- wound (-,-) (+,-) (+,+) (-,+) -- is always CCW
+  //  seen from outside.
+  const AXIS_UV   = [[1,2],[2,0],[0,1]];
+  const FACE_TINT = [[TINT.nx,TINT.px],[TINT.ny,TINT.py],[TINT.nz,TINT.pz]];
+  const CORNERS   = [[-1,-1],[1,-1],[1,1],[-1,1]];
+  //  ambient occlusion: 3 = open corner, 0 = corner buried by two neighbours.
+  const AO_LEVEL  = [0.40, 0.60, 0.80, 1.00];
+
+  function unitCube(){
+    const g = new THREE.BufferGeometry();
+    const pos=[], col=[], idxs=[], nrm=[];
+    const faces = [
+      [[ .5,-.5,-.5],[ .5,-.5, .5],[ .5, .5, .5],[ .5, .5,-.5],[1,0,0],TINT.px],
+      [[-.5,-.5, .5],[-.5,-.5,-.5],[-.5, .5,-.5],[-.5, .5, .5],[-1,0,0],TINT.nx],
+      [[-.5, .5,-.5],[ .5, .5,-.5],[ .5, .5, .5],[-.5, .5, .5],[0,1,0],TINT.py],
+      [[-.5,-.5, .5],[ .5,-.5, .5],[ .5,-.5,-.5],[-.5,-.5,-.5],[0,-1,0],TINT.ny],
+      [[-.5,-.5, .5],[-.5, .5, .5],[ .5, .5, .5],[ .5,-.5, .5],[0,0,1],TINT.pz],
+      [[ .5,-.5,-.5],[ .5, .5,-.5],[-.5, .5,-.5],[-.5,-.5,-.5],[0,0,-1],TINT.nz],
+    ];
+    faces.forEach((f,fi)=>{
+      const t=f[5];
+      for(let v=0;v<4;v++){ pos.push(...f[v]); nrm.push(...f[4]); col.push(t,t,t); }
+      const b=fi*4; idxs.push(b,b+2,b+1, b,b+3,b+2);   // CCW seen from OUTSIDE
+    });
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+    g.setAttribute('normal',   new THREE.Float32BufferAttribute(nrm,3));
+    g.setAttribute('color',    new THREE.Float32BufferAttribute(col,3));   // baked face light
+    g.setIndex(idxs);
+    return g;
+  }
+
+  function initThree(){
+    const stage = document.getElementById('stage');
+    renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true, logarithmicDepthBuffer:true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setClearColor(0x000000, 0);
+    stage.appendChild(renderer.domElement);
+    scene  = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(FOV, innerWidth/innerHeight, 0.01, 1e7);
+    camera.rotation.order='YXZ';
+    cube = unitCube();
+
+    const hg = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.002,1.002,1.002));
+    highlight = new THREE.LineSegments(hg, new THREE.LineBasicMaterial({color:0x101018, transparent:true, opacity:.85}));
+    highlight.frustumCulled=false; highlight.visible=false;
+    scene.add(highlight);
+
+    ghost = new THREE.LineSegments(hg, new THREE.LineBasicMaterial({color:0xffb454, transparent:true, opacity:.55}));
+    ghost.frustumCulled=false; ghost.visible=false;
+    scene.add(ghost);
+
+    addEventListener('resize', ()=>{
+      renderer.setSize(innerWidth, innerHeight);
+      camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+    });
+  }
+
+  function nextPow2(n){ let p=64; while(p<n) p<<=1; return p; }
+  //  Only the LOD "open" pass is instanced now: those cubes stand in for a
+  //  whole sub-world that is too small to resolve, so they are always small
+  //  on screen and want no AO and no face culling.
+  function ensureMesh(w, which, need){
+    let m = w[which];
+    if(m && m.instanceMatrix.count >= need) return m;
+    if(m){ scene.remove(m); }
+    const cap = nextPow2(Math.max(need,64));
+    const mat = new THREE.MeshBasicMaterial({ vertexColors:true });
+    m = new THREE.InstancedMesh(cube, mat, cap);
+    m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap*3), 3);
+    m.frustumCulled = false;
+    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(m);
+    w[which] = m;
+    return m;
+  }
+
+  const _m4 = new THREE.Matrix4(), _c = new THREE.Color();
+  function tintOf(m, salt){
+    _c.setHex(MAT[m].c);
+    const j = 0.90 + 0.20*hash2(salt&1023, (salt>>10)&1023, m);
+    _c.multiplyScalar(j);
+    return _c;
+  }
+
+  // ---- solid pass: one merged mesh per world, rebuilt on edit -------
+  //  Two things happen here that a shared-geometry InstancedMesh can never
+  //  do, and they are the whole visual difference:
+  //
+  //   · per-FACE culling.  A face is emitted only if the neighbouring cell
+  //     is air, out-of-world, or open. The interior of the island is never
+  //     built at all, and even the shell drops ~2/3 of its triangles.
+  //
+  //   · per-VERTEX ambient occlusion.  Each of a face's four corners counts
+  //     its three diagonal neighbours (two edge-adjacent, one corner) and
+  //     darkens accordingly. It costs nothing at draw time — it is baked
+  //     into the vertex colour — and it is what makes a cube world read as
+  //     having volume instead of as a pile of flat swatches. It also does
+  //     the most important job in this particular game: the seam where a
+  //     world meets its sub-blocks gets a real contact shadow, so *depth
+  //     looks like depth*.
+  //
+  //  The quad is triangulated along whichever diagonal keeps the AO from
+  //  bleeding across the bright corner — the classic anisotropy fix.
+  function rebuild(w){
+    const [nx,ny,nz]=w.dims;
+    const solidAtCell = (i,j,k)=>{
+      if(!inb(w,i,j,k)) return false;
+      const ii=idx3(w,i,j,k);
+      return w.vox[ii]!==0 && !w.kids.has(ii);        // open cells occlude nothing
+    };
+    const P=[], C=[], NR=[], IX=[];
+    let vc=0, faceCount=0, visCount=0;
+    const cl=new THREE.Color();
+
+    for(let k=0;k<nz;k++) for(let j=0;j<ny;j++) for(let i=0;i<nx;i++){
+      const ii=idx3(w,i,j,k), m=w.vox[ii];
+      if(!m || w.kids.has(ii)) continue;
+      const jt = 0.92 + 0.16*hash2((i*7+1)&1023, (j*13+3)&1023, (k*17+5)&1023);
+      cl.setHex(MAT[m].c);
+      const cr=cl.r*jt, cg=cl.g*jt, cb=cl.b*jt;
+      let drew=false;
+
+      for(let a=0;a<3;a++) for(let sg=-1; sg<=1; sg+=2){
+        const nb=[i,j,k]; nb[a]+=sg;
+        if(solidAtCell(nb[0],nb[1],nb[2])) continue;   // buried face: never exists
+        drew=true; faceCount++;
+
+        const uv=AXIS_UV[a];
+        const uA = sg>0?uv[0]:uv[1], vA = sg>0?uv[1]:uv[0];
+        const tint = FACE_TINT[a][sg>0?1:0];
+        const ao=[0,0,0,0];
+
+        for(let q=0;q<4;q++){
+          const du=CORNERS[q][0], dv=CORNERS[q][1];
+          const s1=[nb[0],nb[1],nb[2]]; s1[uA]+=du;
+          const s2=[nb[0],nb[1],nb[2]]; s2[vA]+=dv;
+          const co=[nb[0],nb[1],nb[2]]; co[uA]+=du; co[vA]+=dv;
+          const o1=solidAtCell(s1[0],s1[1],s1[2])?1:0;
+          const o2=solidAtCell(s2[0],s2[1],s2[2])?1:0;
+          const oc=solidAtCell(co[0],co[1],co[2])?1:0;
+          ao[q] = (o1&&o2) ? 0 : 3-(o1+o2+oc);
+
+          const p=[i+0.5,j+0.5,k+0.5];
+          p[a]+=0.5*sg; p[uA]+=0.5*du; p[vA]+=0.5*dv;
+          const b = AO_LEVEL[ao[q]]*tint;
+          P.push(p[0],p[1],p[2]);
+          NR.push(a===0?sg:0, a===1?sg:0, a===2?sg:0);
+          C.push(cr*b, cg*b, cb*b);
+        }
+        const b=vc; vc+=4;
+        if(ao[0]+ao[2] >= ao[1]+ao[3]) IX.push(b,b+1,b+2, b,b+2,b+3);
+        else                           IX.push(b+1,b+2,b+3, b+1,b+3,b);
+      }
+      if(drew) visCount++;
+    }
+
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(P,3));
+    g.setAttribute('normal',   new THREE.Float32BufferAttribute(NR,3));
+    g.setAttribute('color',    new THREE.Float32BufferAttribute(C,3));
+    g.setIndex(new THREE.BufferAttribute(
+      vc>65535 ? new Uint32Array(IX) : new Uint16Array(IX), 1));
+
+    if(!w.solid){
+      w.solid = new THREE.Mesh(g, new THREE.MeshBasicMaterial({vertexColors:true}));
+      w.solid.frustumCulled = false;
+      scene.add(w.solid);
+    } else {
+      w.solid.geometry.dispose();
+      w.solid.geometry = g;
+    }
+    w.visCount = visCount;
+    w.faceCount = faceCount;
+    w.dirty = false;
+  }
+
+  // ===================================================================
+  //  4 · THE RENDER WALK
+  //     Start at the highest ancestor we care about; recurse downward
+  //     through open blocks while their children are big enough to be
+  //     worth resolving. Everything is expressed as (scale, origin) in
+  //     the reference world's units — never absolutely.
+  // ===================================================================
+  let frames = [];                 // {w, s, o, hidden:Set, openSolid:[]}
+  let liveWorlds = new Set();      // for LOD hysteresis
+
+  function projPx(size, dist){ return size*viewH / (Math.max(dist,1e-9) * 2 * TANHALF); }
+  let viewH = 800;
+
+  function topFrame(){
+    let w=cam.world, s=1, o=[0,0,0], up=0;
+    while(w.parent && up<ANCESTORS){
+      const p=worlds.get(w.parent.w);
+      const c=[w.parent.i, w.parent.j, w.parent.k];
+      const ns = s*N;                                     // one parent unit = N of ours
+      o = [ o[0]-ns*c[0], o[1]-ns*c[1], o[2]-ns*c[2] ];
+      s = ns; w = p; up++;
+    }
+    return {w,s,o};
+  }
+
+  function walk(){
+    frames = [];
+    const live = new Set();
+    const top = topFrame();
+    const stack = [top];
+    while(stack.length && frames.length < MAX_WORLDS){
+      const {w,s,o} = stack.shift();
+      const fr = { w, s, o, hidden:new Set(), openSolid:[] };
+      frames.push(fr); live.add(w.id);
+      if(w.dirty) rebuild(w);
+      for(const [ii,cid] of w.kids){
+        const c = worlds.get(cid); if(!c) continue;
+        const [nx,ny]=w.dims;
+        const i = ii % nx, j = ((ii/nx)|0) % ny, k = (ii/(nx*ny))|0;
+        const cx = o[0]+s*(i+0.5)-cam.pos[0];
+        const cy = o[1]+s*(j+0.5)-cam.pos[1];
+        const cz = o[2]+s*(k+0.5)-cam.pos[2];
+        const dist = Math.max(Math.hypot(cx,cy,cz) - s*0.87, s*0.05);
+        const px = projPx(s/N, dist);
+        const thr = liveWorlds.has(cid) ? CELL_PX_H : CELL_PX;
+        if(px >= thr && frames.length + stack.length < MAX_WORLDS){
+          fr.hidden.add(ii);
+          stack.push({ w:c, s:s/N, o:[o[0]+s*i, o[1]+s*j, o[2]+s*k] });
+        } else {
+          fr.openSolid.push([ii,i,j,k]);                  // too small to resolve → one cube
+        }
+      }
+    }
+    liveWorlds = live;
+
+    // hide the meshes of worlds that fell out of the walk
+    for(const w of worlds.values()){
+      const on = live.has(w.id);
+      if(w.solid) w.solid.visible = on;
+      if(w.open)  w.open.visible  = on && w.kids.size>0;
+    }
+
+    // place meshes relative to the camera (RTC: f64 subtract, then f32)
+    let far = 1;
+    for(const fr of frames){
+      const {w,s,o} = fr;
+      const px=o[0]-cam.pos[0], py=o[1]-cam.pos[1], pz=o[2]-cam.pos[2];
+      if(w.solid){ w.solid.position.set(px,py,pz); w.solid.scale.setScalar(s); }
+      const need = fr.openSolid.length;
+      if(need){
+        const om = ensureMesh(w,'open',need);
+        for(let n=0;n<need;n++){
+          const [ii,i,j,k]=fr.openSolid[n];
+          _m4.makeTranslation(i+0.5,j+0.5,k+0.5);
+          om.setMatrixAt(n,_m4);
+          om.setColorAt(n, tintOf(w.vox[ii], ii*2654435761 % 1048576));
+        }
+        om.count=need; om.instanceMatrix.needsUpdate=true; om.instanceColor.needsUpdate=true;
+        om.position.set(px,py,pz); om.scale.setScalar(s); om.visible=true;
+      } else if(w.open){ w.open.count=0; }
+      const ext = s*Math.max(w.dims[0],w.dims[1],w.dims[2]);
+      far = Math.max(far, Math.hypot(px,py,pz) + ext*1.8);
+    }
+
+    camera.near = Math.max(cam.R*0.02, 1e-7);
+    camera.far  = far*1.5;
+    camera.updateProjectionMatrix();
+  }
+
+  // ===================================================================
+  //  5 · PICKING  —  a DDA per rendered world, nearest hit wins.
+  //     The same visibility flags the renderer used decide what is
+  //     solid: an open block whose child is on screen is *not* there;
+  //     the child's own grid answers for it.
+  // ===================================================================
+  function rayGrid(fr, ro, rd, maxT, capLevel){
+    const {w,s,o} = fr;
+    if(w.level > capLevel) return null;              // this world is finer than we are aiming
+    const inv = 1/s;
+    const ox=(ro[0]-o[0])*inv, oy=(ro[1]-o[1])*inv, oz=(ro[2]-o[2])*inv;   // local ray origin
+    const [nx,ny,nz]=w.dims;
+    // slab test against the grid box
+    let t0=0, t1=maxT/s;
+    const O=[ox,oy,oz], D=rd, dim=[nx,ny,nz];
+    let entryAxis=-1, entrySign=0;
+    for(let a=0;a<3;a++){
+      if(Math.abs(D[a])<1e-12){ if(O[a]<0||O[a]>dim[a]) return null; continue; }
+      let ta=(0-O[a])/D[a], tb=(dim[a]-O[a])/D[a], sg=-1;
+      if(ta>tb){ const tmp=ta; ta=tb; tb=tmp; sg=1; }
+      if(ta>t0){ t0=ta; entryAxis=a; entrySign=sg; }
+      if(tb<t1) t1=tb;
+      if(t0>t1) return null;
+    }
+    if(t1<0) return null;
+    let t=Math.max(t0,0);
+    let i=Math.floor(ox+D[0]*(t+1e-7)), j=Math.floor(oy+D[1]*(t+1e-7)), k=Math.floor(oz+D[2]*(t+1e-7));
+    i=Math.min(Math.max(i,0),nx-1); j=Math.min(Math.max(j,0),ny-1); k=Math.min(Math.max(k,0),nz-1);
+    const st=[D[0]>0?1:-1, D[1]>0?1:-1, D[2]>0?1:-1];
+    const cell=[i,j,k], p=[ox,oy,oz];
+    const tMax=[0,0,0], tDel=[0,0,0];
+    for(let a=0;a<3;a++){
+      if(Math.abs(D[a])<1e-12){ tMax[a]=Infinity; tDel[a]=Infinity; }
+      else {
+        const nb = cell[a] + (st[a]>0?1:0);
+        tMax[a] = (nb - p[a]) / D[a];
+        tDel[a] = st[a]/D[a];
+      }
+    }
+    let nrm = entryAxis>=0 ? [0,0,0] : null;
+    if(nrm) nrm[entryAxis] = entrySign;
+    let tcur = t;
+    //  The cell the camera is standing in can never be a target — otherwise,
+    //  the moment you aim coarser than the world you are inside, you would
+    //  "hit" the block you are living in, from within it.
+    const oi=Math.floor(ox), oj=Math.floor(oy), ok=Math.floor(oz);
+    for(let step=0; step<600; step++){
+      if(cell[0]<0||cell[1]<0||cell[2]<0||cell[0]>=nx||cell[1]>=ny||cell[2]>=nz) return null;
+      const ii = idx3(w,cell[0],cell[1],cell[2]);
+      const m = w.vox[ii];
+      const here = cell[0]===oi && cell[1]===oj && cell[2]===ok;
+      //  A cell is a target if it holds a block AND it is not resolved into a
+      //  finer world *that we are still willing to aim at*. Raise the aim
+      //  (capLevel down) and an open block stops being a window into its
+      //  children and becomes, once again, a single solid block.
+      const resolved = fr.hidden.has(ii) && (w.level+1) <= capLevel;
+      if(m && !resolved && !here){
+        const tref = Math.max(tcur,0)*s;
+        if(tref>maxT) return null;
+        return { fr, w, ii, i:cell[0], j:cell[1], k:cell[2], m, t:tref, n:nrm||[0,1,0] };
+      }
+      const a = (tMax[0]<tMax[1]) ? (tMax[0]<tMax[2]?0:2) : (tMax[1]<tMax[2]?1:2);
+      tcur = tMax[a];
+      if(tcur*s > maxT) return null;
+      cell[a]+=st[a]; tMax[a]+=tDel[a];
+      nrm=[0,0,0]; nrm[a] = -st[a];
+    }
+    return null;
+  }
+
+  //  AIM SCALE.  aimOff is how many levels coarser (negative) or finer
+  //  (positive) than yourself you are willing to target. It is stored as an
+  //  offset from camLevel(), so it survives shrinking, growing and band
+  //  transport untouched: "two sizes bigger than me" stays true forever.
+  //
+  //  aimOff = AIM_MAX  -> the default: aim at the finest thing on screen.
+  //  aimOff = 0        -> aim only at blocks of your own world; an opened
+  //                       block collapses back into ONE block you can grab.
+  //  aimOff < 0        -> aim at the blocks of the world above, and above.
+  //
+  //  Reach grows with the blocks you are aiming at — an arm's length is
+  //  measured in whatever you are reaching for.
+  const AIM_MAX = 9, AIM_MIN = -4;
+  let aimOff = AIM_MAX;
+  const aimCell = ()=> Math.pow(N, -Math.min(aimOff,0));     // target cell size, in your cells
+  const aimReach = ()=> REACH * aimCell();
+
+  function pick(){
+    const rd = camDir();
+    const cap = camLevel() + aimOff;
+    const reach = aimReach();
+    let best=null;
+    for(const fr of frames){
+      const lim = best ? Math.min(best.t, reach) : reach;
+      const h = rayGrid(fr, cam.pos, rd, lim, cap);
+      if(h && (!best || h.t < best.t)) best=h;
+    }
+    return best;
+  }
+
+  // ===================================================================
+  //  6 · ACTIONS
+  // ===================================================================
+  let held = 3;        // plain material in hand
+  let stamp = null;    // a picked-up block: material + everything inside it
+  let useStamp = false;
+  let stampUp = 0;     // how many levels to PROMOTE it by when stamping (0 = as it was)
+  function doBreak(){
+    const h=pick(); if(!h) return;
+    closeBlock(h.w, h.ii);
+    h.w.vox[h.ii]=0; h.w.dirty=true;
+    if(h.w.parent) worlds.get(h.w.parent.w).dirty=true;
+  }
+  function doPlace(){
+    const h=pick(); if(!h) return;
+    const i=h.i+h.n[0], j=h.j+h.n[1], k=h.k+h.n[2];
+    if(!inb(h.w,i,j,k)){ hint('nothing to build on out there'); return; }
+    const ii=idx3(h.w,i,j,k);
+    if(h.w.vox[ii]) return;
+    const s=h.fr.s, o=h.fr.o;                       // ...not on top of yourself
+    const lx=(cam.pos[0]-o[0])/s, ly=(cam.pos[1]-o[1])/s, lz=(cam.pos[2]-o[2])/s;
+    if(Math.floor(lx)===i && Math.floor(ly)===j && Math.floor(lz)===k){ hint('you are standing there'); return; }
+
+    if(useStamp && stamp){ stampRegion(h.w, i, j, k); return; }
+    h.w.vox[ii]=held; h.w.dirty=true;
+  }
+
+  // ===================================================================
+  //  6b · THE STAMP  —  carrying a block, interior and all
+  //
+  //  This is the payoff of the whole substrate, and it costs almost no
+  //  code, because of one fact:  A SUBTREE HAS NO SCALE.  A world stores
+  //  only its own 8³ grid and which of its cells are open; nowhere in it
+  //  is there a size, a coordinate, or a level. Level is a property of
+  //  *where a tree is attached*, not of the tree.
+  //
+  //  So "pick up this block with everything inside it" is a deep copy of
+  //  a scale-free structure, and "place it" is grafting that structure
+  //  onto a cell — any cell, in any world, at any level. The thing you
+  //  carved at 10^6× magnification can be stamped down as a mountain, or
+  //  stamped inside itself. It is the same bytes either way.
+  // ===================================================================
+  function captureWorld(c){
+    const n = { vox: c.vox.slice(), kids: new Map() };
+    for(const [ii,cid] of c.kids){
+      const k = worlds.get(cid);
+      if(k) n.kids.set(ii, captureWorld(k));
+    }
+    return n;
+  }
+  function measure(n){
+    let count=1, depth=1;
+    for(const k of n.kids.values()){
+      const r = measure(k);
+      count += r[0];
+      depth  = Math.max(depth, 1+r[1]);
+    }
+    return [count, depth];
+  }
+  function instantiate(node, w, i, j, k){            // graft a captured tree onto w[i,j,k]
+    const c = makeWorld([N,N,N], {w:w.id, i, j, k});
+    c.vox.set(node.vox);
+    w.kids.set(idx3(w,i,j,k), c.id);
+    const nx=c.dims[0], ny=c.dims[1];
+    for(const [ii,kid] of node.kids){
+      instantiate(kid, c, ii%nx, ((ii/nx)|0)%ny, (ii/(nx*ny))|0);
+    }
+    return c;
+  }
+  //  PROMOTION.  The counterpart of the stamp, and the reason the whole
+  //  thing is worth having.
+  //
+  //  A block's interior is an 8³ grid of smaller blocks. Nothing about that
+  //  grid says "smaller" — smallness is an accident of where it is attached.
+  //  So detach it and attach it one level UP: the 512 children stop being the
+  //  inside of a block and become 512 blocks in their own right, each 8× the
+  //  size it was, each still carrying whatever was inside *it*. Two levels up
+  //  and each of those explodes again — 8³ × 8³ blocks, and a thing you
+  //  carved at the scale of a grain of salt is now terrain.
+  //
+  //  leafOf() is the whole trick: it reads the captured tree as a number in
+  //  base 8. To find what belongs at cell (x,y,z) of the promoted region, take
+  //  the leading base-8 digit of each coordinate, use it to pick a child, and
+  //  recurse on the remainder. A plain block with no interior is "made of
+  //  itself" — it promotes into a solid cube of its own material, which is the
+  //  only answer consistent with how openBlock() works.
+  function leafOf(node, m, up, x, y, z){
+    if(up===0) return {m, sub:node};
+    if(!node)  return {m, sub:null};                    // plain block: uniformly itself
+    const S = Math.pow(N, up-1);
+    const ox=(x/S)|0, oy=(y/S)|0, oz=(z/S)|0;
+    const ii = ox + N*(oy + N*oz);
+    const cm = node.vox[ii];
+    if(!cm) return {m:0, sub:null};                     // air stays air
+    return leafOf(node.kids.get(ii)||null, cm, up-1, x%S, y%S, z%S);
+  }
+
+  const WORLD_BUDGET = 4000;
+  function stampRegion(w, i0, j0, k0){
+    const up = stamp.node ? stampUp : 0;                // a plain block has nothing to promote
+    const S  = Math.pow(N, up);
+
+    // plan it first, so an over-large promotion is refused rather than half-built
+    //  Air is part of the shape: a cell the interior left empty must CLEAR
+    //  the target, or the carving you did would be filled in by whatever the
+    //  stamp lands on and the thing you built would not survive the trip.
+    const plan=[]; let newWorlds=0, clipped=0, solid=0;
+    for(let z=0;z<S;z++) for(let y=0;y<S;y++) for(let x=0;x<S;x++){
+      const i=i0+x, j=j0+y, k=k0+z;
+      if(!inb(w,i,j,k)){ clipped++; continue; }
+      const {m, sub} = leafOf(stamp.node, stamp.m, up, x,y,z);
+      if(m){ solid++; if(sub) newWorlds += measure(sub)[0]; }
+      plan.push([idx3(w,i,j,k), i, j, k, m, m?sub:null]);
+    }
+    if(newWorlds > WORLD_BUDGET){
+      hint('that promotion would build '+newWorlds.toLocaleString()+' nested worlds — too much. Aim <b>.</b> lower.');
+      return;
+    }
+    for(const [ii,i,j,k,m,sub] of plan){
+      closeBlock(w, ii);                                // free whatever was there
+      w.vox[ii] = m;
+      if(sub) instantiate(sub, w, i, j, k);
+    }
+    w.dirty = true;
+    if(up>0) flash('promoted — its '+solid.toLocaleString()+' inner blocks are now blocks of <b>this</b> world'
+                   + (clipped ? ', '+clipped.toLocaleString()+' fell outside' : ''));
+    else if(stamp.node) flash('stamped — and everything inside it came too');
+  }
+
+  function setStampUp(v){
+    if(!stamp){ hint('nothing in hand'); return; }
+    if(!stamp.node){ hint('that block has no interior to promote — open one first (<b>E</b>)'); return; }
+    const nv = Math.max(0, Math.min(2, v));
+    if(nv===stampUp) return;
+    stampUp = nv;
+    refreshHotbar();
+    const S = Math.pow(N, stampUp);
+    flash(stampUp===0
+      ? 'stamping it back as <b>one block</b>, interior intact'
+      : 'stamping its interior <b>'+stampUp+' level'+(stampUp>1?'s':'')+' up</b> — '
+        + S+'×'+S+'×'+S+' blocks of this world, each '+Math.pow(N,stampUp)+'× the size it was');
+  }
+
+  function doGrab(){
+    const h = pick();
+    if(!h){ hint('nothing there to pick up'); return; }
+    const cid  = h.w.kids.get(h.ii);
+    const node = cid!==undefined ? captureWorld(worlds.get(cid)) : null;
+    const [nw, dep] = node ? measure(node) : [0,0];
+    stamp = { m:h.m, node, worlds:nw, depth:dep };
+    useStamp = true; stampUp = 0;
+    refreshHotbar();
+    flash(node
+      ? 'picked up '+MAT[h.m].name+' <b>and everything inside it</b> — '+nw+' nested world'+(nw===1?'':'s')
+        +', '+dep+' level'+(dep===1?'':'s')+' deep. Right-click to stamp it. Anywhere. At any scale.'
+      : 'picked up a plain block of '+MAT[h.m].name+' — right-click to stamp it');
+  }
+  function doOpen(){
+    const h=pick(); if(!h) return;
+    if(h.w.kids.has(h.ii)){ flash('already open — mine into it, then shrink'); return; }
+    openBlock(h.w, h.i, h.j, h.k);
+    flash('opened a block of '+MAT[h.m].name+' — it is made of '+(N*N*N)+' smaller blocks');
+  }
+
+  // ===================================================================
+  //  7 · HUD
+  // ===================================================================
+  const LADDER = [
+    [1e2,'a hillside'],[1e1,'a tree'],[1e0,'you, at the start'],[1e-1,'your hand'],
+    [1e-2,'a coin'],[1e-3,'a grain of salt'],[1e-4,'a strand of hair'],[1e-5,'a red blood cell'],
+    [1e-6,'a bacterium'],[1e-7,'a virus'],[1e-8,'a strand of DNA'],[1e-9,'a molecule'],
+    [1e-10,'an atom'],[1e-12,'inside the atom'],[1e-15,'a nucleus'],[1e-18,'a quark'],
+  ];
+  function fmtMeters(m){
+    const u=[[1,'m'],[1e-2,'cm'],[1e-3,'mm'],[1e-6,'µm'],[1e-9,'nm'],[1e-12,'pm'],[1e-15,'fm']];
+    for(const [s,n] of u){ if(m>=s*0.999){ const v=m/s; return (v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toPrecision(2))+' '+n; } }
+    return m.toExponential(1).replace('e','×10^')+' m';
+  }
+  const elAim=document.getElementById('aimline');
+  const elMag=document.getElementById('mag'), elSize=document.getElementById('sizeline'),
+        elStats=document.getElementById('stats'), elLadder=document.getElementById('ladder'),
+        elHint=document.getElementById('hint');
+  LADDER.forEach((r,n)=>{
+    const d=document.createElement('div'); d.className='rung'; d.dataset.n=n;
+    d.innerHTML='<span>'+r[1]+'</span><span class="m">'+fmtMeters(r[0])+'</span><span class="tick"></span>';
+    elLadder.appendChild(d);
+  });
+  let hintT=0;
+  function hint(html){ elHint.innerHTML=html; elHint.classList.add('on'); hintT=performance.now()+2600; }
+  function flash(msg){ hint(msg); }
+
+  function playerMeters(){ return cam.R * Math.pow(N, -camLevel()) * ROOT_METERS; }
+  function blockMeters(level){ return Math.pow(N, -level) * ROOT_METERS; }
+  function setAim(v){
+    const nv = Math.max(AIM_MIN, Math.min(AIM_MAX, v));
+    if(nv===aimOff) return;
+    aimOff = nv;
+    flash(aimOff>=AIM_MAX
+      ? 'aiming at the <b>finest</b> blocks in view'
+      : 'aiming at blocks <b>'+fmtMeters(blockMeters(camLevel()+aimOff))+'</b> across'
+        + (aimOff<0 ? ' — the world above you' : aimOff===0 ? ' — your own world' : ''));
+  }
+  function updateHUD(){
+    const M = Math.pow(N, camLevel()) / cam.R;
+    const e = Math.floor(Math.log10(M));
+    elMag.innerHTML = (M<1e5 ? Math.round(M).toLocaleString() : (M/Math.pow(10,e)).toFixed(1)+'×10<sup>'+e+'</sup>') + '<i>×</i>';
+    const met = playerMeters();
+    elSize.innerHTML = '<em>you are</em> '+fmtMeters(met)+' tall';
+    let bi=0, bd=1e9;
+    LADDER.forEach((r,n)=>{ const d=Math.abs(Math.log10(met)-Math.log10(r[0])); if(d<bd){bd=d;bi=n;} });
+    elLadder.querySelectorAll('.rung').forEach((d,n)=>d.classList.toggle('on', n===bi));
+    let blocks=0, faces=0;
+    for(const f of frames){ blocks += (f.w.visCount||0) + f.openSolid.length; faces += (f.w.faceCount||0); }
+    elStats.textContent = (cam.fly?'fly':'walk')+' · level '+camLevel()+' · '+frames.length+' worlds · '
+                        + blocks.toLocaleString()+' blocks · '+faces.toLocaleString()+' faces';
+    if(useStamp && stamp && stamp.node && stampUp>0){
+      const S=Math.pow(N,stampUp);
+      elAim.innerHTML = '<em>in hand</em> '+MAT[stamp.m].name+' interior, <b>'+S+'³ blocks</b> of this world';
+      if(performance.now()>hintT) elHint.classList.remove('on');
+      return;
+    }
+    elAim.innerHTML = aimTarget
+      ? '<em>aiming at</em> '+fmtMeters(blockMeters(aimTarget.w.level))+' '+MAT[aimTarget.m].name
+        +(aimTarget.w.kids.has(aimTarget.ii) ? ' <b>(open)</b>' : '')
+      : '<em>aiming at</em> ' + (aimOff>=AIM_MAX ? 'the finest blocks in view'
+          : fmtMeters(blockMeters(camLevel()+aimOff))+' blocks');
+    if(performance.now()>hintT) elHint.classList.remove('on');
+  }
+
+  // hotbar
+  const bar=document.getElementById('hotbar');
+  [1,2,3,4,5,6].forEach(m=>{
+    const b=document.createElement('div'); b.className='slot'; b.dataset.m=m;
+    b.innerHTML='<div class="sw" style="background:#'+MAT[m].c.toString(16).padStart(6,'0')+'"></div><div class="k">'+m+'</div>';
+    b.title=MAT[m].name;
+    b.onclick=()=>selectMat(m);
+    bar.appendChild(b);
+  });
+  {
+    const b=document.createElement('div'); b.className='slot stamp'; b.dataset.m='S';
+    b.innerHTML='<div class="sw"></div><div class="k">G</div>';
+    b.title='nothing picked up';
+    b.onclick=()=>{ if(stamp){ useStamp=true; refreshHotbar(); } };
+    bar.appendChild(b);
+  }
+  function refreshHotbar(){
+    bar.querySelectorAll('.slot').forEach(s=>{
+      if(s.dataset.m==='S'){
+        s.classList.toggle('has',  !!stamp);
+        s.classList.toggle('deep', !!(stamp && stamp.node));
+        s.classList.toggle('on',   useStamp && !!stamp);
+        s.querySelector('.sw').style.background =
+          stamp ? '#'+MAT[stamp.m].c.toString(16).padStart(6,'0') : 'transparent';
+        s.title = stamp
+          ? MAT[stamp.m].name + (stamp.node ? ' · '+stamp.worlds+' nested worlds, '+stamp.depth+' deep' : ' (plain)')
+            + (stampUp ? ' · promoted '+stampUp+' level'+(stampUp>1?'s':'') : '')
+          : 'nothing picked up';
+        s.classList.toggle('up', stampUp>0);
+      } else {
+        s.classList.toggle('on', !useStamp && +s.dataset.m===held);
+      }
+    });
+  }
+  function selectMat(m){ held=m; useStamp=false; refreshHotbar(); }
+  refreshHotbar();
+
+  document.getElementById('helpBtn').onclick=(e)=>{ e.stopPropagation(); document.getElementById('help').classList.toggle('on'); };
+
+  // ===================================================================
+  //  8 · INPUT
+  // ===================================================================
+  const keys=new Set();
+  const lockEl=document.getElementById('lock');
+  addEventListener('keydown',e=>{
+    keys.add(e.code);
+    if(e.code==='KeyE') doOpen();
+    if(e.code==='KeyG') doGrab();
+    if(e.code==='BracketLeft')  setAim(aimOff-1);      // aim at bigger blocks
+    if(e.code==='BracketRight') setAim(aimOff+1);      // aim at smaller blocks
+    if(e.code==='Comma')  setStampUp(stampUp-1);       // stamp what's in hand smaller
+    if(e.code==='Period') setStampUp(stampUp+1);       //   ...or promote it a level
+    if(e.key==='?' || e.code==='Slash') document.getElementById('help').classList.toggle('on');
+    if(e.code==='KeyF'){
+      cam.fly=!cam.fly; cam.vel=[0,0,0];
+      flash(cam.fly ? 'flying' : 'walking — <b>space</b> to jump, gravity scales with you');
+    }
+    if(/^Digit[1-6]$/.test(e.code)) selectMat(+e.code.slice(5));
+    if(e.code==='Digit7' && stamp){ useStamp=true; refreshHotbar(); }
+    if(['Space','ShiftLeft','KeyW','KeyA','KeyS','KeyD'].includes(e.code)) e.preventDefault();
+  });
+  addEventListener('keyup',e=>keys.delete(e.code));
+  addEventListener('blur',()=>keys.clear());
+
+  function initInput(){
+    const cv=renderer.domElement;
+    lockEl.onclick=()=>cv.requestPointerLock();
+    cv.oncontextmenu=e=>e.preventDefault();
+    document.addEventListener('pointerlockchange',()=>{
+      const on = document.pointerLockElement===cv;
+      lockEl.classList.toggle('off', on);
+      if(!on) keys.clear();
+    });
+    addEventListener('mousemove',e=>{
+      if(document.pointerLockElement!==cv) return;
+      cam.yaw   -= e.movementX*0.0022;
+      cam.pitch -= e.movementY*0.0022;
+      cam.pitch = Math.max(-1.5533, Math.min(1.5533, cam.pitch));
+    });
+    addEventListener('mousedown',e=>{
+      if(document.pointerLockElement!==cv) return;
+      if(e.button===0) doBreak();
+      if(e.button===2) doPlace();
+    });
+    addEventListener('wheel',e=>{
+      if(document.pointerLockElement!==cv) return;
+      e.preventDefault();
+      cam.R *= Math.exp(e.deltaY*0.0012);        // scroll up = shrink = dive
+      cam.R = Math.min(cam.R, R_ROOF);
+      bandTransport();
+    },{passive:false});
+  }
+
+  // ===================================================================
+  //  9 · FRAME
+  // ===================================================================
+  let aimTarget = null;
+  let last=performance.now();
+  function tick(now){
+    requestAnimationFrame(tick);
+    const dt=Math.min(0.05,(now-last)/1000); last=now;
+    viewH = renderer.domElement.height / renderer.getPixelRatio();
+
+    //  Movement. Every speed is proportional to cam.R — your own height —
+    //  so walking, jumping and falling feel exactly the same whether a block
+    //  is a metre wide or a nanometre.
+    const boost = keys.has('ControlLeft')||keys.has('ControlRight');
+    const d = camDir();
+    const r = [ -d[2], 0, d[0] ];
+    const rl = Math.hypot(r[0],r[2]) || 1; r[0]/=rl; r[2]/=rl;
+    let mx=0,my=0,mz=0;
+    if(keys.has('KeyW')) mz+=1;
+    if(keys.has('KeyS')) mz-=1;
+    if(keys.has('KeyD')) mx+=1;
+    if(keys.has('KeyA')) mx-=1;
+
+    if(cam.fly){
+      if(keys.has('Space')) my+=1;
+      if(keys.has('ShiftLeft')||keys.has('ShiftRight')) my-=1;
+      const v = cam.R * 7 * (boost?5:1) * dt;
+      if(mx||my||mz){
+        cam.pos[0]+= (d[0]*mz + r[0]*mx)*v;
+        cam.pos[1]+= (d[1]*mz + my)*v;
+        cam.pos[2]+= (d[2]*mz + r[2]*mx)*v;
+        bandTransport();                                 // moving can also change your band
+      }
+      cam.vel=[0,0,0];
+    } else {
+      const wx = d[0]*mz + r[0]*mx, wz = d[2]*mz + r[2]*mx;
+      const wl = Math.hypot(wx,wz);
+      const spd = V_WALK*cam.R*(boost?1.9:1);
+      cam.vel[0] = wl>1e-6 ? wx/wl*spd : 0;
+      cam.vel[2] = wl>1e-6 ? wz/wl*spd : 0;
+      if(keys.has('Space') && cam.onGround){ cam.vel[1] = V_JUMP*cam.R; cam.onGround=false; }
+      cam.vel[1] -= G_ACCEL*cam.R*dt;
+      cam.vel[1]  = Math.max(cam.vel[1], -60*cam.R);     // terminal velocity
+      movePhysical(dt);
+      bandTransport();
+      if(!cam.world.parent && cam.pos[1] < -80){         // fell off the island
+        cam.pos=[15.5,15.5,33]; cam.vel=[0,0,0]; cam.R=0.9; cam.fly=true;
+        flash('you fell out of the world — flight restored');
+      }
+    }
+
+    //  Q / Z: shrink and grow by hand — the same exponential law as the wheel,
+    //  so a held key is a steady dive: constant time per octave of scale.
+    let sc=0;
+    if(keys.has('KeyQ')) sc -= 1;
+    if(keys.has('KeyZ')) sc += 1;
+    if(sc){
+      cam.R *= Math.exp(sc * (boost?3.2:1.1) * dt);
+      cam.R  = Math.min(cam.R, R_ROOF);
+      bandTransport();
+    }
+
+    camera.rotation.set(cam.pitch, cam.yaw, 0);
+    walk();
+
+    const h = pick();
+    aimTarget = h;
+    if(h){
+      const s=h.fr.s, o=h.fr.o;
+      highlight.visible=true;
+      highlight.position.set(o[0]+s*(h.i+0.5)-cam.pos[0], o[1]+s*(h.j+0.5)-cam.pos[1], o[2]+s*(h.k+0.5)-cam.pos[2]);
+      highlight.scale.setScalar(s);
+
+      //  ghost: where a promoted stamp would actually land, at its real extent
+      if(useStamp && stamp && stamp.node && stampUp>0){
+        const S=Math.pow(N,stampUp);
+        const i0=h.i+h.n[0], j0=h.j+h.n[1], k0=h.k+h.n[2];
+        ghost.visible=true;
+        ghost.position.set(o[0]+s*(i0+S/2)-cam.pos[0], o[1]+s*(j0+S/2)-cam.pos[1], o[2]+s*(k0+S/2)-cam.pos[2]);
+        ghost.scale.setScalar(s*S);
+      } else ghost.visible=false;
+    } else { highlight.visible=false; ghost.visible=false; }
+
+    updateHUD();
+    renderer.render(scene,camera);
+  }
+
+  // ===================================================================
+  //  10 · SELF-TESTS  (the frame algebra, checked at boot — ubertheory §0)
+  // ===================================================================
+  function selfTests(){
+    const out=[];
+    // descend then ascend is the identity on a position
+    const p=[3.25,1.5,6.75], cell=[3,1,6];
+    const down=[(p[0]-cell[0])*N,(p[1]-cell[1])*N,(p[2]-cell[2])*N];
+    const up=[cell[0]+down[0]/N, cell[1]+down[1]/N, cell[2]+down[2]/N];
+    out.push(['band transport round-trips exactly', up.every((x,n)=>x===p[n])]);
+    // the player-scale envelope is closed: R<1/8 -> R*8 <= 1, R>1 -> R/8 >= 1/8
+    out.push(['scale envelope is closed', (R_MIN*0.999*N)<=R_MAX && (R_MAX*1.001/N)>=R_MIN]);
+    // RTC: what the GPU actually reconstructs for a block deep in a chunk
+    const f=Math.fround, A=[1234.5,-77.25,9001.5], q=[1234.5+7.5, -77.25+3.5, 9001.5-2.5];
+    const rec=[f(A[0]-0)+f(q[0]-A[0]), f(A[1]-0)+f(q[1]-A[1]), f(A[2]-0)+f(q[2]-A[2])];
+    out.push(['RTC reconstruction is sub-milli-cell', Math.hypot(rec[0]-q[0],rec[1]-q[1],rec[2]-q[2])<1e-3]);
+    const bad = out.filter(o=>!o[1]);
+    console.log('%cscriptorium/blocks · self-tests: '+(out.length-bad.length)+'/'+out.length+' pass',
+                'color:'+(bad.length?'#ffb454':'#66d19e'));
+    out.forEach(o=>console.log((o[1]?'  ✓ ':'  ✗ ')+o[0]));
+  }
+
+  // ---- boot ----
+  try{
+    initThree();
+    initInput();
+    const root = buildRoot();
+    cam.world = root;
+    cam.pos = [15.5, 15.5, 33];       // an establishing shot of the island
+    cam.R = 0.9;                      // you are 0.9 m tall, a block is 1 m
+    cam.yaw = 0.0; cam.pitch = -0.30;
+    selfTests();
+    requestAnimationFrame(tick);
+    console.log('scriptorium/blocks · root world: '+root.dims.join('×')+' · a block is '+ROOT_METERS+' m');
+  }catch(err){
+    console.error('boot failed', err);
+  }
+  </script>
+
+</body>
+</html>
