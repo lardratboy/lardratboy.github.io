@@ -149,6 +149,7 @@
     <div class="row"><span>Turn what's in hand</span><kbd>R</kbd> <kbd>T</kbd></div>
     <div class="row"><span>Mirror what's in hand</span><kbd>M</kbd></div>
     <div class="row"><span>Undo / redo</span><kbd>U</kbd> <kbd>Y</kbd></div>
+    <div class="row"><span>Wireframe <i style="opacity:.5">(debug)</i></span><kbd>|</kbd></div>
     <div class="row"><span>Shrink (dive)</span><kbd>Q</kbd> <kbd>scroll &uarr;</kbd></div>
     <div class="row"><span>Grow (surface)</span><kbd>Z</kbd> <kbd>scroll &darr;</kbd></div>
     <div class="row"><span>Material</span><kbd>1 – 6</kbd></div>
@@ -506,12 +507,27 @@
   }
 
   function nextPow2(n){ let p=64; while(p<n) p<<=1; return p; }
+
+  // ---- debug wireframe (alt+W) --------------------------------------
+  // Shows every triangle the mesher actually emits: face culling against solid
+  // neighbors, the AO-driven quad diagonal flip, and instanced unit cubes for
+  // collapsed child worlds all become directly visible.
+  let showWire = false;
+  function setWireframe(on){
+    showWire = on;
+    for(const w of worlds.values()){
+      if(w.solid) w.solid.material.wireframe = on;
+      if(w.open)  w.open.material.wireframe  = on;
+    }
+    flash(on ? 'wireframe <b>on</b> — every triangle the mesher emits' : 'wireframe off');
+  }
+
   function ensureMesh(w, which, need){
     let m = w[which];
     if(m && m.instanceMatrix.count >= need) return m;
     if(m){ scene.remove(m); }
     const cap = nextPow2(Math.max(need,64));
-    const mat = new THREE.MeshBasicMaterial({ vertexColors:true });
+    const mat = new THREE.MeshBasicMaterial({ vertexColors:true, wireframe:showWire });
     m = new THREE.InstancedMesh(cube, mat, cap);
     m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap*3), 3);
     m.frustumCulled = false;
@@ -590,7 +606,7 @@
       vc>65535 ? new Uint32Array(IX) : new Uint16Array(IX), 1));
 
     if(!w.solid){
-      w.solid = new THREE.Mesh(g, new THREE.MeshBasicMaterial({vertexColors:true}));
+      w.solid = new THREE.Mesh(g, new THREE.MeshBasicMaterial({vertexColors:true, wireframe:showWire}));
       w.solid.frustumCulled = false;
       scene.add(w.solid);
     } else {
@@ -1244,7 +1260,7 @@
     elLadder.querySelectorAll('.rung').forEach((d,n)=>d.classList.toggle('on', n===bi));
     let blocks=0, faces=0;
     for(const f of frames){ blocks += (f.w.visCount||0) + f.openSolid.length; faces += (f.w.faceCount||0); }
-    elStats.textContent = (cam.fly?'fly':'walk')+' · level '+camLevel()+' · '+frames.length+' worlds · '
+    elStats.textContent = (cam.fly?'fly':'walk')+(showWire?' · wire':'')+' · level '+camLevel()+' · '+frames.length+' worlds · '
                         + blocks.toLocaleString()+' blocks · '+faces.toLocaleString()+' faces';
     if(useStamp && stamp){
       const S = Math.pow(N, stampUp);
@@ -1318,6 +1334,16 @@
   const lockEl=document.getElementById('lock');
   addEventListener('keydown',e=>{
     keys.add(e.code);
+    if(e.altKey && e.code==='KeyW'){
+      e.preventDefault();
+      keys.delete('KeyW');          // legacy alt+W: swallow so it can't wedge movement
+      return;
+    }
+    if(e.code==='Backslash'){       // | (works with or without shift)
+      e.preventDefault();
+      setWireframe(!showWire);
+      return;
+    }
     if(e.code==='KeyE') doOpen();
     if(e.code==='KeyG') doGrab();
     if(e.code==='BracketLeft')  setAim(aimOff-1);
