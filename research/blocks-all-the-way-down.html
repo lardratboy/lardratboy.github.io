@@ -311,6 +311,11 @@
   const cam = { world:null, pos:[0,0,0], R:1.0, yaw:0.6, pitch:-0.28,
                 vel:[0,0,0], fly:true, onGround:false };
 
+  // Transition tracking parameters
+  let transitionStart = 0;
+  let transitionDuration = 220; // ms
+  let transitionDir = 0;        // 1 = descend (dive), -1 = ascend (surface)
+
   // ===================================================================
   //  2b · GRAVITY, COLLISION, WALKING
   // ===================================================================
@@ -335,6 +340,11 @@
                     w.parent.k + cam.pos[2]/N ];
         cam.R /= N; cam.world = p;
         cam.vel = [cam.vel[0]/N, cam.vel[1]/N, cam.vel[2]/N];
+        
+        // Trigger Ascend (surface) visual animation
+        transitionStart = performance.now();
+        transitionDir = -1;
+        
         flash('surfaced — you are back in the '+(p.parent?'block above':'world above'));
         continue;
       }
@@ -346,13 +356,15 @@
           cam.pos = [ (cam.pos[0]-i)*N, (cam.pos[1]-j)*N, (cam.pos[2]-k)*N ];
           cam.R *= N; cam.world = c;
           cam.vel = [cam.vel[0]*N, cam.vel[1]*N, cam.vel[2]*N];
+          
+          // Trigger Descend (dive) visual animation
+          transitionStart = performance.now();
+          transitionDir = 1;
+          
           flash('you are inside a block of '+MAT[parentMat(c)].name);
           continue;
         }
         
-        // Prevent body scale clamping in fly mode. By allowing the physical camera
-        // size 'cam.R' to continuously shrink when inspecting details from the outside,
-        // your movement speeds and near-clipping parameters scale proportionally.
         if (!cam.fly) {
           cam.R = R_MIN; // keep clamp in walk mode for physics stability
         } else {
@@ -644,10 +656,34 @@
       if(w.open)  w.open.visible  = on && w.kids.size>0;
     }
 
+    // Dynamic camera offsets during transition animations
+    let currentFOV = FOV;
+    const visualOffset = [0,0,0];
+    
+    if (transitionDir !== 0) {
+      const elapsed = performance.now() - transitionStart;
+      const progress = elapsed / transitionDuration;
+      if (progress >= 1.0) {
+        transitionDir = 0;
+      } else {
+        const pulse = Math.sin(progress * Math.PI);
+        currentFOV = FOV + transitionDir * pulse * 14.0;
+        
+        const rd = camDir();
+        const slideDist = cam.R * 0.18 * (1.0 - progress) * transitionDir;
+        visualOffset[0] = rd[0] * slideDist;
+        visualOffset[1] = rd[1] * slideDist;
+        visualOffset[2] = rd[2] * slideDist;
+      }
+    }
+
     let far = 1;
     for(const fr of frames){
       const {w,s,o} = fr;
-      const px=o[0]-cam.pos[0], py=o[1]-cam.pos[1], pz=o[2]-cam.pos[2];
+      const px = o[0] - cam.pos[0] - visualOffset[0];
+      const py = o[1] - cam.pos[1] - visualOffset[1];
+      const pz = o[2] - cam.pos[2] - visualOffset[2];
+      
       if(w.solid){ w.solid.position.set(px,py,pz); w.solid.scale.setScalar(s); }
       const need = fr.openSolid.length;
       if(need){
@@ -665,6 +701,7 @@
       far = Math.max(far, Math.hypot(px,py,pz) + ext*1.8);
     }
 
+    camera.fov = currentFOV;
     camera.near = Math.max(cam.R * 0.01, 0.001);
     camera.far  = far * 1.5;
     camera.updateProjectionMatrix();
