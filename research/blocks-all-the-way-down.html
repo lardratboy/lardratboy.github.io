@@ -146,12 +146,15 @@
     <div class="row"><span>Pick up a block <i style="opacity:.5">(+ its interior)</i></span><kbd>G</kbd></div>
     <div class="row"><span>Aim bigger / smaller</span><kbd>[</kbd> <kbd>]</kbd></div>
     <div class="row"><span>Promote what's in hand</span><kbd>,</kbd> <kbd>.</kbd></div>
+    <div class="row"><span>Turn what's in hand</span><kbd>R</kbd> <kbd>T</kbd></div>
+    <div class="row"><span>Mirror what's in hand</span><kbd>M</kbd></div>
+    <div class="row"><span>Undo / redo</span><kbd>U</kbd> <kbd>Y</kbd></div>
     <div class="row"><span>Shrink (dive)</span><kbd>Q</kbd> <kbd>scroll &uarr;</kbd></div>
     <div class="row"><span>Grow (surface)</span><kbd>Z</kbd> <kbd>scroll &darr;</kbd></div>
     <div class="row"><span>Material</span><kbd>1 – 6</kbd></div>
     <div class="row"><span>Release cursor</span><kbd>esc</kbd></div>
     <div class="row"><span>This panel</span><kbd>?</kbd></div>
-    <div class="note">Every block is made of blocks. Press <em>E</em> on one to open it: it becomes 8×8×8 smaller blocks of the same stuff. Mine a shaft down into it and <em>scroll to shrink</em> until you fit — you'll drop inside, and it's a whole world. Repeat forever. Scroll the other way to grow back out; the world you left is still there, above you, enormous.<br><br>Once a block is open you are looking at its 512 children, so the crosshair grabs <em>them</em>. Press <em>[</em> to aim at bigger blocks: the open block folds back up into one block you can break, grab or stamp whole. <em>]</em> aims finer again. The aim is held as a size <b>relative to you</b>, so it follows you down.<br><br><em>G</em> picks up the block you're looking at <b>together with everything inside it</b> — every sub-block, every sub-sub-block, however deep you carved. Right-click stamps it back down. A subtree has no scale, so you can stamp what you built at 10⁶× as a mountain, or stamp it inside itself.<br><br>And you can <b>promote</b> it. Press <em>.</em> and the thing in your hand stamps <em>one level up</em>: its 512 children stop being the inside of a block and become 8×8×8 blocks of the world you're standing in, each eight times the size it was, each still carrying whatever was inside <em>it</em>. Press <em>.</em> again for 64³. Carve at the scale of a grain of salt; stamp it out as terrain. <em>,</em> steps back down.<br><br>Press <em>F</em> to stand up and walk. Gravity is written in units of <em>you</em>, so a fall from a block feels the same whether the block is a metre wide or a nanometre.</div>
+    <div class="note">Every block is made of blocks. Press <em>E</em> on one to open it: it becomes 8×8×8 smaller blocks of the same stuff. Mine a shaft down into it and <em>scroll to shrink</em> until you fit — you'll drop inside, and it's a whole world. Repeat forever. Scroll the other way to grow back out; the world you left is still there, above you, enormous.<br><br>Once a block is open you are looking at its 512 children, so the crosshair grabs <em>them</em>. Press <em>[</em> to aim at bigger blocks: the open block folds back up into one block you can break, grab or stamp whole. <em>]</em> aims finer again. The aim is held as a size <b>relative to you</b>, so it follows you down.<br><br><em>G</em> picks up the block you're looking at <b>together with everything inside it</b> — every sub-block, every sub-sub-block, however deep you carved. Right-click stamps it back down. A subtree has no scale, so you can stamp what you built at 10⁶× as a mountain, or stamp it inside itself.<br><br>And you can <b>promote</b> it. Press <em>.</em> and the thing in your hand stamps <em>one level up</em>: its 512 children stop being the inside of a block and become 8×8×8 blocks of the world you're standing in, each eight times the size it was, each still carrying whatever was inside <em>it</em>. Press <em>.</em> again for 64³. Carve at the scale of a grain of salt; stamp it out as terrain. <em>,</em> steps back down.<br><br>The thing in your hand can be <b>turned</b>: <em>R</em> spins it a quarter-turn, <em>T</em> tips it over toward you, <em>M</em> mirrors it — exactly, all the way down. Every nested world inside turns with it, to any depth, with zero error: on a block grid a quarter-turn is just a re-shelving of integers. <em>U</em> undoes breaks, places and stamps; <em>Y</em> redoes.<br><br>Press <em>F</em> to stand up and walk. Gravity is written in units of <em>you</em>, so a fall from a block feels the same whether the block is a metre wide or a nanometre.</div>
   </div>
 
   <div id="lock">
@@ -787,6 +790,7 @@
   // ===================================================================
   //  5b · SIMILARITY ZOOM
   // ===================================================================
+  let zoomPending = 0;
   function applyZoom(factor) {
     const prevR = cam.R;
     cam.R *= factor;
@@ -795,7 +799,7 @@
     if (cam.fly) {
       const actualFactor = cam.R / prevR;
       const rd = camDir();
-      const h = pick();
+      const h = aimTarget;   // the frame loop's pick — at most one frame stale, and free
       
       let dist = h ? h.t : REACH * prevR;
       
@@ -815,80 +819,60 @@
 
   let ghostMesh = null;
 
+  // The preview descends into the stamp's nested worlds so what you see is what
+  // you'll get, interiors included. Depth is chosen adaptively: the deepest uniform
+  // expansion whose cube count fits the budget, so a plain block previews its 512
+  // children while a dense 3-level grab previews only its top shell.
+  const PREVIEW_BUDGET = 4096, PREVIEW_MAX_DEPTH = 3;
+
+  function previewCount(node, d){
+    let c = 0;
+    for(let ii=0; ii<node.vox.length; ii++){
+      if(!node.vox[ii]) continue;
+      const kid = node.kids.get(ii);
+      if(kid && d>0) c += previewCount(kid, d-1);
+      else c++;
+    }
+    return c;
+  }
+
   function buildStampPreviewData() {
     if (!stamp) return [];
     const list = [];
-    
     if (!stamp.node) {
       list.push({ x: 0.5, y: 0.5, z: 0.5, size: 1, m: stamp.m });
-    } else {
-      if (stampUp === 0) {
-        const N = 8;
-        for (let z=0; z<N; z++) {
-          for (let y=0; y<N; y++) {
-            for (let x=0; x<N; x++) {
-              const idx = x + N * (y + N * z);
-              const m = stamp.node.vox[idx];
-              if (m) {
-                list.push({
-                  x: (x + 0.5) / N,
-                  y: (y + 0.5) / N,
-                  z: (z + 0.5) / N,
-                  size: 1 / N,
-                  m: m,
-                  idx: idx
-                });
-              }
-            }
-          }
-        }
-      } else if (stampUp === 1) {
-        const N = 8;
-        for (let z=0; z<N; z++) {
-          for (let y=0; y<N; y++) {
-            for (let x=0; x<N; x++) {
-              const idx = x + N * (y + N * z);
-              const m = stamp.node.vox[idx];
-              if (m) {
-                list.push({
-                  x: x + 0.5,
-                  y: y + 0.5,
-                  z: z + 0.5,
-                  size: 1,
-                  m: m,
-                  idx: idx
-                });
-              }
-            }
-          }
-        }
-      } else if (stampUp === 2) {
-        const N = 8;
-        const S = 8;
-        for (let z=0; z<N; z++) {
-          for (let y=0; y<N; y++) {
-            for (let x=0; x<N; x++) {
-              const idx = x + N * (y + N * z);
-              const m = stamp.node.vox[idx];
-              if (m) {
-                list.push({
-                  x: (x + 0.5) * S,
-                  y: (y + 0.5) * S,
-                  z: (z + 0.5) * S,
-                  size: S,
-                  m: m,
-                  idx: idx
-                });
-              }
-            }
-          }
-        }
-      }
+      return list;
     }
+    let depth = PREVIEW_MAX_DEPTH;
+    while(depth > 0 && previewCount(stamp.node, depth) > PREVIEW_BUDGET) depth--;
+
+    const S = Math.pow(N, stampUp);   // the stamp spans S³ cells of the target world
+    (function emit(node, ox, oy, oz, size, d){
+      const cs = size / N;
+      for (let z=0; z<N; z++) for (let y=0; y<N; y++) for (let x=0; x<N; x++) {
+        const ii = x + N*(y + N*z), m = node.vox[ii];
+        if(!m) continue;
+        const kid = node.kids.get(ii);
+        if(kid && d > 0 && list.length < PREVIEW_BUDGET){
+          emit(kid, ox + x*cs, oy + y*cs, oz + z*cs, cs, d-1);
+        } else {
+          list.push({ x: ox+(x+0.5)*cs, y: oy+(y+0.5)*cs, z: oz+(z+0.5)*cs,
+                      size: cs, m, idx: ii });
+        }
+        if(list.length >= PREVIEW_BUDGET*2) return;
+      }
+    })(stamp.node, 0, 0, 0, S, depth);
     return list;
   }
 
+  let stampOver = false;   // would this stamp, at this promotion, bust WORLD_BUDGET?
+  function refreshStampBudget(){
+    stampOver = !!(stamp && stamp.node) && worldsBelow(stamp.node, stampUp) > WORLD_BUDGET;
+    ghost.material.color.setHex(stampOver ? 0xff5566 : 0xffb454);
+  }
+
   function updateGhostMesh(previewData) {
+    refreshStampBudget();
     if (ghostMesh) {
       scene.remove(ghostMesh);
       ghostMesh.material.dispose();
@@ -899,7 +883,8 @@
     const mat = new THREE.MeshBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: 0.5,
+      opacity: stampOver ? 0.35 : 0.5,
+      color: stampOver ? 0xff7777 : 0xffffff,
       depthWrite: false
     });
     ghostMesh = new THREE.InstancedMesh(cube, mat, cap);
@@ -932,6 +917,10 @@
   let stampUp = 0;
   function doBreak(){
     const h=pick(); if(!h) return;
+    if(camInsideCell(h.w.id, h.ii)){ hint('you are <b>inside</b> that block — surface first'); return; }
+    const cid = h.w.kids.get(h.ii);
+    const prevSub = cid!==undefined ? captureWorld(worlds.get(cid)) : null;
+    pushOp({ w:h.w.id, cells:[[h.ii, h.i, h.j, h.k, h.m, prevSub, 0, null]] });
     closeBlock(h.w, h.ii);
     h.w.vox[h.ii]=0; h.w.dirty=true;
     if(h.w.parent) worlds.get(h.w.parent.w).dirty=true;
@@ -947,6 +936,7 @@
     if(Math.floor(lx)===i && Math.floor(ly)===j && Math.floor(lz)===k){ hint('you are standing there'); return; }
 
     if(useStamp && stamp){ stampRegion(h.w, i, j, k); return; }
+    pushOp({ w:h.w.id, cells:[[ii, i, j, k, 0, null, held, null]] });
     h.w.vox[ii]=held; h.w.dirty=true;
   }
 
@@ -970,6 +960,137 @@
     }
     return [count, depth];
   }
+  // ---- exact symmetry: the octahedral group on a stamp -------------
+  // An element g = {p:[perm], s:[signs]} acts on a cell:  v'[a] = s[a]<0 ? N-1-v[p[a]] : v[p[a]].
+  // Pure integer permutation — lossless, invertible, closed under composition.
+  // Applied recursively it turns every nested world inside the stamp, to any depth,
+  // with zero numeric error. Reflections are just as free as rotations.
+  function mapCell(g, x, y, z){
+    const v = [x, y, z], w = [0, 0, 0];
+    for(let a=0; a<3; a++) w[a] = g.s[a] < 0 ? (N-1 - v[g.p[a]]) : v[g.p[a]];
+    return w;
+  }
+  function xformNode(node, g){
+    const out = { vox: new Uint8Array(N*N*N), kids: new Map() };
+    for(let z=0; z<N; z++) for(let y=0; y<N; y++) for(let x=0; x<N; x++){
+      const ii = x + N*(y + N*z);
+      const m  = node.vox[ii];
+      const kid = node.kids.get(ii);
+      if(!m && !kid) continue;
+      const [X, Y, Z] = mapCell(g, x, y, z);
+      const oi = X + N*(Y + N*Z);
+      out.vox[oi] = m;
+      if(kid) out.kids.set(oi, xformNode(kid, g));
+    }
+    return out;
+  }
+  function nodeEq(a, b){
+    for(let i=0; i<a.vox.length; i++) if(a.vox[i] !== b.vox[i]) return false;
+    if(a.kids.size !== b.kids.size) return false;
+    for(const [ii, k] of a.kids){
+      const o = b.kids.get(ii);
+      if(!o || !nodeEq(k, o)) return false;
+    }
+    return true;
+  }
+
+  const G_YAW    = { p:[2,1,0], s:[ 1, 1,-1] };   // 90° about Y:  (x,y,z) → (z, y, N-1-x)
+  const G_TIP_X  = { p:[0,2,1], s:[ 1,-1, 1] };   // 90° about X:  (x,y,z) → (x, N-1-z, y)
+  const G_TIP_Z  = { p:[1,0,2], s:[-1, 1, 1] };   // 90° about Z:  (x,y,z) → (N-1-y, x, z)
+  const G_MIRR_X = { p:[0,1,2], s:[-1, 1, 1] };
+  const G_MIRR_Z = { p:[0,1,2], s:[ 1, 1,-1] };
+
+  function stampXform(g, msg){
+    if(!stamp){ hint('nothing in hand'); return; }
+    if(!stamp.node){ hint('a plain block looks the same every way up'); return; }
+    stamp.node = xformNode(stamp.node, g);
+    updateGhostMesh(buildStampPreviewData());
+    flash(msg);
+  }
+  // T and M act about the screen-horizontal axis, so a stamp tips over "away from
+  // you" and mirrors "left–right" regardless of which way you happen to be facing.
+  function faceAxis(){ const d = camDir(); return Math.abs(d[0]) > Math.abs(d[2]) ? 0 : 2; }
+  function doRotate(){ stampXform(G_YAW, 'turned a quarter — <b>R</b> to keep turning'); }
+  function doTip(){    stampXform(faceAxis()===0 ? G_TIP_Z : G_TIP_X, 'tipped it over — everything inside tipped with it'); }
+  function doMirror(){ stampXform(faceAxis()===0 ? G_MIRR_Z : G_MIRR_X, 'mirrored — a reflection is as exact as a turn here'); }
+
+  // ---- how many worlds would stamping this build, at promotion `up`? ----
+  function worldsBelow(node, up){
+    if(!node) return 0;
+    if(up === 0) return measure(node)[0];
+    let t = 0;
+    for(const kid of node.kids.values()) t += worldsBelow(kid, up-1);
+    return t;
+  }
+
+  // ---- never delete the world the camera is standing in ------------
+  function camInsideCell(wId, ii){
+    let w = cam.world;
+    while(w && w.parent){
+      const P = worlds.get(w.parent.w);
+      if(!P) break;
+      if(w.parent.w === wId && idx3(P, w.parent.i, w.parent.j, w.parent.k) === ii) return true;
+      w = P;
+    }
+    return false;
+  }
+  function camInsideRegion(wId, i0, j0, k0, S){
+    let w = cam.world;
+    while(w && w.parent){
+      const pl = w.parent;
+      if(pl.w === wId && pl.i>=i0 && pl.i<i0+S && pl.j>=j0 && pl.j<j0+S && pl.k>=k0 && pl.k<k0+S) return true;
+      w = worlds.get(pl.w);
+    }
+    return false;
+  }
+
+  // ---- undo / redo --------------------------------------------------
+  // One op = one edit to one world: a list of cells, each with its full before and
+  // after state (material + captured subtree). Undo replays "before", redo "after".
+  // Captured nodes are immutable once made, so ops can share them freely.
+  const ops = [], redoStack = [];
+  const OPS_MAX = 64, OP_CELLS_MAX = 300000;
+  function pushOp(op){
+    if(op.cells.length === 0) return;
+    if(op.cells.length > OP_CELLS_MAX){ hint('that edit is too large to undo'); return; }
+    ops.push(op);
+    if(ops.length > OPS_MAX) ops.shift();
+    redoStack.length = 0;
+  }
+  function applyCells(op, useNew){
+    const w = worlds.get(op.w);
+    if(!w){ hint('that world no longer exists'); return false; }
+    for(const [ii, i, j, k] of op.cells){
+      if(w.kids.has(ii) && camInsideCell(w.id, ii)){
+        hint('step out of that block first — part of this edit is around you');
+        return false;
+      }
+    }
+    for(const [ii, i, j, k, pm, ps, nm, ns] of op.cells){
+      closeBlock(w, ii);
+      const m = useNew ? nm : pm, sub = useNew ? ns : ps;
+      w.vox[ii] = m;
+      if(sub) instantiate(sub, w, i, j, k);
+    }
+    w.dirty = true;
+    if(w.parent){ const P = worlds.get(w.parent.w); if(P) P.dirty = true; }
+    return true;
+  }
+  function undoOp(){
+    if(!ops.length){ hint('nothing to undo'); return; }
+    const op = ops[ops.length-1];
+    if(!applyCells(op, false)) return;
+    ops.pop(); redoStack.push(op);
+    flash('undone');
+  }
+  function redoOp(){
+    if(!redoStack.length){ hint('nothing to redo'); return; }
+    const op = redoStack[redoStack.length-1];
+    if(!applyCells(op, true)) return;
+    redoStack.pop(); ops.push(op);
+    flash('redone');
+  }
+
   function instantiate(node, w, i, j, k){
     const c = makeWorld([N,N,N], {w:w.id, i, j, k});
     c.vox.set(node.vox);
@@ -996,6 +1117,11 @@
     const up = stamp.node ? stampUp : 0;
     const S  = Math.pow(N, up);
 
+    if(camInsideRegion(w.id, i0, j0, k0, S)){
+      hint('that stamp would land <b>on top of you</b> — step out of its footprint first');
+      return;
+    }
+
     const plan=[]; let newWorlds=0, clipped=0, solid=0;
     for(let z=0;z<S;z++) for(let y=0;y<S;y++) for(let x=0;x<S;x++){
       const i=i0+x, j=j0+y, k=k0+z;
@@ -1008,6 +1134,15 @@
       hint('that promotion would build '+newWorlds.toLocaleString()+' nested worlds — too much. Aim <b>.</b> lower.');
       return;
     }
+    const cells=[];
+    for(const [ii,i,j,k,m,sub] of plan){
+      const pm  = w.vox[ii];
+      const cid = w.kids.get(ii);
+      if(pm===m && cid===undefined && !sub) continue;          // no-op cell: don't record
+      const ps = cid!==undefined ? captureWorld(worlds.get(cid)) : null;
+      cells.push([ii, i, j, k, pm, ps, m, sub]);
+    }
+    pushOp({ w:w.id, cells });
     for(const [ii,i,j,k,m,sub] of plan){
       closeBlock(w, ii);
       w.vox[ii] = m;
@@ -1050,7 +1185,7 @@
     
     flash(node
       ? 'picked up '+MAT[h.m].name+' <b>and everything inside it</b> — '+nw+' nested world'+(nw===1?'':'s')
-        +', '+dep+' level'+(dep===1?'':'s')+' deep. Right-click to stamp it. Anywhere. At any scale.'
+        +', '+dep+' level'+(dep===1?'':'s')+' deep. Right-click stamps it, <b>R T M</b> turn and mirror it.'
       : 'picked up a plain block of '+MAT[h.m].name+' — right-click to stamp it');
   }
   function doOpen(){
@@ -1189,6 +1324,11 @@
     if(e.code==='BracketRight') setAim(aimOff+1);
     if(e.code==='Comma')  setStampUp(stampUp-1);
     if(e.code==='Period') setStampUp(stampUp+1);
+    if(e.code==='KeyR') doRotate();
+    if(e.code==='KeyT') doTip();
+    if(e.code==='KeyM') doMirror();
+    if(e.code==='KeyU'){ if(e.shiftKey) redoOp(); else undoOp(); }
+    if(e.code==='KeyY') redoOp();
     if(e.key==='?' || e.code==='Slash') document.getElementById('help').classList.toggle('on');
     if(e.code==='KeyF'){
       cam.fly=!cam.fly; cam.vel=[0,0,0];
@@ -1224,7 +1364,10 @@
     addEventListener('wheel',e=>{
       if(document.pointerLockElement!==cv) return;
       e.preventDefault();
-      applyZoom(Math.exp(e.deltaY*0.0012));
+      // Accumulate into log-space; the frame loop eases it out. Wheel events can
+      // arrive in bursts of dozens; integrating them here and spending them per-frame
+      // gives one smooth exponential glide instead of a stutter of discrete jumps.
+      zoomPending = Math.max(-3, Math.min(3, zoomPending + e.deltaY*0.0012));
     },{passive:false});
   }
 
@@ -1290,6 +1433,11 @@
     if(sc){
       applyZoom(Math.exp(sc * (boost?3.2:1.1) * dt));
     }
+    if(Math.abs(zoomPending) > 1e-4){
+      const step = zoomPending * Math.min(1, dt*14);   // exponential ease toward zero
+      zoomPending -= step;
+      applyZoom(Math.exp(step));
+    } else zoomPending = 0;
 
     camera.rotation.set(cam.pitch, cam.yaw, 0);
     walk();
@@ -1348,6 +1496,25 @@
     const f=Math.fround, A=[1234.5,-77.25,9001.5], q=[1234.5+7.5, -77.25+3.5, 9001.5-2.5];
     const rec=[f(A[0]-0)+f(q[0]-A[0]), f(A[1]-0)+f(q[1]-A[1]), f(A[2]-0)+f(q[2]-A[2])];
     out.push(['RTC reconstruction is sub-milli-cell', Math.hypot(rec[0]-q[0],rec[1]-q[1],rec[2]-q[2])<1e-3]);
+    {
+      // the octahedral action on stamps is exact and invertible, to any depth
+      let s=42; const rnd=()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; };
+      const mk=(depth)=>{
+        const nd={vox:new Uint8Array(N*N*N),kids:new Map()};
+        for(let i=0;i<nd.vox.length;i++) nd.vox[i] = rnd()<0.3 ? 1+((rnd()*6)|0) : 0;
+        if(depth>0) for(let t=0;t<5;t++){ const ii=(rnd()*N*N*N)|0; if(nd.vox[ii]&&!nd.kids.has(ii)) nd.kids.set(ii, mk(depth-1)); }
+        return nd;
+      };
+      const node=mk(2);
+      let t=node; for(let q4=0;q4<4;q4++) t=xformNode(t,G_YAW);
+      out.push(['stamp yaw⁴ = identity, all depths', nodeEq(t,node)]);
+      out.push(['stamp mirror² = identity, all depths', nodeEq(xformNode(xformNode(node,G_MIRR_X),G_MIRR_X), node)]);
+      const cnt=nd=>{ let c=0; for(const v of nd.vox) if(v)c++; for(const k of nd.kids.values()) c+=cnt(k); return c; };
+      out.push(['transforms preserve occupancy', cnt(xformNode(node,G_TIP_X))===cnt(node)]);
+      // tip then un-tip three more times also closes the 4-cycle
+      let u=node; for(let q4=0;q4<4;q4++) u=xformNode(u,G_TIP_Z);
+      out.push(['stamp tip⁴ = identity, all depths', nodeEq(u,node)]);
+    }
     const bad = out.filter(o=>!o[1]);
     console.log('%cscriptorium/blocks · self-tests: '+(out.length-bad.length)+'/'+out.length+' pass',
                 'color:'+(bad.length?'#ffb454':'#66d19e'));
