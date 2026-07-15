@@ -201,8 +201,96 @@
   ];
 
   // ===================================================================
-  //  1 · WORLDS
+  //  0b · ORIENTATION CODES — the octahedral group in 6 bits
   // ===================================================================
+  // An orientation is (perm of axes, sign per axis): v'[a] = ±v[perm[a]],
+  // reflections written N-1-v in cell space. 6 perms × 8 sign patterns = 48
+  // elements — the full symmetry group of the cube, rotations AND mirrors.
+  // Encoded as  code = permIdx*8 + signBits,  so an oriented reference to a
+  // subtree costs six bits. All operations are exact integer moves.
+  const PERMS = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+  const PERM_IDX = new Map(PERMS.map((p,n)=>[p.join(''), n]));
+  const O_ID = 0;   // perm [0,1,2], all signs +
+
+  function oDesc(code){        // code → {p, s}
+    const p = PERMS[(code>>3)|0];
+    return { p, s: [ (code&1)?-1:1, (code&2)?-1:1, (code&4)?-1:1 ] };
+  }
+  function oCode(g){           // {p, s} → code
+    return PERM_IDX.get(g.p.join(''))*8
+         + ((g.s[0]<0)?1:0) + ((g.s[1]<0)?2:0) + ((g.s[2]<0)?4:0);
+  }
+  function oApply(code, x, y, z){
+    const g = oDesc(code), v = [x,y,z], w = [0,0,0];
+    for(let a=0; a<3; a++) w[a] = g.s[a] < 0 ? (N-1 - v[g.p[a]]) : v[g.p[a]];
+    return w;
+  }
+  // (a∘b): apply b, then a.   w[i] = s_a[i]·u[p_a[i]],  u[j] = s_b[j]·v[p_b[j]]
+  //   ⇒ p_ab[i] = p_b[p_a[i]],   s_ab[i] = s_a[i]·s_b[p_a[i]]
+  function oCompose(ca, cb){
+    const a = oDesc(ca), b = oDesc(cb);
+    const p = [0,0,0], s = [1,1,1];
+    for(let i=0; i<3; i++){ p[i] = b.p[a.p[i]]; s[i] = a.s[i]*b.s[a.p[i]]; }
+    return oCode({p, s});
+  }
+  function oInv(code){
+    const g = oDesc(code);
+    const p = [0,0,0], s = [1,1,1];
+    for(let a=0; a<3; a++){ p[g.p[a]] = a; s[g.p[a]] = g.s[a]; }
+    return oCode({p, s});
+  }
+
+  // ===================================================================
+  //  0c · THE NODE STORE — content-addressed, immutable, hash-consed
+  // ===================================================================
+  // A node is the frozen content of one 8³ block interior: its vox array plus
+  // a map of cell → child reference {h, o}. Nodes are interned by content hash,
+  // so identical subtrees — wherever and however they arise — are stored once.
+  // This is the HashLife trick: memory is proportional to DISTINCT content.
+  // A reference {h, o} is a hyperlink: which node, held at which of the 48
+  // orientations. Rotating a subtree is changing six bits on the reference.
+  const store = new Map();          // hash → { hash, vox, kids:Map(ii→{h,o}), meta:{worlds,depth} }
+  let internHits = 0;
+
+  function hashNode(vox, kids){
+    let a = 0x811c9dc5 >>> 0, b = 0xcbf29ce4 >>> 0;
+    const mix = x => { a = Math.imul(a ^ x, 0x01000193) >>> 0;
+                       b = Math.imul(b ^ x, 0x85ebca6b) >>> 0; };
+    for(let i=0; i<vox.length; i++) mix(vox[i]);
+    const ks = [...kids.entries()].sort((p,q)=>p[0]-q[0]);
+    for(const [ii, r] of ks){
+      mix(0xC1); mix(ii);
+      for(let c=0; c<r.h.length; c++) mix(r.h.charCodeAt(c));
+      mix(r.o);
+    }
+    return a.toString(16).padStart(8,'0') + b.toString(16).padStart(8,'0');
+  }
+  // intern takes OWNERSHIP of vox and kids (callers must not mutate them after).
+  function intern(vox, kids){
+    const h = hashNode(vox, kids);
+    const hit = store.get(h);
+    if(hit){ internHits++; return h; }
+    let worlds = 1, depth = 1;
+    for(const r of kids.values()){
+      const m = store.get(r.h).meta;
+      worlds += m.worlds;
+      depth = Math.max(depth, 1 + m.depth);
+    }
+    store.set(h, { hash:h, vox, kids, meta:{worlds, depth} });
+    return h;
+  }
+  const refMeta = ref => store.get(ref.h).meta;   // O(1) measure of any subtree
+
+  // ===================================================================
+  //  1 · WORLDS — materialized instances of node references
+  // ===================================================================
+  // A "world" is now a PLACEMENT: the lazily-materialized appearance of one
+  // node reference at one cell of one parent world. The node store is the
+  // truth; worlds are a render/physics cache of it, created on demand and
+  // updated in place by copy-on-write edits — which is what keeps the camera's
+  // identity stable: cam.world names a placement (a chain of cells), never
+  // raw data. w.kids maps cell → ref {h, o, inst} where inst caches the
+  // materialized child world's id (0 = not yet materialized).
   let nextWorldId = 1;
   const worlds = new Map();
 
@@ -212,6 +300,8 @@
       dims,
       level: parent ? worlds.get(parent.w).level+1 : 0,
       vox: new Uint8Array(dims[0]*dims[1]*dims[2]),
+      voxShared: false,   // true while vox aliases an immutable store array
+      node: null,         // hash this instance currently materializes (null = root)
       kids: new Map(),
       parent,
       dirty: true,
@@ -278,34 +368,119 @@
     return w;
   }
 
-  function openBlock(w,i,j,k){
-    const ii = idx3(w,i,j,k);
-    const m  = w.vox[ii];
-    if(!m || w.kids.has(ii)) return null;
-    const c = makeWorld([N,N,N], {w:w.id,i,j,k});
-    for(let z=0;z<N;z++) for(let y=0;y<N;y++) for(let x=0;x<N;x++){
-      let s = m;
-      if(m===1)      s = (y===N-1) ? 1 : 2;
-      else if(m===6) s = (hash2(x*3+z,y*7,w.id)>0.45) ? 6 : 0;
-      else if(m===3) s = (hash2(x+y*5,z*3,w.id+91)>0.965) ? 7 : 3;
-      c.vox[idx3(c,x,y,z)] = s;
+  // ---- materialization: ref → world instance, lazily ----------------
+  // Baking at materialization keeps render/physics/pick code untouched: the
+  // instance's vox is already in parent-aligned orientation. An identity-
+  // oriented ref SHARES the node's vox array (voxShared); an oriented ref
+  // bakes one level — an exact integer remap — and pushes composed orientation
+  // codes down onto its child refs, to be baked in turn if ever viewed.
+  function materialize(ref, w, i, j, k){
+    const node = store.get(ref.h);
+    const c = makeWorld([N,N,N], {w:w.id, i, j, k});
+    if(ref.o === O_ID){
+      c.vox = node.vox;
+      c.voxShared = true;
+      for(const [ii, kr] of node.kids) c.kids.set(ii, {h:kr.h, o:kr.o, inst:0});
+    } else {
+      for(let z=0; z<N; z++) for(let y=0; y<N; y++) for(let x=0; x<N; x++){
+        const ii = x + N*(y + N*z);
+        const m  = node.vox[ii], kr = node.kids.get(ii);
+        if(!m && !kr) continue;
+        const [X, Y, Z] = oApply(ref.o, x, y, z);
+        const oi = X + N*(Y + N*Z);
+        c.vox[oi] = m;
+        if(kr) c.kids.set(oi, {h:kr.h, o:oCompose(ref.o, kr.o), inst:0});
+      }
     }
-    w.kids.set(ii, c.id);
-    w.dirty = true;
+    c.node = ref.h;
+    ref.inst = c.id;
     return c;
   }
-  function closeBlock(w,ii){
-    const cid = w.kids.get(ii);
-    if(cid===undefined) return;
-    const stack=[cid];
+  function instOf(w, ii, ref, i, j, k){
+    if(ref.inst){ const c = worlds.get(ref.inst); if(c) return c; }
+    return materialize(ref, w, i, j, k);
+  }
+  function ensureOwnVox(w){
+    if(w.voxShared){ w.vox = new Uint8Array(w.vox); w.voxShared = false; }
+  }
+
+  // ---- copy-on-write commit: re-intern an edited instance up the path ----
+  // Editing a placement forks along the camera-visible chain: the edited
+  // world's content is interned as a (possibly new) node, its parent's ref is
+  // re-pointed, and the parent — whose content thereby changed — is interned
+  // in turn, until the root. Everything NOT on the path keeps its hash: other
+  // placements of the same original node are untouched. O(depth) work.
+  function internFromWorld(w){
+    const kids = new Map();
+    for(const [ii, r] of w.kids) kids.set(ii, {h:r.h, o:r.o});
+    const h = intern(w.vox, kids);
+    // the store now owns (or already owned) this array — future edits must copy
+    w.voxShared = true;
+    return h;
+  }
+  function commitWorld(w){
+    while(w.parent){
+      const P = worlds.get(w.parent.w);
+      if(!P) return;
+      const h = internFromWorld(w);
+      w.node = h;
+      const ii = idx3(P, w.parent.i, w.parent.j, w.parent.k);
+      const old = P.kids.get(ii);
+      if(old && old.h === h && old.o === O_ID) return;   // converged: nothing changed
+      P.kids.set(ii, {h, o:O_ID, inst:w.id});
+      w = P;
+    }
+  }
+
+  // ---- opening a block: interior fills are canonical, interned nodes ----
+  // Fills are seeded by MATERIAL plus a small position-chosen variant (not by
+  // world id as before), so opening the ten-thousandth stone block is a table
+  // lookup, not 512 bytes. Which variant a cell gets is a stable function of
+  // its address — reopening the same cell always yields the same interior,
+  // while two placements of a shared node that get opened re-roll per
+  // placement (the "identity re-rolls on placement" semantics).
+  const FILL_VARIANTS = 4;
+  function fillNode(m, vi){
+    const seed = m*97.31 + vi*47.77;
+    const vox = new Uint8Array(N*N*N);
+    for(let z=0; z<N; z++) for(let y=0; y<N; y++) for(let x=0; x<N; x++){
+      let s = m;
+      if(m===1)      s = (y===N-1) ? 1 : 2;
+      else if(m===6) s = (hash2(x*3+z, y*7, seed) > 0.45) ? 6 : 0;
+      else if(m===3) s = (hash2(x+y*5, z*3, seed+91) > 0.965) ? 7 : 3;
+      vox[x + N*(y + N*z)] = s;
+    }
+    return intern(vox, new Map());
+  }
+  function openBlock(w, i, j, k){
+    const ii = idx3(w, i, j, k);
+    const m  = w.vox[ii];
+    if(!m || w.kids.has(ii)) return null;
+    const vi = (hash2(i*3+1, k*7+2, j*13 + w.level*5) * FILL_VARIANTS) | 0;
+    const ref = { h: fillNode(m, vi), o: O_ID, inst: 0 };
+    w.kids.set(ii, ref);
+    w.dirty = true;
+    commitWorld(w);
+    return instOf(w, ii, ref, i, j, k);
+  }
+
+  // ---- dropping instances (the node data lives on in the store) ------
+  function disposeInstances(w, ii){
+    const ref = w.kids.get(ii);
+    if(!ref || !ref.inst) return;
+    const stack = [ref.inst];
+    ref.inst = 0;
     while(stack.length){
       const c = worlds.get(stack.pop());
       if(!c) continue;
-      for(const kid of c.kids.values()) stack.push(kid);
+      for(const r of c.kids.values()) if(r.inst) stack.push(r.inst);
       if(c.solid){ scene.remove(c.solid); c.solid.geometry.dispose(); c.solid.material.dispose(); }
       if(c.open){  scene.remove(c.open);  c.open.material.dispose(); }
       worlds.delete(c.id);
     }
+  }
+  function closeBlock(w, ii){
+    disposeInstances(w, ii);
     w.kids.delete(ii);
   }
 
@@ -354,9 +529,9 @@
       }
       if(cam.R < R_MIN){
         const i=Math.floor(cam.pos[0]), j=Math.floor(cam.pos[1]), k=Math.floor(cam.pos[2]);
-        const cid = inb(w,i,j,k) ? w.kids.get(idx3(w,i,j,k)) : undefined;
-        if(cid!==undefined){
-          const c = worlds.get(cid);
+        const ref = inb(w,i,j,k) ? w.kids.get(idx3(w,i,j,k)) : undefined;
+        if(ref!==undefined){
+          const c = instOf(w, idx3(w,i,j,k), ref, i, j, k);
           cam.pos = [ (cam.pos[0]-i)*N, (cam.pos[1]-j)*N, (cam.pos[2]-k)*N ];
           cam.R *= N; cam.world = c;
           cam.vel = [cam.vel[0]*N, cam.vel[1]*N, cam.vel[2]*N];
@@ -397,9 +572,9 @@
     }
     const ii=idx3(w,i,j,k), m=w.vox[ii];
     if(!m) return false;
-    const cid=w.kids.get(ii);
-    if(cid!==undefined){
-      const c=worlds.get(cid);
+    const ref=w.kids.get(ii);
+    if(ref!==undefined){
+      const c=instOf(w, ii, ref, i, j, k);
       return solidAtIn(c, [ (p[0]-i)*N, (p[1]-j)*N, (p[2]-k)*N ], depth+1);
     }
     return true;
@@ -649,8 +824,7 @@
       const fr = { w, s, o, hidden:new Set(), openSolid:[] };
       frames.push(fr); live.add(w.id);
       if(w.dirty) rebuild(w);
-      for(const [ii,cid] of w.kids){
-        const c = worlds.get(cid); if(!c) continue;
+      for(const [ii,ref] of w.kids){
         const [nx,ny]=w.dims;
         const i = ii % nx, j = ((ii/nx)|0) % ny, k = (ii/(nx*ny))|0;
         const cx = o[0]+s*(i+0.5)-cam.pos[0];
@@ -658,8 +832,9 @@
         const cz = o[2]+s*(k+0.5)-cam.pos[2];
         const dist = Math.max(Math.hypot(cx,cy,cz) - s*0.87, s*0.05);
         const px = projPx(s/N, dist);
-        const thr = liveWorlds.has(cid) ? CELL_PX_H : CELL_PX;
+        const thr = (ref.inst && liveWorlds.has(ref.inst)) ? CELL_PX_H : CELL_PX;
         if(px >= thr && frames.length + stack.length < MAX_WORLDS){
+          const c = instOf(w, ii, ref, i, j, k);   // ← lazy materialization point
           fr.hidden.add(ii);
           stack.push({ w:c, s:s/N, o:[o[0]+s*i, o[1]+s*j, o[2]+s*k] });
         } else {
@@ -835,18 +1010,19 @@
 
   let ghostMesh = null;
 
-  // The preview descends into the stamp's nested worlds so what you see is what
-  // you'll get, interiors included. Depth is chosen adaptively: the deepest uniform
-  // expansion whose cube count fits the budget, so a plain block previews its 512
-  // children while a dense 3-level grab previews only its top shell.
+  // The preview descends into the stamp's nested nodes so what you see is what
+  // you'll get, interiors included, at the stamp's current orientation. Depth
+  // is chosen adaptively: the deepest uniform expansion whose cube count fits
+  // the budget. (Counts are orientation-invariant, so no orient math here.)
   const PREVIEW_BUDGET = 4096, PREVIEW_MAX_DEPTH = 3;
 
-  function previewCount(node, d){
+  function previewCount(h, d){
+    const node = store.get(h);
     let c = 0;
     for(let ii=0; ii<node.vox.length; ii++){
       if(!node.vox[ii]) continue;
-      const kid = node.kids.get(ii);
-      if(kid && d>0) c += previewCount(kid, d-1);
+      const kr = node.kids.get(ii);
+      if(kr && d>0) c += previewCount(kr.h, d-1);
       else c++;
     }
     return c;
@@ -855,40 +1031,35 @@
   function buildStampPreviewData() {
     if (!stamp) return [];
     const list = [];
-    if (!stamp.node) {
+    if (!stamp.ref) {
       list.push({ x: 0.5, y: 0.5, z: 0.5, size: 1, m: stamp.m });
       return list;
     }
     let depth = PREVIEW_MAX_DEPTH;
-    while(depth > 0 && previewCount(stamp.node, depth) > PREVIEW_BUDGET) depth--;
+    while(depth > 0 && previewCount(stamp.ref.h, depth) > PREVIEW_BUDGET) depth--;
 
     const S = Math.pow(N, stampUp);   // the stamp spans S³ cells of the target world
-    (function emit(node, ox, oy, oz, size, d){
+    (function emit(ref, ox, oy, oz, size, d){
+      const node = store.get(ref.h);
       const cs = size / N;
       for (let z=0; z<N; z++) for (let y=0; y<N; y++) for (let x=0; x<N; x++) {
         const ii = x + N*(y + N*z), m = node.vox[ii];
-        if(!m) continue;
-        const kid = node.kids.get(ii);
-        if(kid && d > 0 && list.length < PREVIEW_BUDGET){
-          emit(kid, ox + x*cs, oy + y*cs, oz + z*cs, cs, d-1);
-        } else {
-          list.push({ x: ox+(x+0.5)*cs, y: oy+(y+0.5)*cs, z: oz+(z+0.5)*cs,
+        const kr = node.kids.get(ii);
+        if(!m && !kr) continue;
+        const [X, Y, Z] = oApply(ref.o, x, y, z);   // target-frame position
+        if(kr && d > 0 && list.length < PREVIEW_BUDGET){
+          emit({h:kr.h, o:oCompose(ref.o, kr.o)}, ox + X*cs, oy + Y*cs, oz + Z*cs, cs, d-1);
+        } else if(m) {
+          list.push({ x: ox+(X+0.5)*cs, y: oy+(Y+0.5)*cs, z: oz+(Z+0.5)*cs,
                       size: cs, m, idx: ii });
         }
         if(list.length >= PREVIEW_BUDGET*2) return;
       }
-    })(stamp.node, 0, 0, 0, S, depth);
+    })(stamp.ref, 0, 0, 0, S, depth);
     return list;
   }
 
-  let stampOver = false;   // would this stamp, at this promotion, bust WORLD_BUDGET?
-  function refreshStampBudget(){
-    stampOver = !!(stamp && stamp.node) && worldsBelow(stamp.node, stampUp) > WORLD_BUDGET;
-    ghost.material.color.setHex(stampOver ? 0xff5566 : 0xffb454);
-  }
-
   function updateGhostMesh(previewData) {
-    refreshStampBudget();
     if (ghostMesh) {
       scene.remove(ghostMesh);
       ghostMesh.material.dispose();
@@ -899,8 +1070,8 @@
     const mat = new THREE.MeshBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: stampOver ? 0.35 : 0.5,
-      color: stampOver ? 0xff7777 : 0xffffff,
+      opacity: 0.5,
+      color: 0xffffff,
       depthWrite: false
     });
     ghostMesh = new THREE.InstancedMesh(cube, mat, cap);
@@ -934,12 +1105,14 @@
   function doBreak(){
     const h=pick(); if(!h) return;
     if(camInsideCell(h.w.id, h.ii)){ hint('you are <b>inside</b> that block — surface first'); return; }
-    const cid = h.w.kids.get(h.ii);
-    const prevSub = cid!==undefined ? captureWorld(worlds.get(cid)) : null;
-    pushOp({ w:h.w.id, cells:[[h.ii, h.i, h.j, h.k, h.m, prevSub, 0, null]] });
+    const old = h.w.kids.get(h.ii);
+    const prevRef = old ? {h:old.h, o:old.o} : null;   // O(1) capture: it's a reference
+    pushOp({ w:h.w.id, cells:[[h.ii, h.i, h.j, h.k, h.m, prevRef, 0, null]] });
+    ensureOwnVox(h.w);
     closeBlock(h.w, h.ii);
     h.w.vox[h.ii]=0; h.w.dirty=true;
-    if(h.w.parent) worlds.get(h.w.parent.w).dirty=true;
+    commitWorld(h.w);
+    if(h.w.parent){ const P=worlds.get(h.w.parent.w); if(P) P.dirty=true; }
   }
   function doPlace(){
     const h=pick(); if(!h) return;
@@ -953,34 +1126,22 @@
 
     if(useStamp && stamp){ stampRegion(h.w, i, j, k); return; }
     pushOp({ w:h.w.id, cells:[[ii, i, j, k, 0, null, held, null]] });
+    ensureOwnVox(h.w);
     h.w.vox[ii]=held; h.w.dirty=true;
+    commitWorld(h.w);
   }
 
   // ===================================================================
-  //  6b · THE STAMP
+  //  6b · THE STAMP — now a reference, not a copy
   // ===================================================================
-  function captureWorld(c){
-    const n = { vox: c.vox.slice(), kids: new Map() };
-    for(const [ii,cid] of c.kids){
-      const k = worlds.get(cid);
-      if(k) n.kids.set(ii, captureWorld(k));
-    }
-    return n;
-  }
-  function measure(n){
-    let count=1, depth=1;
-    for(const k of n.kids.values()){
-      const r = measure(k);
-      count += r[0];
-      depth  = Math.max(depth, 1+r[1]);
-    }
-    return [count, depth];
-  }
-  // ---- exact symmetry: the octahedral group on a stamp -------------
-  // An element g = {p:[perm], s:[signs]} acts on a cell:  v'[a] = s[a]<0 ? N-1-v[p[a]] : v[p[a]].
-  // Pure integer permutation — lossless, invertible, closed under composition.
-  // Applied recursively it turns every nested world inside the stamp, to any depth,
-  // with zero numeric error. Reflections are just as free as rotations.
+  // Grabbing used to deep-copy the subtree (captureWorld) and stamping used to
+  // deep-instantiate it. Under the node store, a grab reads the cell's ref —
+  // O(1) — and a stamp writes refs — O(1) per cell. The copies are gone.
+
+  // ---- legacy eager form, kept as the correctness bridge for tests ----
+  // {vox, kids:Map(ii→legacyNode)} trees, and the eager octahedral transform.
+  // expandRef() lowers a (hash, orient) reference into this form, so tests can
+  // assert: lazy-oriented reference === eager-transformed tree, bit for bit.
   function mapCell(g, x, y, z){
     const v = [x, y, z], w = [0, 0, 0];
     for(let a=0; a<3; a++) w[a] = g.s[a] < 0 ? (N-1 - v[g.p[a]]) : v[g.p[a]];
@@ -1009,6 +1170,25 @@
     }
     return true;
   }
+  function internLegacy(node){          // legacy tree → interned hash
+    const kids = new Map();
+    for(const [ii, k] of node.kids) kids.set(ii, {h: internLegacy(k), o: O_ID});
+    return intern(new Uint8Array(node.vox), kids);
+  }
+  function expandRef(ref){              // reference → legacy tree, orientation applied
+    const node = store.get(ref.h);
+    const out = { vox: new Uint8Array(N*N*N), kids: new Map() };
+    for(let z=0; z<N; z++) for(let y=0; y<N; y++) for(let x=0; x<N; x++){
+      const ii = x + N*(y + N*z);
+      const m = node.vox[ii], kr = node.kids.get(ii);
+      if(!m && !kr) continue;
+      const [X, Y, Z] = oApply(ref.o, x, y, z);
+      const oi = X + N*(Y + N*Z);
+      out.vox[oi] = m;
+      if(kr) out.kids.set(oi, expandRef({h:kr.h, o:oCompose(ref.o, kr.o)}));
+    }
+    return out;
+  }
 
   const G_YAW    = { p:[2,1,0], s:[ 1, 1,-1] };   // 90° about Y:  (x,y,z) → (z, y, N-1-x)
   const G_TIP_X  = { p:[0,2,1], s:[ 1,-1, 1] };   // 90° about X:  (x,y,z) → (x, N-1-z, y)
@@ -1016,10 +1196,13 @@
   const G_MIRR_X = { p:[0,1,2], s:[-1, 1, 1] };
   const G_MIRR_Z = { p:[0,1,2], s:[ 1, 1,-1] };
 
+  // Turning the stamp is now O(1): compose six bits onto the reference.
+  // The data is never touched; every placement of this node elsewhere in the
+  // universe is oblivious. The preview re-bakes, but that's a view.
   function stampXform(g, msg){
     if(!stamp){ hint('nothing in hand'); return; }
-    if(!stamp.node){ hint('a plain block looks the same every way up'); return; }
-    stamp.node = xformNode(stamp.node, g);
+    if(!stamp.ref){ hint('a plain block looks the same every way up'); return; }
+    stamp.ref = { h: stamp.ref.h, o: oCompose(oCode(g), stamp.ref.o) };
     updateGhostMesh(buildStampPreviewData());
     flash(msg);
   }
@@ -1029,15 +1212,6 @@
   function doRotate(){ stampXform(G_YAW, 'turned a quarter — <b>R</b> to keep turning'); }
   function doTip(){    stampXform(faceAxis()===0 ? G_TIP_Z : G_TIP_X, 'tipped it over — everything inside tipped with it'); }
   function doMirror(){ stampXform(faceAxis()===0 ? G_MIRR_Z : G_MIRR_X, 'mirrored — a reflection is as exact as a turn here'); }
-
-  // ---- how many worlds would stamping this build, at promotion `up`? ----
-  function worldsBelow(node, up){
-    if(!node) return 0;
-    if(up === 0) return measure(node)[0];
-    let t = 0;
-    for(const kid of node.kids.values()) t += worldsBelow(kid, up-1);
-    return t;
-  }
 
   // ---- never delete the world the camera is standing in ------------
   function camInsideCell(wId, ii){
@@ -1082,13 +1256,15 @@
         return false;
       }
     }
-    for(const [ii, i, j, k, pm, ps, nm, ns] of op.cells){
+    ensureOwnVox(w);
+    for(const [ii, i, j, k, pm, pr, nm, nr] of op.cells){
       closeBlock(w, ii);
-      const m = useNew ? nm : pm, sub = useNew ? ns : ps;
+      const m = useNew ? nm : pm, ref = useNew ? nr : pr;
       w.vox[ii] = m;
-      if(sub) instantiate(sub, w, i, j, k);
+      if(ref) w.kids.set(ii, {h:ref.h, o:ref.o, inst:0});
     }
     w.dirty = true;
+    commitWorld(w);
     if(w.parent){ const P = worlds.get(w.parent.w); if(P) P.dirty = true; }
     return true;
   }
@@ -1107,30 +1283,33 @@
     flash('redone');
   }
 
-  function instantiate(node, w, i, j, k){
-    const c = makeWorld([N,N,N], {w:w.id, i, j, k});
-    c.vox.set(node.vox);
-    w.kids.set(idx3(w,i,j,k), c.id);
-    const nx=c.dims[0], ny=c.dims[1];
-    for(const [ii,kid] of node.kids){
-      instantiate(kid, c, ii%nx, ((ii/nx)|0)%ny, (ii/(nx*ny))|0);
-    }
-    return c;
-  }
-  function leafOf(node, m, up, x, y, z){
-    if(up===0) return {m, sub:node};
-    if(!node)  return {m, sub:null};
+  // ---- descending a reference for promotion --------------------------
+  // Target-frame cell (x,y,z) at promotion `up` maps into the (possibly
+  // oriented) stamp: the child index is found by pulling the cell back through
+  // the INVERSE orientation into node frame; the child's own orientation is
+  // pushed forward by composition. Coordinates stay in target frame all the
+  // way down, so the recursion is uniform — and exact.
+  function leafOfRef(ref, m, up, x, y, z){
+    if(up===0) return {m, ref};
+    if(!ref)   return {m, ref:null};
+    const node = store.get(ref.h);
     const S = Math.pow(N, up-1);
-    const ox=(x/S)|0, oy=(y/S)|0, oz=(z/S)|0;
-    const ii = ox + N*(oy + N*oz);
+    const [cx, cy, cz] = [(x/S)|0, (y/S)|0, (z/S)|0];
+    const [nx2, ny2, nz2] = oApply(oInv(ref.o), cx, cy, cz);
+    const ii = nx2 + N*(ny2 + N*nz2);
     const cm = node.vox[ii];
-    if(!cm) return {m:0, sub:null};
-    return leafOf(node.kids.get(ii)||null, cm, up-1, x%S, y%S, z%S);
+    if(!cm) return {m:0, ref:null};
+    const kr = node.kids.get(ii);
+    const childRef = kr ? {h:kr.h, o:oCompose(ref.o, kr.o)} : null;
+    return leafOfRef(childRef, cm, up-1, x%S, y%S, z%S);
   }
 
-  const WORLD_BUDGET = 4000;
+  // Stamping writes references — O(1) per cell, no instantiation, no world
+  // budget. A stamp that "contains" a million nested worlds costs the same as
+  // one that contains none; materialization happens later, lazily, only for
+  // the handful of placements the camera actually looks into.
   function stampRegion(w, i0, j0, k0){
-    const up = stamp.node ? stampUp : 0;
+    const up = stamp.ref ? stampUp : 0;
     const S  = Math.pow(N, up);
 
     if(camInsideRegion(w.id, i0, j0, k0, S)){
@@ -1138,41 +1317,39 @@
       return;
     }
 
-    const plan=[]; let newWorlds=0, clipped=0, solid=0;
+    const plan=[]; let clipped=0, solid=0;
     for(let z=0;z<S;z++) for(let y=0;y<S;y++) for(let x=0;x<S;x++){
       const i=i0+x, j=j0+y, k=k0+z;
       if(!inb(w,i,j,k)){ clipped++; continue; }
-      const {m, sub} = leafOf(stamp.node, stamp.m, up, x,y,z);
-      if(m){ solid++; if(sub) newWorlds += measure(sub)[0]; }
-      plan.push([idx3(w,i,j,k), i, j, k, m, m?sub:null]);
-    }
-    if(newWorlds > WORLD_BUDGET){
-      hint('that promotion would build '+newWorlds.toLocaleString()+' nested worlds — too much. Aim <b>.</b> lower.');
-      return;
+      const {m, ref} = leafOfRef(stamp.ref, stamp.m, up, x,y,z);
+      if(m) solid++;
+      plan.push([idx3(w,i,j,k), i, j, k, m, m?ref:null]);
     }
     const cells=[];
-    for(const [ii,i,j,k,m,sub] of plan){
+    for(const [ii,i,j,k,m,ref] of plan){
       const pm  = w.vox[ii];
-      const cid = w.kids.get(ii);
-      if(pm===m && cid===undefined && !sub) continue;          // no-op cell: don't record
-      const ps = cid!==undefined ? captureWorld(worlds.get(cid)) : null;
-      cells.push([ii, i, j, k, pm, ps, m, sub]);
+      const old = w.kids.get(ii);
+      if(pm===m && old===undefined && !ref) continue;          // no-op cell: don't record
+      const pr = old ? {h:old.h, o:old.o} : null;
+      cells.push([ii, i, j, k, pm, pr, m, ref]);
     }
     pushOp({ w:w.id, cells });
-    for(const [ii,i,j,k,m,sub] of plan){
+    ensureOwnVox(w);
+    for(const [ii,i,j,k,m,ref] of plan){
       closeBlock(w, ii);
       w.vox[ii] = m;
-      if(sub) instantiate(sub, w, i, j, k);
+      if(ref) w.kids.set(ii, {h:ref.h, o:ref.o, inst:0});
     }
     w.dirty = true;
+    commitWorld(w);
     if(up>0) flash('promoted — its '+solid.toLocaleString()+' inner blocks are now blocks of <b>this</b> world'
                    + (clipped ? ', '+clipped.toLocaleString()+' fell outside' : ''));
-    else if(stamp.node) flash('stamped — and everything inside it came too');
+    else if(stamp.ref) flash('stamped — a reference to everything inside it, written in place');
   }
 
   function setStampUp(v){
     if(!stamp){ hint('nothing in hand'); return; }
-    if(!stamp.node){ hint('that block has no interior to promote — open one first (<b>E</b>)'); return; }
+    if(!stamp.ref){ hint('that block has no interior to promote — open one first (<b>E</b>)'); return; }
     const nv = Math.max(0, Math.min(2, v));
     if(nv===stampUp) return;
     stampUp = nv;
@@ -1190,18 +1367,18 @@
   function doGrab(){
     const h = pick();
     if(!h){ hint('nothing there to pick up'); return; }
-    const cid  = h.w.kids.get(h.ii);
-    const node = cid!==undefined ? captureWorld(worlds.get(cid)) : null;
-    const [nw, dep] = node ? measure(node) : [0,0];
-    stamp = { m:h.m, node, worlds:nw, depth:dep };
+    const old = h.w.kids.get(h.ii);
+    const ref = old ? {h:old.h, o:old.o} : null;    // the grab IS the reference: O(1)
+    const meta = ref ? refMeta(ref) : null;
+    stamp = { m:h.m, ref, worlds: meta?meta.worlds:0, depth: meta?meta.depth:0 };
     useStamp = true; stampUp = 0;
     
     updateGhostMesh(buildStampPreviewData());
     refreshHotbar();
     
-    flash(node
-      ? 'picked up '+MAT[h.m].name+' <b>and everything inside it</b> — '+nw+' nested world'+(nw===1?'':'s')
-        +', '+dep+' level'+(dep===1?'':'s')+' deep. Right-click stamps it, <b>R T M</b> turn and mirror it.'
+    flash(ref
+      ? 'picked up '+MAT[h.m].name+' <b>and everything inside it</b> — '+stamp.worlds+' nested world'+(stamp.worlds===1?'':'s')
+        +', '+stamp.depth+' level'+(stamp.depth===1?'':'s')+' deep. Right-click stamps it, <b>R T M</b> turn and mirror it.'
       : 'picked up a plain block of '+MAT[h.m].name+' — right-click to stamp it');
   }
   function doOpen(){
@@ -1261,11 +1438,12 @@
     let blocks=0, faces=0;
     for(const f of frames){ blocks += (f.w.visCount||0) + f.openSolid.length; faces += (f.w.faceCount||0); }
     elStats.textContent = (cam.fly?'fly':'walk')+(showWire?' · wire':'')+' · level '+camLevel()+' · '+frames.length+' worlds · '
-                        + blocks.toLocaleString()+' blocks · '+faces.toLocaleString()+' faces';
+                        + blocks.toLocaleString()+' blocks · '+faces.toLocaleString()+' faces · '
+                        + store.size+' nodes/'+internHits+' reused';
     if(useStamp && stamp){
       const S = Math.pow(N, stampUp);
       const visualSize = blockMeters(camLevel()) * S;
-      if (stamp.node) {
+      if (stamp.ref) {
         if (stampUp === 0) {
           elAim.innerHTML = '<em>stamp hand</em> ' + MAT[stamp.m].name + ' <b>(1x scale: ' + fmtMeters(blockMeters(camLevel())) + ', interior intact)</b> · [.] to promote';
         } else {
@@ -1305,12 +1483,12 @@
     bar.querySelectorAll('.slot').forEach(s=>{
       if(s.dataset.m==='S'){
         s.classList.toggle('has',  !!stamp);
-        s.classList.toggle('deep', !!(stamp && stamp.node));
+        s.classList.toggle('deep', !!(stamp && stamp.ref));
         s.classList.toggle('on',   useStamp && !!stamp);
         s.querySelector('.sw').style.background =
           stamp ? '#'+MAT[stamp.m].c.toString(16).padStart(6,'0') : 'transparent';
         s.title = stamp
-          ? MAT[stamp.m].name + (stamp.node ? ' · '+stamp.worlds+' nested worlds, '+stamp.depth+' deep' : ' (plain)')
+          ? MAT[stamp.m].name + (stamp.ref ? ' · '+stamp.worlds+' nested worlds, '+stamp.depth+' deep' : ' (plain)')
             + (stampUp ? ' · promoted '+stampUp+' level'+(stampUp>1?'s':'')+' ('+Math.pow(N,stampUp)+'³ blocks)' : '')
           : 'nothing picked up';
         s.classList.toggle('up', stampUp>0);
@@ -1479,7 +1657,7 @@
       if(useStamp && stamp){
         const i0=h.i+h.n[0], j0=h.j+h.n[1], k0=h.k+h.n[2];
         
-        if(stamp.node && stampUp>0){
+        if(stamp.ref && stampUp>0){
           const S=Math.pow(N,stampUp);
           ghost.visible=true;
           ghost.position.set(o[0]+s*(i0+S/2)-cam.pos[0], o[1]+s*(j0+S/2)-cam.pos[1], o[2]+s*(k0+S/2)-cam.pos[2]);
@@ -1523,23 +1701,69 @@
     const rec=[f(A[0]-0)+f(q[0]-A[0]), f(A[1]-0)+f(q[1]-A[1]), f(A[2]-0)+f(q[2]-A[2])];
     out.push(['RTC reconstruction is sub-milli-cell', Math.hypot(rec[0]-q[0],rec[1]-q[1],rec[2]-q[2])<1e-3]);
     {
-      // the octahedral action on stamps is exact and invertible, to any depth
-      let s=42; const rnd=()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; };
-      const mk=(depth)=>{
+      // -- orientation-code algebra: 48 elements, homomorphism, inverses --
+      let s=7; const rnd=()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; };
+      const rc=()=> (rnd()*48)|0;
+      const codes=new Set(); for(let c=0;c<48;c++) codes.add(oCode(oDesc(c)));
+      out.push(['orient codes: 48 distinct, encode∘decode = id', codes.size===48]);
+      let hom=true, inv=true, closed=true;
+      for(let t=0;t<300;t++){
+        const a=rc(), b=rc(), v=[(rnd()*N)|0,(rnd()*N)|0,(rnd()*N)|0];
+        const lhs=oApply(oCompose(a,b), v[0],v[1],v[2]);
+        const w2=oApply(b, v[0],v[1],v[2]);
+        const rhs=oApply(a, w2[0],w2[1],w2[2]);
+        if(lhs[0]!==rhs[0]||lhs[1]!==rhs[1]||lhs[2]!==rhs[2]) hom=false;
+        const r=oApply(oCompose(a,oInv(a)), v[0],v[1],v[2]);
+        if(r[0]!==v[0]||r[1]!==v[1]||r[2]!==v[2]) inv=false;
+        if(oCompose(a,b)<0||oCompose(a,b)>47) closed=false;
+      }
+      out.push(['orient: apply(a∘b) = apply(a)∘apply(b), 300 random', hom]);
+      out.push(['orient: a∘a⁻¹ = identity, 300 random', inv]);
+      out.push(['orient: composition closed in [0,48)', closed]);
+
+      // -- the store: identical content interns to one node ---------------
+      const mkLeg=(depth)=>{
         const nd={vox:new Uint8Array(N*N*N),kids:new Map()};
         for(let i=0;i<nd.vox.length;i++) nd.vox[i] = rnd()<0.3 ? 1+((rnd()*6)|0) : 0;
-        if(depth>0) for(let t=0;t<5;t++){ const ii=(rnd()*N*N*N)|0; if(nd.vox[ii]&&!nd.kids.has(ii)) nd.kids.set(ii, mk(depth-1)); }
+        if(depth>0) for(let t=0;t<5;t++){ const ii=(rnd()*N*N*N)|0; if(nd.vox[ii]&&!nd.kids.has(ii)) nd.kids.set(ii, mkLeg(depth-1)); }
         return nd;
       };
-      const node=mk(2);
-      let t=node; for(let q4=0;q4<4;q4++) t=xformNode(t,G_YAW);
-      out.push(['stamp yaw⁴ = identity, all depths', nodeEq(t,node)]);
-      out.push(['stamp mirror² = identity, all depths', nodeEq(xformNode(xformNode(node,G_MIRR_X),G_MIRR_X), node)]);
-      const cnt=nd=>{ let c=0; for(const v of nd.vox) if(v)c++; for(const k of nd.kids.values()) c+=cnt(k); return c; };
-      out.push(['transforms preserve occupancy', cnt(xformNode(node,G_TIP_X))===cnt(node)]);
-      // tip then un-tip three more times also closes the 4-cycle
-      let u=node; for(let q4=0;q4<4;q4++) u=xformNode(u,G_TIP_Z);
-      out.push(['stamp tip⁴ = identity, all depths', nodeEq(u,node)]);
+      const legacy = mkLeg(2);
+      const size0 = store.size;
+      const h1 = internLegacy(legacy);
+      const grew = store.size - size0;
+      const h2 = internLegacy(legacy);          // identical content again
+      out.push(['intern: identical tree collapses to same hash', h1===h2 && store.size===size0+grew]);
+
+      // -- lazy orientation ≡ eager transform, to any depth ---------------
+      const gy=oCode(G_YAW), gm=oCode(G_MIRR_X), gt=oCode(G_TIP_Z);
+      out.push(['expandRef(id) reproduces the tree, bit for bit',
+                nodeEq(expandRef({h:h1, o:O_ID}), legacy)]);
+      out.push(['oriented reference ≡ eager xformNode (yaw)',
+                nodeEq(expandRef({h:h1, o:gy}), xformNode(legacy, G_YAW))]);
+      out.push(['oriented reference ≡ eager xformNode (yaw∘mirror∘tip)',
+                nodeEq(expandRef({h:h1, o:oCompose(gy,oCompose(gm,gt))}),
+                       xformNode(xformNode(xformNode(legacy, G_TIP_Z), G_MIRR_X), G_YAW))]);
+      out.push(['yaw⁴ on the reference = identity (six bits, zero data)',
+                oCompose(gy,oCompose(gy,oCompose(gy,gy)))===O_ID]);
+
+      // -- promotion descent through an oriented reference ----------------
+      // leafOfRef must agree with brute force: expand the oriented tree
+      // eagerly, then read its children directly.
+      const ref={h:h1, o:gy};
+      const eager=expandRef(ref);
+      let leafOK=true;
+      for(let t=0;t<200 && leafOK;t++){
+        const x=(rnd()*N)|0, y=(rnd()*N)|0, z=(rnd()*N)|0;   // up=1 → child index
+        const got=leafOfRef(ref, 3, 1, x, y, z);
+        const ii=x+N*(y+N*z);
+        const wantM=eager.vox[ii];
+        if((got.m|0)!==(wantM|0)) leafOK=false;
+        const wantKid=eager.kids.get(ii);
+        if(!!got.ref !== !!wantKid) leafOK=false;
+        else if(got.ref && !nodeEq(expandRef(got.ref), wantKid)) leafOK=false;
+      }
+      out.push(['leafOfRef through an oriented stamp ≡ eager descent, 200 cells', leafOK]);
     }
     const bad = out.filter(o=>!o[1]);
     console.log('%cscriptorium/blocks · self-tests: '+(out.length-bad.length)+'/'+out.length+' pass',
@@ -1558,7 +1782,8 @@
     cam.yaw = 0.0; cam.pitch = -0.30;
     selfTests();
     requestAnimationFrame(tick);
-    console.log('scriptorium/blocks · root world: '+root.dims.join('×')+' · a block is '+ROOT_METERS+' m');
+    console.log('scriptorium/blocks · root world: '+root.dims.join('×')+' · a block is '+ROOT_METERS+' m'
+               +' · node store: content-addressed, '+store.size+' nodes interned at boot');
   }catch(err){
     console.error('boot failed', err);
   }
