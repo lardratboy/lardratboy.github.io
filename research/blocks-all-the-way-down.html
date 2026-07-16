@@ -172,6 +172,7 @@
     <div class="row"><span>Freeze an instance</span><kbd>X</kbd></div>
     <div class="row"><span>Undo / redo</span><kbd>U</kbd> <kbd>Y</kbd></div>
     <div class="row"><span>Wireframe <i style="opacity:.5">(debug)</i></span><kbd>|</kbd></div>
+    <div class="row"><span>Flight law <i style="opacity:.5">(experimental)</i></span><kbd>V</kbd></div>
     <div class="row"><span>Shrink (dive)</span><kbd>Q</kbd> <kbd>scroll &uarr;</kbd></div>
     <div class="row"><span>Grow (surface)</span><kbd>Z</kbd> <kbd>scroll &darr;</kbd></div>
     <div class="row"><span>Material</span><kbd>1 – 6</kbd></div>
@@ -644,6 +645,7 @@
                     w.parent.k + cam.pos[2]/N ];
         cam.R /= N; cam.world = p;
         cam.vel = [cam.vel[0]/N, cam.vel[1]/N, cam.vel[2]/N];
+        if(flyDSm !== null) flyDSm /= N;   // smoothed attention distance rides the transport too
         
         // Trigger Ascend (surface) visual animation
         transitionStart = performance.now();
@@ -660,6 +662,7 @@
           cam.pos = [ (cam.pos[0]-i)*N, (cam.pos[1]-j)*N, (cam.pos[2]-k)*N ];
           cam.R *= N; cam.world = c;
           cam.vel = [cam.vel[0]*N, cam.vel[1]*N, cam.vel[2]*N];
+          if(flyDSm !== null) flyDSm *= N;   // smoothed attention distance rides the transport too
           
           // Trigger Descend (dive) visual animation
           transitionStart = performance.now();
@@ -1124,6 +1127,47 @@
       if(h && (!best || h.t < best.t)) best=h;
     }
     return best;
+  }
+
+  // ---- W2 · scene-scaled flight (experimental, toggle with V) ----
+  // Classic flight speed is body-proportional (7·R cells/s): constant in units
+  // of you, but meaningless when your body and the visible scene decouple —
+  // frozen in the sub-envelope abyss, capped-and-kinked at the root roof,
+  // wading across open interiors at R_MIN. The scene law scales speed with
+  // *attention distance* instead, the same quantity the zoom already follows:
+  //
+  //     v = min( FLY_K · max(d_eff, R·FLY_FLOOR_R),  maxDim/FLY_CROSS_S )
+  //
+  // FLY_K = 7/REACH makes the two laws EXACTLY equal when aimed at pick-reach
+  // distance (the tuning the game already had, kept as an identity — see the
+  // self-test). The floor keeps near-wall control body-relative; the ceiling
+  // means no world is ever crossed in under FLY_CROSS_S seconds, at any zoom.
+  const FLY_K       = 7 / REACH;   // = 1.4 /s — parity with classic at reach
+  const FLY_FLOOR_R = 3.5;         // d_eff floor, in bodies → near-wall v ≈ 4.9R
+  const FLY_CROSS_S = 2.5;         // seconds to cross a world at full speed
+  let   flyScene    = false;       // V toggles; classic law by default
+  let   flyDSm      = null;        // smoothed d_eff, in current-band cells
+
+  function flySpeedLaw(dEff, R, dims){          // → cells/s, unboosted (pure)
+    const d = Math.max(dEff, R * FLY_FLOOR_R);
+    return Math.min(FLY_K * d, Math.max(dims[0],dims[1],dims[2]) / FLY_CROSS_S);
+  }
+  function probeDist(rd, maxT){                 // nearest surface along rd, ≤ maxT
+    let best = maxT;
+    const cap = camLevel();                     // shells count as surfaces here
+    for(const fr of frames){
+      const h = rayGrid(fr, cam.pos, rd, best, cap);
+      if(h && h.t < best) best = h.t;
+    }
+    return best;
+  }
+  function flySceneSpeed(dt){                   // → cells/s for this frame
+    const probeMax = Math.max(...cam.world.dims) * 2;
+    const dRaw = Math.min( aimTarget ? aimTarget.t : probeMax,
+                           probeDist([0,-1,0], probeMax) );
+    const a = Math.min(1, dt / 0.25);           // τ ≈ 0.25 s — no speed pops
+    flyDSm = (flyDSm === null) ? dRaw : flyDSm + (dRaw - flyDSm) * a;
+    return flySpeedLaw(flyDSm, cam.R, cam.world.dims);
   }
 
   // ===================================================================
@@ -1797,6 +1841,11 @@
     if(e.code==='KeyY') redoOp();
     if(e.key==='?' || e.code==='Slash') document.getElementById('help').classList.toggle('on');
     if(e.code==='KeyH') document.getElementById('manual').classList.toggle('on');
+    if(e.code==='KeyV'){
+      flyScene = !flyScene; flyDSm = null;   // re-seed smoothing on switch
+      flash(flyScene ? 'flight law: <b>scene-scaled</b> (experimental) — speed follows what you look at'
+                     : 'flight law: <b>classic</b> — speed follows your size');
+    }
     if(e.code==='KeyF'){
       cam.fly=!cam.fly; cam.vel=[0,0,0];
       flash(cam.fly ? 'flying' : 'walking — <b>space</b> to jump, gravity scales with you');
@@ -1883,12 +1932,22 @@
     if(cam.fly){
       if(keys.has('Space')) my+=1;
       if(keys.has('ShiftLeft')||keys.has('ShiftRight')) my-=1;
-      const v = speedR * 7 * (boost?4:1) * dt;
+      const cellsPerSec = flyScene ? flySceneSpeed(dt) * (boost?2.5:1)
+                                   : speedR * 7       * (boost?4:1);
+      const v = cellsPerSec * dt;
       if(mx||my||mz){
-        cam.pos[0]+= (d[0]*mz + r[0]*mx)*v;
-        cam.pos[1]+= (d[1]*mz + my)*v;
-        cam.pos[2]+= (d[2]*mz + r[2]*mx)*v;
-        bandTransport();
+        // W0 — normalize the composed wish vector: diagonals no longer
+        // strafe-run (W+D+Space used to move ~1.73× faster than W alone).
+        const wx = d[0]*mz + r[0]*mx,
+              wy = d[1]*mz + my,
+              wz = d[2]*mz + r[2]*mx;
+        const wl = Math.hypot(wx,wy,wz);
+        if(wl > 1e-6){
+          cam.pos[0]+= wx/wl*v;
+          cam.pos[1]+= wy/wl*v;
+          cam.pos[2]+= wz/wl*v;
+          bandTransport();
+        }
       }
       cam.vel=[0,0,0];
     } else {
@@ -1897,9 +1956,14 @@
       const spd = V_WALK * speedR * (boost?1.9:1);
       cam.vel[0] = wl>1e-6 ? wx/wl*spd : 0;
       cam.vel[2] = wl>1e-6 ? wz/wl*spd : 0;
-      if(keys.has('Space') && cam.onGround){ cam.vel[1] = V_JUMP * speedR; cam.onGround=false; }
-      cam.vel[1] -= G_ACCEL * speedR * dt;
-      cam.vel[1]  = Math.max(cam.vel[1], -60 * speedR);
+      // W1 — gravity, jump, and terminal velocity use raw R, not the clamped
+      // speedR: the min(R,3) clamp exists to cap *traversal* speed at the root
+      // roof, but sharing it here made falls 5× floatier per body above R=3,
+      // silently breaking "a fall feels the same at any scale". These three are
+      // body physics; they follow the body, unclamped.
+      if(keys.has('Space') && cam.onGround){ cam.vel[1] = V_JUMP * cam.R; cam.onGround=false; }
+      cam.vel[1] -= G_ACCEL * cam.R * dt;
+      cam.vel[1]  = Math.max(cam.vel[1], -60 * cam.R);
       movePhysical(dt);
       bandTransport();
     }
@@ -1984,6 +2048,20 @@
       const one = scaleAbout(p0,pv,0.125);
       out.push(['dive similarity composes (f\u2218g = f\u00b7g)',
         two.every((x,n)=>Math.abs(x-one[n])<1e-12)]);
+    }
+    {
+      // -- W2: the scene flight law agrees with classic exactly at pick reach --
+      // (R chosen so 7R sits below the world-crossing ceiling, where the
+      //  identity holds; above it the ceiling deliberately wins.)
+      const dims=[8,8,8], R=0.25;
+      out.push(['flight laws are equal at reach (k\u00b7REACH\u00b7R = 7R)',
+        Math.abs(flySpeedLaw(REACH*R, R, dims) - 7*R) < 1e-12]);
+      out.push(['flight law floors at body scale near walls',
+        Math.abs(flySpeedLaw(0, R, dims) - FLY_K*FLY_FLOOR_R*R) < 1e-12]);
+      out.push(['flight law ceiling: no world crossed under '+FLY_CROSS_S+'s',
+        flySpeedLaw(1e9, 16, dims) === Math.max(...dims)/FLY_CROSS_S]);
+      out.push(['flight law is monotone in attention distance',
+        flySpeedLaw(2,R,dims) <= flySpeedLaw(3,R,dims) && flySpeedLaw(3,R,dims) <= flySpeedLaw(5,R,dims)]);
     }
     {
       // -- orientation-code algebra: 48 elements, homomorphism, inverses --
