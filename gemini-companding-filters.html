@@ -1654,6 +1654,114 @@ const CHUNK_BYTES = 128 * 1024 * 1024;
 const BYTES_PER_POINT = 16;
 const MAX_OUTPUT_POINTS = 48 * 1024 * 1024;
 
+// ---------- GPU media filter: in-stream compute pre-pass (filters.md Phase 2) ----------
+// Runs per chunk between upload and decode. Chunks are frame-aligned; each upload
+// carries one lead-in frame so temporal difference can always read (byte - frameBytes).
+// The filter compacts: reads src at leadInBytes + b, writes dst at b, so decode
+// consumes filteredBuf from offset 0 with zero changes. Each thread owns 4 output
+// u32 words (16 bytes) - no byte-write races, and dispatch stays under 65535 wgs.
+const FILTER_WGSL = `
+struct FU {
+    w: u32, h: u32, frameBytes: u32, leadInBytes: u32,
+    outBytes: u32, ftype: u32, strength: f32, _pad: u32,
+};
+@group(0) @binding(0) var<storage, read> src : array<u32>;
+@group(0) @binding(1) var<storage, read_write> dst : array<u32>;
+@group(0) @binding(2) var<uniform> U : FU;
+
+fn rdB(i: u32) -> i32 { return i32((src[i >> 2u] >> ((i & 3u) * 8u)) & 0xffu); }
+
+fn sampPx(x: i32, y: i32, fbase: u32, c: u32) -> i32 {
+    let xc = u32(clamp(x, 0, i32(U.w) - 1));
+    let yc = u32(clamp(y, 0, i32(U.h) - 1));
+    return rdB(U.leadInBytes + fbase + (yc * U.w + xc) * 3u + c);
+}
+
+fn filterByte(b: u32) -> u32 {
+    let pix = b / 3u;
+    let c = b - pix * 3u;
+    let ppf = U.w * U.h;
+    let f = pix / ppf;
+    let rem = pix - f * ppf;
+    let x = i32(rem % U.w);
+    let y = i32(rem / U.w);
+    let fbase = f * U.frameBytes;
+    let orig = rdB(U.leadInBytes + b);
+    var v : i32 = orig;
+    if (U.ftype == 1u) {
+        // temporal diff: previous frame sits exactly one frameBytes earlier,
+        // which for frame 0 lands inside the lead-in region.
+        v = abs(orig - rdB(U.leadInBytes + b - U.frameBytes));
+    } else if (U.ftype == 2u) {
+        var sum : i32 = 0;
+        for (var dy = -1; dy <= 1; dy = dy + 1) {
+            for (var dx = -1; dx <= 1; dx = dx + 1) {
+                sum = sum + sampPx(x + dx, y + dy, fbase, c);
+            }
+        }
+        v = sum / 9;
+    } else if (U.ftype == 3u) {
+        v = 5 * orig - sampPx(x - 1, y, fbase, c) - sampPx(x + 1, y, fbase, c)
+                     - sampPx(x, y - 1, fbase, c) - sampPx(x, y + 1, fbase, c);
+    } else if (U.ftype == 4u) {
+        let a  = sampPx(x - 1, y - 1, fbase, c); let b2 = sampPx(x, y - 1, fbase, c); let cc = sampPx(x + 1, y - 1, fbase, c);
+        let d  = sampPx(x - 1, y,     fbase, c);                                      let ff = sampPx(x + 1, y,     fbase, c);
+        let g  = sampPx(x - 1, y + 1, fbase, c); let hh = sampPx(x, y + 1, fbase, c); let ii = sampPx(x + 1, y + 1, fbase, c);
+        let gx = -a - 2 * d - g + cc + 2 * ff + ii;
+        let gy = -a - 2 * b2 - cc + g + 2 * hh + ii;
+        v = i32(sqrt(f32(gx * gx + gy * gy)));
+    }
+    let mixed = f32(orig) + (f32(clamp(v, 0, 255)) - f32(orig)) * U.strength;
+    return u32(clamp(i32(mixed), 0, 255));
+}
+
+@compute @workgroup_size(256)
+fn filt(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let word0 = gid.x * 4u;
+    for (var k = 0u; k < 4u; k = k + 1u) {
+        let wi = word0 + k;
+        let b0 = wi * 4u;
+        if (b0 >= U.outBytes) { return; }
+        var packed : u32 = 0u;
+        for (var j = 0u; j < 4u; j = j + 1u) {
+            let b = b0 + j;
+            if (b < U.outBytes) {
+                packed = packed | (filterByte(b) << (j * 8u));
+            }
+        }
+        dst[wi] = packed;
+    }
+}
+`;
+
+let filterPipeline = null, filterBGL = null, filteredBuf = null, filterUniformBuf = null;
+let filterScratchArr = null;
+const filterUniformData = new Uint32Array(8);
+const filterUniformFloat = new Float32Array(filterUniformData.buffer);
+
+// Created lazily: costs 128 MB of VRAM, so only users who touch a filter pay it.
+function ensureFilterResources() {
+    if (filterPipeline) return;
+    filterBGL = device.createBindGroupLayout({ entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]});
+    filterPipeline = device.createComputePipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [filterBGL] }),
+        compute: { module: device.createShaderModule({ code: FILTER_WGSL }), entryPoint: 'filt' },
+    });
+    filteredBuf = device.createBuffer({ size: Math.ceil(CHUNK_BYTES / 4) * 4, usage: GPUBufferUsage.STORAGE });
+    filterUniformBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+}
+
+function gpuFilterEligible() {
+    if (!device || state.format !== 'img_rgb' || !state.mediaVolume) return false;
+    if (state.mediaFilter === FILTER_NONE || state.filterStrength === 0) return false;
+    const fb = state.mediaVolume.w * state.mediaVolume.h * 3;
+    return fb * 2 <= CHUNK_BYTES; // room for one lead-in frame + at least one payload frame
+}
+
 const computeUniformData = new Uint32Array(12);
 const computeUniformDataFloat = new Float32Array(computeUniformData.buffer);
 const indirectResetData = new Uint32Array([6, 0, 0, 0, 0]);
@@ -1700,11 +1808,30 @@ function updateBackdropFromRGB(rgb, off, w, h) {
 // changing filter or strength never re-seeks the video. Temporal difference uses a
 // lookback frame (t0 - 1/fps) fetched during decode when the filter is active.
 const FILTER_NONE = 0, FILTER_DIFF = 1, FILTER_SMOOTH = 2, FILTER_SHARPEN = 3, FILTER_EDGE = 4;
-const K_BLUR  = [1/9,1/9,1/9, 1/9,1/9,1/9, 1/9,1/9,1/9];
 const K_SHARP = [0,-1,0, -1,5,-1, 0,-1,0];
 let filterRunId = 0;
 
 function yieldToUI() { return new Promise(r => setTimeout(r, 0)); }
+
+// Integer box blur: exact sum/9, byte-identical to the GPU shader's integer path
+// (a float 1/9 kernel truncates differently at exact-integer boundaries).
+function filterFrameBox(src, off, dst, w, h) {
+    const rb = w * 3;
+    for (let y = 0; y < h; y++) {
+        const r0 = off + (y > 0 ? y-1 : y) * rb;
+        const r1 = off + y * rb;
+        const r2 = off + (y < h-1 ? y+1 : y) * rb;
+        for (let x = 0; x < w; x++) {
+            const xm = (x > 0 ? x-1 : x) * 3, x0 = x * 3, xp = (x < w-1 ? x+1 : x) * 3;
+            for (let c = 0; c < 3; c++) {
+                const sum = src[r0+xm+c] + src[r0+x0+c] + src[r0+xp+c]
+                          + src[r1+xm+c] + src[r1+x0+c] + src[r1+xp+c]
+                          + src[r2+xm+c] + src[r2+x0+c] + src[r2+xp+c];
+                dst[r1+x0+c] = (sum / 9) | 0;
+            }
+        }
+    }
+}
 
 function filterFrameConv(src, off, dst, w, h, k) {
     const rb = w * 3;
@@ -1759,6 +1886,34 @@ async function applyMediaFilter() {
         return;
     }
 
+    if (gpuFilterEligible()) {
+        // Phase 2: the volume streams through the GPU filter pre-pass inside
+        // runCompute. CPU work here is only the backdrop preview (frame 0).
+        state.buffer = data.buffer;
+        const preview = new Uint8Array(frameBytes);
+        switch (filt) {
+            case FILTER_DIFF: {
+                const pArr = mv.lookback || data; // self -> zeros, matching the shader
+                for (let j = 0; j < frameBytes; j++) {
+                    const d = data[j] - pArr[j];
+                    preview[j] = d < 0 ? -d : d;
+                }
+                break;
+            }
+            case FILTER_SMOOTH:  filterFrameBox(data, 0, preview, w, h);        break;
+            case FILTER_SHARPEN: filterFrameConv(data, 0, preview, w, h, K_SHARP); break;
+            case FILTER_EDGE:    filterFrameSobel(data, 0, preview, w, h);         break;
+        }
+        if (s < 1) {
+            for (let j = 0; j < frameBytes; j++) {
+                preview[j] = (data[j] + (preview[j] - data[j]) * s) | 0;
+            }
+        }
+        updateBackdropFromRGB(preview, 0, w, h);
+        return;
+    }
+
+    // CPU fallback: frames too large for the chunked GPU path (> half a chunk).
     const out = new Uint8Array(data.length);
     for (let i = 0; i < frames; i++) {
         const off = i * frameBytes;
@@ -1774,7 +1929,7 @@ async function applyMediaFilter() {
                 }
                 break;
             }
-            case FILTER_SMOOTH:  filterFrameConv(data, off, out, w, h, K_BLUR);  break;
+            case FILTER_SMOOTH:  filterFrameBox(data, off, out, w, h);        break;
             case FILTER_SHARPEN: filterFrameConv(data, off, out, w, h, K_SHARP); break;
             case FILTER_EDGE:    filterFrameSobel(data, off, out, w, h);         break;
         }
@@ -2053,12 +2208,33 @@ async function runCompute() {
     device.queue.writeBuffer(maxCountBuf, 0, new Uint32Array([0]));
 
     const MAX_DISPATCH = 65535 * 256;
-    const chunkTuples = Math.min(Math.floor(CHUNK_BYTES / byteStep), MAX_DISPATCH);
+    let chunkTuples = Math.min(Math.floor(CHUNK_BYTES / byteStep), MAX_DISPATCH);
+
+    // GPU media filter: chunks must be frame-aligned so 3x3 kernels never cross
+    // a chunk boundary and every chunk's lead-in is exactly the preceding frame.
+    const gpuFilter = gpuFilterEligible() && byteStep === 3;
+    let fltFrameBytes = 0, fltPixPerFrame = 0;
+    if (gpuFilter) {
+        ensureFilterResources();
+        const mv = state.mediaVolume;
+        fltPixPerFrame = mv.w * mv.h;
+        fltFrameBytes = fltPixPerFrame * 3;
+        const framesPerChunk = Math.max(1, Math.floor((CHUNK_BYTES - fltFrameBytes) / fltFrameBytes));
+        chunkTuples = Math.max(fltPixPerFrame,
+            Math.floor(Math.min(framesPerChunk * fltPixPerFrame, MAX_DISPATCH) / fltPixPerFrame) * fltPixPerFrame);
+        if (!filterScratchArr) filterScratchArr = new Uint8Array(Math.ceil(CHUNK_BYTES / 4) * 4 + 4);
+    }
     const totalChunks = Math.ceil(totalTuples / chunkTuples);
     const srcBytes = new Uint8Array(state.buffer);
 
-    const computeBG = device.createBindGroup({ layout: computeBGL, entries:[
+    const filterBG = gpuFilter ? device.createBindGroup({ layout: filterBGL, entries: [
         { binding: 0, resource: { buffer: rawDataBuf } },
+        { binding: 1, resource: { buffer: filteredBuf } },
+        { binding: 2, resource: { buffer: filterUniformBuf } },
+    ]}) : null;
+
+    const computeBG = device.createBindGroup({ layout: computeBGL, entries:[
+        { binding: 0, resource: { buffer: gpuFilter ? filteredBuf : rawDataBuf } },
         { binding: 1, resource: { buffer: bitTableBuf } },
         { binding: 2, resource: { buffer: outputBuf } },
         { binding: 3, resource: { buffer: indirectBuf } },
@@ -2095,7 +2271,30 @@ async function runCompute() {
             const chunkByteLen = count * byteStep;
 
             const alignedLen = Math.ceil(chunkByteLen / 4) * 4;
-            if (chunkByteOff + alignedLen <= srcBytes.length) {
+            if (gpuFilter) {
+                // Assemble [lead-in frame][chunk frames]. Chunk 0's lead-in is the
+                // decoded lookback frame, or the first frame itself (diff -> zeros:
+                // phase-1 semantics, no motion before the window start).
+                const leadStart = chunkByteOff - fltFrameBytes;
+                if (leadStart >= 0) {
+                    filterScratchArr.set(srcBytes.subarray(leadStart, chunkByteOff), 0);
+                } else {
+                    const lb = state.mediaVolume.lookback;
+                    filterScratchArr.set(lb || srcBytes.subarray(0, fltFrameBytes), 0);
+                }
+                filterScratchArr.set(srcBytes.subarray(chunkByteOff, chunkByteOff + chunkByteLen), fltFrameBytes);
+                const upBytes = Math.ceil((fltFrameBytes + chunkByteLen) / 4) * 4;
+                device.queue.writeBuffer(rawDataBuf, 0, filterScratchArr, 0, upBytes);
+
+                filterUniformData[0] = state.mediaVolume.w;
+                filterUniformData[1] = state.mediaVolume.h;
+                filterUniformData[2] = fltFrameBytes;
+                filterUniformData[3] = fltFrameBytes; // leadInBytes
+                filterUniformData[4] = chunkByteLen;
+                filterUniformData[5] = state.mediaFilter;
+                filterUniformFloat[6] = state.filterStrength;
+                device.queue.writeBuffer(filterUniformBuf, 0, filterUniformData);
+            } else if (chunkByteOff + alignedLen <= srcBytes.length) {
                 device.queue.writeBuffer(rawDataBuf, 0, srcBytes, chunkByteOff, alignedLen);
             } else {
                 const tmp = new Uint8Array(alignedLen);
@@ -2117,6 +2316,15 @@ async function runCompute() {
             device.queue.writeBuffer(computeUniformBuf, 0, computeUniformData);
 
             const enc = device.createCommandEncoder();
+            if (gpuFilter) {
+                // Filter dispatch: 16 output bytes per thread keeps a full 128 MB
+                // chunk at ~32k workgroups, under the 65535 dispatch limit.
+                const fPass = enc.beginComputePass();
+                fPass.setPipeline(filterPipeline);
+                fPass.setBindGroup(0, filterBG);
+                fPass.dispatchWorkgroups(Math.ceil(chunkByteLen / 16 / 256));
+                fPass.end();
+            }
             const pass = enc.beginComputePass();
             pass.setPipeline(computePipeline);
             pass.setBindGroup(0, computeBG);
