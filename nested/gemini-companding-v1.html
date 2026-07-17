@@ -8,6 +8,8 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #050508; color: #ccc; font-family: 'Consolas', 'SF Mono', monospace; overflow: hidden; }
     canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+    #bgMedia { object-fit: contain; z-index: 0; opacity: 0; }
+    #canvas { z-index: 1; }
 
     .panel {
         position: fixed; top: 16px; z-index: 10;
@@ -246,6 +248,10 @@
         <label>Density Strength <span class="val" id="vDens">0.00</span></label>
         <input type="range" id="sDens" min="0" max="1" step="0.01" value="0">
     </div>
+    <div class="ctrl">
+        <label>Media Backdrop <span class="val" id="vBgBlend">0.00</span></label>
+        <input type="range" id="sBgBlend" min="0" max="1" step="0.01" value="0">
+    </div>
         </div>
     </details>
 
@@ -441,6 +447,7 @@
     </details>
 </div>
 
+<canvas id="bgMedia" width="1" height="1"></canvas>
 <canvas id="canvas"></canvas>
 
 <script>
@@ -1269,6 +1276,7 @@ let state = {
     tileStep: 4,
     densityThreshold: 7943282, decodedImageBuf: null,
     videoEl: null, videoFile: null, videoMeta: null, videoURL: null,
+    mediaBackdrop: 0,
     compandCurve: 0, compandParam: 10.0,
 };
 
@@ -1646,6 +1654,23 @@ let windowDirty = false;
 
 let videoScratchCanvas = null, videoScratchCtx = null;
 
+// ---------- Media backdrop: source frame alpha-blended behind the cloud ----------
+// The #bgMedia canvas sits under the WebGPU canvas. The blend slider drives two
+// things in tandem: this element's CSS opacity, and the render pass clear alpha
+// (canvas is alphaMode:'premultiplied', so a transparent clear reveals the DOM).
+function setMediaBackdropSource(source, w, h) {
+    const bg = document.getElementById('bgMedia');
+    if (bg.width !== w || bg.height !== h) { bg.width = w; bg.height = h; }
+    bg.getContext('2d').drawImage(source, 0, 0, w, h);
+}
+function clearMediaBackdrop() {
+    const bg = document.getElementById('bgMedia');
+    bg.getContext('2d').clearRect(0, 0, bg.width, bg.height);
+}
+function applyMediaBackdropBlend() {
+    document.getElementById('bgMedia').style.opacity = state.mediaBackdrop;
+}
+
 function isVideoRGBMode() { return !!(state.videoMeta && state.format === 'img_rgb'); }
 
 function clearVideoState() {
@@ -1792,6 +1817,7 @@ async function decodeVideoWindow() {
         const t = Math.min(t0 + i * dt, m.duration - 0.0001);
         await seekVideo(v, t);
         videoScratchCtx.drawImage(v, 0, 0, m.w, m.h);
+        if (i === 0) setMediaBackdropSource(videoScratchCanvas, m.w, m.h);
         const rgba = videoScratchCtx.getImageData(0, 0, m.w, m.h).data;
         let ri = i * m.frameBytes;
         for (let p = 0, si = 0; p < pixelCount; p++, si += 4, ri += 3) {
@@ -2123,10 +2149,13 @@ function render() {
     device.queue.writeBuffer(renderUniformBuf, 0, ruData);
 
     const enc = device.createCommandEncoder();
+    // Backdrop blend: the canvas is alphaMode:'premultiplied', so clearing at
+    // reduced alpha lets the #bgMedia frame show through. RGB is premultiplied.
+    const bgA = 1 - state.mediaBackdrop;
     const pass = enc.beginRenderPass({
         colorAttachments:[{
             view: context.getCurrentTexture().createView(),
-            clearValue:{r:0.008,g:0.008,b:0.016,a:1}, loadOp:'clear', storeOp:'store',
+            clearValue:{r:0.008*bgA, g:0.008*bgA, b:0.016*bgA, a:bgA}, loadOp:'clear', storeOp:'store',
         }],
         depthStencilAttachment:{
             view:depthView, depthClearValue:1.0, depthLoadOp:'clear', depthStoreOp:'store',
@@ -2552,6 +2581,7 @@ function handleFile(files){
     if(f.type.startsWith('video/') || /\.(mp4|webm|m4v|mov|ogv)$/i.test(f.name)){
         setupVideoFile(f).catch(() => {
             // Undecodable as video — fall through to raw byte ingestion.
+            clearMediaBackdrop();
             state.imageFile = null; state.decodedImageBuf = null;
             state.file = f; state.fileSize = f.size; state.fileName = f.name;
             const mb = f.size / (1024 * 1024);
@@ -2578,6 +2608,7 @@ function handleFile(files){
                 const ctx = canvas.getContext('2d');
                 canvas.width = img.width; canvas.height = img.height;
                 ctx.drawImage(img, 0, 0);
+                setMediaBackdropSource(canvas, canvas.width, canvas.height);
                 const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
                 const pixelCount = canvas.width * canvas.height;
                 const rgb = new Uint8Array(pixelCount * 3);
@@ -2593,6 +2624,7 @@ function handleFile(files){
         return;
     }
     clearVideoState();
+    clearMediaBackdrop();
     state.imageFile = null; state.decodedImageBuf = null;
     state.file = f; state.fileSize = f.size; state.fileName = f.name;
 
@@ -2611,6 +2643,7 @@ function handleFile(files){
 
 function ingestBuffer(arrayBuffer, name, autoFormat){
     clearVideoState();
+    if(autoFormat !== 'img_rgb') clearMediaBackdrop();
     state.file = null; state.buffer = arrayBuffer;
     state.fileSize = arrayBuffer.byteLength; state.fileName = name || 'ingested';
     if(autoFormat) setFormat(autoFormat);
@@ -2691,6 +2724,7 @@ document.getElementById('sPts').oninput=e=>{state.pointScale=parseFloat(e.target
 document.getElementById('sDepth').oninput=e=>{state.depthScale=parseFloat(e.target.value);document.getElementById('vDepth').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sProx').oninput=e=>{state.proximity=parseFloat(e.target.value);document.getElementById('vProx').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sDens').oninput=e=>{state.densityStrength=parseFloat(e.target.value);document.getElementById('vDens').innerText=parseFloat(e.target.value).toFixed(2);};
+document.getElementById('sBgBlend').oninput=e=>{state.mediaBackdrop=parseFloat(e.target.value);document.getElementById('vBgBlend').innerText=state.mediaBackdrop.toFixed(2);applyMediaBackdropBlend();};
 function setDive(axis, v){
     v = parseInt(v);
     if (document.getElementById('chkLinkDive').checked) {
