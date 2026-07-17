@@ -79,7 +79,7 @@
     <p style="font-size:12px; line-height:1.6;">This tool requires WebGPU. Use Chrome 113+, Edge 113+, or Safari 18+.</p>
 </div>
 
-<div id="dropZone"><h1 style="color:#0ff">INJECT BYTESTREAM</h1><p style="color:#558;font-size:12px;margin-top:8px;">Drop files, images, or paste URLs</p></div>
+<div id="dropZone"><h1 style="color:#0ff">INJECT BYTESTREAM</h1><p style="color:#558;font-size:12px;margin-top:8px;">Drop files, images, videos, or paste URLs</p></div>
 <div id="selRect" style="position:fixed;border:1px dashed #0ff;background:rgba(0,255,255,0.06);pointer-events:none;display:none;z-index:5;box-shadow:0 0 12px rgba(0,255,255,0.15);"></div>
 <div style="position:fixed;bottom:12px;left:16px;z-index:10;font-size:9px;color:#446;pointer-events:none;line-height:1.6;letter-spacing:0.3px;">Shift + Left Drag = Select &nbsp;·&nbsp; + Ctrl = Add &nbsp;·&nbsp; + Alt = Subtract &nbsp;·&nbsp; <b>+</b>/<b>−</b> = Density &nbsp;·&nbsp; Ctrl+Z = Undo</div>
 
@@ -89,18 +89,18 @@
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
         <button class="file-btn" style="margin-bottom:0;" onclick="document.getElementById('fIn').click()">Open File</button>
-        <button class="file-btn" style="margin-bottom:0;background:#0af;" onclick="document.getElementById('fInImg').click()">IMG</button>
+        <button class="file-btn" style="margin-bottom:0;background:#0af;" onclick="document.getElementById('fInImg').click()">MEDIA</button>
     </div>
     <input type="file" id="fIn" style="display:none" onchange="handleFile(this.files)">
-    <input type="file" id="fInImg" style="display:none" accept="image/*" onchange="handleFile(this.files)">
+    <input type="file" id="fInImg" style="display:none" accept="image/*,video/*" onchange="handleFile(this.files)">
 
     <div class="group-label">Scrub Timeline</div>
     <div class="ctrl">
-        <label>File Offset <span class="val" id="vOff">0%</span></label>
+        <label><span id="lblOff">File Offset</span> <span class="val" id="vOff">0%</span></label>
         <input type="range" id="sOff" min="0" max="100" step="0.1" value="0">
     </div>
     <div class="ctrl">
-        <label>Window Size (MB) <span class="val" id="vWin">32.0</span></label>
+        <label><span id="lblWin">Window Size (MB)</span> <span class="val" id="vWin">32.0</span></label>
         <input type="range" id="sWin" min="0.1" max="256" step="0.1" value="32">
     </div>
     <div class="select-row">
@@ -126,9 +126,9 @@
                     <option value="fp32">fp32</option>
                     <option value="fp64">fp64</option>
                 </optgroup>
-                <optgroup label="Image">
-                    <option value="img_rgb">IMG → RGB</option>
-                    <option value="img_raw">IMG → Raw</option>
+                <optgroup label="Media">
+                    <option value="img_rgb">IMG/VID → RGB</option>
+                    <option value="img_raw">IMG/VID → Raw</option>
                 </optgroup>
             </select>
         </div>
@@ -1268,8 +1268,13 @@ let state = {
     densityStrength: 0, densityCurve: 0, densityGamma: 0.5, densityMode: 0,
     tileStep: 4,
     densityThreshold: 7943282, decodedImageBuf: null,
+    videoEl: null, videoFile: null, videoMeta: null, videoURL: null,
     compandCurve: 0, compandParam: 10.0,
 };
+
+// Video decode limits: a temporal slab is decoded per window; keep it bounded.
+const VIDEO_MAX_FRAMES = 64;
+const VIDEO_MAX_DECODE_BYTES = 256 * 1024 * 1024;
 
 function getWordSize(f) {
     if (['uint16','int16','fp16','bf16'].includes(f)) return 2;
@@ -1634,7 +1639,186 @@ const indirectResetData = new Uint32Array([6, 0, 0, 0, 0]);
 let loadingWindow = false;
 let windowDirty = false;
 
+// ---------- Video as a 3D volume: time is the third axis ----------
+// A video is a stack of 2D RGB slices. The scrub offset selects a timestamp,
+// the window size selects how many consecutive frames get decoded into one
+// contiguous RGB buffer — a temporal slab fed through the img_rgb pipeline.
+
+let videoScratchCanvas = null, videoScratchCtx = null;
+
+function isVideoRGBMode() { return !!(state.videoMeta && state.format === 'img_rgb'); }
+
+function clearVideoState() {
+    if (state.videoEl) { state.videoEl.pause(); state.videoEl.removeAttribute('src'); state.videoEl.load(); }
+    if (state.videoURL) { URL.revokeObjectURL(state.videoURL); }
+    state.videoEl = null; state.videoFile = null; state.videoMeta = null; state.videoURL = null;
+    updateScrubLabels(false);
+}
+
+function updateScrubLabels(videoMode) {
+    const lo = document.getElementById('lblOff'), lw = document.getElementById('lblWin');
+    if (lo) lo.textContent = videoMode ? 'Time Offset' : 'File Offset';
+    if (lw) lw.textContent = videoMode ? 'Time Window (frames)' : 'Window Size (MB)';
+}
+
+function seekVideo(v, t) {
+    return new Promise(resolve => {
+        if (v.readyState >= 2 && Math.abs(v.currentTime - t) < 0.0005) { resolve(); return; }
+        let settled = false;
+        const done = () => {
+            if (settled) return;
+            settled = true;
+            v.removeEventListener('seeked', done);
+            clearTimeout(timer);
+            resolve();
+        };
+        const timer = setTimeout(done, 2500); // safety: never hang the pipeline on a stuck seek
+        v.addEventListener('seeked', done);
+        v.currentTime = t;
+    });
+}
+
+// Estimate FPS by playing muted briefly and sampling presented-frame timestamps.
+// Falls back to 30 if requestVideoFrameCallback is unavailable or times out.
+function estimateVideoFPS(v) {
+    return new Promise(resolve => {
+        if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) { resolve(30); return; }
+        const times = [];
+        let handle = 0, finished = false;
+        const finish = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            if (handle) v.cancelVideoFrameCallback(handle);
+            v.pause();
+            if (times.length < 3) { resolve(30); return; }
+            const deltas = [];
+            for (let i = 1; i < times.length; i++) deltas.push(times[i] - times[i-1]);
+            deltas.sort((a, b) => a - b);
+            const median = deltas[Math.floor(deltas.length / 2)];
+            const fps = median > 0 ? 1 / median : 30;
+            resolve(Math.min(240, Math.max(1, Math.round(fps))));
+        };
+        const timer = setTimeout(finish, 900);
+        const tick = (_now, meta) => {
+            times.push(meta.mediaTime);
+            if (times.length >= 9) { finish(); return; }
+            handle = v.requestVideoFrameCallback(tick);
+        };
+        handle = v.requestVideoFrameCallback(tick);
+        v.muted = true;
+        v.play().catch(() => finish());
+    });
+}
+
+async function setupVideoFile(f) {
+    clearVideoState();
+    state.imageFile = null; state.decodedImageBuf = null;
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.preload = 'auto';
+    v.style.display = 'none';
+    const url = URL.createObjectURL(f);
+    state.videoURL = url;
+    v.src = url;
+
+    await new Promise((resolve, reject) => {
+        v.onloadedmetadata = resolve;
+        v.onerror = () => reject(new Error('video metadata load failed'));
+        setTimeout(() => reject(new Error('video metadata timeout')), 8000);
+    }).catch(e => { console.log('Video load failed:', e.message); clearVideoState(); throw e; });
+
+    let duration = v.duration;
+    if (!isFinite(duration) || duration <= 0) {
+        duration = (v.seekable && v.seekable.length) ? v.seekable.end(v.seekable.length - 1) : 0;
+    }
+    if (duration <= 0 || !v.videoWidth || !v.videoHeight) {
+        console.log('Video has no usable duration/dimensions, treating as raw bytes.');
+        clearVideoState();
+        throw new Error('unusable video');
+    }
+
+    const fps = await estimateVideoFPS(v);
+    v.pause();
+
+    const w = v.videoWidth, h = v.videoHeight;
+    const frameBytes = w * h * 3;
+    const totalFrames = Math.max(1, Math.round(duration * fps));
+    state.videoEl = v;
+    state.videoFile = f;
+    state.videoMeta = { w, h, duration, fps, frameBytes, totalFrames,
+                        totalVirtualBytes: totalFrames * frameBytes };
+    state.fileName = `${f.name} (${w}×${h} · ${duration.toFixed(1)}s · ~${fps}fps)`;
+    console.log(`Video volume: ${w}×${h}×${totalFrames} frames ≈ ${(state.videoMeta.totalVirtualBytes/1048576).toFixed(0)} MB decoded RGB`);
+
+    // Configure scrub controls in frame units.
+    const winSlider = document.getElementById('sWin');
+    const maxFrames = Math.min(VIDEO_MAX_FRAMES, totalFrames,
+                               Math.max(1, Math.floor(VIDEO_MAX_DECODE_BYTES / frameBytes)));
+    winSlider.min = 1; winSlider.step = 1; winSlider.max = maxFrames;
+    winSlider.value = 1;
+    state.scrubWindowMB = frameBytes / 1048576; // 1 frame, kept in MB so nothing downstream changes
+    document.getElementById('vWin').innerText = '1 frame';
+    document.getElementById('sOff').value = 0; state.scrubOffset = 0;
+    document.getElementById('vOff').innerText = '0.00s';
+    updateScrubLabels(true);
+
+    setFormat('img_rgb');
+}
+
+async function decodeVideoWindow() {
+    const m = state.videoMeta, v = state.videoEl;
+    if (!m || !v) return;
+
+    if (!videoScratchCanvas) {
+        videoScratchCanvas = document.createElement('canvas');
+        videoScratchCtx = videoScratchCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    if (videoScratchCanvas.width !== m.w || videoScratchCanvas.height !== m.h) {
+        videoScratchCanvas.width = m.w; videoScratchCanvas.height = m.h;
+    }
+
+    const windowBytes = state.scrubWindowMB * 1048576;
+    const capFrames = Math.min(VIDEO_MAX_FRAMES, m.totalFrames,
+                               Math.max(1, Math.floor(VIDEO_MAX_DECODE_BYTES / m.frameBytes)));
+    const frames = Math.min(capFrames, Math.max(1, Math.round(windowBytes / m.frameBytes)));
+    const dt = 1 / m.fps;
+    const tEnd = Math.max(0, m.duration - dt);
+    const t0 = Math.min(state.scrubOffset * m.duration, tEnd);
+
+    const vol = new Uint8Array(frames * m.frameBytes);
+    const pixelCount = m.w * m.h;
+
+    for (let i = 0; i < frames; i++) {
+        const t = Math.min(t0 + i * dt, m.duration - 0.0001);
+        await seekVideo(v, t);
+        videoScratchCtx.drawImage(v, 0, 0, m.w, m.h);
+        const rgba = videoScratchCtx.getImageData(0, 0, m.w, m.h).data;
+        let ri = i * m.frameBytes;
+        for (let p = 0, si = 0; p < pixelCount; p++, si += 4, ri += 3) {
+            vol[ri] = rgba[si]; vol[ri+1] = rgba[si+1]; vol[ri+2] = rgba[si+2];
+        }
+    }
+
+    state.buffer = vol.buffer;
+    state.fileSize = m.totalVirtualBytes;
+    document.getElementById('vOff').innerText = t0.toFixed(2) + 's';
+    document.getElementById('vWin').innerText = frames === 1 ? '1 frame' : frames + ' frames';
+}
+
 async function loadWindow() {
+    const videoMode = isVideoRGBMode();
+    if (videoMode) {
+        if (loadingWindow) { windowDirty = true; return; }
+        loadingWindow = true;
+        windowDirty = false;
+        try {
+            await decodeVideoWindow();
+            runCompute();
+        } catch(e) { console.warn('video decode error:', e); }
+        loadingWindow = false;
+        if (windowDirty) loadWindow();
+        return;
+    }
     if (!state.file && !state.buffer) return;
     if (!state.file) { runCompute(); return; }
     if (loadingWindow) { windowDirty = true; return; }
@@ -2262,7 +2446,42 @@ function setFormat(f){
     state.format=f;
     document.getElementById('selFormat').value=f;
 
-    if(f === 'img_rgb' && state.decodedImageBuf){
+    // Restores MB semantics on the window slider when leaving video-frame scrubbing.
+    const configRawSliders = (file) => {
+        state.file = file; state.buffer = null;
+        state.fileSize = file.size;
+        const mb = file.size / (1024*1024);
+        const winSlider = document.getElementById('sWin');
+        winSlider.min = 0.1; winSlider.step = 0.1;
+        winSlider.max = Math.max(1, Math.ceil(mb));
+        const defWin = Math.min(32, mb);
+        winSlider.value = defWin; state.scrubWindowMB = defWin;
+        document.getElementById('vWin').innerText = defWin.toFixed(1);
+        updateScrubLabels(false);
+        loadWindow();
+    };
+
+    if(f === 'img_rgb' && state.videoMeta){
+        // Video → temporal RGB volume. Window slider is in frames; keep
+        // scrubWindowMB in true MB so decodeVideoWindow's math stays uniform.
+        state.file = null;
+        state.fileSize = state.videoMeta.totalVirtualBytes;
+        const winSlider = document.getElementById('sWin');
+        const m = state.videoMeta;
+        const maxFrames = Math.min(VIDEO_MAX_FRAMES, m.totalFrames,
+                                   Math.max(1, Math.floor(VIDEO_MAX_DECODE_BYTES / m.frameBytes)));
+        winSlider.min = 1; winSlider.step = 1; winSlider.max = maxFrames;
+        const curFrames = Math.min(maxFrames, Math.max(1, Math.round(winSlider.value)));
+        winSlider.value = curFrames;
+        state.scrubWindowMB = curFrames * m.frameBytes / 1048576;
+        document.getElementById('vWin').innerText = curFrames === 1 ? '1 frame' : curFrames + ' frames';
+        updateScrubLabels(true);
+        loadWindow();
+    } else if(f === 'img_raw' && state.videoFile){
+        configRawSliders(state.videoFile);
+    } else if(wasImage && !f.startsWith('img_') && state.videoFile){
+        configRawSliders(state.videoFile);
+    } else if(f === 'img_rgb' && state.decodedImageBuf){
         state.buffer = state.decodedImageBuf;
         state.file = null;
         state.fileSize = state.decodedImageBuf.byteLength;
@@ -2330,7 +2549,26 @@ function setCompand(c) {
 function handleFile(files){
     if(!files[0])return;
     const f = files[0];
+    if(f.type.startsWith('video/') || /\.(mp4|webm|m4v|mov|ogv)$/i.test(f.name)){
+        setupVideoFile(f).catch(() => {
+            // Undecodable as video — fall through to raw byte ingestion.
+            state.imageFile = null; state.decodedImageBuf = null;
+            state.file = f; state.fileSize = f.size; state.fileName = f.name;
+            const mb = f.size / (1024 * 1024);
+            const winSlider = document.getElementById('sWin');
+            winSlider.min = 0.1; winSlider.step = 0.1;
+            winSlider.max = Math.max(1, Math.ceil(mb));
+            const defWin = Math.min(32, mb);
+            winSlider.value = defWin; state.scrubWindowMB = defWin;
+            document.getElementById('vWin').innerText = defWin.toFixed(1);
+            document.getElementById('sOff').value = 0; state.scrubOffset = 0;
+            document.getElementById('vOff').innerText = '0%';
+            loadWindow();
+        });
+        return;
+    }
     if(f.type.startsWith('image/')){
+        clearVideoState();
         state.imageFile = f;
         const reader = new FileReader();
         reader.onload = function(e){
@@ -2354,11 +2592,13 @@ function handleFile(files){
         reader.readAsDataURL(f);
         return;
     }
+    clearVideoState();
     state.imageFile = null; state.decodedImageBuf = null;
     state.file = f; state.fileSize = f.size; state.fileName = f.name;
 
     const mb = f.size / (1024 * 1024);
     const winSlider = document.getElementById('sWin');
+    winSlider.min = 0.1; winSlider.step = 0.1;
     winSlider.max = Math.max(1, Math.ceil(mb));
     const defWin = Math.min(32, mb);
     winSlider.value = defWin; state.scrubWindowMB = defWin;
@@ -2370,11 +2610,13 @@ function handleFile(files){
 }
 
 function ingestBuffer(arrayBuffer, name, autoFormat){
+    clearVideoState();
     state.file = null; state.buffer = arrayBuffer;
     state.fileSize = arrayBuffer.byteLength; state.fileName = name || 'ingested';
     if(autoFormat) setFormat(autoFormat);
     const mb = arrayBuffer.byteLength / (1024 * 1024);
     const winSlider = document.getElementById('sWin');
+    winSlider.min = 0.1; winSlider.step = 0.1;
     winSlider.max = Math.max(1, Math.ceil(mb));
     winSlider.value = Math.ceil(mb); state.scrubWindowMB = mb;
     document.getElementById('vWin').innerText = mb.toFixed(1);
@@ -2390,7 +2632,11 @@ async function tryFetchURL(src){
         if(!response.ok) return;
         const contentType = response.headers.get('content-type') || '';
         const blob = await response.blob();
-        if(contentType.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)(\?|$)/i.test(src)){
+        if(contentType.startsWith('video/') || /\.(mp4|webm|m4v|mov|ogv)(\?|$)/i.test(src)){
+            const blobWithType = new Blob([blob], {type: contentType.startsWith('video/') ? contentType : 'video/mp4'});
+            const file = new File([blobWithType], url.pathname.split('/').pop() || 'fetched.mp4', {type: blobWithType.type});
+            handleFile([file]);
+        } else if(contentType.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)(\?|$)/i.test(src)){
             const blobWithType = new Blob([blob], {type: contentType.startsWith('image/') ? contentType : 'image/png'});
             const file = new File([blobWithType], url.pathname.split('/').pop() || 'fetched', {type: blobWithType.type});
             handleFile([file]);
@@ -2418,8 +2664,26 @@ function scheduleCompute() { cancelAnimationFrame(computeRAF); computeRAF = requ
 let windowRAF = 0;
 function scheduleLoadWindow() { cancelAnimationFrame(windowRAF); windowRAF = requestAnimationFrame(() => loadWindow()); }
 
-document.getElementById('sOff').oninput=e=>{state.scrubOffset=parseFloat(e.target.value)/100;document.getElementById('vOff').innerText=parseFloat(e.target.value).toFixed(1)+'%';scheduleLoadWindow();};
-document.getElementById('sWin').oninput=e=>{state.scrubWindowMB=parseFloat(e.target.value);document.getElementById('vWin').innerText=parseFloat(e.target.value).toFixed(1);scheduleLoadWindow();};
+document.getElementById('sOff').oninput=e=>{
+    const pct = parseFloat(e.target.value);
+    state.scrubOffset = pct / 100;
+    document.getElementById('vOff').innerText = isVideoRGBMode()
+        ? (state.scrubOffset * state.videoMeta.duration).toFixed(2) + 's'
+        : pct.toFixed(1) + '%';
+    scheduleLoadWindow();
+};
+document.getElementById('sWin').oninput=e=>{
+    const val = parseFloat(e.target.value);
+    if (isVideoRGBMode()) {
+        const frames = Math.max(1, Math.round(val));
+        state.scrubWindowMB = frames * state.videoMeta.frameBytes / 1048576;
+        document.getElementById('vWin').innerText = frames === 1 ? '1 frame' : frames + ' frames';
+    } else {
+        state.scrubWindowMB = val;
+        document.getElementById('vWin').innerText = val.toFixed(1);
+    }
+    scheduleLoadWindow();
+};
 document.getElementById('sG0').oninput=e=>{state.gaps[0]=parseFloat(e.target.value);document.getElementById('vG0').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sG1').oninput=e=>{state.gaps[1]=parseFloat(e.target.value);document.getElementById('vG1').innerText=parseFloat(e.target.value).toFixed(2);};
 document.getElementById('sInf').oninput=e=>{state.inflate=parseFloat(e.target.value);document.getElementById('vInf').innerText=parseFloat(e.target.value).toFixed(2);};
