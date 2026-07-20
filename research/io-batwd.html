@@ -1,0 +1,2207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Scriptorium · Blocks all the way down</title>
+<style>
+  :root{
+    --void:#05060c;
+    --panel:rgba(11,15,26,.72);
+    --hair:rgba(150,170,215,.14);
+    --hair-strong:rgba(150,170,215,.30);
+    --dim:#6f7b97;
+    --ink:#c7d1e6;
+    --ink-bright:#e8eefc;
+    --heat:#ffb454;
+    --ok:#66d19e;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Consolas", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", system-ui, sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;background:var(--void)}
+  body{font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased;touch-action:none;user-select:none}
+  #stage{position:fixed;inset:0;
+    background:linear-gradient(180deg,#0a1024 0%,#13203c 42%,#2a3b5e 78%,#4a5f84 100%)}
+  canvas{display:block;width:100%;height:100%}
+
+  .panel{background:var(--panel);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);
+         border:1px solid var(--hair);border-radius:10px}
+
+  /* brand */
+  #brand{position:fixed;top:14px;left:16px;z-index:5;padding:7px 12px;display:flex;gap:10px;align-items:baseline}
+  #brand b{font-weight:600;font-size:13px;color:var(--ink-bright);letter-spacing:.02em}
+  #brand span{font-family:var(--mono);font-size:10.5px;color:var(--dim);letter-spacing:.08em;text-transform:uppercase}
+
+  /* depth readout */
+  #depth{position:fixed;top:14px;right:16px;z-index:5;padding:9px 13px;min-width:196px;text-align:right}
+  #depth .cap{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+  #mag{font-family:var(--mono);font-size:24px;color:var(--heat);line-height:1.15;font-weight:500}
+  #mag i{font-style:normal;font-size:13px;color:var(--dim);margin-left:1px}
+  #sizeline{font-size:12px;color:var(--ink-bright);margin-top:3px}
+  #sizeline em{font-style:normal;color:var(--dim)}
+  #aimline{margin-top:3px;font-size:11.5px;color:var(--ink)}
+  #aimline em{color:var(--dim);font-style:normal}
+  #aimline b{color:var(--heat);font-weight:500}
+  #stats{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:5px;letter-spacing:.04em}
+
+  /* size ladder */
+  #ladder{position:fixed;right:16px;top:132px;bottom:120px;width:196px;z-index:5;
+          display:flex;flex-direction:column;justify-content:space-between;padding:10px 12px;pointer-events:none}
+  #ladder .rung{display:flex;justify-content:flex-end;align-items:center;gap:8px;
+                font-size:11px;color:var(--dim);white-space:nowrap;opacity:.5;transition:opacity .18s,color .18s}
+  #ladder .rung .m{font-family:var(--mono);font-size:9.5px;letter-spacing:.03em;opacity:.7}
+  #ladder .rung .tick{width:14px;height:1px;background:var(--hair-strong);flex:none}
+  #ladder .rung.on{opacity:1;color:var(--heat)}
+  #ladder .rung.on .tick{background:var(--heat);width:26px}
+
+  /* crosshair */
+  #cross{position:fixed;left:50%;top:50%;width:18px;height:18px;margin:-9px 0 0 -9px;z-index:4;pointer-events:none;opacity:.85}
+  #cross:before,#cross:after{content:"";position:absolute;background:#e8eefc;box-shadow:0 0 2px rgba(0,0,0,.85)}
+  #cross:before{left:8px;top:0;width:2px;height:18px}
+  #cross:after{top:8px;left:0;height:2px;width:18px}
+
+  /* hotbar */
+  #hotbar{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:5;
+          display:flex;gap:6px;padding:7px}
+  .slot{width:48px;height:48px;border-radius:7px;border:1px solid var(--hair);position:relative;cursor:pointer;
+        display:flex;align-items:flex-end;justify-content:center;padding-bottom:3px}
+  .slot .sw{position:absolute;inset:6px 6px 14px 6px;border-radius:4px;box-shadow:inset 0 -10px 14px rgba(0,0,0,.35),inset 0 6px 10px rgba(255,255,255,.22)}
+  .slot .k{font-family:var(--mono);font-size:9px;color:var(--dim);position:relative;z-index:1}
+  .slot.on{border-color:var(--heat);box-shadow:0 0 0 1px rgba(255,180,84,.35)}
+  .slot.on .k{color:var(--heat)}
+
+  /* hint line */
+  #hint{position:fixed;bottom:82px;left:50%;transform:translateX(-50%);z-index:5;
+        font-size:12.5px;color:var(--ink);padding:7px 13px;opacity:0;transition:opacity .25s;pointer-events:none;white-space:nowrap}
+  #hint.on{opacity:1}
+  #hint b{color:var(--heat);font-weight:600}
+
+  /* the stamp slot: a block you are carrying, with its interior */
+  #hotbar .slot.stamp{opacity:.32}
+  #hotbar .slot.stamp.has{opacity:1}
+  #hotbar .slot.stamp .sw{position:relative;overflow:hidden}
+  #hotbar .slot.stamp.deep .sw::after{content:'';position:absolute;inset:24%;
+        border:1px solid rgba(0,0,0,.5);box-shadow:inset 0 0 0 1px rgba(255,255,255,.42),
+        0 0 0 1px rgba(255,255,255,.16)}
+  #hotbar .slot.stamp.deep .sw::before{content:'';position:absolute;inset:40%;
+        background:rgba(255,255,255,.30)}
+  #hotbar .slot.stamp.up{box-shadow:0 0 0 1px var(--heat), 0 0 14px rgba(255,180,84,.35)}
+
+  /* help */
+  #helpBtn{position:fixed;bottom:18px;right:16px;z-index:10;width:34px;height:34px;border-radius:9px;
+           background:var(--panel);border:1px solid var(--hair);color:var(--ink);font-size:14px;cursor:pointer}
+  #help{position:fixed;bottom:60px;right:16px;z-index:10;width:290px;padding:14px;display:none}
+  #help.on{display:block}
+  #help h4{margin:0 0 9px;font-size:12px;color:var(--ink-bright);letter-spacing:.03em}
+  #help .row{display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:12px;color:var(--dim)}
+  #help kbd{font-family:var(--mono);font-size:10.5px;color:var(--ink);background:rgba(150,170,215,.10);
+            border:1px solid var(--hair);border-radius:5px;padding:1px 6px}
+  #help .note{margin-top:10px;padding-top:9px;border-top:1px solid var(--hair);font-size:11.5px;line-height:1.5;color:var(--dim)}
+  #help .note em{color:var(--heat);font-style:normal}
+  #help .more{cursor:pointer;user-select:none}
+  #help .more:hover{color:var(--ink)}
+
+  /* field manual — the long-form instructions, split out of the shortcut
+     guide so the pair no longer stacks into a tower. Independently toggled,
+     height-capped, and scrollable. */
+  #manual{position:fixed;bottom:60px;right:322px;z-index:10;width:340px;padding:14px 16px;display:none;
+          max-height:min(560px, calc(100vh - 120px));overflow-y:auto;overscroll-behavior:contain;
+          scrollbar-width:thin;scrollbar-color:rgba(150,170,215,.28) transparent}
+  #manual.on{display:block}
+  #manual::-webkit-scrollbar{width:8px}
+  #manual::-webkit-scrollbar-track{background:transparent}
+  #manual::-webkit-scrollbar-thumb{background:rgba(150,170,215,.18);border-radius:4px;
+          border:2px solid transparent;background-clip:content-box}
+  #manual::-webkit-scrollbar-thumb:hover{background:rgba(150,170,215,.32);background-clip:content-box}
+  #manual h4{margin:0 0 4px;font-size:12px;color:var(--ink-bright);letter-spacing:.03em}
+  #manual .sub{margin:0 0 10px;font-size:10.5px;font-family:var(--mono);letter-spacing:.04em;color:var(--dim);opacity:.8}
+  #manual p{margin:0 0 10px;font-size:11.5px;line-height:1.55;color:var(--dim)}
+  #manual p:last-child{margin-bottom:2px}
+  #manual em{color:var(--heat);font-style:normal}
+
+  /* lock overlay */
+  #lock{position:fixed;inset:0;z-index:9;display:flex;align-items:center;justify-content:center;
+        background:rgba(4,6,12,.72);backdrop-filter:blur(3px);cursor:pointer}
+  #lock.off{display:none}
+  #lock .card{text-align:center;max-width:430px;padding:26px 30px}
+  #lock h1{margin:0 0 6px;font-size:21px;color:var(--ink-bright);font-weight:600;letter-spacing:.01em}
+  #lock h2{margin:0 0 16px;font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--heat);font-weight:500}
+  #lock p{margin:0 0 6px;font-size:13px;line-height:1.6;color:var(--dim)}
+  #lock .go{margin-top:18px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-bright)}
+  #lock .go span{color:var(--heat)}
+</style>
+</head>
+<body>
+  <div id="stage"></div>
+
+  <div id="brand" class="panel"><b>Scriptorium</b><span>blocks all the way down</span></div>
+
+  <div id="depth" class="panel">
+    <div class="cap">magnification</div>
+    <div id="mag">1<i>×</i></div>
+    <div id="sizeline"><em>you are</em> 1 m tall</div>
+    <div id="aimline"><em>aiming at</em> the finest blocks in view</div>
+    <div id="stats">level 0 · 0 worlds · 0 blocks</div>
+  </div>
+
+  <div id="ladder" class="panel"></div>
+
+  <div id="cross"></div>
+  <div id="hotbar" class="panel"></div>
+  <div id="hint"></div>
+
+  <button id="helpBtn">?</button>
+  <div id="help" class="panel on">
+    <h4>Controls</h4>
+    <div class="row"><span>Look</span><kbd>mouse</kbd></div>
+    <div class="row"><span>Move</span><kbd>W A S D</kbd></div>
+    <div class="row"><span>Walk / fly</span><kbd>F</kbd></div>
+    <div class="row"><span>Jump &nbsp;<i style="opacity:.5">(walk)</i></span><kbd>space</kbd></div>
+    <div class="row"><span>Up / down &nbsp;<i style="opacity:.5">(fly)</i></span><kbd>space / shift</kbd></div>
+    <div class="row"><span>Sprint / boost</span><kbd>ctrl</kbd></div>
+    <div class="row"><span>Break block</span><kbd>left click</kbd></div>
+    <div class="row"><span>Place block</span><kbd>right click</kbd></div>
+    <div class="row"><span>Open a block</span><kbd>E</kbd></div>
+    <div class="row"><span>Pick up a block <i style="opacity:.5">(+ its interior)</i></span><kbd>G</kbd></div>
+    <div class="row"><span>Aim bigger / smaller</span><kbd>[</kbd> <kbd>]</kbd> <kbd>alt+scroll</kbd></div>
+    <div class="row"><span>Promote what's in hand</span><kbd>,</kbd> <kbd>.</kbd></div>
+    <div class="row"><span>Turn what's in hand</span><kbd>R</kbd> <kbd>T</kbd></div>
+    <div class="row"><span>Mirror what's in hand</span><kbd>M</kbd></div>
+    <div class="row"><span>Keep as species <i style="opacity:.5">(live)</i></span><kbd>K</kbd></div>
+    <div class="row"><span>Freeze an instance</span><kbd>X</kbd></div>
+    <div class="row"><span>Undo / redo</span><kbd>U</kbd> <kbd>Y</kbd></div>
+    <div class="row"><span>Wireframe <i style="opacity:.5">(debug)</i></span><kbd>|</kbd></div>
+    <div class="row"><span>Flight law <i style="opacity:.5">(experimental)</i></span><kbd>V</kbd></div>
+    <div class="row"><span>Dive pulse fx</span><kbd>P</kbd></div>
+    <div class="row"><span>Shrink (dive)</span><kbd>Q</kbd> <kbd>scroll &uarr;</kbd></div>
+    <div class="row"><span>Grow (surface)</span><kbd>Z</kbd> <kbd>scroll &darr;</kbd></div>
+    <div class="row"><span>Material</span><kbd>1 – 6</kbd></div>
+    <div class="row"><span>Release cursor</span><kbd>esc</kbd></div>
+    <div class="row"><span>Quick save</span><kbd>N</kbd></div>
+    <div class="row"><span>Quick load</span><kbd>L</kbd></div>
+    <div class="row"><span>Field manual</span><kbd>H</kbd></div>
+    <div class="row"><span>This panel</span><kbd>?</kbd></div>
+    <div class="note more" id="manualBtn">New here? Read the <em>field manual</em> — press <b>H</b> or click here.</div>
+  </div>
+
+  <div id="manual" class="panel">
+    <h4>Field manual</h4>
+    <div class="sub">esc frees the cursor to scroll · H toggles</div>
+    <p>Every block is made of blocks. Press <em>E</em> on one to open it: it becomes 8×8×8 smaller blocks of the same stuff. Mine a shaft down into it and <em>scroll to shrink</em> until you fit — you'll drop inside, and it's a whole world. Repeat forever. Scroll the other way to grow back out; the world you left is still there, above you, enormous.</p>
+    <p>Once a block is open you are looking at its 512 children, so the crosshair grabs <em>them</em>. Press <em>[</em> to aim at bigger blocks: the open block folds back up into one block you can break, grab or stamp whole. <em>]</em> aims finer again. The aim is held as a size <b>relative to you</b>, so it follows you down.</p>
+    <p><em>G</em> picks up the block you're looking at <b>together with everything inside it</b> — every sub-block, every sub-sub-block, however deep you carved. Right-click stamps it back down. A subtree has no scale, so you can stamp what you built at 10⁶× as a mountain, or stamp it inside itself.</p>
+    <p>And you can <b>promote</b> it. Press <em>.</em> and the thing in your hand stamps <em>one level up</em>: its 512 children stop being the inside of a block and become 8×8×8 blocks of the world you're standing in, each eight times the size it was, each still carrying whatever was inside <em>it</em>. Press <em>.</em> again for 64³. Carve at the scale of a grain of salt; stamp it out as terrain. <em>,</em> steps back down.</p>
+    <p>The thing in your hand can be <b>turned</b>: <em>R</em> spins it a quarter-turn, <em>T</em> tips it over toward you, <em>M</em> mirrors it — exactly, all the way down. Every nested world inside turns with it, to any depth, with zero error: on a block grid a quarter-turn is just a re-shelving of integers. <em>U</em> undoes breaks, places and stamps; <em>Y</em> redoes.</p>
+    <p>And the thing in your hand can be made <b>alive</b>. Press <em>K</em> and it becomes a <em>species</em> with a name. Stamp it out a hundred times — those aren't copies, they're instances. Dive into any one of them and carve: <b>all one hundred change</b>, because you didn't edit a block, you edited the species. <em>X</em> freezes one you're aiming at into a snapshot that stops listening. And a species can be stamped <em>inside itself</em> — infinity is now a thing you can build by hand.</p>
+    <p>Press <em>F</em> to stand up and walk. Gravity is written in units of <em>you</em>, so a fall from a block feels the same whether the block is a metre wide or a nanometre.</p>
+  </div>
+
+  <div id="lock">
+    <div class="card panel">
+      <h2>Scriptorium</h2>
+      <h1>Blocks all the way down.</h1>
+      <p>A block world you can fall into. Look at a block, press <b>E</b>: it opens, and turns out to be made of 512 smaller blocks of the same stuff.</p>
+      <p>Mine a tunnel into it, then <b>scroll to shrink</b>. You'll drop inside, and it's a world — with its own stone, its own dirt, its own ore. Do it again. And again.</p>
+      <div class="go">click to <span>play</span> · esc to release the cursor</div>
+    </div>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+  "use strict";
+
+  // ===================================================================
+  //  0 · THE IDEA, IN NUMBERS
+  // ===================================================================
+
+  const N        = 8;      // a block subdivides into N³ sub-blocks
+  const R_MIN    = 1/N;    // player-scale envelope, in cells of the reference world
+  const R_MAX    = 1.0;    //   ...crossing it triggers a band transport (descend/ascend)
+  const R_ROOF   = 16;     // Cap root scale to keep relative coordinate distances bounded
+  const ANCESTORS= 5;      // how many levels of parent world we keep on screen (8^5 = 32768×)
+  const CELL_PX  = 3.0;    // a child world is drawn only while its cells are ≥ this many px
+  const CELL_PX_H= 2.1;    //   ...hysteresis: once drawn, it survives down to this
+  const MAX_WORLDS = 64;
+  const REACH    = 5.0;    // in reference-world cells.
+  const FOV      = 70;
+  const TANHALF  = Math.tan(FOV*Math.PI/360);
+  const ROOT_METERS = 1.0; // a root block is one metre. Everything else follows.
+
+  // ---- materials -------------------------------------------------
+  const MAT = [
+    null,
+    { id:1, name:'grass',  c:0x6cbf4b },
+    { id:2, name:'dirt',   c:0x8a6141 },
+    { id:3, name:'stone',  c:0x8d939c },
+    { id:4, name:'sand',   c:0xdccf9e },
+    { id:5, name:'wood',   c:0x7a5230 },
+    { id:6, name:'leaves', c:0x4f9e3a },
+    { id:7, name:'gold',   c:0xe8b73c },
+  ];
+
+  // ===================================================================
+  //  0b · ORIENTATION CODES — the octahedral group in 6 bits
+  // ===================================================================
+  const PERMS = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+  const PERM_IDX = new Map(PERMS.map((p,n)=>[p.join(''), n]));
+  const O_ID = 0;   // perm [0,1,2], all signs +
+
+  function oDesc(code){        // code → {p, s}
+    const p = PERMS[(code>>3)|0];
+    return { p, s: [ (code&1)?-1:1, (code&2)?-1:1, (code&4)?-1:1 ] };
+  }
+  function oCode(g){           // {p, s} → code
+    return PERM_IDX.get(g.p.join(''))*8
+         + ((g.s[0]<0)?1:0) + ((g.s[1]<0)?2:0) + ((g.s[2]<0)?4:0);
+  }
+  function oApply(code, x, y, z){
+    const g = oDesc(code), v = [x,y,z], w = [0,0,0];
+    for(let a=0; a<3; a++) w[a] = g.s[a] < 0 ? (N-1 - v[g.p[a]]) : v[g.p[a]];
+    return w;
+  }
+  function oCompose(ca, cb){
+    const a = oDesc(ca), b = oDesc(cb);
+    const p = [0,0,0], s = [1,1,1];
+    for(let i=0; i<3; i++){ p[i] = b.p[a.p[i]]; s[i] = a.s[i]*b.s[a.p[i]]; }
+    return oCode({p, s});
+  }
+  function oInv(code){
+    const g = oDesc(code);
+    const p = [0,0,0], s = [1,1,1];
+    for(let a=0; a<3; a++){ p[g.p[a]] = a; s[g.p[a]] = g.s[a]; }
+    return oCode({p, s});
+  }
+
+  // ===================================================================
+  //  0c · THE NODE STORE — content-addressed, immutable, hash-consed
+  // ===================================================================
+  const store = new Map();          // hash → { hash, vox, kids:Map(ii→{h,o}), meta:{worlds,depth} }
+  let internHits = 0;
+
+  // ===================================================================
+  //  0d · TYPES — named, mutable pointers into the immutable store
+  // ===================================================================
+  const types = new Map();
+  let nextTypeId = 1;
+  const GREEK = ['α','β','γ','δ','ε','ζ','η','θ','ι','κ','λ','μ',
+                 'ν','ξ','ο','π','ρ','σ','τ','υ','φ','χ','ψ','ω'];
+  function makeType(m, head){
+    const id = nextTypeId++;
+    const name = MAT[m].name + ' ' + GREEK[(id-1) % GREEK.length]
+               + (id > GREEK.length ? Math.ceil(id/GREEK.length) : '');
+    const t = { id, name, head, ver: 1 };
+    types.set(id, t);
+    return t;
+  }
+  const isTyped = ref => ref.t !== undefined;
+  const refHash = ref => isTyped(ref) ? types.get(ref.t).head : ref.h;
+  const copyRef = ref => isTyped(ref) ? {t:ref.t, o:ref.o} : {h:ref.h, o:ref.o};
+
+  function hashNode(vox, kids){
+    let a = 0x811c9dc5 >>> 0, b = 0xcbf29ce4 >>> 0;
+    const mix = x => { a = Math.imul(a ^ x, 0x01000193) >>> 0;
+                       b = Math.imul(b ^ x, 0x85ebca6b) >>> 0; };
+    for(let i=0; i<vox.length; i++) mix(vox[i]);
+    const ks = [...kids.entries()].sort((p,q)=>p[0]-q[0]);
+    for(const [ii, r] of ks){
+      if(isTyped(r)){ mix(0xC7); mix(ii); mix(r.t); }
+      else {
+        mix(0xC1); mix(ii);
+        for(let c=0; c<r.h.length; c++) mix(r.h.charCodeAt(c));
+      }
+      mix(r.o);
+    }
+    return a.toString(16).padStart(8,'0') + b.toString(16).padStart(8,'0');
+  }
+  function intern(vox, kids){
+    const h = hashNode(vox, kids);
+    const hit = store.get(h);
+    if(hit){ internHits++; return h; }
+    let worlds = 1, depth = 1, live = false;
+    for(const r of kids.values()){
+      if(isTyped(r)){ worlds += 1; live = true; continue; }
+      const m = store.get(r.h).meta;
+      worlds += m.worlds;
+      depth = Math.max(depth, 1 + m.depth);
+      live = live || m.live;
+    }
+    store.set(h, { hash:h, vox, kids, meta:{worlds, depth, live} });
+    return h;
+  }
+  const refMeta = ref => store.get(refHash(ref)).meta;
+
+  // ===================================================================
+  //  1 · WORLDS — materialized instances of node references
+  // ===================================================================
+  let nextWorldId = 1;
+  const worlds = new Map();
+
+  function makeWorld(dims, parent){
+    const w = {
+      id: nextWorldId++,
+      dims,
+      level: parent ? worlds.get(parent.w).level+1 : 0,
+      vox: new Uint8Array(dims[0]*dims[1]*dims[2]),
+      voxShared: false,
+      node: null,
+      kids: new Map(),
+      parent,
+      dirty: true,
+      solid: null, open: null,
+      visCount: 0,
+    };
+    worlds.set(w.id, w);
+    return w;
+  }
+  const idx3 = (w,i,j,k)=> i + w.dims[0]*(j + w.dims[1]*k);
+  function get(w,i,j,k){
+    const [nx,ny,nz]=w.dims;
+    if(i<0||j<0||k<0||i>=nx||j>=ny||k>=nz) return -1;
+    return w.vox[idx3(w,i,j,k)];
+  }
+  function inb(w,i,j,k){
+    const [nx,ny,nz]=w.dims;
+    return i>=0&&j>=0&&k>=0&&i<nx&&j<ny&&k<nz;
+  }
+
+  function hash2(x,z,s){ const n=Math.sin(x*127.1+z*311.7+s*74.7)*43758.5453; return n-Math.floor(n); }
+  function vnoise(x,z,s){
+    const xi=Math.floor(x), zi=Math.floor(z), xf=x-xi, zf=z-zi;
+    const u=xf*xf*(3-2*xf), v=zf*zf*(3-2*zf);
+    const a=hash2(xi,zi,s), b=hash2(xi+1,zi,s), c=hash2(xi,zi+1,s), d=hash2(xi+1,zi+1,s);
+    return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v;
+  }
+  function buildRoot(){
+    const RX=30, RY=18, RZ=30;
+    const w = makeWorld([RX,RY,RZ], null);
+    const cx=(RX-1)/2, cz=(RZ-1)/2;
+    const set=(i,j,k,m)=>{ if(inb(w,i,j,k)) w.vox[idx3(w,i,j,k)]=m; };
+    for(let i=0;i<RX;i++) for(let k=0;k<RZ;k++){
+      const dx=(i-cx)/(RX/2), dz=(k-cz)/(RZ/2);
+      const rad=Math.sqrt(dx*dx+dz*dz);
+      if(rad>0.98) continue;
+      const fall = 1 - Math.pow(Math.min(1,rad/0.98), 2.4);
+      let h = Math.round(7 + fall*(2 + 4.0*vnoise(i/8,k/8,1) + 1.6*vnoise(i/3.4,k/3.4,2)));
+      if(fall<0.06) continue;
+      const thick = Math.round(2 + 5*fall + 2*vnoise(i/5,k/5,7));
+      const base  = Math.max(0, h - thick);
+      const beach = h<=8;
+      for(let j=base;j<=h;j++){
+        let m;
+        if(j===h)      m = beach?4:1;
+        else if(j>h-3) m = beach?4:2;
+        else           m = 3;
+        set(i,j,k,m);
+      }
+    }
+    for(let t=0;t<7;t++){
+      const i=4+Math.floor(hash2(t,3,11)*(RX-8)), k=4+Math.floor(hash2(t,9,13)*(RZ-8));
+      let h=-1; for(let j=RY-1;j>=0;j--) if(get(w,i,j,k)===1){h=j;break;}
+      if(h<0) continue;
+      const th = 3+Math.floor(hash2(t,1,17)*3);
+      for(let j=1;j<=th;j++) set(i,h+j,k,5);
+      for(let di=-2;di<=2;di++) for(let dk=-2;dk<=2;dk++) for(let dj=0;dj<=2;dj++){
+        const d=Math.abs(di)+Math.abs(dk)+dj;
+        if(d>3) continue;
+        if(get(w,i+di,h+th+dj,k+dk)===0) set(i+di,h+th+dj,k+dk,6);
+      }
+    }
+    return w;
+  }
+
+  const EMPTY_NODE = { hash:'0', vox:new Uint8Array(N*N*N), kids:new Map(), meta:{worlds:1,depth:1,live:false} };
+  function materialize(ref, w, i, j, k){
+    let node = store.get(refHash(ref));
+    if(!node){
+      console.error('materialize: unresolvable reference', ref, '— rendering as air');
+      node = EMPTY_NODE;
+    }
+    const c = makeWorld([N,N,N], {w:w.id, i, j, k});
+    if(ref.o === O_ID){
+      c.vox = node.vox;
+      c.voxShared = true;
+      for(const [ii, kr] of node.kids) c.kids.set(ii, Object.assign(copyRef(kr), {inst:0}));
+    } else {
+      for(let z=0; z<N; z++) for(let y=0; y<N; y++) for(let x=0; x<N; x++){
+        const ii = x + N*(y + N*z);
+        const m  = node.vox[ii], kr = node.kids.get(ii);
+        if(!m && !kr) continue;
+        const [X, Y, Z] = oApply(ref.o, x, y, z);
+        const oi = X + N*(Y + N*Z);
+        c.vox[oi] = m;
+        if(kr) c.kids.set(oi, Object.assign(copyRef(kr), {o:oCompose(ref.o, kr.o), inst:0}));
+      }
+    }
+    c.node = node.hash;
+    if(isTyped(ref)){ c.type = ref.t; c.typeVer = types.get(ref.t).ver; }
+    ref.inst = c.id;
+    return c;
+  }
+  function instOf(w, ii, ref, i, j, k){
+    if(ref.inst){
+      const c = worlds.get(ref.inst);
+      if(c){
+        if(!isTyped(ref) || c.typeVer === types.get(ref.t).ver) return c;
+        if(camInsideCell(w.id, ii)) return c;
+        disposeInstances(w, ii);
+      }
+    }
+    return materialize(ref, w, i, j, k);
+  }
+  function ensureOwnVox(w){
+    if(w.voxShared){ w.vox = new Uint8Array(w.vox); w.voxShared = false; }
+  }
+
+  function internFromWorld(w){
+    const kids = new Map();
+    for(const [ii, r] of w.kids) kids.set(ii, copyRef(r));
+    const h = intern(w.vox, kids);
+    w.voxShared = true;
+    return h;
+  }
+  function internFromWorldUnbaked(w, o){
+    if(o === O_ID) return internFromWorld(w);
+    const inv = oInv(o);
+    const vox = new Uint8Array(N*N*N);
+    const kids = new Map();
+    for(let z=0; z<N; z++) for(let y=0; y<N; y++) for(let x=0; x<N; x++){
+      const ii = x + N*(y + N*z);
+      const m = w.vox[ii], kr = w.kids.get(ii);
+      if(!m && !kr) continue;
+      const [X, Y, Z] = oApply(inv, x, y, z);
+      const oi = X + N*(Y + N*Z);
+      vox[oi] = m;
+      if(kr) kids.set(oi, Object.assign(copyRef(kr), {o:oCompose(inv, kr.o)}));
+    }
+    return intern(vox, kids);
+  }
+  function commitWorld(w){
+    while(w.parent){
+      const P = worlds.get(w.parent.w);
+      if(!P) return;
+      const ii = idx3(P, w.parent.i, w.parent.j, w.parent.k);
+      const old = P.kids.get(ii);
+
+      if(old && isTyped(old)){
+        const T = types.get(old.t);
+        const h = internFromWorldUnbaked(w, old.o);
+        if(T.head === h) return;
+        T.head = h; T.ver++;
+        w.node = store.get(refHash(old)).hash;
+        w.typeVer = T.ver;
+        typesDirty = T.name;
+        return;
+      }
+
+      const h = internFromWorld(w);
+      w.node = h;
+      if(old && old.h === h && old.o === O_ID) return;
+      P.kids.set(ii, {h, o:O_ID, inst:w.id});
+      w = P;
+    }
+  }
+  let typesDirty = false;
+
+  const FILL_VARIANTS = 4;
+  function fillNode(m, vi){
+    const seed = m*97.31 + vi*47.77;
+    const vox = new Uint8Array(N*N*N);
+    for(let z=0; z<N; z++) for(let y=0; y<N; y++) for(let x=0; x<N; x++){
+      let s = m;
+      if(m===1)      s = (y===N-1) ? 1 : 2;
+      else if(m===6) s = (hash2(x*3+z, y*7, seed) > 0.45) ? 6 : 0;
+      else if(m===3) s = (hash2(x+y*5, z*3, seed+91) > 0.965) ? 7 : 3;
+      vox[x + N*(y + N*z)] = s;
+    }
+    return intern(vox, new Map());
+  }
+  function openBlock(w, i, j, k){
+    const ii = idx3(w, i, j, k);
+    const m  = w.vox[ii];
+    if(!m || w.kids.has(ii)) return null;
+    const vi = (hash2(i*3+1, k*7+2, j*13 + w.level*5) * FILL_VARIANTS) | 0;
+    const ref = { h: fillNode(m, vi), o: O_ID, inst: 0 };
+    w.kids.set(ii, ref);
+    w.dirty = true;
+    commitWorld(w);
+    return instOf(w, ii, ref, i, j, k);
+  }
+
+  function disposeInstances(w, ii){
+    const ref = w.kids.get(ii);
+    if(!ref || !ref.inst) return;
+    const stack = [ref.inst];
+    ref.inst = 0;
+    while(stack.length){
+      const c = worlds.get(stack.pop());
+      if(!c) continue;
+      for(const r of c.kids.values()) if(r.inst) stack.push(r.inst);
+      if(c.solid){ scene.remove(c.solid); c.solid.geometry.dispose(); c.solid.material.dispose(); }
+      if(c.open){  scene.remove(c.open);  c.open.material.dispose(); }
+      worlds.delete(c.id);
+    }
+  }
+  function closeBlock(w, ii){
+    disposeInstances(w, ii);
+    w.kids.delete(ii);
+  }
+
+  // ===================================================================
+  //  2 · CAMERA
+  // ===================================================================
+  const cam = { world:null, pos:[0,0,0], R:1.0, yaw:0.6, pitch:-0.28,
+                vel:[0,0,0], fly:true, onGround:false };
+
+  let transitionStart = 0;
+  let transitionDuration = 220;
+  let transitionDir = 0;
+  let fxPulse = false;
+
+  // ===================================================================
+  //  2b · GRAVITY, COLLISION, WALKING
+  // ===================================================================
+  const G_ACCEL = 10.9;
+  const V_JUMP  =  5.6;
+  const V_WALK  =  4.6;
+  const P_WIDTH =  0.30;
+  const EYE     =  0.80;
+
+  function camDir(){
+    const cp=Math.cos(cam.pitch);
+    return [ -Math.sin(cam.yaw)*cp, Math.sin(cam.pitch), -Math.cos(cam.yaw)*cp ];
+  }
+  function bandTransport(){
+    diveBlocked = null;
+    let guard=0;
+    while(guard++<8){
+      const w = cam.world;
+      if(cam.R > R_MAX && w.parent){
+        const p = worlds.get(w.parent.w);
+        cam.pos = [ w.parent.i + cam.pos[0]/N,
+                    w.parent.j + cam.pos[1]/N,
+                    w.parent.k + cam.pos[2]/N ];
+        cam.R /= N; cam.world = p;
+        cam.vel = [cam.vel[0]/N, cam.vel[1]/N, cam.vel[2]/N];
+        if(flyDSm !== null) flyDSm /= N;
+        
+        transitionStart = performance.now();
+        transitionDir = -1;
+        
+        flash('surfaced — you are back in the '+(p.parent?'block above':'world above'));
+        continue;
+      }
+      if(cam.R < R_MIN){
+        const i=Math.floor(cam.pos[0]), j=Math.floor(cam.pos[1]), k=Math.floor(cam.pos[2]);
+        const ref = inb(w,i,j,k) ? w.kids.get(idx3(w,i,j,k)) : undefined;
+        if(ref!==undefined){
+          const c = instOf(w, idx3(w,i,j,k), ref, i, j, k);
+          cam.pos = [ (cam.pos[0]-i)*N, (cam.pos[1]-j)*N, (cam.pos[2]-k)*N ];
+          cam.R *= N; cam.world = c;
+          cam.vel = [cam.vel[0]*N, cam.vel[1]*N, cam.vel[2]*N];
+          if(flyDSm !== null) flyDSm *= N;
+          
+          transitionStart = performance.now();
+          transitionDir = 1;
+          
+          flash('you are inside a block of '+MAT[parentMat(c)].name);
+          continue;
+        }
+
+        if(cam.fly){
+          const m = inb(w,i,j,k) ? w.vox[idx3(w,i,j,k)] : 0;
+          if(m) diveBlocked = { kind:'in-solid', m };
+          else {
+            const rd = camDir();
+            const pi=Math.floor(cam.pos[0]+rd[0]*0.51),
+                  pj=Math.floor(cam.pos[1]+rd[1]*0.51),
+                  pk=Math.floor(cam.pos[2]+rd[2]*0.51);
+            if(inb(w,pi,pj,pk)){
+              const jj = idx3(w,pi,pj,pk), pm = w.vox[jj];
+              if(pm) diveBlocked = w.kids.has(jj) ? { kind:'doorstep', m:pm }
+                                                  : { kind:'wall',     m:pm };
+              else   diveBlocked = { kind:'air' };
+            } else   diveBlocked = { kind:'air' };
+          }
+        } else diveBlocked = { kind:'walk' };
+
+        if (!cam.fly) {
+          cam.R = R_MIN;
+        } else {
+          cam.R = Math.max(cam.R, 1e-6);
+        }
+      }
+      if(!cam.world.parent) cam.R = Math.min(cam.R, R_ROOF);
+      break;
+    }
+  }
+  function parentMat(c){
+    const p=worlds.get(c.parent.w);
+    return p.vox[idx3(p,c.parent.i,c.parent.j,c.parent.k)] || 3;
+  }
+  const camLevel = ()=> cam.world.level;
+
+  function solidAtIn(w, p, depth){
+    if(depth>14) return false;
+    const i=Math.floor(p[0]), j=Math.floor(p[1]), k=Math.floor(p[2]);
+    if(!inb(w,i,j,k)){
+      if(!w.parent) return false;
+      const P=worlds.get(w.parent.w);
+      return solidAtIn(P, [ w.parent.i + p[0]/N,
+                            w.parent.j + p[1]/N,
+                            w.parent.k + p[2]/N ], depth+1);
+    }
+    const ii=idx3(w,i,j,k), m=w.vox[ii];
+    if(!m) return false;
+    const ref=w.kids.get(ii);
+    if(ref!==undefined){
+      const c=instOf(w, ii, ref, i, j, k);
+      return solidAtIn(c, [ (p[0]-i)*N, (p[1]-j)*N, (p[2]-k)*N ], depth+1);
+    }
+    return true;
+  }
+  const solidAt = p => solidAtIn(cam.world, p, 0);
+
+  function hits(p){
+    const hw=P_WIDTH*cam.R, H=cam.R;
+    const y0=p[1]-EYE*H+1e-4, y1=p[1]+(1-EYE)*H-1e-4;
+    for(let sx=-1;sx<=1;sx++) for(let sz=-1;sz<=1;sz++){
+      const x=p[0]+sx*hw, z=p[2]+sz*hw;
+      for(let t=0;t<=3;t++){
+        if(solidAt([x, y0+(y1-y0)*t/3, z])) return true;
+      }
+    }
+    return false;
+  }
+
+  function movePhysical(dt){
+    let dx=cam.vel[0]*dt, dy=cam.vel[1]*dt, dz=cam.vel[2]*dt;
+    if(hits(cam.pos)){
+      cam.vel[1]=0;
+      cam.pos[0]+=dx; cam.pos[2]+=dz;
+      return;
+    }
+    const step = 0.18*cam.R;
+    const n = Math.max(1, Math.ceil(Math.max(Math.abs(dx),Math.abs(dy),Math.abs(dz))/step));
+    cam.onGround=false;
+    const axis=(a, s)=>{
+      const p=cam.pos;
+      p[a]+=s;
+      if(!hits(p)) return false;
+      p[a]-=s;
+      let rem=s;
+      for(let it=0; it<7; it++){ rem*=0.5; p[a]+=rem; if(hits(p)) p[a]-=rem; }
+      return true;
+    };
+    for(let q=0;q<n;q++){
+      const sx=dx/n, sy=dy/n, sz=dz/n;
+      if(axis(0,sx)) cam.vel[0]=0;
+      if(axis(2,sz)) cam.vel[2]=0;
+      if(axis(1,sy)){ if(sy<0) cam.onGround=true; cam.vel[1]=0; }
+    }
+  }
+
+  // ===================================================================
+  //  3 · THREE
+  // ===================================================================
+  let renderer, scene, camera, cube, highlight, ghost;
+  const TINT = {px:0.82, nx:0.72, py:1.0, ny:0.52, pz:0.90, nz:0.66};
+
+  const AXIS_UV   = [[1,2],[2,0],[0,1]];
+  const FACE_TINT = [[TINT.nx,TINT.px],[TINT.ny,TINT.py],[TINT.nz,TINT.pz]];
+  const CORNERS   = [[-1,-1],[1,-1],[1,1],[-1,1]];
+  const AO_LEVEL  = [0.40, 0.60, 0.80, 1.00];
+
+  function unitCube(){
+    const g = new THREE.BufferGeometry();
+    const pos=[], col=[], idxs=[], nrm=[];
+    const faces = [
+      [[ .5,-.5,-.5],[ .5,-.5, .5],[ .5, .5, .5],[ .5, .5,-.5],[1,0,0],TINT.px],
+      [[-.5,-.5, .5],[-.5,-.5,-.5],[-.5, .5,-.5],[-.5, .5, .5],[-1,0,0],TINT.nx],
+      [[-.5, .5,-.5],[ .5, .5,-.5],[ .5, .5, .5],[-.5, .5, .5],[0,1,0],TINT.py],
+      [[-.5,-.5, .5],[ .5,-.5, .5],[ .5,-.5,-.5],[-.5,-.5,-.5],[0,-1,0],TINT.ny],
+      [[-.5,-.5, .5],[-.5, .5, .5],[ .5, .5, .5],[ .5,-.5, .5],[0,0,1],TINT.pz],
+      [[ .5,-.5,-.5],[ .5, .5,-.5],[-.5, .5,-.5],[-.5,-.5,-.5],[0,0,-1],TINT.nz],
+    ];
+    faces.forEach((f,fi)=>{
+      const t=f[5];
+      for(let v=0;v<4;v++){ pos.push(...f[v]); nrm.push(...f[4]); col.push(t,t,t); }
+      const b=fi*4; idxs.push(b,b+2,b+1, b,b+3,b+2);
+    });
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+    g.setAttribute('normal',   new THREE.Float32BufferAttribute(nrm,3));
+    g.setAttribute('color',    new THREE.Float32BufferAttribute(col,3));
+    g.setIndex(idxs);
+    return g;
+  }
+
+  function initThree(){
+    const stage = document.getElementById('stage');
+    renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true, logarithmicDepthBuffer:true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setClearColor(0x000000, 0);
+    stage.appendChild(renderer.domElement);
+    scene  = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(FOV, innerWidth/innerHeight, 0.01, 1e7);
+    camera.rotation.order='YXZ';
+    cube = unitCube();
+
+    const hg = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.002,1.002,1.002));
+    highlight = new THREE.LineSegments(hg, new THREE.LineBasicMaterial({color:0x101018, transparent:true, opacity:.85}));
+    highlight.frustumCulled=false; highlight.visible=false;
+    scene.add(highlight);
+
+    ghost = new THREE.LineSegments(hg, new THREE.LineBasicMaterial({color:0xffb454, transparent:true, opacity:.55}));
+    ghost.frustumCulled=false; ghost.visible=false;
+    scene.add(ghost);
+
+    addEventListener('resize', ()=>{
+      renderer.setSize(innerWidth, innerHeight);
+      camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+    });
+  }
+
+  function nextPow2(n){ let p=64; while(p<n) p<<=1; return p; }
+
+  let showWire = false;
+  function setWireframe(on){
+    showWire = on;
+    for(const w of worlds.values()){
+      if(w.solid) w.solid.material.wireframe = on;
+      if(w.open)  w.open.material.wireframe  = on;
+    }
+    flash(on ? 'wireframe <b>on</b> — every triangle the mesher emits' : 'wireframe off');
+  }
+
+  function ensureMesh(w, which, need){
+    let m = w[which];
+    if(m && m.instanceMatrix.count >= need) return m;
+    if(m){ scene.remove(m); }
+    const cap = nextPow2(Math.max(need,64));
+    const mat = new THREE.MeshBasicMaterial({ vertexColors:true, wireframe:showWire });
+    m = new THREE.InstancedMesh(cube, mat, cap);
+    m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap*3), 3);
+    m.frustumCulled = false;
+    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(m);
+    w[which] = m;
+    return m;
+  }
+
+  const _m4 = new THREE.Matrix4(), _c = new THREE.Color();
+  function tintOf(m, salt){
+    _c.setHex(MAT[m].c);
+    const j = 0.90 + 0.20*hash2(salt&1023, (salt>>10)&1023, m);
+    _c.multiplyScalar(j);
+    return _c;
+  }
+
+  function rebuild(w){
+    const [nx,ny,nz]=w.dims;
+    const solidAtCell = (i,j,k)=>{
+      if(!inb(w,i,j,k)) return false;
+      const ii=idx3(w,i,j,k);
+      return w.vox[ii]!==0 && !w.kids.has(ii);
+    };
+    const P=[], C=[], NR=[], IX=[];
+    let vc=0, faceCount=0, visCount=0;
+    const cl=new THREE.Color();
+
+    for(let k=0;k<nz;k++) for(let j=0;j<ny;j++) for(let i=0;i<nx;i++){
+      const ii=idx3(w,i,j,k), m=w.vox[ii];
+      if(!m || w.kids.has(ii)) continue;
+      const jt = 0.92 + 0.16*hash2((i*7+1)&1023, (j*13+3)&1023, (k*17+5)&1023);
+      cl.setHex(MAT[m].c);
+      const cr=cl.r*jt, cg=cl.g*jt, cb=cl.b*jt;
+      let drew=false;
+
+      for(let a=0;a<3;a++) for(let sg=-1; sg<=1; sg+=2){
+        const nb=[i,j,k]; nb[a]+=sg;
+        if(solidAtCell(nb[0],nb[1],nb[2])) continue;
+        drew=true; faceCount++;
+
+        const uv=AXIS_UV[a];
+        const uA = sg>0?uv[0]:uv[1], vA = sg>0?uv[1]:uv[0];
+        const tint = FACE_TINT[a][sg>0?1:0];
+        const ao=[0,0,0,0];
+
+        for(let q=0;q<4;q++){
+          const du=CORNERS[q][0], dv=CORNERS[q][1];
+          const s1=[nb[0],nb[1],nb[2]]; s1[uA]+=du;
+          const s2=[nb[0],nb[1],nb[2]]; s2[vA]+=dv;
+          const co=[nb[0],nb[1],nb[2]]; co[uA]+=du; co[vA]+=dv;
+          const o1=solidAtCell(s1[0],s1[1],s1[2])?1:0;
+          const o2=solidAtCell(s2[0],s2[1],s2[2])?1:0;
+          const oc=solidAtCell(co[0],co[1],co[2])?1:0;
+          ao[q] = (o1&&o2) ? 0 : 3-(o1+o2+oc);
+
+          const p=[i+0.5,j+0.5,k+0.5];
+          p[a]+=0.5*sg; p[uA]+=0.5*du; p[vA]+=0.5*dv;
+          const b = AO_LEVEL[ao[q]]*tint;
+          P.push(p[0],p[1],p[2]);
+          NR.push(a===0?sg:0, a===1?sg:0, a===2?sg:0);
+          C.push(cr*b, cg*b, cb*b);
+        }
+        const b=vc; vc+=4;
+        if(ao[0]+ao[2] >= ao[1]+ao[3]) IX.push(b,b+1,b+2, b,b+2,b+3);
+        else                           IX.push(b+1,b+2,b+3, b+1,b+3,b);
+      }
+      if(drew) visCount++;
+    }
+
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(P,3));
+    g.setAttribute('normal',   new THREE.Float32BufferAttribute(NR,3));
+    g.setAttribute('color',    new THREE.Float32BufferAttribute(C,3));
+    g.setIndex(new THREE.BufferAttribute(
+      vc>65535 ? new Uint32Array(IX) : new Uint16Array(IX), 1));
+
+    if(!w.solid){
+      w.solid = new THREE.Mesh(g, new THREE.MeshBasicMaterial({vertexColors:true, wireframe:showWire}));
+      w.solid.frustumCulled = false;
+      scene.add(w.solid);
+    } else {
+      w.solid.geometry.dispose();
+      w.solid.geometry = g;
+    }
+    w.visCount = visCount;
+    w.faceCount = faceCount;
+    w.dirty = false;
+  }
+
+  // ===================================================================
+  //  4 · THE RENDER WALK
+  // ===================================================================
+  let frames = [];
+  let liveWorlds = new Set();
+
+  function projPx(size, dist){ return size*viewH / (Math.max(dist,1e-9) * 2 * TANHALF); }
+  let viewH = 800;
+
+  function topFrame(){
+    let w=cam.world, s=1, o=[0,0,0], up=0;
+    while(w.parent && up<ANCESTORS){
+      const p=worlds.get(w.parent.w);
+      const c=[w.parent.i, w.parent.j, w.parent.k];
+      const ns = s*N;
+      o = [ o[0]-ns*c[0], o[1]-ns*c[1], o[2]-ns*c[2] ];
+      s = ns; w = p; up++;
+    }
+    return {w,s,o};
+  }
+
+  function walk(){
+    frames = [];
+    const live = new Set();
+    const top = topFrame();
+    const stack = [top];
+    while(stack.length && frames.length < MAX_WORLDS){
+      const {w,s,o} = stack.shift();
+      const fr = { w, s, o, hidden:new Set(), openSolid:[] };
+      frames.push(fr); live.add(w.id);
+      if(w.dirty) rebuild(w);
+      for(const [ii,ref] of w.kids){
+        const [nx,ny]=w.dims;
+        const i = ii % nx, j = ((ii/nx)|0) % ny, k = (ii/(nx*ny))|0;
+        const cx = o[0]+s*(i+0.5)-cam.pos[0];
+        const cy = o[1]+s*(j+0.5)-cam.pos[1];
+        const cz = o[2]+s*(k+0.5)-cam.pos[2];
+        const dist = Math.max(Math.hypot(cx,cy,cz) - s*0.87, s*0.05);
+        const px = projPx(s/N, dist);
+        const thr = (ref.inst && liveWorlds.has(ref.inst)) ? CELL_PX_H : CELL_PX;
+        if(px >= thr && frames.length + stack.length < MAX_WORLDS){
+          const c = instOf(w, ii, ref, i, j, k);
+          fr.hidden.add(ii);
+          stack.push({ w:c, s:s/N, o:[o[0]+s*i, o[1]+s*j, o[2]+s*k] });
+        } else {
+          fr.openSolid.push([ii,i,j,k]);
+        }
+      }
+    }
+    liveWorlds = live;
+
+    for(const w of worlds.values()){
+      const on = live.has(w.id);
+      if(w.solid) w.solid.visible = on;
+      if(w.open)  w.open.visible  = on && w.kids.size>0;
+    }
+
+    let currentFOV = FOV;
+    const visualOffset = [0,0,0];
+    
+    if (fxPulse && transitionDir !== 0) {
+      const elapsed = performance.now() - transitionStart;
+      const progress = elapsed / transitionDuration;
+      if (progress >= 1.0) {
+        transitionDir = 0;
+      } else {
+        const pulse = Math.sin(progress * Math.PI);
+        currentFOV = FOV + transitionDir * pulse * 14.0;
+        
+        const rd = camDir();
+        const slideDist = cam.R * 0.18 * (1.0 - progress) * transitionDir;
+        visualOffset[0] = rd[0] * slideDist;
+        visualOffset[1] = rd[1] * slideDist;
+        visualOffset[2] = rd[2] * slideDist;
+      }
+    }
+
+    let far = 1;
+    for(const fr of frames){
+      const {w,s,o} = fr;
+      const px = o[0] - cam.pos[0] - visualOffset[0];
+      const py = o[1] - cam.pos[1] - visualOffset[1];
+      const pz = o[2] - cam.pos[2] - visualOffset[2];
+      
+      if(w.solid){ w.solid.position.set(px,py,pz); w.solid.scale.setScalar(s); }
+      const need = fr.openSolid.length;
+      if(need){
+        const om = ensureMesh(w,'open',need);
+        for(let n=0;n<need;n++){
+          const [ii,i,j,k]=fr.openSolid[n];
+          _m4.makeTranslation(i+0.5,j+0.5,k+0.5);
+          om.setMatrixAt(n,_m4);
+          om.setColorAt(n, tintOf(w.vox[ii], ii*2654435761 % 1048576));
+        }
+        om.count=need; om.instanceMatrix.needsUpdate=true; om.instanceColor.needsUpdate=true;
+        om.position.set(px,py,pz); om.scale.setScalar(s); om.visible=true;
+      } else if(w.open){ w.open.count=0; }
+      const ext = s*Math.max(w.dims[0],w.dims[1],w.dims[2]);
+      far = Math.max(far, Math.hypot(px,py,pz) + ext*1.8);
+    }
+
+    camera.fov = currentFOV;
+    camera.near = Math.max(cam.R * 0.01, 0.001);
+    camera.far  = far * 1.5;
+    camera.updateProjectionMatrix();
+  }
+
+  // ===================================================================
+  //  5 · PICKING
+  // ===================================================================
+  function rayGrid(fr, ro, rd, maxT, capLevel){
+    const {w,s,o} = fr;
+    if(w.level > capLevel) return null;
+    const inv = 1/s;
+    const ox=(ro[0]-o[0])*inv, oy=(ro[1]-o[1])*inv, oz=(ro[2]-o[2])*inv;
+    const [nx,ny,nz]=w.dims;
+    let t0=0, t1=maxT/s;
+    const O=[ox,oy,oz], D=rd, dim=[nx,ny,nz];
+    let entryAxis=-1, entrySign=0;
+    for(let a=0;a<3;a++){
+      if(Math.abs(D[a])<1e-12){ if(O[a]<0||O[a]>dim[a]) return null; continue; }
+      let ta=(0-O[a])/D[a], tb=(dim[a]-O[a])/D[a], sg=-1;
+      if(ta>tb){ const tmp=ta; ta=tb; tb=tmp; sg=1; }
+      if(ta>t0){ t0=ta; entryAxis=a; entrySign=sg; }
+      if(tb<t1) t1=tb;
+      if(t0>t1) return null;
+    }
+    if(t1<0) return null;
+    let t=Math.max(t0,0);
+    let i=Math.floor(ox+D[0]*(t+1e-7)), j=Math.floor(oy+D[1]*(t+1e-7)), k=Math.floor(oz+D[2]*(t+1e-7));
+    i=Math.min(Math.max(i,0),nx-1); j=Math.min(Math.max(j,0),ny-1); k=Math.min(Math.max(k,0),nz-1);
+    const st=[D[0]>0?1:-1, D[1]>0?1:-1, D[2]>0?1:-1];
+    const cell=[i,j,k], p=[ox,oy,oz];
+    const tMax=[0,0,0], tDel=[0,0,0];
+    for(let a=0;a<3;a++){
+      if(Math.abs(D[a])<1e-12){ tMax[a]=Infinity; tDel[a]=Infinity; }
+      else {
+        const nb = cell[a] + (st[a]>0?1:0);
+        tMax[a] = (nb - p[a]) / D[a];
+        tDel[a] = st[a]/D[a];
+      }
+    }
+    let nrm = entryAxis>=0 ? [0,0,0] : null;
+    if(nrm) nrm[entryAxis] = entrySign;
+    let tcur = t;
+    const oi=Math.floor(ox), oj=Math.floor(oy), ok=Math.floor(oz);
+    for(let step=0; step<600; step++){
+      if(cell[0]<0||cell[1]<0||cell[2]<0||cell[0]>=nx||cell[1]>=ny||cell[2]>=nz) return null;
+      const ii = idx3(w,cell[0],cell[1],cell[2]);
+      const m = w.vox[ii];
+      const here = cell[0]===oi && cell[1]===oj && cell[2]===ok;
+      const resolved = fr.hidden.has(ii) && (w.level+1) <= capLevel;
+      if(m && !resolved && !here){
+        const tref = Math.max(tcur,0)*s;
+        if(tref>maxT) return null;
+        return { fr, w, ii, i:cell[0], j:cell[1], k:cell[2], m, t:tref, n:nrm||[0,1,0] };
+      }
+      const a = (tMax[0]<tMax[1]) ? (tMax[0]<tMax[2]?0:2) : (tMax[1]<tMax[2]?1:2);
+      tcur = tMax[a];
+      if(tcur*s > maxT) return null;
+      cell[a]+=st[a]; tMax[a]+=tDel[a];
+      nrm=[0,0,0]; nrm[a] = -st[a];
+    }
+    return null;
+  }
+
+  const AIM_MAX = 9, AIM_MIN = -4;
+  let aimOff = AIM_MAX;
+  const aimCell = ()=> Math.pow(N, -Math.min(aimOff,0));
+  const aimReach = ()=> REACH * aimCell();
+
+  function pick(){
+    const rd = camDir();
+    const cap = camLevel() + aimOff;
+    const reach = aimReach();
+    let best=null;
+    for(const fr of frames){
+      const lim = best ? Math.min(best.t, reach) : reach;
+      const h = rayGrid(fr, cam.pos, rd, lim, cap);
+      if(h && (!best || h.t < best.t)) best=h;
+    }
+    return best;
+  }
+
+  const FLY_K       = 7 / REACH;
+  const FLY_FLOOR_R = 3.5;
+  const FLY_CROSS_S = 2.5;
+  let   flyScene    = false;
+  let   flyDSm      = null;
+
+  function flySpeedLaw(dEff, R, dims){
+    const d = Math.max(dEff, R * FLY_FLOOR_R);
+    return Math.min(FLY_K * d, Math.max(dims[0],dims[1],dims[2]) / FLY_CROSS_S);
+  }
+  function probeDist(rd, maxT){
+    let best = maxT;
+    const cap = camLevel();
+    for(const fr of frames){
+      const h = rayGrid(fr, cam.pos, rd, best, cap);
+      if(h && h.t < best) best = h.t;
+    }
+    return best;
+  }
+  function flySceneSpeed(dt){
+    const probeMax = Math.max(...cam.world.dims) * 2;
+    const dRaw = Math.min( aimTarget ? aimTarget.t : probeMax,
+                           probeDist([0,-1,0], probeMax) );
+    const a = Math.min(1, dt / 0.25);
+    flyDSm = (flyDSm === null) ? dRaw : flyDSm + (dRaw - flyDSm) * a;
+    return flySpeedLaw(flyDSm, cam.R, cam.world.dims);
+  }
+
+  // ===================================================================
+  //  5b · SIMILARITY ZOOM
+  // ===================================================================
+  let zoomPending = 0;
+  let aimPending = 0;
+  const AIM_WHEEL_STEP = 80;
+
+  let divePivot = null;
+  const PIVOT_COS = Math.cos(0.10);
+
+  function scaleAbout(p, pv, f){
+    return [ pv[0] + f*(p[0]-pv[0]),
+             pv[1] + f*(p[1]-pv[1]),
+             pv[2] + f*(p[2]-pv[2]) ];
+  }
+  function divePivotFor(prevR){
+    const rd = camDir();
+    if(divePivot && divePivot.world === cam.world.id){
+      const v = [ divePivot.p[0]-cam.pos[0], divePivot.p[1]-cam.pos[1], divePivot.p[2]-cam.pos[2] ];
+      const L = Math.hypot(v[0],v[1],v[2]);
+      if(L > 1e-9 && (v[0]*rd[0]+v[1]*rd[1]+v[2]*rd[2])/L > PIVOT_COS) return divePivot.p;
+    }
+    const h = aimTarget;
+    const dist = Math.min(h ? h.t : REACH * prevR, REACH * 2.5 * prevR);
+    divePivot = { world: cam.world.id,
+                  p: [ cam.pos[0]+rd[0]*dist, cam.pos[1]+rd[1]*dist, cam.pos[2]+rd[2]*dist ] };
+    return divePivot.p;
+  }
+
+  let diveBlocked = null;
+  let stuckMsgT = 0;
+  function stuckSay(msg){
+    const t = performance.now();
+    if(t < stuckMsgT) return;
+    stuckMsgT = t + 2200;
+    flash(msg);
+  }
+  function diveRefusedMsg(){
+    if(!cam.fly)
+      return 'walking stops at this size — <b>E</b> opens the block you aim at, then zoom into it to dive (<b>F</b> to fly)';
+    switch(diveBlocked.kind){
+      case 'in-solid': return 'inside un-opened '+MAT[diveBlocked.m].name+' — back out and press <b>E</b> on it to open it, then dive';
+      case 'wall':     return 'that '+MAT[diveBlocked.m].name+' isn\u2019t open — press <b>E</b> to open it, then dive inside';
+      case 'doorstep': return 'at the doorstep of the '+MAT[diveBlocked.m].name+' — tap <b>W</b> to slip inside and keep diving';
+      default:         return 'open air — nothing here to dive into; aim at a block and zoom';
+    }
+  }
+
+  function applyZoom(factor) {
+    const prevR = cam.R;
+    cam.R *= factor;
+    cam.R = Math.min(cam.R, R_ROOF);
+    
+    if (cam.fly) {
+      const f = cam.R / prevR;
+      const pv = divePivotFor(prevR);
+      const np = scaleAbout(cam.pos, pv, f);
+      cam.pos[0] = np[0]; cam.pos[1] = np[1]; cam.pos[2] = np[2];
+    }
+    
+    bandTransport();
+
+    if(factor < 1 && diveBlocked) stuckSay(diveRefusedMsg());
+    if(factor > 1 && !cam.world.parent && prevR >= R_ROOF*0.999 && cam.R >= R_ROOF*0.999)
+      stuckSay('this is as big as it gets — the root island has no world above it');
+  }
+
+  let ghostMesh = null;
+
+  const PREVIEW_BUDGET = 4096, PREVIEW_MAX_DEPTH = 3;
+
+  function previewCount(ref, d){
+    const node = store.get(refHash(ref)) || EMPTY_NODE;
+    let c = 0;
+    for(let ii=0; ii<node.vox.length; ii++){
+      if(!node.vox[ii]) continue;
+      const kr = node.kids.get(ii);
+      if(kr && d>0) c += previewCount(kr, d-1);
+      else c++;
+    }
+    return c;
+  }
+
+  function buildStampPreviewData() {
+    if (!stamp) return [];
+    const list = [];
+    if (!stamp.ref) {
+      list.push({ x: 0.5, y: 0.5, z: 0.5, size: 1, m: stamp.m });
+      return list;
+    }
+    let depth = PREVIEW_MAX_DEPTH;
+    while(depth > 0 && previewCount(stamp.ref, depth) > PREVIEW_BUDGET) depth--;
+
+    const S = Math.pow(N, stampUp);
+    (function emit(ref, ox, oy, oz, size, d){
+      const node = store.get(refHash(ref)) || EMPTY_NODE;
+      const cs = size / N;
+      for (let z=0; z<N; z++) for (let y=0; y<N; y++) for (let x=0; x<N; x++) {
+        const ii = x + N*(y + N*z), m = node.vox[ii];
+        const kr = node.kids.get(ii);
+        if(!m && !kr) continue;
+        const [X, Y, Z] = oApply(ref.o, x, y, z);
+        if(kr && d > 0 && list.length < PREVIEW_BUDGET){
+          emit(Object.assign(copyRef(kr), {o:oCompose(ref.o, kr.o)}), ox + X*cs, oy + Y*cs, oz + Z*cs, cs, d-1);
+        } else if(m) {
+          list.push({ x: ox+(X+0.5)*cs, y: oy+(Y+0.5)*cs, z: oz+(Z+0.5)*cs,
+                      size: cs, m, idx: ii });
+        }
+        if(list.length >= PREVIEW_BUDGET*2) return;
+      }
+    })(stamp.ref, 0, 0, 0, S, depth);
+    return list;
+  }
+
+  function updateGhostMesh(previewData) {
+    if (ghostMesh) {
+      scene.remove(ghostMesh);
+      ghostMesh.material.dispose();
+      ghostMesh = null;
+    }
+    if (!previewData || previewData.length === 0) return;
+    const bg = previewData.length;
+    const mat = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.5,
+      color: 0xffffff,
+      depthWrite: false
+    });
+    ghostMesh = new THREE.InstancedMesh(cube, mat, bg);
+    ghostMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(bg * 3), 3);
+    ghostMesh.frustumCulled = false;
+    
+    const _m = new THREE.Matrix4();
+    const _s = new THREE.Vector3();
+    for (let n=0; n<bg; n++) {
+      const p = previewData[n];
+      _m.makeTranslation(p.x, p.y, p.z);
+      _s.setScalar(p.size);
+      _m.scale(_s);
+      ghostMesh.setMatrixAt(n, _m);
+      
+      const c = tintOf(p.m, (p.idx || n) * 2654435761 % 1048576);
+      ghostMesh.setColorAt(n, c);
+    }
+    ghostMesh.instanceMatrix.needsUpdate = true;
+    ghostMesh.instanceColor.needsUpdate = true;
+    scene.add(ghostMesh);
+  }
+
+  // ===================================================================
+  //  6 · ACTIONS
+  // ===================================================================
+  let held = 3;
+  let stamp = null;
+  let useStamp = false;
+  let stampUp = 0;
+  function doBreak(){
+    const h=pick(); if(!h) return;
+    if(camInsideCell(h.w.id, h.ii)){ hint('you are <b>inside</b> that block — surface first'); return; }
+    const old = h.w.kids.get(h.ii);
+    const prevRef = old ? copyRef(old) : null;
+    pushOp({ w:h.w.id, cells:[[h.ii, h.i, h.j, h.k, h.m, prevRef, 0, null]] });
+    ensureOwnVox(h.w);
+    closeBlock(h.w, h.ii);
+    h.w.vox[h.ii]=0; h.w.dirty=true;
+    commitWorld(h.w);
+    if(h.w.parent){ const P=worlds.get(h.w.parent.w); if(P) P.dirty=true; }
+  }
+  function doPlace(){
+    const h=pick(); if(!h) return;
+    const i=h.i+h.n[0], j=h.j+h.n[1], k=h.k+h.n[2];
+    if(!inb(h.w,i,j,k)){ hint('nothing to build on out there'); return; }
+    const ii=idx3(h.w,i,j,k);
+    if(h.w.vox[ii]) return;
+    const s=h.fr.s, o=h.fr.o;
+    const lx=(cam.pos[0]-o[0])/s, ly=(cam.pos[1]-o[1])/s, lz=(cam.pos[2]-o[2])/s;
+    if(Math.floor(lx)===i && Math.floor(ly)===j && Math.floor(lz)===k){ hint('you are standing there'); return; }
+
+    if(useStamp && stamp){ stampRegion(h.w, i, j, k); return; }
+    pushOp({ w:h.w.id, cells:[[ii, i, j, k, 0, null, held, null]] });
+    ensureOwnVox(h.w);
+    h.w.vox[ii]=held; h.w.dirty=true;
+    commitWorld(h.w);
+  }
+
+  // ===================================================================
+  //  6b · THE STAMP — now a reference, not a copy
+  // ===================================================================
+  function mapCell(g, x, y, z){
+    const v = [x, y, z], w = [0, 0, 0];
+    for(let a=0; a<3; a++) w[a] = g.s[a] < 0 ? (N-1 - v[g.p[a]]) : v[g.p[a]];
+    return w;
+  }
+  function xformNode(node, g){
+    const out = { vox: new Uint8Array(N*N*N), kids: new Map() };
+    for(let z=0; z<N; z++) for(let y=0; y<N; y++) for(let x=0; x<N; x++){
+      const ii = x + N*(y + N*z);
+      const m  = node.vox[ii];
+      const kid = node.kids.get(ii);
+      if(!m && !kid) continue;
+      const [X, Y, Z] = mapCell(g, x, y, z);
+      const oi = X + N*(Y + N*Z);
+      out.vox[oi] = m;
+      if(kid) out.kids.set(oi, xformNode(kid, g));
+    }
+    return out;
+  }
+  function nodeEq(a, b){
+    for(let i=0; i<a.vox.length; i++) if(a.vox[i] !== b.vox[i]) return false;
+    if(a.kids.size !== b.kids.size) return false;
+    for(const [ii, k] of a.kids){
+      const o = b.kids.get(ii);
+      if(!o || !nodeEq(k, o)) return false;
+    }
+    return true;
+  }
+  function internLegacy(node){
+    const kids = new Map();
+    for(const [ii, k] of node.kids) kids.set(ii, {h: internLegacy(k), o: O_ID});
+    return intern(new Uint8Array(node.vox), kids);
+  }
+  function expandRef(ref, depth=12){
+    const node = store.get(refHash(ref));
+    const out = { vox: new Uint8Array(N*N*N), kids: new Map() };
+    for(let z=0; z<N; z++) for(let y=0; y<N; y++) for(let x=0; x<N; x++){
+      const ii = x + N*(y + N*z);
+      const m = node.vox[ii], kr = node.kids.get(ii);
+      if(!m && !kr) continue;
+      const [X, Y, Z] = oApply(ref.o, x, y, z);
+      const oi = X + N*(Y + N*Z);
+      out.vox[oi] = m;
+      if(kr && depth > 0)
+        out.kids.set(oi, expandRef(Object.assign(copyRef(kr), {o:oCompose(ref.o, kr.o)}), depth-1));
+    }
+    return out;
+  }
+
+  const G_YAW    = { p:[2,1,0], s:[ 1, 1,-1] };
+  const G_TIP_X  = { p:[0,2,1], s:[ 1,-1, 1] };
+  const G_TIP_Z  = { p:[1,0,2], s:[-1, 1, 1] };
+  const G_MIRR_X = { p:[0,1,2], s:[-1, 1, 1] };
+  const G_MIRR_Z = { p:[0,1,2], s:[ 1, 1,-1] };
+
+  function stampXform(g, msg){
+    if(!stamp){ hint('nothing in hand'); return; }
+    if(!stamp.ref){ hint('a plain block looks the same every way up'); return; }
+    stamp.ref = Object.assign(copyRef(stamp.ref), { o: oCompose(oCode(g), stamp.ref.o) });
+    updateGhostMesh(buildStampPreviewData());
+    flash(msg);
+  }
+  function faceAxis(){ const d = camDir(); return Math.abs(d[0]) > Math.abs(d[2]) ? 0 : 2; }
+  function doRotate(){ stampXform(G_YAW, 'turned a quarter — <b>R</b> to keep turning'); }
+  function doTip(){    stampXform(faceAxis()===0 ? G_TIP_Z : G_TIP_X, 'tipped it over — everything inside tipped with it'); }
+  function doMirror(){ stampXform(faceAxis()===0 ? G_MIRR_Z : G_MIRR_X, 'mirrored — a reflection is as exact as a turn here'); }
+
+  function camInsideCell(wId, ii){
+    let w = cam.world;
+    while(w && w.parent){
+      const P = worlds.get(w.parent.w);
+      if(!P) break;
+      if(w.parent.w === wId && idx3(P, w.parent.i, w.parent.j, w.parent.k) === ii) return true;
+      w = P;
+    }
+    return false;
+  }
+  function camInsideRegion(wId, i0, j0, k0, S){
+    let w = cam.world;
+    while(w && w.parent){
+      const pl = w.parent;
+      if(pl.w === wId && pl.i>=i0 && pl.i<i0+S && pl.j>=j0 && pl.j<j0+S && pl.k>=k0 && pl.k<k0+S) return true;
+      w = worlds.get(pl.w);
+    }
+    return false;
+  }
+
+  const ops = [], redoStack = [];
+  const OPS_MAX = 64, OP_CELLS_MAX = 300000;
+  function pushOp(op){
+    if(op.cells.length === 0) return;
+    if(op.cells.length > OP_CELLS_MAX){ hint('that edit is too large to undo'); return; }
+    ops.push(op);
+    if(ops.length > OPS_MAX) ops.shift();
+    redoStack.length = 0;
+  }
+  function applyCells(op, useNew){
+    const w = worlds.get(op.w);
+    if(!w){ hint('that world no longer exists'); return false; }
+    for(const [ii, i, j, k] of op.cells){
+      if(w.kids.has(ii) && camInsideCell(w.id, ii)){
+        hint('step out of that block first — part of this edit is around you');
+        return false;
+      }
+    }
+    ensureOwnVox(w);
+    for(const [ii, i, j, k, pm, pr, nm, nr] of op.cells){
+      closeBlock(w, ii);
+      const m = useNew ? nm : pm, ref = useNew ? nr : pr;
+      w.vox[ii] = m;
+      if(ref) w.kids.set(ii, Object.assign(copyRef(ref), {inst:0}));
+    }
+    w.dirty = true;
+    commitWorld(w);
+    if(w.parent){ const P = worlds.get(w.parent.w); if(P) P.dirty = true; }
+    return true;
+  }
+  function undoOp(){
+    if(!ops.length){ hint('nothing to undo'); return; }
+    const op = ops[ops.length-1];
+    if(!applyCells(op, false)) return;
+    ops.pop(); redoStack.push(op);
+    flash('undone');
+  }
+  function redoOp(){
+    if(!redoStack.length){ hint('nothing to redo'); return; }
+    const op = redoStack[redoStack.length-1];
+    if(!applyCells(op, true)) return;
+    redoStack.pop(); ops.push(op);
+    flash('redone');
+  }
+
+  function leafOfRef(ref, m, up, x, y, z){
+    if(up===0) return {m, ref};
+    if(!ref)   return {m, ref:null};
+    const node = store.get(refHash(ref));
+    const S = Math.pow(N, up-1);
+    const [cx, cy, cz] = [(x/S)|0, (y/S)|0, (z/S)|0];
+    const [nx2, ny2, nz2] = oApply(oInv(ref.o), cx, cy, cz);
+    const ii = nx2 + N*(ny2 + N*nz2);
+    const cm = node.vox[ii];
+    if(!cm) return {m:0, ref:null};
+    const kr = node.kids.get(ii);
+    const childRef = kr ? Object.assign(copyRef(kr), {o:oCompose(ref.o, kr.o)}) : null;
+    return leafOfRef(childRef, cm, up-1, x%S, y%S, z%S);
+  }
+
+  function stampRegion(w, i0, j0, k0){
+    const up = stamp.ref ? stampUp : 0;
+    const S  = Math.pow(N, up);
+
+    if(camInsideRegion(w.id, i0, j0, k0, S)){
+      hint('that stamp would land <b>on top of you</b> — step out of its footprint first');
+      return;
+    }
+
+    const plan=[]; let clipped=0, solid=0;
+    for(let z=0;z<S;z++) for(let y=0;y<S;y++) for(let x=0;x<S;x++){
+      const i=i0+x, j=j0+y, k=k0+z;
+      if(!inb(w,i,j,k)){ clipped++; continue; }
+      const {m, ref} = leafOfRef(stamp.ref, stamp.m, up, x,y,z);
+      if(m) solid++;
+      plan.push([idx3(w,i,j,k), i, j, k, m, m?ref:null]);
+    }
+    const cells=[];
+    for(const [ii,i,j,k,m,ref] of plan){
+      const pm  = w.vox[ii];
+      const old = w.kids.get(ii);
+      if(pm===m && old===undefined && !ref) continue;
+      const pr = old ? copyRef(old) : null;
+      cells.push([ii, i, j, k, pm, pr, m, ref]);
+    }
+    pushOp({ w:w.id, cells });
+    ensureOwnVox(w);
+    for(const [ii,i,j,k,m,ref] of plan){
+      closeBlock(w, ii);
+      w.vox[ii] = m;
+      if(ref) w.kids.set(ii, Object.assign(copyRef(ref), {inst:0}));
+    }
+    w.dirty = true;
+    commitWorld(w);
+    if(up>0) flash('promoted — its '+solid.toLocaleString()+' inner blocks are now blocks of <b>this</b> world'
+                   + (clipped ? ', '+clipped.toLocaleString()+' fell outside' : ''));
+    else if(stamp.ref) flash('stamped — a reference to everything inside it, written in place');
+  }
+
+  function setStampUp(v){
+    if(!stamp){ hint('nothing in hand'); return; }
+    if(!stamp.ref){ hint('that block has no interior to promote — open one first (<b>E</b>)'); return; }
+    const nv = Math.max(0, Math.min(2, v));
+    if(nv===stampUp) return;
+    stampUp = nv;
+    
+    updateGhostMesh(buildStampPreviewData());
+    refreshHotbar();
+    
+    const S = Math.pow(N, stampUp);
+    flash(stampUp===0
+      ? 'stamping it back as <b>one block</b>, interior intact'
+      : 'stamping its interior <b>'+stampUp+' level'+(stampUp>1?'s':'')+' up</b> — '
+        + S+'×'+S+'×'+S+' blocks of this world, each '+Math.pow(N,stampUp)+'× the size it was');
+  }
+
+  function doGrab(){
+    const h = pick();
+    if(!h){ hint('nothing there to pick up'); return; }
+    const old = h.w.kids.get(h.ii);
+    const ref = old ? copyRef(old) : null;
+    const meta = ref ? refMeta(ref) : null;
+    stamp = { m:h.m, ref, worlds: meta?meta.worlds:0, depth: meta?meta.depth:0, live: !!(meta&&meta.live) };
+    useStamp = true; stampUp = 0;
+    
+    updateGhostMesh(buildStampPreviewData());
+    refreshHotbar();
+    
+    flash(ref
+      ? (isTyped(ref) ? 'picked up a live instance of species <b>'+types.get(ref.t).name+'</b> — stamps stay live'
+                      : 'picked up '+MAT[h.m].name+' <b>and everything inside it</b> — '+stamp.worlds+' nested world'+(stamp.worlds===1?'':'s')
+                        +', '+stamp.depth+' level'+(stamp.depth===1?'':'s')+(stamp.live?' (live doors within)':'')+' deep')
+        + '. Right-click stamps it, <b>R T M</b> turn and mirror it, <b>K</b> keeps it as a species.'
+      : 'picked up a plain block of '+MAT[h.m].name+' — right-click to stamp it');
+  }
+  function doOpen(){
+    const h=pick(); if(!h) return;
+    if(h.w.kids.has(h.ii)){ flash('already open — mine into it, then shrink'); return; }
+    openBlock(h.w, h.i, h.j, h.k);
+    flash('opened a block of '+MAT[h.m].name+' — it is made of '+(N*N*N)+' smaller blocks');
+  }
+
+  // ===================================================================
+  //  6c · SPECIES — keep (K) and freeze (X)
+  // ===================================================================
+  function doKeep(){
+    if(!stamp){ hint('nothing in hand — <b>G</b> picks something up'); return; }
+    if(!stamp.ref){ hint('a plain block has no interior to speciate — open one first (<b>E</b>)'); return; }
+    if(isTyped(stamp.ref)){
+      hint('already the species <b>'+types.get(stamp.ref.t).name+'</b> — stamping plants live instances. <b>X</b> freezes one you aim at.');
+      return;
+    }
+    const T = makeType(stamp.m, stamp.ref.h);
+    stamp.ref = { t: T.id, o: stamp.ref.o };
+    refreshHotbar();
+    flash('kept as species <b>'+T.name+'</b> — every stamp is now a <b>live instance</b>. '
+        + 'Edit inside any one and they all change. <b>X</b> freezes.');
+  }
+  function doFreeze(){
+    const h = pick();
+    if(!h){ hint('aim at a placed block to freeze it'); return; }
+    const ref = h.w.kids.get(h.ii);
+    if(!ref || !isTyped(ref)){
+      hint(ref ? 'that one is already frozen — its content is a fixed snapshot'
+               : 'nothing live there to freeze');
+      return;
+    }
+    const T = types.get(ref.t);
+    const head = T.head;
+    const prevRef = copyRef(ref);
+    const newRef = { h: head, o: ref.o };
+    pushOp({ w:h.w.id, cells:[[h.ii, h.i, h.j, h.k, h.m, prevRef, h.m, newRef]] });
+    const inst = (ref.inst && worlds.get(ref.inst) &&
+                  worlds.get(ref.inst).typeVer === T.ver) ? ref.inst : 0;
+    ensureOwnVox(h.w);
+    h.w.kids.set(h.ii, Object.assign(newRef, {inst}));
+    if(inst){ const c=worlds.get(inst); delete c.type; delete c.typeVer; }
+    h.w.dirty = true;
+    commitWorld(h.w);
+    flash('froze this <b>'+T.name+'</b> — it is now a snapshot, safe from the species\' future');
+  }
+
+  // ===================================================================
+  //  7 · HUD
+  // ===================================================================
+  const LADDER = [
+    [1e2,'a hillside'],[1e1,'a tree'],[1e0,'you, at the start'],[1e-1,'your hand'],
+    [1e-2,'a coin'],[1e-3,'a grain of salt'],[1e-4,'a strand of hair'],[1e-5,'a red blood cell'],
+    [1e-6,'a bacterium'],[1e-7,'a virus'],[1e-8,'a strand of DNA'],[1e-9,'a molecule'],
+    [1e-10,'an atom'],[1e-12,'inside the atom'],[1e-15,'a nucleus'],[1e-18,'a quark'],
+  ];
+  function fmtMeters(m){
+    const u=[[1,'m'],[1e-2,'cm'],[1e-3,'mm'],[1e-6,'µm'],[1e-9,'nm'],[1e-12,'pm'],[1e-15,'fm']];
+    for(const [s,n] of u){ if(m>=s*0.999){ const v=m/s; return (v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toPrecision(2))+' '+n; } }
+    return m.toExponential(1).replace('e','×10^')+' m';
+  }
+  const elAim=document.getElementById('aimline');
+  const elMag=document.getElementById('mag'), elSize=document.getElementById('sizeline'),
+        elStats=document.getElementById('stats'), elLadder=document.getElementById('ladder'),
+        elHint=document.getElementById('hint');
+  LADDER.forEach((r,n)=>{
+    const d=document.createElement('div'); d.className='rung'; d.dataset.n=n;
+    d.innerHTML='<span>'+r[1]+'</span><span class="m">'+fmtMeters(r[0])+'</span><span class="tick"></span>';
+    elLadder.appendChild(d);
+  });
+  let hintT=0;
+  function hint(html){ elHint.innerHTML=html; elHint.classList.add('on'); hintT=performance.now()+2600; }
+  function flash(msg){ hint(msg); }
+
+  function playerMeters(){ return cam.R * Math.pow(N, -camLevel()) * ROOT_METERS; }
+  function blockMeters(level){ return Math.pow(N, -level) * ROOT_METERS; }
+  function setAim(v){
+    const nv = Math.max(AIM_MIN, Math.min(AIM_MAX, v));
+    if(nv===aimOff) return;
+    aimOff = nv;
+    flash(aimOff>=AIM_MAX
+      ? 'aiming at the <b>finest</b> blocks in view'
+      : 'aiming at blocks <b>'+fmtMeters(blockMeters(camLevel()+aimOff))+'</b> across'
+        + (aimOff<0 ? ' — the world above you' : aimOff===0 ? ' — your own world' : ''));
+  }
+  function updateHUD(){
+    const M = Math.pow(N, camLevel()) / cam.R;
+    const e = Math.floor(Math.log10(M));
+    elMag.innerHTML = (M<1e5 ? Math.round(M).toLocaleString() : (M/Math.pow(10,e)).toFixed(1)+'×10<sup>'+e+'</sup>') + '<i>×</i>';
+    const met = playerMeters();
+    elSize.innerHTML = '<em>you are</em> '+fmtMeters(met)+' tall';
+    let bi=0, bd=1e9;
+    LADDER.forEach((r,n)=>{ const d=Math.abs(Math.log10(met)-Math.log10(r[0])); if(d<bd){bd=d;bi=n;} });
+    elLadder.querySelectorAll('.rung').forEach((d,n)=>d.classList.toggle('on', n===bi));
+    let blocks=0, faces=0;
+    for(const f of frames){ blocks += (f.w.visCount||0) + f.openSolid.length; faces += (f.w.faceCount||0); }
+    elStats.textContent = (cam.fly?'fly':'walk')+(showWire?' · wire':'')+' · level '+camLevel()+' · '+frames.length+' worlds · '
+                        + blocks.toLocaleString()+' blocks · '+faces.toLocaleString()+' faces · '
+                        + store.size+' nodes/'+internHits+' reused'
+                        + (types.size ? ' · '+types.size+' species' : '');
+    if(useStamp && stamp){
+      const S = Math.pow(N, stampUp);
+      const visualSize = blockMeters(camLevel()) * S;
+      if (stamp.ref) {
+        const sp = isTyped(stamp.ref) ? types.get(stamp.ref.t).name+' · live · ' : '';
+        if (stampUp === 0) {
+          elAim.innerHTML = '<em>stamp hand</em> ' + sp + MAT[stamp.m].name + ' <b>(1x scale: ' + fmtMeters(blockMeters(camLevel())) + ', interior intact)</b> · [.] to promote';
+        } else {
+          elAim.innerHTML = '<em>stamp hand</em> ' + MAT[stamp.m].name + ' <b>promoted ' + stampUp + ' level' + (stampUp > 1 ? 's' : '') + ' (' + S + '³ blocks: ' + fmtMeters(visualSize) + ' wide)</b> · [,] to demote, [.] to promote';
+        }
+      } else {
+        elAim.innerHTML = '<em>stamp hand</em> plain ' + MAT[stamp.m].name + ' block (' + fmtMeters(blockMeters(camLevel())) + ')';
+      }
+      if(performance.now()>hintT) elHint.classList.remove('on');
+      return;
+    }
+    const aimRef = aimTarget && aimTarget.w.kids.get(aimTarget.ii);
+    elAim.innerHTML = aimTarget
+      ? '<em>aiming at</em> '+fmtMeters(blockMeters(aimTarget.w.level))+' '+MAT[aimTarget.m].name
+        +(aimRef ? (isTyped(aimRef) ? ' <b>· '+types.get(aimRef.t).name+' (live)</b>' : ' <b>(open)</b>') : '')
+      : '<em>aiming at</em> ' + (aimOff>=AIM_MAX ? 'the finest blocks in view'
+          : fmtMeters(blockMeters(camLevel()+aimOff))+' blocks');
+    if(performance.now()>hintT) elHint.classList.remove('on');
+  }
+
+  const bar=document.getElementById('hotbar');
+  [1,2,3,4,5,6].forEach(m=>{
+    const b=document.createElement('div'); b.className='slot'; b.dataset.m=m;
+    b.innerHTML='<div class="sw" style="background:#'+MAT[m].c.toString(16).padStart(6,'0')+'"></div><div class="k">'+m+'</div>';
+    b.title=MAT[m].name;
+    b.onclick=()=>selectMat(m);
+    bar.appendChild(b);
+  });
+  {
+    const b=document.createElement('div'); b.className='slot stamp'; b.dataset.m='S';
+    b.innerHTML='<div class="sw"></div><div class="k">G</div>';
+    b.title='nothing picked up';
+    b.onclick=()=>{ if(stamp){ useStamp=true; refreshHotbar(); if (ghostMesh) ghostMesh.visible = true; } };
+    bar.appendChild(b);
+  }
+  function refreshHotbar(){
+    bar.querySelectorAll('.slot').forEach(s=>{
+      if(s.dataset.m==='S'){
+        s.classList.toggle('has',  !!stamp);
+        s.classList.toggle('deep', !!(stamp && stamp.ref));
+        s.classList.toggle('on',   useStamp && !!stamp);
+        s.querySelector('.sw').style.background =
+          stamp ? '#'+MAT[stamp.m].c.toString(16).padStart(6,'0') : 'transparent';
+        s.title = stamp
+          ? (stamp.ref && isTyped(stamp.ref) ? 'species '+types.get(stamp.ref.t).name+' (live) · ' : '')
+            + MAT[stamp.m].name + (stamp.ref ? ' · '+stamp.worlds+' nested worlds, '+stamp.depth+' deep' : ' (plain)')
+            + (stampUp ? ' · promoted '+stampUp+' level'+(stampUp>1?'s':'')+' ('+Math.pow(N,stampUp)+'³ blocks)' : '')
+          : 'nothing picked up';
+        s.classList.toggle('up', stampUp>0);
+      } else {
+        s.classList.toggle('on', !useStamp && +s.dataset.m===held);
+      }
+    });
+  }
+  function selectMat(m){
+    held=m; useStamp=false; refreshHotbar();
+    if (ghostMesh) ghostMesh.visible = false;
+  }
+  refreshHotbar();
+
+  document.getElementById('helpBtn').onclick=(e)=>{ e.stopPropagation(); document.getElementById('help').classList.toggle('on'); };
+  document.getElementById('manualBtn').onclick=(e)=>{ e.stopPropagation(); document.getElementById('manual').classList.toggle('on'); };
+
+  // ===================================================================
+  //  8 · INPUT
+  // ===================================================================
+  const keys=new Set();
+  const lockEl=document.getElementById('lock');
+  addEventListener('keydown',e=>{
+    keys.add(e.code);
+    if(e.altKey && e.code==='KeyW'){
+      e.preventDefault();
+      keys.delete('KeyW');
+      return;
+    }
+    if(e.code==='Backslash'){
+      e.preventDefault();
+      setWireframe(!showWire);
+      return;
+    }
+    if(e.code==='KeyE') doOpen();
+    if(e.code==='KeyG') doGrab();
+    if(e.code==='BracketLeft')  setAim(aimOff-1);
+    if(e.code==='BracketRight') setAim(aimOff+1);
+    if(e.code==='Comma')  setStampUp(stampUp-1);
+    if(e.code==='Period') setStampUp(stampUp+1);
+    if(e.code==='KeyR') doRotate();
+    if(e.code==='KeyT') doTip();
+    if(e.code==='KeyM') doMirror();
+    if(e.code==='KeyK') doKeep();
+    if(e.code==='KeyX') doFreeze();
+    if(e.code==='KeyU'){ if(e.shiftKey) redoOp(); else undoOp(); }
+    if(e.code==='KeyY') redoOp();
+    if(e.key==='?' || e.code==='Slash') document.getElementById('help').classList.toggle('on');
+    if(e.code==='KeyH') document.getElementById('manual').classList.toggle('on');
+    if(e.code==='KeyN') quickSave();
+    if(e.code==='KeyL') quickLoad();
+    if(e.code==='KeyP'){
+      fxPulse = !fxPulse;
+      flash(fxPulse ? 'dive pulse: <b>on</b> — band crossings breathe'
+                    : 'dive pulse: <b>off</b>');
+    }
+    if(e.code==='KeyV'){
+      flyScene = !flyScene; flyDSm = null;
+      flash(flyScene ? 'flight law: <b>scene-scaled</b> (experimental) — speed follows what you look at'
+                     : 'flight law: <b>classic</b> — speed follows your size');
+    }
+    if(e.code==='KeyF'){
+      cam.fly=!cam.fly; cam.vel=[0,0,0];
+      flash(cam.fly ? 'flying' : 'walking — <b>space</b> to jump, gravity scales with you');
+    }
+    if(/^Digit[1-6]$/.test(e.code)) selectMat(+e.code.slice(5));
+    if(e.code==='Digit7' && stamp){ useStamp=true; refreshHotbar(); if (ghostMesh) ghostMesh.visible = true; }
+    if(['Space','ShiftLeft','KeyW','KeyA','KeyS','KeyD'].includes(e.code)) e.preventDefault();
+  });
+  addEventListener('keyup',e=>keys.delete(e.code));
+  addEventListener('blur',()=>keys.clear());
+
+  function initInput(){
+    const cv=renderer.domElement;
+    lockEl.onclick=()=>cv.requestPointerLock();
+    cv.oncontextmenu=e=>e.preventDefault();
+    document.addEventListener('pointerlockchange',()=>{
+      const on = document.pointerLockElement===cv;
+      lockEl.classList.toggle('off', on);
+      if(!on) keys.clear();
+    });
+    addEventListener('mousemove',e=>{
+      if(document.pointerLockElement!==cv) return;
+      cam.yaw   -= e.movementX*0.0022;
+      cam.pitch -= e.movementY*0.0022;
+      cam.pitch = Math.max(-1.5533, Math.min(1.5533, cam.pitch));
+    });
+    addEventListener('mousedown',e=>{
+      if(document.pointerLockElement!==cv) return;
+      if(e.button===0) doBreak();
+      if(e.button===2) doPlace();
+    });
+    addEventListener('wheel',e=>{
+      if(document.pointerLockElement!==cv) return;
+      e.preventDefault();
+      if(e.altKey){
+        aimPending += e.deltaY;
+        while(aimPending <= -AIM_WHEEL_STEP){ aimPending += AIM_WHEEL_STEP; setAim(aimOff+1); }
+        while(aimPending >=  AIM_WHEEL_STEP){ aimPending -= AIM_WHEEL_STEP; setAim(aimOff-1); }
+        return;
+      }
+      aimPending = 0;
+      zoomPending = Math.max(-3, Math.min(3, zoomPending + e.deltaY*0.0012));
+    },{passive:false});
+  }
+
+  // ===================================================================
+  //  9 · FRAME
+  // ===================================================================
+  let aimTarget = null;
+  let last=performance.now();
+  function tick(now){
+    requestAnimationFrame(tick);
+    const dt=Math.min(0.05,(now-last)/1000); last=now;
+    viewH = renderer.domElement.height / renderer.getPixelRatio();
+
+    const boost = keys.has('ControlLeft')||keys.has('ControlRight');
+    const d = camDir();
+    const r = [ -d[2], 0, d[0] ];
+    const rl = Math.hypot(r[0],r[2]) || 1; r[0]/=rl; r[2]/=rl;
+    let mx=0,my=0,mz=0;
+    if(keys.has('KeyW')) mz+=1;
+    if(keys.has('KeyS')) mz-=1;
+    if(keys.has('KeyD')) mx+=1;
+    if(keys.has('KeyA')) mx-=1;
+
+    if(!cam.world.parent){
+      const distFromCenter = Math.hypot(cam.pos[0] - 15.0, cam.pos[2] - 15.0);
+      if(cam.pos[1] < -80 || cam.pos[1] > 150 || distFromCenter > 150){
+        cam.pos=[15.5,15.5,33]; cam.vel=[0,0,0]; cam.R=0.9; cam.fly=true;
+        flash('teleported back to the island');
+      }
+    }
+
+    const speedR = Math.min(cam.R, 3.0);
+
+    if(cam.fly){
+      if(keys.has('Space')) my+=1;
+      if(keys.has('ShiftLeft')||keys.has('ShiftRight')) my-=1;
+      const cellsPerSec = flyScene ? flySceneSpeed(dt) * (boost?2.5:1)
+                                   : speedR * 7       * (boost?4:1);
+      const v = cellsPerSec * dt;
+      if(mx||my||mz){
+        const wx = d[0]*mz + r[0]*mx,
+              wy = d[1]*mz + my,
+              wz = d[2]*mz + r[2]*mx;
+        const wl = Math.hypot(wx,wy,wz);
+        if(wl > 1e-6){
+          cam.pos[0]+= wx/wl*v;
+          cam.pos[1]+= wy/wl*v;
+          cam.pos[2]+= wz/wl*v;
+          bandTransport();
+        }
+      }
+      cam.vel=[0,0,0];
+    } else {
+      const wx = d[0]*mz + r[0]*mx, wz = d[2]*mz + r[2]*mx;
+      const wl = Math.hypot(wx,wz);
+      const spd = V_WALK * speedR * (boost?1.9:1);
+      cam.vel[0] = wl>1e-6 ? wx/wl*spd : 0;
+      cam.vel[2] = wl>1e-6 ? wz/wl*spd : 0;
+      if(keys.has('Space') && cam.onGround){ cam.vel[1] = V_JUMP * cam.R; cam.onGround=false; }
+      cam.vel[1] -= G_ACCEL * cam.R * dt;
+      cam.vel[1]  = Math.max(cam.vel[1], -60 * cam.R);
+      movePhysical(dt);
+      bandTransport();
+    }
+
+    let sc=0;
+    if(keys.has('KeyQ')) sc -= 1;
+    if(keys.has('KeyZ')) sc += 1;
+    if(sc){
+      applyZoom(Math.exp(sc * (boost?3.2:1.1) * dt));
+    }
+    if(Math.abs(zoomPending) > 1e-4){
+      const step = zoomPending * Math.min(1, dt*14);
+      zoomPending -= step;
+      applyZoom(Math.exp(step));
+    } else zoomPending = 0;
+    if(!sc && zoomPending === 0) divePivot = null;
+
+    camera.rotation.set(cam.pitch, cam.yaw, 0);
+    walk();
+
+    const h = pick();
+    aimTarget = h;
+    if(h){
+      const s=h.fr.s, o=h.fr.o;
+      highlight.visible=true;
+      highlight.position.set(o[0]+s*(h.i+0.5)-cam.pos[0], o[1]+s*(h.j+0.5)-cam.pos[1], o[2]+s*(h.k+0.5)-cam.pos[2]);
+      highlight.scale.setScalar(s);
+
+      if(useStamp && stamp){
+        const i0=h.i+h.n[0], j0=h.j+h.n[1], k0=h.k+h.n[2];
+        
+        if(stamp.ref && stampUp>0){
+          const S=Math.pow(N,stampUp);
+          ghost.visible=true;
+          ghost.position.set(o[0]+s*(i0+S/2)-cam.pos[0], o[1]+s*(j0+S/2)-cam.pos[1], o[2]+s*(k0+S/2)-cam.pos[2]);
+          ghost.scale.setScalar(s*S);
+        } else {
+          ghost.visible=true;
+          ghost.position.set(o[0]+s*(i0+0.5)-cam.pos[0], o[1]+s*(j0+0.5)-cam.pos[1], o[2]+s*(k0+0.5)-cam.pos[2]);
+          ghost.scale.setScalar(s);
+        }
+
+        if(ghostMesh){
+          ghostMesh.visible=true;
+          ghostMesh.position.set(o[0]+s*i0-cam.pos[0], o[1]+s*j0-cam.pos[1], o[2]+s*k0-cam.pos[2]);
+          ghostMesh.scale.setScalar(s);
+        }
+      } else {
+        ghost.visible=false;
+        if(ghostMesh) ghostMesh.visible=false;
+      }
+    } else {
+      highlight.visible=false;
+      ghost.visible=false;
+      if(ghostMesh) ghostMesh.visible=false;
+    }
+
+    if(typesDirty){ hint('edited species <b>'+typesDirty+'</b> — every instance follows'); typesDirty=false; }
+    updateHUD();
+    renderer.render(scene,camera);
+  }
+
+  // ===================================================================
+  //  9b · SERIALIZATION & EXPORT
+  // ===================================================================
+  function serializeGame() {
+    const serializedStore = [];
+    for (const [hash, node] of store.entries()) {
+      const kidsArray = [];
+      for (const [ii, ref] of node.kids.entries()) {
+        kidsArray.push([ii, isTyped(ref) ? { t: ref.t, o: ref.o } : { h: ref.h, o: ref.o }]);
+      }
+      serializedStore.push({
+        hash: node.hash,
+        vox: Array.from(node.vox),
+        kids: kidsArray
+      });
+    }
+
+    const serializedTypes = [];
+    for (const [id, t] of types.entries()) {
+      serializedTypes.push({ id: t.id, name: t.name, head: t.head, ver: t.ver });
+    }
+
+    let rootWorld = cam.world;
+    while (rootWorld.parent) {
+      rootWorld = worlds.get(rootWorld.parent.w);
+    }
+    const rootKids = [];
+    for (const [ii, ref] of rootWorld.kids.entries()) {
+      rootKids.push([ii, isTyped(ref) ? { t: ref.t, o: ref.o } : { h: ref.h, o: ref.o }]);
+    }
+    const serializedRoot = {
+      dims: rootWorld.dims,
+      vox: Array.from(rootWorld.vox),
+      kids: rootKids
+    };
+
+    const activePath = [];
+    let curr = cam.world;
+    while (curr && curr.parent) {
+      activePath.unshift({ i: curr.parent.i, j: curr.parent.j, k: curr.parent.k });
+      curr = worlds.get(curr.parent.w);
+    }
+
+    const serializedCam = {
+      pos: cam.pos,
+      R: cam.R,
+      yaw: cam.yaw,
+      pitch: cam.pitch,
+      fly: cam.fly
+    };
+
+    let serializedStamp = null;
+    if (stamp) {
+      serializedStamp = {
+        m: stamp.m,
+        ref: stamp.ref ? (isTyped(stamp.ref) ? { t: stamp.ref.t, o: stamp.ref.o } : { h: stamp.ref.h, o: stamp.ref.o }) : null,
+        worlds: stamp.worlds,
+        depth: stamp.depth,
+        live: stamp.live,
+        stampUp: stampUp,
+        useStamp: useStamp
+      };
+    }
+
+    return JSON.stringify({
+      store: serializedStore,
+      types: serializedTypes,
+      root: serializedRoot,
+      activePath: activePath,
+      camera: serializedCam,
+      stamp: serializedStamp,
+      nextTypeId: nextTypeId
+    });
+  }
+
+  function deserializeGame(jsonStr) {
+    try {
+      const data = JSON.parse(jsonStr);
+
+      for (const w of worlds.values()) {
+        if (w.solid) { scene.remove(w.solid); w.solid.geometry.dispose(); w.solid.material.dispose(); }
+        if (w.open) { scene.remove(w.open); w.open.material.dispose(); }
+      }
+      worlds.clear();
+
+      nextTypeId = data.nextTypeId || 1;
+
+      types.clear();
+      for (const t of data.types) {
+        types.set(t.id, t);
+      }
+
+      store.clear();
+      for (const n of data.store) {
+        const kidsMap = new Map();
+        for (const [ii, ref] of n.kids) {
+          kidsMap.set(ii, ref);
+        }
+        store.set(n.hash, {
+          hash: n.hash,
+          vox: new Uint8Array(n.vox),
+          kids: kidsMap,
+          meta: { worlds: 1, depth: 1, live: false }
+        });
+      }
+
+      const metaCache = new Map();
+      function computeMeta(hash) {
+        if (metaCache.has(hash)) return metaCache.get(hash);
+        const node = store.get(hash);
+        if (!node) return { worlds: 1, depth: 1, live: false };
+        let worldsCount = 1, maxDepth = 1, live = false;
+        for (const r of node.kids.values()) {
+          if (isTyped(r)) { worldsCount += 1; live = true; continue; }
+          const m = computeMeta(r.h);
+          worldsCount += m.worlds;
+          maxDepth = Math.max(maxDepth, 1 + m.depth);
+          live = live || m.live;
+        }
+        const meta = { worlds: worldsCount, depth: maxDepth, live };
+        node.meta = meta;
+        metaCache.set(hash, meta);
+        return meta;
+      }
+      for (const hash of store.keys()) {
+        computeMeta(hash);
+      }
+
+      const rootData = data.root;
+      const rootWorld = makeWorld(rootData.dims, null);
+      rootWorld.vox = new Uint8Array(rootData.vox);
+      rootWorld.voxShared = false;
+      for (const [ii, ref] of rootData.kids) {
+        rootWorld.kids.set(ii, Object.assign(ref, { inst: 0 }));
+      }
+
+      let currentWorld = rootWorld;
+      for (const step of data.activePath) {
+        const ii = idx3(currentWorld, step.i, step.j, step.k);
+        const ref = currentWorld.kids.get(ii);
+        if (ref) {
+          currentWorld = instOf(currentWorld, ii, ref, step.i, step.j, step.k);
+        } else {
+          console.warn("Active path broken during load at", step);
+          break;
+        }
+      }
+
+      cam.world = currentWorld;
+      cam.pos = data.camera.pos;
+      cam.R = data.camera.R;
+      cam.yaw = data.camera.yaw;
+      cam.pitch = data.camera.pitch;
+      cam.fly = data.camera.fly;
+      cam.vel = [0, 0, 0];
+
+      if (data.stamp) {
+        stamp = {
+          m: data.stamp.m,
+          ref: data.stamp.ref,
+          worlds: data.stamp.worlds,
+          depth: data.stamp.depth,
+          live: data.stamp.live
+        };
+        stampUp = data.stamp.stampUp;
+        useStamp = data.stamp.useStamp;
+      } else {
+        stamp = null;
+        useStamp = false;
+        stampUp = 0;
+      }
+
+      highlight.visible = false;
+      ghost.visible = false;
+      if (ghostMesh) {
+        scene.remove(ghostMesh);
+        ghostMesh.material.dispose();
+        ghostMesh = null;
+      }
+      if (useStamp && stamp) {
+        updateGhostMesh(buildStampPreviewData());
+      }
+
+      refreshHotbar();
+      flash("world loaded successfully");
+    } catch (err) {
+      console.error("Load failed", err);
+      flash("<b style='color:var(--heat)'>Load failed:</b> invalid or corrupt save data");
+    }
+  }
+
+  function quickSave() {
+    const data = serializeGame();
+    localStorage.setItem('scriptorium_quicksave', data);
+    flash('world saved to local storage');
+  }
+
+  function quickLoad() {
+    const data = localStorage.getItem('scriptorium_quicksave');
+    if (!data) {
+      flash('no save game found in this browser');
+      return;
+    }
+    deserializeGame(data);
+  }
+
+  // ===================================================================
+  //  10 · SELF-TESTS
+  // ===================================================================
+  function selfTests(){
+    const out=[];
+    const p=[3.25,1.5,6.75], cell=[3,1,6];
+    const down=[(p[0]-cell[0])*N,(p[1]-cell[1])*N,(p[2]-cell[2])*N];
+    const up=[cell[0]+down[0]/N, cell[1]+down[1]/N, cell[2]+down[2]/N];
+    out.push(['band transport round-trips exactly', up.every((x,n)=>x===p[n])]);
+    out.push(['scale envelope is closed', (R_MIN*0.999*N)<=R_MAX && (R_MAX*1.001/N)>=R_MIN]);
+    const f=Math.fround, A=[1234.5,-77.25,9001.5], q=[1234.5+7.5, -77.25+3.5, 9001.5-2.5];
+    const rec=[f(A[0]-0)+f(q[0]-A[0]), f(A[1]-0)+f(q[1]-A[1]), f(A[2]-0)+f(q[2]-A[2])];
+    out.push(['RTC reconstruction is sub-milli-cell', Math.hypot(rec[0]-q[0],rec[1]-q[1],rec[2]-q[2])<1e-3]);
+    {
+      const pv=[3.7,-1.2,8.9], p0=[10,4,-2];
+      out.push(['dive pivot is an exact fixed point',
+        scaleAbout(pv,pv,0.3).every((x,n)=>x===pv[n])]);
+      const two = scaleAbout(scaleAbout(p0,pv,0.25), pv, 0.5);
+      const one = scaleAbout(p0,pv,0.125);
+      out.push(['dive similarity composes (f\u2218g = f\u00b7g)',
+        two.every((x,n)=>Math.abs(x-one[n])<1e-12)]);
+    }
+    {
+      const dims=[8,8,8], R=0.25;
+      out.push(['flight laws are equal at reach (k\u00b7REACH\u00b7R = 7R)',
+        Math.abs(flySpeedLaw(REACH*R, R, dims) - 7*R) < 1e-12]);
+      out.push(['flight law floors at body scale near walls',
+        Math.abs(flySpeedLaw(0, R, dims) - FLY_K*FLY_FLOOR_R*R) < 1e-12]);
+      out.push(['flight law ceiling: no world crossed under '+FLY_CROSS_S+'s',
+        flySpeedLaw(1e9, 16, dims) === Math.max(...dims)/FLY_CROSS_S]);
+      out.push(['flight law is monotone in attention distance',
+        flySpeedLaw(2,R,dims) <= flySpeedLaw(3,R,dims) && flySpeedLaw(3,R,dims) <= flySpeedLaw(5,R,dims)]);
+    }
+    {
+      let s=7; const rnd=()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; };
+      const rc=()=> (rnd()*48)|0;
+      const codes=new Set(); for(let c=0;c<48;c++) codes.add(oCode(oDesc(c)));
+      out.push(['orient codes: 48 distinct, encode∘decode = id', codes.size===48]);
+      let hom=true, inv=true, closed=true;
+      for(let t=0;t<300;t++){
+        const a=rc(), b=rc(), v=[(rnd()*N)|0,(rnd()*N)|0,(rnd()*N)|0];
+        const lhs=oApply(oCompose(a,b), v[0],v[1],v[2]);
+        const w2=oApply(b, v[0],v[1],v[2]);
+        const rhs=oApply(a, w2[0],w2[1],w2[2]);
+        if(lhs[0]!==rhs[0]||lhs[1]!==rhs[1]||lhs[2]!==rhs[2]) hom=false;
+        const r=oApply(oCompose(a,oInv(a)), v[0],v[1],v[2]);
+        if(r[0]!==v[0]||r[1]!==v[1]||r[2]!==v[2]) inv=false;
+        if(oCompose(a,b)<0||oCompose(a,b)>47) closed=false;
+      }
+      out.push(['orient: apply(a∘b) = apply(a)∘apply(b), 300 random', hom]);
+      out.push(['orient: a∘a⁻¹ = identity, 300 random', inv]);
+      out.push(['orient: composition closed in [0,48)', closed]);
+
+      const mkLeg=(depth)=>{
+        const nd={vox:new Uint8Array(N*N*N),kids:new Map()};
+        for(let i=0;i<nd.vox.length;i++) nd.vox[i] = rnd()<0.3 ? 1+((rnd()*6)|0) : 0;
+        if(depth>0) for(let t=0;t<5;t++){ const ii=(rnd()*N*N*N)|0; if(nd.vox[ii]&&!nd.kids.has(ii)) nd.kids.set(ii, mkLeg(depth-1)); }
+        return nd;
+      };
+      const legacy = mkLeg(2);
+      const size0 = store.size;
+      const h1 = internLegacy(legacy);
+      const grew = store.size - size0;
+      const h2 = internLegacy(legacy);
+      out.push(['intern: identical tree collapses to same hash', h1===h2 && store.size===size0+grew]);
+
+      const gy=oCode(G_YAW), gm=oCode(G_MIRR_X), gt=oCode(G_TIP_Z);
+      out.push(['expandRef(id) reproduces the tree, bit for bit',
+                nodeEq(expandRef({h:h1, o:O_ID}), legacy)]);
+      out.push(['oriented reference ≡ eager xformNode (yaw)',
+                nodeEq(expandRef({h:h1, o:gy}), xformNode(legacy, G_YAW))]);
+      out.push(['oriented reference ≡ eager xformNode (yaw∘mirror∘tip)',
+                nodeEq(expandRef({h:h1, o:oCompose(gy,oCompose(gm,gt))}),
+                       xformNode(xformNode(xformNode(legacy, G_TIP_Z), G_MIRR_X), G_YAW))]);
+      out.push(['yaw⁴ on the reference = identity (six bits, zero data)',
+                oCompose(gy,oCompose(gy,oCompose(gy,gy)))===O_ID]);
+
+      const ref={h:h1, o:gy};
+      const eager=expandRef(ref);
+      let leafOK=true;
+      for(let t=0;t<200 && leafOK;t++){
+        const x=(rnd()*N)|0, y=(rnd()*N)|0, z=(rnd()*N)|0;
+        const got=leafOfRef(ref, 3, 1, x, y, z);
+        const ii=x+N*(y+N*z);
+        const wantM=eager.vox[ii];
+        if((got.m|0)!==(wantM|0)) leafOK=false;
+        const wantKid=eager.kids.get(ii);
+        if(!!got.ref !== !!wantKid) leafOK=false;
+        else if(got.ref && !nodeEq(expandRef(got.ref), wantKid)) leafOK=false;
+      }
+      out.push(['leafOfRef through an oriented stamp ≡ eager descent, 200 cells', leafOK]);
+
+      const SP = makeType(3, h1);
+      const kv1=new Uint8Array(N*N*N); kv1[11]=2;
+      const pa = intern(kv1, new Map([[5,{t:SP.id, o:O_ID}]]));
+      SP.head = h2==='x'?h1:h1;
+      const headSave = SP.head; SP.head = 'ffffffffffffffff';
+      const kv2=new Uint8Array(N*N*N); kv2[11]=2;
+      const pb = intern(kv2, new Map([[5,{t:SP.id, o:O_ID}]]));
+      SP.head = headSave;
+      out.push(['species: parent hash binds the NAME, stable across head edits', pa===pb]);
+      out.push(['species: refHash resolves the live head', refHash({t:SP.id,o:O_ID})===SP.head]);
+      types.delete(SP.id);
+    }
+    const bad = out.filter(o=>!o[1]);
+    console.log('%cscriptorium/blocks · self-tests: '+(out.length-bad.length)+'/'+out.length+' pass',
+                'color:'+(bad.length?'#ffb454':'#66d19e'));
+    out.forEach(o=>console.log((o[1]?'  ✓ ':'  ✗ ')+o[0]));
+  }
+
+  // ---- boot ----
+  try{
+    initThree();
+    initInput();
+    const root = buildRoot();
+    cam.world = root;
+    cam.pos = [15.5, 15.5, 33];
+    cam.R = 0.9;
+    cam.yaw = 0.0; cam.pitch = -0.30;
+    selfTests();
+    requestAnimationFrame(tick);
+    console.log('scriptorium/blocks · root world: '+root.dims.join('×')+' · a block is '+ROOT_METERS+' m'
+               +' · node store: content-addressed, '+store.size+' nodes interned at boot');
+  }catch(err){
+    console.error('boot failed', err);
+  }
+  </script>
+
+</body>
+</html>
