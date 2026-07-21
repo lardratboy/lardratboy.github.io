@@ -1205,8 +1205,8 @@
   const W_ANG      = 1.0;           // primary: proximity to the gaze
   const W_SIZE     = 0.38;          // secondary: comfortably-sized on screen
   const W_INC      = 0.55;          // hysteresis: bonus for the block already held
-  const W_OCC      = 2.5;           // occlusion penalty: a candidate hidden behind another
-                                    // block loses to ANY visible one (exceeds max reachable score)
+  const W_OCC      = 2.5;           // penalty for a candidate behind the block you're on (loses to any front one)
+  const OCC_FACTOR = 1.5;           // "behind" = farther than the front hit by more than this factor
   const SIZE_OCT   = 3;             // size score = 0.5 at this many octaves off "sweet"
   const V_BREAK    = 3.0;           // rad/s; gaze faster than this melts the incumbency bonus
   const SWITCH_DWELL = 0.06;        // s; a challenger must beat the incumbent this long to win
@@ -1233,34 +1233,37 @@
     rx/=rl; rz/=rl;
     const ux=-fwd[0]*fwd[1]/rl, uy=rl, uz=-fwd[2]*fwd[1]/rl;   // up' = right × fwd (unit)
     const cands=[], seen=new Set();
-    const add=(h)=>{ if(!h) return; const k=keyOf(h); if(!seen.has(k)){ seen.add(k); cands.push(h); } };
-    add(shootRay(fwd, cap, reach));
+    // Each candidate remembers the cone angle of the ray that *found* it: 0 for the
+    // center ray (the block literally under the crosshair), larger for ring spokes.
+    // Scoring keys angular error off this, NOT the cell center — otherwise a block
+    // whose center happens to sit nearer the gaze axis (the neighbor to the right,
+    // when you aim at a cell's right edge) can steal selection from the cell you're
+    // actually on. Center-found always wins the angular term.
+    const add=(h,rayAng)=>{ if(!h) return; const k=keyOf(h);
+      if(!seen.has(k)){ h.rayAng=rayAng; seen.add(k); cands.push(h); } };
+    add(shootRay(fwd, cap, reach), 0);
     for(let ri=0; ri<CONE_RINGS.length; ri++){
-      const rr=Math.tan(CONE_HALF*CONE_RINGS[ri]), off=(ri&1)?0.5:0;   // stagger alternate rings
+      const rr=Math.tan(CONE_HALF*CONE_RINGS[ri]), off=(ri&1)?0.5:0, ringAng=CONE_HALF*CONE_RINGS[ri];
       for(let s=0;s<CONE_SPOKES;s++){
         const a=((s+off)/CONE_SPOKES)*TAU, ca=Math.cos(a), sa=Math.sin(a);
         let dx=fwd[0]+rr*(ca*rx+sa*ux),
             dy=fwd[1]+rr*(   sa*uy),
             dz=fwd[2]+rr*(ca*rz+sa*uz);
         const dl=Math.hypot(dx,dy,dz)||1;
-        add(shootRay([dx/dl,dy/dl,dz/dl], cap, reach));
+        add(shootRay([dx/dl,dy/dl,dz/dl], cap, reach), ringAng);
       }
     }
-    // Occlusion pass — the fix for "it selected the block *behind* the one I
-    // expect." A ring spoke is angled off-axis, so it can graze past the edge of
-    // the block you're looking at and strike one behind it; that hidden block then
-    // becomes a candidate and, since angular/size score off the block *center*
-    // with no depth awareness, it can outscore the front one. Here we cast a ray
-    // toward each candidate's own center: if a *different* block is hit first, this
-    // candidate is occluded — flag it so scoring demotes it below anything visible.
-    for(const c of cands){
-      const cx=c.fr.o[0]+c.fr.s*(c.i+0.5)-cam.pos[0],
-            cy=c.fr.o[1]+c.fr.s*(c.j+0.5)-cam.pos[1],
-            cz=c.fr.o[2]+c.fr.s*(c.k+0.5)-cam.pos[2];
-      const L=Math.hypot(cx,cy,cz)||1e-9;
-      const front=shootRay([cx/L,cy/L,cz/L], cap, L*1.02);   // reaches c's front face; catches any occluder nearer than c
-      c.occl = (front && keyOf(front)!==keyOf(c)) ? 1 : 0;
-    }
+    // Occlusion by depth, not by a per-candidate center probe. The old probe cast
+    // at each cell's center, which false-flagged a subdivided cell whose center
+    // hides behind a sibling even though the face you're looking at is plainly
+    // visible — that was the "it picked the neighbor" regression. Instead: the
+    // center-ray hit sets the front depth; a candidate much farther than that was
+    // glimpsed *past an edge* and sits behind the block you're on, so it's demoted.
+    // Same-depth neighbors keep competing (fairly, on the finding-ray angle above).
+    let tFront=Infinity;
+    for(const c of cands) if(c.rayAng===0 && c.t<tFront) tFront=c.t;        // the center-ray hit
+    if(!isFinite(tFront)) for(const c of cands) if(c.t<tFront) tFront=c.t;   // no center hit: nearest wins the reference
+    for(const c of cands) c.behind = (c.t > tFront*OCC_FACTOR) ? 1 : 0;
     return cands;
   }
 
@@ -1280,9 +1283,9 @@
     for(const c of cands){
       const m=aimMetrics(c);
       if(m.z<=0) continue;                                   // behind the eye — ignore
-      const angS=Math.exp(-(m.ang/ANG_SIGMA)*(m.ang/ANG_SIGMA));
+      const angS=Math.exp(-(c.rayAng/ANG_SIGMA)*(c.rayAng/ANG_SIGMA));   // finding-ray offset, not cell center
       let sc=W_ANG*angS + W_SIZE*sizeScore(m.dpx);
-      if(c.occl) sc -= W_OCC;                                // hidden behind another block — demote
+      if(c.behind) sc -= W_OCC;                              // glimpsed past an edge, behind the block you're on
       const isInc = keyOf(c)===attn.key;
       if(isInc) sc += W_INC*incGate;
       if(sc>bestS){ bestS=sc; best=c; }
