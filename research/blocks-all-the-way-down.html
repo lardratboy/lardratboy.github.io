@@ -1152,6 +1152,60 @@
     return best;
   }
 
+  // ===================================================================
+  //  5a · ATTENTION  (the seam #2 fills in)
+  // ===================================================================
+  // Today aim is a single hard raycast, reassigned every frame (aimTarget = the
+  // nearest hit): one ray, one scale, no memory — which *is* the "only works in
+  // a narrow band" fragility. #2 replaces the guts of updateAttention() with a
+  // scored, sticky argmax over a *set* of candidates (projected pixel size +
+  // angular error + incumbency + gaze-break). Everything here is the scaffolding
+  // that keeps that a localized change; the update seam itself currently just
+  // passes the nearest hit through, so behavior is identical until #2 lands.
+
+  // Stable identity of a picked block: (world, cell). Recognizable frame-to-frame
+  // so an incumbent can hold; legitimately changes at a band crossing, where the
+  // same physical block becomes a different (world,cell) and attention re-acquires
+  // on the far side (the pivot carry from #3 keeps the geometry smooth meanwhile).
+  function keyOf(h){ return h ? (h.w.id + ':' + h.ii) : null; }
+
+  // Per-candidate geometry in cam-relative units — precisely the terms #2 scores:
+  // dpx (projected pixel span of the block — the term that makes a mote and a
+  // mountain equally selectable), ang (angular error off the gaze, radians),
+  // z (along-gaze depth; >0 is ahead), dist (Euclidean).
+  function aimMetrics(h){
+    const s=h.fr.s, o=h.fr.o, fwd=camDir();
+    const cx=o[0]+s*(h.i+0.5)-cam.pos[0],
+          cy=o[1]+s*(h.j+0.5)-cam.pos[1],
+          cz=o[2]+s*(h.k+0.5)-cam.pos[2];
+    const dist=Math.hypot(cx,cy,cz) || 1e-9;
+    const z=cx*fwd[0]+cy*fwd[1]+cz*fwd[2];         // depth along the gaze
+    const dpx=projPx(s, Math.max(z,1e-9));          // one cell edge, in pixels
+    const ang=Math.acos(Math.min(1,Math.max(-1, z/dist)));
+    return { center:[cx,cy,cz], dist, z, dpx, ang };
+  }
+
+  // Attention state persists across frames (unlike the raw pick). #2 uses dwellT
+  // for switch-dwell and gazeSpeed to dissolve the incumbency bonus on a flick.
+  // current/key are the canonical sticky target the pivot and HUD already read
+  // (via aimTarget), so #2's winner flows to them without touching call sites.
+  const attn = { current:null, key:null, dwellT:0, gazeSpeed:0, _y:cam.yaw, _p:cam.pitch };
+
+  function updateAttention(cands, dt){
+    // Gaze angular speed (rad/s), smoothed — the "break attention" signal.
+    const dY=cam.yaw-attn._y, dP=cam.pitch-attn._p; attn._y=cam.yaw; attn._p=cam.pitch;
+    const raw=Math.hypot(dY,dP)/Math.max(dt,1e-4);
+    attn.gazeSpeed += (raw-attn.gazeSpeed)*Math.min(1,dt*12);
+
+    // #2 GOES HERE: score each candidate via aimMetrics + incumbency
+    // (keyOf(c)===attn.key) + a gaze-speed penalty; keep a sticky argmax with a
+    // switch margin and dwell. For now: nearest hit, so aimTarget is unchanged.
+    const chosen = cands.length ? cands[0] : null;
+    if(keyOf(chosen)===attn.key) attn.dwellT += dt; else attn.dwellT = 0;
+    attn.current = chosen; attn.key = keyOf(chosen);
+    return chosen;
+  }
+
   // ---- W2 · scene-scaled flight (experimental, toggle with V) ----
   // Classic flight speed is body-proportional (7·R cells/s): constant in units
   // of you, but meaningless when your body and the visible scene decouple —
@@ -2012,7 +2066,8 @@
     camera.rotation.set(cam.pitch, cam.yaw, 0);
     walk();
 
-    const h = pick();
+    const raw = pick();
+    const h = updateAttention(raw ? [raw] : [], dt);   // #2: feed a candidate set here
     aimTarget = h;
     if(h){
       const s=h.fr.s, o=h.fr.o;
@@ -2111,6 +2166,15 @@
       out.push(['orient: apply(a∘b) = apply(a)∘apply(b), 300 random', hom]);
       out.push(['orient: a∘a⁻¹ = identity, 300 random', inv]);
       out.push(['orient: composition closed in [0,48)', closed]);
+
+      // -- #2 scaffolding: the two laws attention scoring rests on -----------
+      out.push(['projPx: linear in size, inverse in distance',
+        Math.abs(projPx(2,10)-2*projPx(1,10))<1e-12 && Math.abs(projPx(1,20)-0.5*projPx(1,10))<1e-12]);
+      out.push(['aim key is stable and distinguishes cells',
+        keyOf({w:{id:7},ii:3})===keyOf({w:{id:7},ii:3})
+        && keyOf({w:{id:7},ii:3})!==keyOf({w:{id:7},ii:4})
+        && keyOf({w:{id:8},ii:3})!==keyOf({w:{id:7},ii:3})
+        && keyOf(null)===null]);
 
       // -- the store: identical content interns to one node ---------------
       const mkLeg=(depth)=>{
