@@ -1205,6 +1205,8 @@
   const W_ANG      = 1.0;           // primary: proximity to the gaze
   const W_SIZE     = 0.38;          // secondary: comfortably-sized on screen
   const W_INC      = 0.55;          // hysteresis: bonus for the block already held
+  const W_OCC      = 2.5;           // occlusion penalty: a candidate hidden behind another
+                                    // block loses to ANY visible one (exceeds max reachable score)
   const SIZE_OCT   = 3;             // size score = 0.5 at this many octaves off "sweet"
   const V_BREAK    = 3.0;           // rad/s; gaze faster than this melts the incumbency bonus
   const SWITCH_DWELL = 0.06;        // s; a challenger must beat the incumbent this long to win
@@ -1244,6 +1246,21 @@
         add(shootRay([dx/dl,dy/dl,dz/dl], cap, reach));
       }
     }
+    // Occlusion pass — the fix for "it selected the block *behind* the one I
+    // expect." A ring spoke is angled off-axis, so it can graze past the edge of
+    // the block you're looking at and strike one behind it; that hidden block then
+    // becomes a candidate and, since angular/size score off the block *center*
+    // with no depth awareness, it can outscore the front one. Here we cast a ray
+    // toward each candidate's own center: if a *different* block is hit first, this
+    // candidate is occluded — flag it so scoring demotes it below anything visible.
+    for(const c of cands){
+      const cx=c.fr.o[0]+c.fr.s*(c.i+0.5)-cam.pos[0],
+            cy=c.fr.o[1]+c.fr.s*(c.j+0.5)-cam.pos[1],
+            cz=c.fr.o[2]+c.fr.s*(c.k+0.5)-cam.pos[2];
+      const L=Math.hypot(cx,cy,cz)||1e-9;
+      const front=shootRay([cx/L,cy/L,cz/L], cap, L*1.02);   // reaches c's front face; catches any occluder nearer than c
+      c.occl = (front && keyOf(front)!==keyOf(c)) ? 1 : 0;
+    }
     return cands;
   }
 
@@ -1265,6 +1282,7 @@
       if(m.z<=0) continue;                                   // behind the eye — ignore
       const angS=Math.exp(-(m.ang/ANG_SIGMA)*(m.ang/ANG_SIGMA));
       let sc=W_ANG*angS + W_SIZE*sizeScore(m.dpx);
+      if(c.occl) sc -= W_OCC;                                // hidden behind another block — demote
       const isInc = keyOf(c)===attn.key;
       if(isInc) sc += W_INC*incGate;
       if(sc>bestS){ bestS=sc; best=c; }
