@@ -1139,18 +1139,18 @@
   const aimCell = ()=> Math.pow(N, -Math.min(aimOff,0));
   const aimReach = ()=> REACH * aimCell();
 
-  function pick(){
-    const rd = camDir();
-    const cap = camLevel() + aimOff;
-    const reach = aimReach();
+  // Nearest solid hit along one ray, across every visible nested frame. This is
+  // the primitive both the legacy single-ray pick() and the cone gatherer use.
+  function shootRay(dir, cap, reach){
     let best=null;
     for(const fr of frames){
       const lim = best ? Math.min(best.t, reach) : reach;
-      const h = rayGrid(fr, cam.pos, rd, lim, cap);
+      const h = rayGrid(fr, cam.pos, dir, lim, cap);
       if(h && (!best || h.t < best.t)) best=h;
     }
     return best;
   }
+  function pick(){ return shootRay(camDir(), camLevel()+aimOff, aimReach()); }  // single-ray baseline; retained for reference — the hot path uses gatherCandidates()
 
   // ===================================================================
   //  5a · ATTENTION  (the seam #2 fills in)
@@ -1185,11 +1185,67 @@
     return { center:[cx,cy,cz], dist, z, dpx, ang };
   }
 
-  // Attention state persists across frames (unlike the raw pick). #2 uses dwellT
-  // for switch-dwell and gazeSpeed to dissolve the incumbency bonus on a flick.
-  // current/key are the canonical sticky target the pivot and HUD already read
-  // (via aimTarget), so #2's winner flows to them without touching call sites.
-  const attn = { current:null, key:null, dwellT:0, gazeSpeed:0, _y:cam.yaw, _p:cam.pitch };
+  // Attention state persists across frames (unlike the raw pick). dwellT is how
+  // long the current target has held (≥ ATTEND_DWELL ⇒ "committed"); gazeSpeed
+  // dissolves the incumbency bonus on a deliberate flick; chall* is the pending
+  // challenger's dwell so a switch must be *sustained*, not a one-frame flicker.
+  // current/key are the canonical sticky target the pivot and HUD read via
+  // aimTarget, so the scored winner flows to them without touching call sites.
+  const attn = { current:null, key:null, dwellT:0, gazeSpeed:0,
+                 challKey:null, challT:0, _y:cam.yaw, _p:cam.pitch };
+
+  // --- tuning knobs (all conservative; angular still dominates, so you select
+  //     what you look at — size and stickiness only break ties and rescue the
+  //     tiny/off-center/flickering cases the single ray missed) ---------------
+  const TAU        = Math.PI*2;
+  const CONE_HALF  = 0.11;          // ~6.3° gather cone (a touch wider than the pivot cone)
+  const CONE_RINGS = [0.5, 1.0];    // two rings of spokes at these fractions of CONE_HALF
+  const CONE_SPOKES= 6;
+  const ANG_SIGMA  = 0.075;         // ~4.3°; Gaussian falloff of the angular score
+  const W_ANG      = 1.0;           // primary: proximity to the gaze
+  const W_SIZE     = 0.38;          // secondary: comfortably-sized on screen
+  const W_INC      = 0.55;          // hysteresis: bonus for the block already held
+  const SIZE_OCT   = 3;             // size score = 0.5 at this many octaves off "sweet"
+  const V_BREAK    = 3.0;           // rad/s; gaze faster than this melts the incumbency bonus
+  const SWITCH_DWELL = 0.06;        // s; a challenger must beat the incumbent this long to win
+  const ATTEND_DWELL = 0.09;        // s; dwellT past this = committed (exposed for later states)
+
+  // Projected-size preference: a smooth bump peaking at a comfortable on-screen
+  // size. A 1px speck and a screen-filling wall both score low — the first is
+  // too small to mean, the second is something you're diving *through*, not
+  // selecting. "sweet" tracks viewH so it's resolution-independent.
+  function sizeScore(dpx){
+    const sweet = 0.16*viewH;
+    const oct = Math.log2(Math.max(dpx,1e-3)/sweet) / SIZE_OCT;
+    return 1/(1+oct*oct);
+  }
+
+  // Cast a small cone of rays around the gaze and collect the distinct blocks
+  // they hit (dedup by identity). One center ray reproduces the old pick; the
+  // ring rays catch blocks near — but not exactly under — the crosshair, which
+  // is what makes small and off-center targets acquirable at all.
+  function gatherCandidates(){
+    const fwd=camDir(), cap=camLevel()+aimOff, reach=aimReach();
+    let rx=-fwd[2], rz=fwd[0], rl=Math.hypot(rx,rz);   // right = normalize(fwd × up)
+    if(rl<1e-6){ rx=1; rz=0; rl=1; }                    // gaze near-vertical: pick any right
+    rx/=rl; rz/=rl;
+    const ux=-fwd[0]*fwd[1]/rl, uy=rl, uz=-fwd[2]*fwd[1]/rl;   // up' = right × fwd (unit)
+    const cands=[], seen=new Set();
+    const add=(h)=>{ if(!h) return; const k=keyOf(h); if(!seen.has(k)){ seen.add(k); cands.push(h); } };
+    add(shootRay(fwd, cap, reach));
+    for(let ri=0; ri<CONE_RINGS.length; ri++){
+      const rr=Math.tan(CONE_HALF*CONE_RINGS[ri]), off=(ri&1)?0.5:0;   // stagger alternate rings
+      for(let s=0;s<CONE_SPOKES;s++){
+        const a=((s+off)/CONE_SPOKES)*TAU, ca=Math.cos(a), sa=Math.sin(a);
+        let dx=fwd[0]+rr*(ca*rx+sa*ux),
+            dy=fwd[1]+rr*(   sa*uy),
+            dz=fwd[2]+rr*(ca*rz+sa*uz);
+        const dl=Math.hypot(dx,dy,dz)||1;
+        add(shootRay([dx/dl,dy/dl,dz/dl], cap, reach));
+      }
+    }
+    return cands;
+  }
 
   function updateAttention(cands, dt){
     // Gaze angular speed (rad/s), smoothed — the "break attention" signal.
@@ -1197,12 +1253,40 @@
     const raw=Math.hypot(dY,dP)/Math.max(dt,1e-4);
     attn.gazeSpeed += (raw-attn.gazeSpeed)*Math.min(1,dt*12);
 
-    // #2 GOES HERE: score each candidate via aimMetrics + incumbency
-    // (keyOf(c)===attn.key) + a gaze-speed penalty; keep a sticky argmax with a
-    // switch margin and dwell. For now: nearest hit, so aimTarget is unchanged.
-    const chosen = cands.length ? cands[0] : null;
-    if(keyOf(chosen)===attn.key) attn.dwellT += dt; else attn.dwellT = 0;
-    attn.current = chosen; attn.key = keyOf(chosen);
+    if(!cands.length){ attn.current=null; attn.key=null; attn.dwellT=0; attn.challKey=null; attn.challT=0; return null; }
+
+    // Score every candidate. Angular proximity dominates; the comfortably-sized
+    // one wins ties; the incumbent carries a bonus that fades as the gaze speeds
+    // up (a slow refine keeps the lock, a fast flick lets go).
+    const incGate = Math.exp(-attn.gazeSpeed / V_BREAK);
+    let best=null, bestS=-Infinity, inc=null, incS=-Infinity;
+    for(const c of cands){
+      const m=aimMetrics(c);
+      if(m.z<=0) continue;                                   // behind the eye — ignore
+      const angS=Math.exp(-(m.ang/ANG_SIGMA)*(m.ang/ANG_SIGMA));
+      let sc=W_ANG*angS + W_SIZE*sizeScore(m.dpx);
+      const isInc = keyOf(c)===attn.key;
+      if(isInc) sc += W_INC*incGate;
+      if(sc>bestS){ bestS=sc; best=c; }
+      if(isInc){ inc=c; incS=sc; }
+    }
+    if(!best){ attn.current=null; attn.key=null; attn.dwellT=0; return null; }
+
+    // Sticky argmax: if the incumbent is still visible but no longer the top
+    // score, a challenger only wins after leading for SWITCH_DWELL — long enough
+    // to reject raycast flicker, short enough to feel immediate.
+    let chosen;
+    if(inc && best!==inc){
+      if(keyOf(best)===attn.challKey) attn.challT += dt;
+      else { attn.challKey=keyOf(best); attn.challT=0; }
+      if(attn.challT>=SWITCH_DWELL){ chosen=best; attn.challKey=null; attn.challT=0; }
+      else chosen=inc;
+    } else {                                                 // incumbent gone or already winning
+      chosen=best; attn.challKey=null; attn.challT=0;
+    }
+
+    if(keyOf(chosen)===attn.key) attn.dwellT+=dt; else attn.dwellT=0;
+    attn.current=chosen; attn.key=keyOf(chosen);
     return chosen;
   }
 
@@ -1429,7 +1513,7 @@
   let useStamp = false;
   let stampUp = 0;
   function doBreak(){
-    const h=pick(); if(!h) return;
+    const h=aimTarget; if(!h) return;   // act on what attention holds, not a bare re-pick
     if(camInsideCell(h.w.id, h.ii)){ hint('you are <b>inside</b> that block — surface first'); return; }
     const old = h.w.kids.get(h.ii);
     const prevRef = old ? copyRef(old) : null;         // O(1) capture: it's a reference
@@ -1441,7 +1525,7 @@
     if(h.w.parent){ const P=worlds.get(h.w.parent.w); if(P) P.dirty=true; }
   }
   function doPlace(){
-    const h=pick(); if(!h) return;
+    const h=aimTarget; if(!h) return;   // match the ghost preview (also aimTarget)
     const i=h.i+h.n[0], j=h.j+h.n[1], k=h.k+h.n[2];
     if(!inb(h.w,i,j,k)){ hint('nothing to build on out there'); return; }
     const ii=idx3(h.w,i,j,k);
@@ -1692,7 +1776,7 @@
   }
 
   function doGrab(){
-    const h = pick();
+    const h = aimTarget;
     if(!h){ hint('nothing there to pick up'); return; }
     const old = h.w.kids.get(h.ii);
     const ref = old ? copyRef(old) : null;          // the grab IS the reference: O(1)
@@ -1711,7 +1795,7 @@
       : 'picked up a plain block of '+MAT[h.m].name+' — right-click to stamp it');
   }
   function doOpen(){
-    const h=pick(); if(!h) return;
+    const h=aimTarget; if(!h) return;
     if(h.w.kids.has(h.ii)){ flash('already open — mine into it, then shrink'); return; }
     openBlock(h.w, h.i, h.j, h.k);
     flash('opened a block of '+MAT[h.m].name+' — it is made of '+(N*N*N)+' smaller blocks');
@@ -1740,7 +1824,7 @@
         + 'Edit inside any one and they all change. <b>X</b> freezes.');
   }
   function doFreeze(){
-    const h = pick();
+    const h = aimTarget;
     if(!h){ hint('aim at a placed block to freeze it'); return; }
     const ref = h.w.kids.get(h.ii);
     if(!ref || !isTyped(ref)){
@@ -2066,8 +2150,7 @@
     camera.rotation.set(cam.pitch, cam.yaw, 0);
     walk();
 
-    const raw = pick();
-    const h = updateAttention(raw ? [raw] : [], dt);   // #2: feed a candidate set here
+    const h = updateAttention(gatherCandidates(), dt);   // scored, sticky attention target
     aimTarget = h;
     if(h){
       const s=h.fr.s, o=h.fr.o;
@@ -2175,6 +2258,10 @@
         && keyOf({w:{id:7},ii:3})!==keyOf({w:{id:7},ii:4})
         && keyOf({w:{id:8},ii:3})!==keyOf({w:{id:7},ii:3})
         && keyOf(null)===null]);
+      out.push(['size score: peaks at comfortable px, octave-symmetric, falls off',
+        Math.abs(sizeScore(0.16*viewH)-1)<1e-9
+        && sizeScore(0.16*viewH) > sizeScore(0.16*viewH*4)
+        && Math.abs(sizeScore(0.16*viewH*8)-sizeScore(0.16*viewH/8))<1e-9]);
 
       // -- the store: identical content interns to one node ---------------
       const mkLeg=(depth)=>{
