@@ -215,6 +215,8 @@
     <div class="sep"></div>
     <button class="tbtn active" id="snapBtn" title="Drop at the depth of the instance under the cursor">Snap&nbsp;·&nbsp;on</button>
     <button class="tbtn active" id="logBtn" title="Logarithmic depth buffer — widens the frustum to 10^12:1 so nothing near-clips as you fly past it (L)">Log&nbsp;·&nbsp;on</button>
+    <button class="tbtn active" id="cageBtn" title="Draw cubes as edge cages so nested content is visible (K)">Cage&nbsp;·&nbsp;on</button>
+    <button class="tbtn" id="dirBtn" title="Nest children inside the parent cube, or accrete them around it (I)">Nest&nbsp;·&nbsp;in</button>
     <button class="tbtn" id="fracBtn" title="Grow a group48 orbit fractal at the cursor, filling whatever headroom is left under the instance cap. Click cycles nothing; N cycles the orbit (face 6 / corner 8 / edge 12). Key: R">Grow&nbsp;·&nbsp;corner</button>
     <button class="tbtn" id="lifeBtn" title="Particle life — six-species force field over the instances in this band. Cubes are immobile anchors. (P to toggle, M for a new matrix)">Life&nbsp;·&nbsp;off</button>
     <div class="sep"></div>
@@ -258,6 +260,8 @@
     <div class="row"><span class="act">New interaction matrix</span><kbd>M</kbd></div>
     <div class="row"><span class="act">Grow group48 fractal</span><kbd>R</kbd></div>
     <div class="row"><span class="act">Cycle fractal orbit</span><kbd>N</kbd></div>
+    <div class="row"><span class="act">Cube edge cages</span><kbd>K</kbd></div>
+    <div class="row"><span class="act">Nest inward / outward</span><kbd>I</kbd></div>
     <div class="row"><span class="act">Undo / redo</span><kbd>⌘Z / ⌘⇧Z</kbd></div>
     <div class="row"><span class="act">Fit / Home</span><kbd>F / H</kbd></div>
     <div class="note">Tasks 4 &amp; 5 active: Group48 integer octahedral symmetry in 6 bits, centered continuous vector transformation, content-addressed node store with Morton canonical hashing, and named live species pointers with recursion cycle-breaking.</div>
@@ -808,6 +812,40 @@
       }
       ok('fractal: orbit size divides 48 (orbit-stabilizer)', osOK);
       ok('fractal: child offset = oApply(oCompose(parent,rep), seed)', homOK);
+      // inward mode: every descendant, to full depth, must stay inside the ROOT
+      // cube. The derived spread makes children touch the parent boundary, so
+      // containment is inductive — but assert it end to end rather than trust it.
+      {
+        const HE=1/Math.sqrt(3);
+        let contained=true, worstOver=0;
+        const savedIn=FRAC.inward, savedRatio=FRAC.ratio;
+        FRAC.inward=true;
+        for(const ratio of [0.35,0.42,0.48]){
+          FRAC.ratio=ratio;
+          for(const key of Object.keys(FRAC_SEEDS)){
+            const sd=FRAC_SEEDS[key], L=Math.hypot(sd[0],sd[1],sd[2]);
+            const unit=[sd[0]/L,sd[1]/L,sd[2]/L];
+            const spread=fracSpread(unit), reps=fracOrbit(sd);
+            const q=[{p:[0,0,0],o:O_ID,s:1,d:0}]; let head=0,seen=0;
+            while(head<q.length && seen<1200){
+              const n=q[head++]; seen++;
+              for(let a2=0;a2<3;a2++){
+                const reach=Math.abs(n.p[a2])+n.s*HE;
+                if(reach>HE+1e-9){ contained=false; worstOver=Math.max(worstOver,reach-HE); }
+              }
+              if(n.d>=4) continue;
+              for(const r of reps){
+                const co=oCompose(n.o,r), off=oApply(co,unit), rr=n.s*spread;
+                q.push({p:[n.p[0]+off[0]*rr,n.p[1]+off[1]*rr,n.p[2]+off[2]*rr],
+                        o:co, s:n.s*ratio, d:n.d+1});
+              }
+            }
+          }
+        }
+        FRAC.inward=savedIn; FRAC.ratio=savedRatio;
+        ok('fractal: inward children stay inside the root cube to full depth',
+           contained, contained?'':'over by '+worstOver.toExponential(2));
+      }
       ok('fractal: the three seeds branch 6 / 8 / 12',
          fracOrbit(FRAC_SEEDS.face).length===6 &&
          fracOrbit(FRAC_SEEDS.corner).length===8 &&
@@ -1049,7 +1087,8 @@
         uFade0={value:FADE0}, uFade1={value:FADE1},
         uGate={value:0}, uGateF={value:1}, uGateK={value:ERASE_KAPPA},
         uDustPx={value:3}, uProjectionMatrix={value:new THREE.Matrix4()},
-        uClock={value:0.0};
+        uClock={value:0.0},
+        uHollow={value:1.0};   // 1 = draw cubes as edge cages, so anything inside them shows
   let logDepthEnabled=true;
   const uLogDepthActive={value:1.0}, uLogDepthBufFC={value:1.0};
 
@@ -1096,7 +1135,10 @@
     in vec3 iColor;
     in float iBirth;
     in float iType;
+    uniform float uHollow;
     out vec3 vColor;
+    out vec3 vLocal;      // base-geometry position, for the edge-cage test
+    out float vCage;      // 1 when this instance should draw as edges only
     out vec3 vNormal;
     out vec3 vView;
     out float vFade;
@@ -1106,6 +1148,8 @@
     vec3 qrot(vec4 q, vec3 v){ return v + 2.0*cross(q.xyz, cross(q.xyz, v) + q.w*v); }
     void main(){
       vColor = iColor;
+      vLocal = position;                                   // un-scaled, un-rotated
+      vCage  = (uHollow > 0.5 && iType > 0.5 && iType < 1.5) ? 1.0 : 0.0;
       float curScale = iScale * glslLifeCurve(uClock - iBirth, iType);
       vec3 local = qrot(iQuat, position * curScale) + iPos;
       vec4 mv = modelViewMatrix * vec4(local, 1.0);
@@ -1133,8 +1177,23 @@
     in vec3 vNormal;
     in vec3 vView;
     in float vFade;
+    in vec3 vLocal;
+    in float vCage;
     out vec4 fragColor;
     void main(){
+      // Edge cage. The cube base geometry is axis-aligned with half-edge
+      // 1/sqrt(3), so a surface fragment has max(|x|,|y|,|z|) = H: on a face
+      // exactly one component reaches H, on an edge two do, at a corner three.
+      // Keeping only fragments where two or more components are near H leaves
+      // the wireframe and lets you see straight through to whatever is nested
+      // inside. No extra geometry, no line pass, no second draw call.
+      if (vCage > 0.5) {
+        const float H = 0.5773502691896258;
+        const float W = 0.11;                    // edge thickness as a fraction of H
+        vec3 av = abs(vLocal);
+        float onEdge = step(H*(1.0-W), av.x) + step(H*(1.0-W), av.y) + step(H*(1.0-W), av.z);
+        if (onEdge < 1.5) discard;
+      }
       vec3 N = normalize(vNormal);
       vec3 L = normalize(vec3(0.35, 0.55, 0.75));
       vec3 V = normalize(-vView);
@@ -1296,10 +1355,10 @@
     }
 
     meshMat=new THREE.RawShaderMaterial({
-      uniforms:{ uH,uTanHalfFov,uFade0,uFade1,uGate,uGateF,uGateK,uLogDepthActive,uLogDepthBufFC,uClock },
+      uniforms:{ uH,uTanHalfFov,uFade0,uFade1,uGate,uGateF,uGateK,uLogDepthActive,uLogDepthBufFC,uClock,uHollow },
       vertexShader:MESH_VERT, fragmentShader:MESH_FRAG,
       transparent:true, depthTest:true, depthWrite:true, blending:THREE.NormalBlending,
-      side:THREE.FrontSide,
+      side:THREE.DoubleSide,   // cages are see-through: the far edges must draw too
     });
     spriteBaseMat=new THREE.RawShaderMaterial({
       uniforms:{ uH,uTanHalfFov,uSMax,uGate,uGateF,uGateK,uProjectionMatrix,uLogDepthActive,uLogDepthBufFC,uClock, uLODAlpha:{value:1.0} },
@@ -2598,10 +2657,25 @@
   const FRAC={
     seedKey:'corner',                 // which orbit: face | corner | edge
     ratio:0.42,                       // child scale / parent scale
-    spread:1.30,                      // child centre distance, in parent scales
+    inward:true,                      // true = children NEST inside the parent cube
+    spreadOut:1.30,                   // outward mode: centre distance in parent scales
     typeId:1,                         // cube: immobile anchor when particle life runs
     mixTypes:false,
   };
+  // Inward spread is DERIVED, not tuned. The cube's half-edge is 1/sqrt(3) per
+  // unit bounding radius, so for a child to sit inside the parent and just touch
+  // its boundary:  d*max|u| + ratio/sqrt(3) = 1/sqrt(3), giving
+  //     spread = (1 - ratio) / (sqrt(3) * max|u_axis|)
+  // Verified containment for all three orbits at ratio 0.35/0.42/0.5: the worst
+  // axis reach lands on 0.577350 exactly, never over.
+  // NOTE the degenerate case: corner orbit at ratio 0.5 gives spread 0.5, which
+  // is a plain 2x2x2 subdivision — 8 children exactly filling the parent, i.e. a
+  // solid cube with no visible structure. Keep ratio below 0.5 for gaps.
+  function fracSpread(seedUnit){
+    if(!FRAC.inward) return FRAC.spreadOut;
+    const maxU=Math.max(Math.abs(seedUnit[0]),Math.abs(seedUnit[1]),Math.abs(seedUnit[2]));
+    return (1-FRAC.ratio)/(Math.sqrt(3)*maxU);
+  }
   const FRAC_SEEDS={
     face:  [1,0,0],
     corner:[1,1,1],
@@ -2642,6 +2716,7 @@
     const b=reps.length;
     const sLen=Math.hypot(seed[0],seed[1],seed[2]);
     const unit=[seed[0]/sLen, seed[1]/sLen, seed[2]/sLen];
+    const spread=fracSpread(unit);
 
     // seed sits on the focal shell, sized like a brush grain, so the fractal
     // arrives at the scale you are looking at — same I2 rule as painting
@@ -2676,7 +2751,7 @@
         const co=oCompose(n.o, reps[i]);
         // homomorphism: offset direction is the child's own orientation on the seed
         const off=oApply(co, unit);
-        const r=n.s*FRAC.spread;
+        const r=n.s*spread;
         q.push({ px:n.px+off[0]*r, py:n.py+off[1]*r, pz:n.pz+off[2]*r,
                  o:co, s:cs, d:n.d+1 });
         if(q.length-head + emitted >= budget) break;
@@ -2686,10 +2761,26 @@
 
     const ms=performance.now()-t0;
     console.log('fractal: '+FRAC.seedKey+' orbit (b='+b+', stabilizer='+(48/b)+') · '
+      +(FRAC.inward?'inward/nested':'outward/accreted')+' spread '+spread.toFixed(3)+' · '
       +emitted.toLocaleString()+' instances · depth '+maxD+' · '+ms.toFixed(0)+'ms · '
       +totalAlive().toLocaleString()+'/'+FRACTAL_TARGET.toLocaleString()+' live');
   }
 
+  function toggleHollow(){
+    uHollow.value = uHollow.value>0.5 ? 0.0 : 1.0;
+    const btn=document.getElementById('cageBtn');
+    if(btn){ btn.innerHTML='Cage&nbsp;·&nbsp;'+(uHollow.value>0.5?'on':'off');
+             btn.classList.toggle('active', uHollow.value>0.5); }
+    console.log('cube edge cages '+(uHollow.value>0.5?'ON — nested content is now visible':'OFF'));
+  }
+  function toggleFractalDirection(){
+    FRAC.inward=!FRAC.inward;
+    const btn=document.getElementById('dirBtn');
+    if(btn) btn.innerHTML=FRAC.inward?'Nest&nbsp;·&nbsp;in':'Nest&nbsp;·&nbsp;out';
+    console.log('fractal growth: '+(FRAC.inward?'INWARD (children nest inside the parent)'
+                                               :'OUTWARD (children accrete around the parent)'));
+    if(FRAC.inward && uHollow.value<0.5) console.log('  tip: press K — without edge cages you only see the outermost cube');
+  }
   function cycleFractalSeed(){
     const keys=Object.keys(FRAC_SEEDS);
     FRAC.seedKey=keys[(keys.indexOf(FRAC.seedKey)+1)%keys.length];
@@ -3109,6 +3200,10 @@
     if(lifeBtn) lifeBtn.addEventListener('click',toggleParticleLife);
     const fracBtn=document.getElementById('fracBtn');
     if(fracBtn) fracBtn.addEventListener('click',growFractal);
+    const cageBtn=document.getElementById('cageBtn');
+    if(cageBtn) cageBtn.addEventListener('click',toggleHollow);
+    const dirBtn=document.getElementById('dirBtn');
+    if(dirBtn) dirBtn.addEventListener('click',toggleFractalDirection);
     document.getElementById('viewsBtn').addEventListener('click',toggleViews);
     document.getElementById('viewsAdd').addEventListener('click',addBookmark);
     document.getElementById('undoBtn').addEventListener('click',undo);
@@ -3191,6 +3286,8 @@
       if(k==='m'){ plReseed(); }
       if(k==='r') growFractal();
       if(k==='n') cycleFractalSeed();
+      if(k==='k') toggleHollow();
+      if(k==='i') toggleFractalDirection();
       if(k>='1'&&k<='6') setType(parseInt(k,10)-1);
       if(k==='7') setType(-1);
       if(k===']') setSize(brush.size*1.2);
