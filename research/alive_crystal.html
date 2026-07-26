@@ -163,7 +163,11 @@
       <option value="vicsek">Vicsek cross</option>
       <option value="cantor">Cantor dust</option>
       <option value="sierpinski">Sierpinski tetra</option>
+      <option value="jerusalem">Jerusalem cube</option>
+      <option value="octaflake">Octahedron flake</option>
+      <option value="twist">Twisting lattice</option>
       <option value="dendrite">Dendrite</option>
+      <option value="hilbert">Hilbert curve</option>
     </select>
     <button class="tbtn" id="gramBtn" title="Grow the selected IFS grammar at the cursor (O)">Grow&nbsp;IFS</button>
     <button class="tbtn accent" id="liveCrystBtn" title="Seed a LIVING 8-fold kaleidoscope crystal in the cube under the cursor (Y). Shift+Y fills every cube in the scene.">Crystal&nbsp;·&nbsp;live</button>
@@ -665,6 +669,49 @@
         ok('grammar: heap pops in non-increasing scale order', mono);
         // dendrite must actually use more than one symbol, or the grammar is
         // just an orbit with extra steps
+        // Jerusalem: the defining relation, and containment with TWO ratios
+        {
+          const k=Math.SQRT2-1;
+          ok('grammar: Jerusalem satisfies 2k + k^2 = 1', Math.abs(2*k+k*k-1)<1e-12);
+          const R=GRAMMARS.jerusalem.rules.S;
+          ok('grammar: Jerusalem has 8 corners + 12 edges', R.length===20 &&
+             R.filter(r=>Math.abs(r.ratio-k)<1e-12).length===8 &&
+             R.filter(r=>Math.abs(r.ratio-k*k)<1e-12).length===12);
+          let jw=0; for(const r of R) for(let a2=0;a2<3;a2++) jw=Math.max(jw,Math.abs(r.off[a2])+r.ratio*H3);
+          ok('grammar: Jerusalem is exactly contained', Math.abs(jw-H3)<1e-9);
+        }
+        // Twist: the only grammar exercising the orientation algebra
+        {
+          const R=GRAMMARS.twist.rules.S;
+          ok('grammar: twist uses non-identity rotations',
+             R.every(r=>r.o!==O_ID) && new Set(R.map(r=>r.o)).size>1);
+          let allOrder4=true;
+          for(const r of new Set(R.map(x=>x.o))){
+            let o=O_ID, c=0; do{ o=oCompose(o,r); c++; }while(o!==O_ID && c<12);
+            if(c!==2 && c!==4) allOrder4=false;   // 90deg -> 4, 180deg -> 2
+          }
+          ok('grammar: twist rotations are genuine 90/180 turns', allOrder4);
+          // composing down must stay proper: 90deg turns cannot make a mirror
+          let proper=true, o=O_ID;
+          for(let i=0;i<200;i++){ o=oCompose(o,R[i%R.length].o); if(!oIsProper(o)) proper=false; }
+          ok('grammar: twist chains stay proper (no accidental mirrors)', proper);
+        }
+        // Hilbert: every cell once, every step adjacent — the curve's definition
+        {
+          let valid=true;
+          for(const bits of [1,2]){
+            const n=Math.pow(8,bits), seen=new Set(); let prev=null;
+            for(let d=0;d<n;d++){
+              const X=hilbertXYZ(d,bits);
+              seen.add(X.join(','));
+              if(prev){ const st=Math.abs(X[0]-prev[0])+Math.abs(X[1]-prev[1])+Math.abs(X[2]-prev[2]);
+                        if(st!==1) valid=false; }
+              prev=X;
+            }
+            if(seen.size!==n) valid=false;
+          }
+          ok('grammar: Hilbert visits every cell once with unit steps', valid);
+        }
         ok('grammar: dendrite is genuinely symbol-dependent',
            Object.keys(GRAMMARS.dendrite.rules).length>1 &&
            new Set(GRAMMARS.dendrite.rules.T.map(r=>r.ratio)).size>1);
@@ -1739,6 +1786,66 @@
         })};
       })(),
     },
+    jerusalem:{
+      name:'Jerusalem cube',
+      note:'two child sizes at once — k=sqrt(2)-1 and k^2, from 2k+k^2=1. The heap earns its keep here.',
+      axiom:'S',
+      rules:(function(){
+        // A Jerusalem cube slices a cross out of each face, leaving 8 corner
+        // cubes of side k and 12 edge cubes of side k^2, where an edge reads
+        // k + k^2 + k = 1, so k^2 + 2k - 1 = 0 and k = sqrt(2) - 1.
+        // Verified: 2k + k^2 = 1.000000000000, worst reach 0.577350269 == H3.
+        const k=Math.SQRT2-1, kk=k*k, out=[];
+        for(const x of [-1,1]) for(const y of [-1,1]) for(const z of [-1,1])
+          out.push({sym:'S', o:O_ID, off:[x*(1-k)*H3, y*(1-k)*H3, z*(1-k)*H3], ratio:k, type:1});
+        for(let ax=0;ax<3;ax++){
+          const other=[0,1,2].filter(i=>i!==ax);
+          for(const a2 of [-1,1]) for(const b2 of [-1,1]){
+            const o=[0,0,0];
+            o[other[0]]=a2*(1-kk)*H3; o[other[1]]=b2*(1-kk)*H3;
+            out.push({sym:'S', o:O_ID, off:o, ratio:kk, type:1});
+          }
+        }
+        return {S:out};
+      })(),
+    },
+    octaflake:{
+      name:'Octahedron flake',
+      note:'six children at the octahedron vertices, ratio 1/2 — the dual of the Sierpinski tetra',
+      axiom:'S',
+      rules:(function(){
+        const out=[];
+        for(let ax=0;ax<3;ax++) for(const s of [-1,1]){
+          const o=[0,0,0]; o[ax]=s*0.5;
+          out.push({sym:'S', o:O_ID, off:o, ratio:0.5, type:3});
+        }
+        return {S:out};
+      })(),
+    },
+    twist:{
+      name:'Twisting lattice',
+      note:'the only grammar that uses real group48 rotations — orientation compounds down the chain',
+      axiom:'S',
+      rules:(function(){
+        // Every other grammar here uses o:O_ID, which leaves the exact
+        // orientation algebra completely idle. These are true 90-degree
+        // rotations (each verified to have order 4), so oCompose actually
+        // does work and children tumble as they recurse. A depth-5 expansion
+        // reaches 24 of the 48 codes — exactly the proper rotation subgroup,
+        // since 90-degree turns can never produce an improper element.
+        const RX=oCode({p:[0,2,1], s:[1,-1,1]});
+        const RY=oCode({p:[2,1,0], s:[1,1,-1]});
+        const RZ=oCode({p:[1,0,2], s:[-1,1,1]});
+        const rots=[RZ,RX,RY,oCompose(RZ,RZ),oCompose(RX,RX),oCompose(RY,RY)];
+        const out=[]; let n=0;
+        for(let ax=0;ax<3;ax++) for(const s of [-1,1]){
+          const o=[0,0,0]; o[ax]=s*2*H3/3;
+          out.push({sym:'S', o:rots[n%rots.length], off:o, ratio:1/3, type:(n%2)?1:4});
+          n++;
+        }
+        return {S:out};
+      })(),
+    },
     dendrite:{
       name:'Dendrite',
       note:'two symbols, non-uniform ratios — the one that actually needs the heap',
@@ -1771,6 +1878,70 @@
         if(m===i) break; const t=h[m];h[m]=h[i];h[i]=t; i=m; } }
     return top; }
 
+  // The Hilbert curve is not an IFS in the useful sense: its ATTRACTOR is the
+  // solid cube, so rendering the point set shows nothing. What is interesting
+  // is the ORDERING, so this generates the curve directly (Skilling's
+  // transform) and encodes traversal position as colour — a spectrum snaking
+  // through space, where adjacent hues are adjacent in the curve.
+  // Verified at orders 1-3: every cell visited exactly once, and every
+  // consecutive pair is a unit step. That is the definition of the curve.
+  function hilbertXYZ(index, bits){
+    const X=[0,0,0];
+    for(let b=0;b<bits;b++)
+      for(let i=0;i<3;i++){
+        const bit=(index >> (3*(bits-1-b)+(2-i))) & 1;
+        X[i] |= bit << (bits-1-b);
+      }
+    const N=2<<(bits-1);
+    const t=X[2]>>1;
+    for(let i=2;i>0;i--) X[i]^=X[i-1];
+    X[0]^=t;
+    for(let Q=2;Q!==N;Q<<=1){
+      const P=Q-1;
+      for(let i=2;i>=0;i--){
+        if(X[i]&Q) X[0]^=P;
+        else { const tt=(X[0]^X[i])&P; X[0]^=tt; X[i]^=tt; }
+      }
+    }
+    return X;
+  }
+  // spectrum: 0 -> 1 walks hue around the wheel once
+  function curveColor(t){
+    const h=t*6.0;
+    const c=1.0, x=c*(1-Math.abs((h%2)-1));
+    let r,g,b;
+    if(h<1){r=c;g=x;b=0;} else if(h<2){r=x;g=c;b=0;}
+    else if(h<3){r=0;g=c;b=x;} else if(h<4){r=0;g=x;b=c;}
+    else if(h<5){r=x;g=0;b=c;} else {r=c;g=0;b=x;}
+    return [0.25+0.75*r, 0.25+0.75*g, 0.25+0.75*b];
+  }
+  function growHilbert(){
+    const budget=Math.max(0, FRACTAL_TARGET-totalAlive());
+    if(budget<64){ console.warn('hilbert: no headroom — erase some (X) first'); return; }
+    // pick the largest order that fits: 8^bits cells
+    let bits=1; while(Math.pow(8,bits+1)<=budget && bits<4) bits++;
+    const n=Math.pow(8,bits), side=1<<bits;
+    const {F}=camFrame();
+    const dir=worldRayDir(lastCursor.inside?lastCursor.x:innerWidth/2,
+                          lastCursor.inside?lastCursor.y:innerHeight/2);
+    const origin=V3.add(cam.E, V3.scale(dir,F));
+    const span=pxRadiusToWorld(Math.max(brush.size,10)*3.4, F, TAN_HALF, innerHeight);
+    const cell=2*span/side;                       // spacing between consecutive cells
+    const rad=cell*0.30;
+    const t0=performance.now();
+    beginStroke();
+    for(let d=0;d<n;d++){
+      const X=hilbertXYZ(d,bits);
+      const p=[origin[0]+(X[0]-(side-1)/2)*cell,
+               origin[1]+(X[1]-(side-1)/2)*cell,
+               origin[2]+(X[2]-(side-1)/2)*cell];
+      addInstance(p, 0, [0,0,0,1], rad, curveColor(d/(n-1)), d>>>0, uClock.value);
+    }
+    endStroke();
+    console.log('hilbert: order '+bits+' · '+n+' cells · '+side+'^3 lattice · '
+      +(performance.now()-t0).toFixed(0)+'ms · colour encodes traversal position');
+  }
+
   function growGrammar(){
     const budget=Math.max(0, FRACTAL_TARGET-totalAlive());
     if(budget<8){
@@ -1778,6 +1949,7 @@
         +FRACTAL_TARGET.toLocaleString()+' live. Erase some (X) first.');
       return;
     }
+    if(grammarKey==='hilbert'){ growHilbert(); return; }
     const G=GRAMMARS[grammarKey];
     const {F}=camFrame();
     const dir=worldRayDir(lastCursor.inside?lastCursor.x:innerWidth/2,
@@ -1822,6 +1994,12 @@
   }
 
   function setGrammar(key){
+    if(key==='hilbert'){
+      grammarKey=key;
+      console.log('grammar: Hilbert curve — a space-filling curve, coloured by traversal position');
+      const s=document.getElementById('gramSel'); if(s&&s.value!==key) s.value=key;
+      return;
+    }
     if(!GRAMMARS[key]) return;
     grammarKey=key;
     const G=GRAMMARS[key];
