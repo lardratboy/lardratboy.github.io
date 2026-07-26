@@ -154,6 +154,7 @@
     <button class="tbtn active" id="logBtn" title="Logarithmic depth buffer (L)">Log&nbsp;·&nbsp;on</button>
     <button class="tbtn active" id="cageBtn" title="Cube edge cages (K)">Cage&nbsp;·&nbsp;on</button>
     <button class="tbtn" id="dirBtn" title="Nest inward/outward (I)">Nest&nbsp;·&nbsp;in</button>
+    <button class="tbtn" id="gramBtn" title="Grow an IFS grammar at the cursor (E). Shift+E cycles: Menger, Vicsek, Cantor, Sierpinski, Dendrite.">IFS&nbsp;·&nbsp;menger</button>
     <button class="tbtn accent" id="liveCrystBtn" title="Seed a LIVING 8-fold kaleidoscope crystal in the cube under the cursor (Y). Shift+Y fills every cube in the scene.">Crystal&nbsp;·&nbsp;live</button>
     <button class="tbtn" id="crystBtn" title="Populate target cube with 8-fold Octant Crystal atoms (Y)">Cryst&nbsp;·&nbsp;8-fold</button>
     <button class="tbtn" id="fracBtn" title="Grow group48 orbit fractal with living cube innards (R)">Grow&nbsp;·&nbsp;corner</button>
@@ -466,54 +467,25 @@
     probability: 0.70   // Odds of successful injection per attempt
   };
 
+  // Injection used to spawn FREE instances inside a cube. They were ordinary
+  // records, so stepParticleLife() picked them up and moved them, contained
+  // only by the chunk-wide plR — which has nothing to do with the cube they
+  // were injected into. That is where they were flying off to.
+  //
+  // Now injection mutates a CRYSTAL instead: it adds a representative to the
+  // octant sim of a cube that already has one. The atom is then folded,
+  // mirrored eight ways, and rewritten from the cube's own frame every frame,
+  // so it is contained by construction and cannot escape. Injection stops
+  // being decoration and becomes mutation of a living ecology.
   function injectRandomAtomIntoCube() {
-    const activeCubes = [];
-    for (const ch of chunks) {
-      if (!ch.alive) continue;
-      const cs = ch._chunkScale || Math.pow(2, 20 * (cam.bandExp - ch.bandExp));
-      for (let k = 0; k < ch.count; k++) {
-        if (ch.iscale[k] > 0 && ch.itype[k] === 1) { // Type 1 = Cube
-          const lx = ch.ipos[k*3], ly = ch.ipos[k*3+1], lz = ch.ipos[k*3+2];
-          const worldPos = [
-            ch.anchor[0]*cs + lx*cs,
-            ch.anchor[1]*cs + ly*cs,
-            ch.anchor[2]*cs + lz*cs
-          ];
-          activeCubes.push({
-            pos: worldPos,
-            scale: ch.iscale[k] * cs,
-            oCode: ch.iseed[k] & 0x2F
-          });
-        }
-      }
-    }
-
-    if (activeCubes.length === 0) return;
-
+    if (!CRYSTALS.length) return;
     const rng = mulberry32((Math.random() * 0xFFFFFFFF) >>> 0);
-    const target = activeCubes[Math.floor(rng() * activeCubes.length)];
-
-    const H = 0.5773502691896258;
-    const livingTypes = [0, 2, 3, 4, 5];
-    const typeId = livingTypes[Math.floor(rng() * livingTypes.length)];
-    const atomScale = target.scale * (0.07 + 0.09 * rng());
-    const col = jitterColor(SWATCHES[Math.floor(rng() * SWATCHES.length)], rng, 0.15);
-
-    const fx = (0.15 + 0.60 * rng()) * H * target.scale;
-    const fy = (0.15 + 0.60 * rng()) * H * target.scale;
-    const fz = (0.15 + 0.60 * rng()) * H * target.scale;
-
-    beginStroke();
-    for (let signCode = 0; signCode < 8; signCode++) {
-      const [rx, ry, rz] = unfoldOctant(fx, fy, fz, signCode);
-      const orientedLocal = oApply(target.oCode, [rx, ry, rz]);
-      const worldPos = V3.add(target.pos, orientedLocal);
-      const quat = oQuatRender(oCompose(target.oCode, signCode));
-      const atomSeed = (rng() * 4294967296) >>> 0;
-
-      addInstance(worldPos, typeId, quat, atomScale, col, atomSeed, uClock.value);
-    }
-    endStroke();
+    // prefer crystals with room to grow
+    const open = CRYSTALS.filter(c => c.reps.length < CRYST.maxReps);
+    if (!open.length) return;
+    const cr = open[(rng() * open.length) | 0];
+    if (totalAlive() + 8 > FRACTAL_TARGET) return;
+    addRepToCrystal(cr, rng);
   }
 
   function stepInjection(dt) {
@@ -646,6 +618,46 @@
         if(V3.len(V3.sub([px,py,pz], reconstructed)) > 1e-12) octantExact = false;
       }
       ok('octant crystal: fold/unfold round-trips exact', octantExact);
+
+      // ---- IFS grammars ----
+      {
+        // uniform grammars must stay inside the root cube at full depth
+        let contained=true, over=0;
+        for(const key of ['menger','vicsek','cantor']){
+          const G=GRAMMARS[key];
+          const q=[{p:[0,0,0],o:O_ID,s:1,d:0,sym:G.axiom}]; let head=0;
+          while(head<q.length && head<3000){
+            const n=q[head++];
+            for(let a2=0;a2<3;a2++){
+              const reach=Math.abs(n.p[a2])+n.s*H3;
+              if(reach>H3+1e-9){ contained=false; over=Math.max(over,reach-H3); }
+            }
+            if(n.d>=3) continue;
+            for(const r of G.rules[n.sym]){
+              const off=oApply(n.o,r.off);
+              q.push({p:[n.p[0]+off[0]*n.s,n.p[1]+off[1]*n.s,n.p[2]+off[2]*n.s],
+                      o:oCompose(n.o,r.o), s:n.s*r.ratio, d:n.d+1, sym:r.sym});
+            }
+          }
+        }
+        ok('grammar: cell grammars stay inside the root cube', contained,
+           contained?'':'over by '+over.toExponential(2));
+        ok('grammar: Menger keeps 20 of 27 cells', GRAMMARS.menger.rules.S.length===20);
+        ok('grammar: Vicsek keeps 7 of 27 cells', GRAMMARS.vicsek.rules.S.length===7);
+        ok('grammar: Cantor keeps the 8 corners', GRAMMARS.cantor.rules.S.length===8);
+        // the heap must emit in non-increasing scale order — this is the whole
+        // reason a FIFO is not sufficient once ratios vary per rule
+        const h=[]; const scales=[0.3,0.9,0.5,0.7,0.1,0.95,0.42];
+        for(const s of scales) _hPush(h,{s});
+        let mono=true, prev=Infinity;
+        while(h.length){ const n=_hPop(h); if(n.s>prev+1e-15) mono=false; prev=n.s; }
+        ok('grammar: heap pops in non-increasing scale order', mono);
+        // dendrite must actually use more than one symbol, or the grammar is
+        // just an orbit with extra steps
+        ok('grammar: dendrite is genuinely symbol-dependent',
+           Object.keys(GRAMMARS.dendrite.rules).length>1 &&
+           new Set(GRAMMARS.dendrite.rules.T.map(r=>r.ratio)).size>1);
+      }
 
       // The claim the living crystal rests on: stepping only the octant
       // representatives, with the unfolded copies as neighbours, is identical
@@ -1449,7 +1461,7 @@
           exT=t;
           exPoint=[E[0]+dir[0]*t, E[1]+dir[1]*t, E[2]+dir[2]*t];
           exScale=s;
-          exOCode=ch.iseed[k] & 0x2F;
+          exOCode=ch.iocode ? ch.iocode[k] : 0;   // stored code, not a guess
         }
       }
     }
@@ -1641,6 +1653,175 @@
   }
 
   // =====================================================================
+  //  12e · IFS GRAMMARS
+  // =====================================================================
+  // growFractal() takes a single group48 orbit and applies it uniformly. A
+  // grammar generalises that in two directions at once:
+  //
+  //   1. RULES, not an orbit. Each rule carries its own orientation, offset,
+  //      scale ratio and species, so the child set need not be a single orbit.
+  //   2. SYMBOLS. A node has a symbol and rules are looked up by it, so a
+  //      "trunk" expands differently from a "branch". This is exactly
+  //      living-scriptorium.md's composite type — a body that is a list of
+  //      {child, transform} records — arriving early.
+  //
+  // The affine composition is the standard IFS one, and the offset is rotated
+  // by the PARENT orientation (growFractal could use the child's only because
+  // an orbit offset is itself the child orientation applied to the seed):
+  //
+  //   scale_child = scale_parent * rule.ratio
+  //   orient_child = oCompose(orient_parent, rule.o)          [exact, integer]
+  //   pos_child   = pos_parent + scale_parent * oApply(orient_parent, rule.off)
+  //
+  // WHY A HEAP IS NOW REQUIRED. growFractal used a plain FIFO because a uniform
+  // ratio makes scale strictly decreasing with depth, so best-first-by-scale IS
+  // breadth-first. A grammar with different ratios per rule breaks that: a
+  // depth-2 node under ratio 0.7 (scale 0.49) is LARGER than a depth-1 node
+  // under ratio 0.3 (scale 0.30), so FIFO would spend budget on invisible
+  // detail while a visible branch went unexpanded. Best-first needs a real
+  // priority queue once ratios vary.
+  //
+  // Offsets are in PARENT-SCALE units. Containment verified for every uniform
+  // grammar below: worst axis reach lands on 0.577350 exactly (the cube
+  // half-edge), never over.
+  const H3=0.5773502691896258;
+  const T3=2*H3/3;                       // 3x3x3 subdivision step, in parent-scale units
+
+  function mkCellRules(keep, ratio, type, sym){
+    const out=[];
+    for(let i=-1;i<=1;i++) for(let j=-1;j<=1;j++) for(let k=-1;k<=1;k++){
+      const zeros=(i===0?1:0)+(j===0?1:0)+(k===0?1:0);
+      if(!keep(i,j,k,zeros)) continue;
+      out.push({sym, o:O_ID, off:[i*T3, j*T3, k*T3], ratio, type});
+    }
+    return out;
+  }
+
+  const GRAMMARS={
+    menger:{
+      name:'Menger sponge',
+      note:'3x3x3 minus the centre and the six face centres — 20 children, ratio 1/3',
+      axiom:'S',
+      rules:{ S: mkCellRules((i,j,k,z)=>z<=1, 1/3, 1, 'S') },     // 20, cubes
+    },
+    vicsek:{
+      name:'Vicsek cross',
+      note:'centre plus the six face neighbours — 7 children, ratio 1/3',
+      axiom:'S',
+      rules:{ S: mkCellRules((i,j,k,z)=>z>=2, 1/3, 1, 'S') },     // 7, cubes
+    },
+    cantor:{
+      name:'Cantor dust',
+      note:'the eight corner cells only — maximum negative space',
+      axiom:'S',
+      rules:{ S: mkCellRules((i,j,k,z)=>z===0, 1/3, 1, 'S') },    // 8, cubes
+    },
+    sierpinski:{
+      name:'Sierpinski tetrahedron',
+      note:'four alternating cube corners, ratio 1/2 — the tetrahedral subgroup of group48',
+      axiom:'S',
+      rules:(function(){
+        const vs=[[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]];
+        return { S: vs.map(v=>{
+          const L=Math.hypot(v[0],v[1],v[2]);
+          return {sym:'S', o:O_ID, off:[v[0]/L*0.5, v[1]/L*0.5, v[2]/L*0.5], ratio:0.5, type:2};
+        })};
+      })(),
+    },
+    dendrite:{
+      name:'Dendrite',
+      note:'two symbols, non-uniform ratios — the one that actually needs the heap',
+      axiom:'T',
+      rules:{
+        // trunk: continues upward at 0.74, throws four lateral branches at 0.46
+        T:[ {sym:'T', o:O_ID, off:[0, 0.95, 0], ratio:0.74, type:1},
+            {sym:'B', o:O_ID, off:[ 0.62, 0.30, 0], ratio:0.46, type:3},
+            {sym:'B', o:O_ID, off:[-0.62, 0.30, 0], ratio:0.46, type:3},
+            {sym:'B', o:O_ID, off:[0, 0.30,  0.62], ratio:0.46, type:3},
+            {sym:'B', o:O_ID, off:[0, 0.30, -0.62], ratio:0.46, type:3} ],
+        // branch: extends and forks, terminating in spheres
+        B:[ {sym:'B', o:O_ID, off:[0, 0.85, 0], ratio:0.66, type:3},
+            {sym:'L', o:O_ID, off:[0.70, 0.40, 0], ratio:0.40, type:0},
+            {sym:'L', o:O_ID, off:[-0.70, 0.40, 0], ratio:0.40, type:0} ],
+        L:[ {sym:'L', o:O_ID, off:[0, 0.80, 0], ratio:0.55, type:0} ],
+      },
+    },
+  };
+  let grammarKey='menger';
+
+  // Binary max-heap on scale. Only needed because ratios vary per rule.
+  function _hPush(h,n){ h.push(n); let i=h.length-1;
+    while(i>0){ const p=(i-1)>>1; if(h[p].s>=h[i].s) break; const t=h[p];h[p]=h[i];h[i]=t; i=p; } }
+  function _hPop(h){ const top=h[0], last=h.pop();
+    if(h.length){ h[0]=last; let i=0;
+      for(;;){ const l=2*i+1, r=l+1; let m=i;
+        if(l<h.length&&h[l].s>h[m].s) m=l;
+        if(r<h.length&&h[r].s>h[m].s) m=r;
+        if(m===i) break; const t=h[m];h[m]=h[i];h[i]=t; i=m; } }
+    return top; }
+
+  function growGrammar(){
+    const budget=Math.max(0, FRACTAL_TARGET-totalAlive());
+    if(budget<8){
+      console.warn('grammar: no headroom — '+totalAlive().toLocaleString()+'/'
+        +FRACTAL_TARGET.toLocaleString()+' live. Erase some (X) first.');
+      return;
+    }
+    const G=GRAMMARS[grammarKey];
+    const {F}=camFrame();
+    const dir=worldRayDir(lastCursor.inside?lastCursor.x:innerWidth/2,
+                          lastCursor.inside?lastCursor.y:innerHeight/2);
+    const origin=V3.add(cam.E, V3.scale(dir,F));
+    const rootScale=pxRadiusToWorld(Math.max(brush.size,10)*3.4, F, TAN_HALF, innerHeight);
+    const rng=mulberry32(0x6A11);
+
+    const heap=[]; _hPush(heap,{px:origin[0],py:origin[1],pz:origin[2],
+                                o:O_ID, s:rootScale, d:0, sym:G.axiom, type:1});
+    let emitted=0, maxD=0, pending=0;
+    const t0=performance.now();
+    const seen={};
+    beginStroke();
+    while(heap.length && emitted<budget){
+      const n=_hPop(heap);
+      const fch=addInstance([n.px,n.py,n.pz], n.type, oQuatRender(n.o), n.s,
+                  jitterColor(SWATCHES[n.d % SWATCHES.length], rng, 0.06),
+                  (n.o*2654435761 ^ n.d*40503)>>>0);
+      if(fch.iocode) fch.iocode[fch.count-1]=n.o;
+      emitted++; if(n.d>maxD) maxD=n.d;
+      seen[n.sym]=(seen[n.sym]||0)+1;
+
+      const rules=G.rules[n.sym];
+      if(!rules) continue;
+      for(const r of rules){
+        if(emitted+heap.length>=budget) break;
+        const cs=n.s*r.ratio;
+        if(!(cs>0) || !isFinite(cs)) continue;
+        // offset rotated by the PARENT orientation — standard affine composition
+        const off=oApply(n.o, r.off);
+        _hPush(heap,{ px:n.px+off[0]*n.s, py:n.py+off[1]*n.s, pz:n.pz+off[2]*n.s,
+                      o:oCompose(n.o, r.o), s:cs, d:n.d+1, sym:r.sym, type:r.type });
+      }
+    }
+    endStroke();
+    console.log('grammar "'+G.name+'": '+emitted.toLocaleString()+' instances · depth '+maxD
+      +' · symbols '+JSON.stringify(seen)+' · '+(performance.now()-t0).toFixed(0)+'ms · '
+      +totalAlive().toLocaleString()+'/'+FRACTAL_TARGET.toLocaleString()+' live');
+    console.log('  '+G.note);
+    if(uHollow.value<0.5 && grammarKey!=='sierpinski' && grammarKey!=='dendrite') toggleHollow();
+  }
+
+  function cycleGrammar(){
+    const keys=Object.keys(GRAMMARS);
+    grammarKey=keys[(keys.indexOf(grammarKey)+1)%keys.length];
+    const G=GRAMMARS[grammarKey];
+    const b=Object.values(G.rules).reduce((a,r)=>a+r.length,0);
+    console.log('grammar: '+G.name+' — '+G.note+'  ('+Object.keys(G.rules).length
+      +' symbol(s), '+b+' rules total)');
+    const btn=document.getElementById('gramBtn');
+    if(btn) btn.innerHTML='IFS&nbsp;·&nbsp;'+grammarKey;
+  }
+
+  // =====================================================================
   //  12d · LIVING KALEIDOSCOPE CRYSTALS
   // =====================================================================
   // The octant fold above is correct but static — nothing was ever stepped.
@@ -1741,6 +1922,36 @@
     endStroke();
     CRYSTALS.push(cr);
     return cr;
+  }
+
+  // Add one representative (and its 8 mirror instances) to a live crystal.
+  function addRepToCrystal(cr, rng){
+    if(cr.reps.length>=CRYST.maxReps) return false;
+    const sc=cr.slot;
+    if(sc.k>=sc.ch.count || sc.ch.iscale[sc.k]<=0) return false;
+    const living=[0,2,3,4,5];
+    const p={ x:0.15+0.70*rng(), y:0.15+0.70*rng(), z:0.15+0.70*rng(),
+              vx:0, vy:0, vz:0,
+              t:living[(rng()*living.length)|0],
+              rs:0.055+0.045*rng(),
+              col:jitterColor(SWATCHES[(rng()*SWATCHES.length)|0], rng, 0.12) };
+    const cubeScale=sc.ch.iscale[sc.k];
+    const cubeWorld=[sc.ch.anchor[0]+sc.ch.ipos[sc.k*3],
+                     sc.ch.anchor[1]+sc.ch.ipos[sc.k*3+1],
+                     sc.ch.anchor[2]+sc.ch.ipos[sc.k*3+2]];
+    const R=CUBE_H*cubeScale;
+    cr.reps.push(p);
+    beginStroke();
+    for(let s=0;s<8;s++){
+      const g=_SIGNS[s];
+      const loc=oApply(cr.o,[p.x*g[0]*R, p.y*g[1]*R, p.z*g[2]*R]);
+      const ch=addInstance(V3.add(cubeWorld,loc), p.t,
+                           oQuatRender(oCompose(cr.o,s)),
+                           p.rs*cubeScale, p.col, (rng()*4294967296)>>>0, uClock.value);
+      cr.slots.push({ch, k:ch.count-1});
+    }
+    endStroke();
+    return true;
   }
 
   function stepCrystals(dt){
@@ -2360,6 +2571,8 @@
     document.getElementById('crystBtn').addEventListener('click',growOctantCrystalAtCursor);
     const lcb=document.getElementById('liveCrystBtn');
     if(lcb) lcb.addEventListener('click',seedCrystalAtCursor);
+    const gb=document.getElementById('gramBtn');
+    if(gb) gb.addEventListener('click',growGrammar);
     document.getElementById('fracBtn').addEventListener('click',growFractal);
     document.getElementById('injectBtn').addEventListener('click',toggleInjection);
     document.getElementById('cageBtn').addEventListener('click',toggleHollow);
@@ -2416,6 +2629,7 @@
       if(k>='1'&&k<='6') setType(parseInt(k,10)-1); if(k==='7') setType(-1);
       if(k===']') setSize(brush.size*1.2); if(k==='[') setSize(brush.size/1.2);
       if(k==='g') toggleHelp();
+      if(k==='e'){ if(e.shiftKey) cycleGrammar(); else growGrammar(); }
     });
     addEventListener('keyup',e=>{
       const k=e.key.toLowerCase();
