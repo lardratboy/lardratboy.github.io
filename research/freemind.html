@@ -85,6 +85,16 @@
     background: #1a0008; border: 1px solid #f00; border-radius: 10px; padding: 24px; max-width: 440px;
     text-align: center; color: #f66; z-index: 100; }
   code.op { color: var(--accent); letter-spacing: .10em; }
+  #levels { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; }
+  .lvl { padding: 4px 0; border: 1px solid var(--line); border-radius: 4px; background: #0e1015;
+    color: var(--dim); font: inherit; font-size: 9.5px; cursor: pointer; line-height: 1.25; text-align: center; }
+  .lvl:hover { border-color: #3c4352; color: var(--fg); }
+  .lvl.sel { border-color: var(--accent); color: #fff; background: #171b26; }
+  .lvl.off { opacity: .32; }
+  .lvl b { display: block; font-weight: 400; color: inherit; font-size: 10.5px; }
+  #word { margin-top: 7px; font-size: 9.5px; color: var(--dim); letter-spacing: .04em;
+    word-break: break-all; line-height: 1.6; }
+  #word b { color: var(--accent); font-weight: 400; }
 </style>
 </head>
 <body>
@@ -100,7 +110,16 @@
   <h1>FreeMind</h1>
   <div class="sub">WebGPU 27 Sign-Vector Particle Lattice</div>
 
-  <h2>27-Child Rule — Biunit Cube</h2>
+  <h2>tier rules — the 48-bit word</h2>
+  <div id="levels"></div>
+  <div class="row" style="margin-top:6px">
+    <label class="chk" style="flex:1"><input type="checkbox" id="link" checked>link all tiers</label>
+    <button class="mini" data-act="rndword" style="flex:0 0 auto;padding:4px 8px">random word</button>
+  </div>
+  <div id="word"></div>
+  <select id="wordPreset" style="margin-top:7px"></select>
+
+  <h2>27-child rule — tier <span id="lvlTag">0</span></h2>
   <div id="gen"></div>
   <div class="orbits" id="orbits"></div>
 
@@ -133,7 +152,8 @@
     <tr><td>dimension log k / log 3</td><td id="r-dim">2.7268</td></tr>
     <tr><td>stabiliser |H| / 48</td><td id="r-stab">48</td></tr>
     <tr><td>tiers used / max</td><td id="r-depth">—</td></tr>
-    <tr><td>distinct cells k^d</td><td id="r-cells">—</td></tr>
+    <tr><td>distinct cells &Pi;k<sub>i</sub></td><td id="r-cells">—</td></tr>
+    <tr><td>word dimension</td><td id="r-wdim">—</td></tr>
     <tr><td>leaf edge</td><td id="r-leaf">—</td></tr>
     <tr><td>dispatch submit</td><td id="r-gpuTime">—</td></tr>
   </table>
@@ -246,8 +266,9 @@ const PRESETS = [
    The old build swept the full 27^d address space and threw away the misses. */
 const COMPUTE_WGSL = `
 struct Params {
-  mask: u32, depth: u32, total: u32, k: u32,
-  kids: array<vec4<u32>, 7>      // the k valid child indices, vec4-strided for uniform layout
+  depth: u32, total: u32, _p0: u32, _p1: u32,   //   0  scalars
+  k:    array<vec4<u32>, 3>,                    //  16  per-tier child count (12 tiers)
+  kids: array<vec4<u32>, 84>                    //  64  per-tier child list (12 x 7 vec4)
 };
 @group(0) @binding(0) var<storage, read_write> output: array<u32>;
 @group(0) @binding(1) var<uniform> P: Params;
@@ -260,14 +281,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var rem = idx;
   var ax = 0u; var ay = 0u; var topW = 0u; var deepW = 0u;
 
-  // base-k digits, least-significant first -> deepest tier first
+  /* Mixed radix with a per-tier base: digit j (least significant) belongs to
+     tier depth-1-j, so it is divided by THAT tier's k. Uniform rules are the
+     special case where every base is equal. */
   for (var j = 0u; j < P.depth; j = j + 1u) {
-    let di = rem % P.k;
-    rem = rem / P.k;
-    let child = P.kids[di / 4u][di % 4u];
-    let tier = P.depth - 1u - j;                 // tier 0 = macro = most significant
+    let tier = P.depth - 1u - j;
+    let kk   = P.k[tier / 4u][tier % 4u];
+    let di   = rem % kk;
+    rem      = rem / kk;
+    let child = P.kids[tier * 7u + di / 4u][di % 4u];
 
-    // 5 bits per tier: 6 tiers in .x, 6 more in .y -> 12 tiers of real address
     if (tier < 6u) { ax = ax | (child << (5u * tier)); }
     else           { ay = ay | (child << (5u * (tier - 6u))); }
 
@@ -280,7 +303,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   output[o]      = ax;
   output[o + 1u] = ay;
   output[o + 2u] = deepW + 4u * topW;
-  output[o + 3u] = idx;                          // stable instance id, spare
+  output[o + 3u] = idx;
 }
 `;
 
@@ -484,15 +507,30 @@ let computeBG, particleBG, cubeBG;
    what actually limits depth, and it now limits it honestly (see maxDepthFor). */
 const INSTANCE_BUDGET = 6000000;
 const MAX_TIERS = 12;
-function maxDepthFor(k) {
-  if (k <= 1) return MAX_TIERS;
-  let d = 1;
-  while (d < MAX_TIERS && Math.pow(k, d + 1) <= INSTANCE_BUDGET) d++;
-  return d;
+/* One 27-bit rule per tier. Deeper tiers are progressively harder to see
+   (measured: swapping tier 0 changes ~95% of the image, tier 4 about 4% at
+   1080p), so the editor defaults to linked and the tier strip puts the
+   shallow ones first. */
+function planDepth(want) {
+  let total = 1, d = 0;
+  for (let i = 0; i < Math.min(want, MAX_TIERS); i++) {
+    const k = popcount27(state.masks[i]);
+    if (k === 0) break;                                   // empty tier ends the object
+    if (total * k > INSTANCE_BUDGET) break;
+    total *= k; d++;
+  }
+  return { depth: d, total: d ? total : 0 };
 }
+const curMask = () => state.masks[state.level];
+function setMask(m) {
+  if (state.link) state.masks.fill(m); else state.masks[state.level] = m;
+}
+function ruleWord() { return state.masks.map(m => { const o = opcodeOf(m);
+  return o === null ? '****' : o.toString(2).padStart(4, '0'); }); }
 
 const state = {
-  mask: maskOfOpcode(0b1100),
+  masks: new Array(MAX_TIERS).fill(maskOfOpcode(0b1100)),
+  level: 0, link: true,
   depth: 4, effDepth: 4, maxDepth: 5, k: 20, twist: 0,
   projMode: 0, colorMode: 0, meshType: 0, ptSize: 1.0,
   g0: 0.25, g1: 0.10, g2: 0.05, inf: 0.50, blend: 0.0,
@@ -562,7 +600,7 @@ async function initWebGPU() {
   device.queue.writeBuffer(cubeIBuf, 0, cubeI);
 
   outputBuf = device.createBuffer({ size: INSTANCE_BUDGET * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX });
-  computeParamsBuf = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  computeParamsBuf = device.createBuffer({ size: 1408, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   renderParamsBuf = device.createBuffer({ size: 352, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   // Compute Pipeline
@@ -629,39 +667,46 @@ function getDepthView() {
   return depthTexture.createView();
 }
 
-const CParams = new Uint32Array(32);   // 128 bytes: 4 scalars + 7 x vec4 of child indices
+const CParams = new Uint32Array(352);   // 1408 B: scalars + 12 bases + 12 child lists
 
 function runCompute() {
   if (!device || !shadersOK) return;
   const t0 = performance.now();
 
-  const kids = [];
-  for (let i = 0; i < 27; i++) if ((state.mask >> i) & 1) kids.push(i);
-  const k = kids.length;
-  state.k = k;
-  state.maxDepth = k ? maxDepthFor(k) : MAX_TIERS;
-  const d = Math.max(1, Math.min(state.depth, state.maxDepth));
-  state.effDepth = d;
+  const plan = planDepth(state.depth);
+  state.effDepth = plan.depth;
+  state.activeCells = plan.total;
+  state.k = popcount27(curMask());
 
-  const total = k ? Math.pow(k, d) : 0;
-  state.activeCells = total;
-  if (!total) { state.gpuTime = 0; updateReadout(); return; }
+  let md = 0, tt = 1;                                   // deepest the word allows
+  for (let i = 0; i < MAX_TIERS; i++) {
+    const k = popcount27(state.masks[i]);
+    if (k === 0 || tt * k > INSTANCE_BUDGET) break;
+    tt *= k; md++;
+  }
+  state.maxDepth = md;
+
+  if (!plan.total) { state.gpuTime = 0; updateReadout(); return; }
 
   CParams.fill(0);
-  CParams[0] = state.mask; CParams[1] = d; CParams[2] = total; CParams[3] = k;
-  for (let i = 0; i < k; i++) CParams[4 + i] = kids[i];
+  CParams[0] = plan.depth;
+  CParams[1] = plan.total;
+  for (let t = 0; t < plan.depth; t++) {
+    const kids = [];
+    for (let i = 0; i < 27; i++) if ((state.masks[t] >> i) & 1) kids.push(i);
+    CParams[4 + t] = kids.length;                        // k[t]
+    for (let i = 0; i < kids.length; i++) CParams[16 + t * 28 + i] = kids[i];
+  }
   device.queue.writeBuffer(computeParamsBuf, 0, CParams);
 
   const enc = device.createCommandEncoder();
   const pass = enc.beginComputePass();
   pass.setPipeline(computePipeline);
   pass.setBindGroup(0, computeBG);
-  pass.dispatchWorkgroups(Math.ceil(total / 256));
+  pass.dispatchWorkgroups(Math.ceil(plan.total / 256));
   pass.end();
   device.queue.submit([enc.finish()]);
 
-  /* No readback. The survivor count is k^d exactly and the CPU knows it before
-     dispatch, so the old per-tick mapAsync GPU stall is gone. */
   state.gpuTime = performance.now() - t0;
   updateReadout();
 }
@@ -784,7 +829,7 @@ for (let dz = 0; dz < 3; dz++) {
     const idx = dx * 9 + dy * 3 + dz;
     const b = document.createElement('button');
     b.className = 'cell w' + WEIGHT[idx];
-    b.addEventListener('click', () => { state.mask ^= (1 << idx); sync(); });
+    b.addEventListener('click', () => { setMask(curMask() ^ (1 << idx)); sync(); });
     grid.appendChild(b); cellEls[idx] = b;
   }
   slice.append(lab, grid); genEl.appendChild(slice);
@@ -795,26 +840,64 @@ const orbEl = document.getElementById('orbits'), orbBtns = [];
   const b = document.createElement('button'); b.className = 'orb w' + w;
   b.innerHTML = '<span class="sw"></span><span>' + name + '</span><span class="n">' + ORBIT_N[w] + '</span>';
   b.addEventListener('click', () => {
-    state.mask = (state.mask & ORBIT[w]) === ORBIT[w] ? (state.mask & ~ORBIT[w]) : (state.mask | ORBIT[w]);
+    const m = curMask();
+    setMask((m & ORBIT[w]) === ORBIT[w] ? (m & ~ORBIT[w]) : (m | ORBIT[w]));
     sync();
   });
   orbEl.appendChild(b); orbBtns[w] = b;
+});
+
+/* rule words. Tier 0 dominates the silhouette, so the interesting ones vary
+   the shallow tiers; sparse INNER tiers are what buy extra depth. */
+const M = o => maskOfOpcode(o);
+const WORDS = [
+  ['uniform Menger',            [0b1100]],
+  ['solid shell -> Menger',     [0b1111, 0b1111, 0b1100]],
+  ['Menger -> corner dust',     [0b1100, 0b1100, 0b1000]],
+  ['Menger -> Vicsek',          [0b1100, 0b1100, 0b0011]],
+  ['alternating Menger/Vicsek', [0b1100, 0b0011]],
+  ['corners -> Menger',         [0b1000, 0b1100]],
+  ['Vicsek -> Menger',          [0b0011, 0b1100]],
+  ['edges -> corners',          [0b0100, 0b1000]],
+  ['dimension ramp',            [0b1110, 0b1100, 0b0110, 0b0100, 0b1000]],
+  ['deep dust (reaches tier 6)',[0b1100, 0b1100, 0b1000, 0b1000, 0b1000, 0b1000]],
+];
+function applyWord(seq) {
+  for (let i = 0; i < MAX_TIERS; i++) state.masks[i] = M(seq[Math.min(i, seq.length - 1)]);
+}
+const wordEl = document.getElementById('wordPreset');
+WORDS.forEach(([n], i) => { const o = document.createElement('option'); o.value = i; o.textContent = n; wordEl.appendChild(o); });
+wordEl.addEventListener('change', () => { applyWord(WORDS[+wordEl.value][1]); sync(); });
+
+const levelsEl = document.getElementById('levels');
+const lvlEls = [];
+for (let i = 0; i < MAX_TIERS; i++) {
+  const b = document.createElement('button');
+  b.className = 'lvl';
+  b.addEventListener('click', () => { state.level = i; sync(); });
+  levelsEl.appendChild(b); lvlEls[i] = b;
+}
+document.getElementById('link').addEventListener('change', e => {
+  state.link = e.target.checked;
+  if (state.link) state.masks.fill(curMask());
+  sync();
 });
 
 const presetEl = document.getElementById('preset');
 PRESETS.forEach(([name, m], i) => {
   const o = document.createElement('option'); o.value = i; o.textContent = name; presetEl.appendChild(o);
 });
-presetEl.addEventListener('change', () => { state.mask = PRESETS[+presetEl.value][1]; sync(); });
+presetEl.addEventListener('change', () => { setMask(PRESETS[+presetEl.value][1]); sync(); });
 
 document.querySelectorAll('button.mini').forEach(b => b.addEventListener('click', () => {
   const a = b.dataset.act;
-  if (a === 'all') state.mask = (1 << 27) - 1;
-  if (a === 'none') state.mask = 0;
-  if (a === 'inv') state.mask = ~state.mask & ((1 << 27) - 1);
-  if (a === 'sym') state.mask = symmetrise(state.mask);
-  if (a === 'rnd') { state.mask = 0; for (let i=0;i<27;i++) if (Math.random() > 0.5) state.mask |= (1 << i); }
-  if (a === 'rndsym') state.mask = maskOfOpcode(1 + (Math.random() * 14 | 0));
+  if (a === 'all') setMask((1 << 27) - 1);
+  if (a === 'none') setMask(0);
+  if (a === 'inv') setMask(~curMask() & ((1 << 27) - 1));
+  if (a === 'sym') setMask(symmetrise(curMask()));
+  if (a === 'rnd') { let m = 0; for (let i=0;i<27;i++) if (Math.random() > 0.5) m |= (1 << i); setMask(m); }
+  if (a === 'rndsym') setMask(maskOfOpcode(1 + (Math.random() * 14 | 0)));
+  if (a === 'rndword') { for (let i=0;i<MAX_TIERS;i++) state.masks[i] = maskOfOpcode(1 + (Math.random()*14|0)); }
   sync();
 }));
 
@@ -847,9 +930,18 @@ const colorSel = document.getElementById('colorMode');
 if (colorSel) colorSel.addEventListener('change', e => state.colorMode = +e.target.value);
 
 function sync() {
-  for (let i = 0; i < 27; i++) cellEls[i].classList.toggle('on', !!((state.mask >> i) & 1));
+  for (let i = 0; i < MAX_TIERS; i++) {
+    const k = popcount27(state.masks[i]), op = opcodeOf(state.masks[i]);
+    lvlEls[i].innerHTML = '<b>' + (op === null ? '&#42;&#42;&#42;&#42;' : op.toString(2).padStart(4, '0')) + '</b>' + i + ' &middot; k' + k;
+    lvlEls[i].classList.toggle('sel', i === state.level);
+    lvlEls[i].classList.toggle('off', i >= state.effDepth);
+  }
+  document.getElementById('lvlTag').textContent = state.level + (state.link ? ' (linked)' : '');
+  document.getElementById('word').innerHTML = ruleWord().map((w, i) =>
+    (i < state.effDepth ? '<b>' + w + '</b>' : w)).join(' ');
+  for (let i = 0; i < 27; i++) cellEls[i].classList.toggle('on', !!((curMask() >> i) & 1));
   for (let w = 0; w < 4; w++) {
-    const hit = popcount27(state.mask & ORBIT[w]);
+    const hit = popcount27(curMask() & ORBIT[w]);
     orbBtns[w].classList.toggle('full', hit === ORBIT_N[w]);
     orbBtns[w].classList.toggle('part', hit > 0 && hit < ORBIT_N[w]);
   }
@@ -857,7 +949,7 @@ function sync() {
 }
 
 function updateReadout() {
-  const k = popcount27(state.mask), op = opcodeOf(state.mask), stab = stabiliser(state.mask);
+  const k = popcount27(curMask()), op = opcodeOf(curMask()), stab = stabiliser(curMask());
   const dEl = document.getElementById('r-depth');
   if (dEl) dEl.innerHTML = state.effDepth + ' of ' + state.maxDepth +
     (state.depth > state.maxDepth ? ' <span style="color:#f66;">(budget)</span>' : '');
@@ -868,6 +960,10 @@ function updateReadout() {
   document.getElementById('r-op').innerHTML = op === null ? '<span style="color:#f66;">asymmetric</span>' : '<code class="op">0b' + op.toString(2).padStart(4,'0') + '</code>';
   document.getElementById('r-stab').textContent = stab === 48 ? '48 (symmetric)' : stab;
   document.getElementById('r-cells').textContent = state.activeCells.toLocaleString();
+  let lg = 0, n = 0;
+  for (let i = 0; i < state.effDepth; i++) { const kk = popcount27(state.masks[i]); if (kk > 0) { lg += Math.log(kk); n++; } }
+  document.getElementById('r-wdim').textContent = n
+    ? (lg / n / Math.log(3)).toFixed(4) + '   (geo-mean k = ' + Math.exp(lg / n).toFixed(2) + ')' : '—';
   document.getElementById('r-gpuTime').textContent = state.gpuTime.toFixed(1) + ' ms';
 }
 
@@ -877,7 +973,7 @@ function recenterCam() {
   state.camTheta = 0.75; state.camPhi = 1.15; state.camRadius = 6.0;
   state.camTarget = [0.0, 0.0, 0.0];
 }
-function generateDemo() { state.mask = maskOfOpcode(0b1100); sync(); }
+function generateDemo() { state.masks.fill(maskOfOpcode(0b1100)); sync(); }
 
 function handleFile(files) {
   if (!files[0]) return;
@@ -886,7 +982,7 @@ function handleFile(files) {
     const bytes = new Uint8Array(e.target.result);
     let m = 0;
     for (let i = 0; i < Math.min(bytes.length, 27); i++) if (bytes[i] % 3 !== 0) m |= (1 << i);
-    state.mask = m; sync();
+    setMask(m); sync();
   };
   reader.readAsArrayBuffer(files[0]);
 }
@@ -900,8 +996,9 @@ function selfTest() {
   ok('RParams is 352 B and RData matches', RData.byteLength === 352 && RData.length === 88);
   ok('RParams field offsets (blend@256, twist@272, projMode@288, sc@304)',
      64 * 4 === 256 && 68 * 4 === 272 && 72 * 4 === 288 && 76 * 4 === 304);
-  ok('Params is 128 B and CParams matches', CParams.byteLength === 128);
-  ok('Params.kids starts at 16 B with room for 27', 4 * 4 === 16 && CParams.length - 4 >= 27);
+  ok('Params is 1408 B and CParams matches', CParams.byteLength === 1408);
+  ok('Params: k[] at 16 B, kids[] at 64 B, 12 tiers x 28 slots',
+     4 * 4 === 16 && 16 * 4 === 64 && CParams.length === 16 + 12 * 28);
 
   /* --- the enumeration the compute shader performs, mirrored on the CPU --- */
   const emit = (kids, depth, idx) => {
@@ -947,6 +1044,36 @@ function selfTest() {
     if (ref.size !== pos.size || ![...pos].every(q => ref.has(q))) refOK = false;
   }
   ok('every thread yields a cell (100% yield, was as low as 1.6%)', yieldOK);
+
+  /* per-tier rules: mixed radix with a VARYING base */
+  const emitW = (seq, idx) => {
+    let rem = idx, ax = 0, ay = 0;
+    for (let j = 0; j < seq.length; j++) {
+      const tier = seq.length - 1 - j, kk = seq[tier];
+      const di = rem % kk.length; rem = (rem / kk.length) | 0;
+      const child = kk[di];
+      if (tier < 6) ax |= child << (5 * tier); else ay |= child << (5 * (tier - 6));
+    }
+    return (ax >>> 0) + ':' + (ay >>> 0);
+  };
+  const kl = op => { const m = maskOfOpcode(op), r = []; for (let i = 0; i < 27; i++) if ((m >> i) & 1) r.push(i); return r; };
+  const seq = [0b1100, 0b0011, 0b1000, 0b1100].map(kl);
+  const prod = seq.reduce((a, b) => a * b.length, 1);
+  const addrs = new Set(); for (let i = 0; i < prod; i++) addrs.add(emitW(seq, i));
+  ok('per-tier mixed radix: ' + prod.toLocaleString() + ' threads -> that many distinct addresses',
+     addrs.size === prod);
+  // reference: recursive descent with a different rule at each level
+  let cur = [[0, 0, 0]];
+  for (const kk of seq) { const nx = [];
+    for (const c0 of cur) for (const c of kk) nx.push([c0[0]*3 + ((c/9)|0), c0[1]*3 + (((c/3)|0)%3), c0[2]*3 + (c%3)]);
+    cur = nx; }
+  ok('per-tier positions match a recursive reference (' + cur.length.toLocaleString() + ' cells)',
+     cur.length === prod && new Set(cur.map(c => c.join(','))).size === prod);
+  ok('every tier rule is still B3-invariant -> the object is -> the fold survives',
+     [0b1100, 0b0011, 0b1000].every(o => stabiliser(maskOfOpcode(o)) === 48));
+  ok('an empty tier (0000) truncates rather than corrupting',
+     (() => { const sv = state.masks.slice(); state.masks[2] = 0;
+              const r = planDepth(6).depth === 2; state.masks = sv; return r; })());
   ok('distinct positions == k^d (was capped at k^3)', posOK);
   ok('positions match a recursive reference exactly', refOK);
 
@@ -1002,12 +1129,18 @@ function selfTest() {
 
   LOG('');
   LOG('reachable depth at a ' + INSTANCE_BUDGET.toLocaleString() + '-instance budget:');
-  for (const [nm, op] of [['solid', 0b1111], ['Menger', 0b1100], ['edges', 0b0100],
-                          ['corners', 0b1000], ['Vicsek', 0b0011], ['faces', 0b0010]]) {
-    const k = popcount27(maskOfOpcode(op)), d = maxDepthFor(k);
-    LOG('  ' + nm.padEnd(9) + ' k=' + String(k).padStart(2) + '  depth ' + d +
-        '  cells ' + Math.pow(k, d).toLocaleString().padStart(10) + '  (old build: 3 usable tiers)');
+  const sv = state.masks.slice();
+  const depthOf = seq => { for (let i = 0; i < MAX_TIERS; i++) state.masks[i] = maskOfOpcode(seq[Math.min(i, seq.length-1)]);
+                           const pl = planDepth(MAX_TIERS); return pl; };
+  for (const [nm, seq] of [['uniform Menger', [0b1100]], ['uniform Vicsek', [0b0011]],
+                           ['uniform corners', [0b1000]], ['Menger -> corners', [0b1100, 0b1100, 0b1000]],
+                           ['deep dust', [0b1100, 0b1100, 0b1000, 0b1000, 0b1000, 0b1000]]]) {
+    const pl = depthOf(seq);
+    LOG('  ' + nm.padEnd(18) + ' depth ' + String(pl.depth).padStart(2) +
+        '  cells ' + pl.total.toLocaleString().padStart(10));
   }
+  state.masks = sv;
+
 }
 
 /* ── 5. Push-Through Camera Pointer Interaction ──────────────────────────── */
