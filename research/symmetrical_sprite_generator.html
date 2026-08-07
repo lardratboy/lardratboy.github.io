@@ -3,11 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Procedural Sprite Generator — Modulo Fields</title>
+<title>Procedural Sprite Generator — Modulo Fields + Timeline</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#161b22; --sunk:#0b0f14; --line:#2a3038;
-    --ink:#e6edf3; --dim:#8b949e; --accent:#4f8cff; --lock:#ef4444;
+    --ink:#e6edf3; --dim:#8b949e; --accent:#4f8cff; --lock:#ef4444; --mark:#f0b429;
   }
   *{box-sizing:border-box}
   body{
@@ -48,8 +48,9 @@
   }
   button:hover{filter:brightness(1.12)} button:active{transform:scale(.985)}
   button.sec{background:#30363d}
-  #main{flex:1 1 auto; position:relative}
-  #stage{position:absolute; inset:0; overflow:hidden; cursor:crosshair}
+  .btnrow{display:flex; gap:6px}
+  #main{flex:1 1 auto; display:flex; flex-direction:column; min-width:0}
+  #stage{flex:1 1 auto; position:relative; overflow:hidden; cursor:crosshair}
   canvas{position:absolute; transform-origin:0 0; image-rendering:pixelated}
   .toolbar{
     position:absolute; bottom:14px; right:14px; display:flex; gap:6px; z-index:20;
@@ -60,10 +61,64 @@
   #recipe{
     font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; color:#9fd0ff;
     background:var(--sunk); border:1px solid #30363d; border-radius:6px; padding:7px;
-    min-height:34px; word-break:break-word; line-height:1.5;
+    min-height:34px; max-height:150px; overflow:auto; word-break:break-word;
+    line-height:1.55; white-space:pre-wrap;
   }
+  #recipe::-webkit-scrollbar{width:7px}
+  #recipe::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  .titlerow{display:flex; align-items:center; justify-content:space-between; margin-bottom:7px}
+  .titlerow > .title{margin-bottom:0}
+  .mini{
+    width:auto; background:#30363d; padding:2px 9px; font-size:11px; font-weight:600;
+    border-radius:4px; line-height:1.5;
+  }
+  .mini:disabled{opacity:.4; cursor:default}
+  .mini.done{background:#2ea043}
   .hint{font-size:11px; color:#6e7681; text-align:center; line-height:1.5}
   .hidden{display:none !important}
+
+  /* ---- timeline ---- */
+  #timeline{
+    flex:0 0 auto; background:var(--panel); border-top:1px solid var(--line);
+    display:flex; flex-direction:column; user-select:none;
+  }
+  #tl-head{
+    display:flex; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid #21262d;
+  }
+  #tl-head button{
+    width:auto; background:#30363d; padding:3px 9px; font-size:13px; line-height:1.2;
+  }
+  #tl-head button.on{background:var(--accent)}
+  #tl-pos{
+    font-family:ui-monospace,monospace; font-size:11.5px; color:var(--dim);
+    white-space:nowrap; min-width:74px;
+  }
+  #tl-label{
+    font-size:12px; color:#adbac7; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; flex:1 1 auto; min-width:0;
+  }
+  #tl-label b{color:var(--ink); font-weight:600}
+  #tl-past{color:var(--mark)}
+  #tl-strip{
+    display:flex; gap:5px; overflow-x:auto; overflow-y:hidden;
+    padding:7px 10px 9px; height:86px; align-items:flex-start;
+  }
+  #tl-strip::-webkit-scrollbar{height:8px}
+  #tl-strip::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  .frame{
+    position:relative; flex:0 0 auto; border:2px solid #262c35; border-radius:5px;
+    background:var(--sunk); cursor:pointer; padding:0; line-height:0; overflow:hidden;
+  }
+  .frame:hover{border-color:#4a5361}
+  .frame.cur{border-color:var(--accent); box-shadow:0 0 0 2px rgba(79,140,255,.25)}
+  .frame .idx{
+    position:absolute; left:0; bottom:0; font:10px/1.4 ui-monospace,monospace;
+    background:rgba(0,0,0,.66); color:#c9d1d9; padding:0 4px; border-top-right-radius:4px;
+  }
+  .frame .star{
+    position:absolute; right:2px; top:1px; font-size:11px; line-height:1; color:var(--mark);
+    text-shadow:0 0 3px #000;
+  }
 </style>
 </head>
 <body>
@@ -82,23 +137,23 @@
         <option value="custom">Custom expression</option>
       </select>
     </div>
-    <div class="row fieldonly">
+    <div class="row r-field">
       <label>Formula</label>
       <select id="formula"></select>
     </div>
-    <div class="row customonly hidden" style="display:block">
+    <div class="row r-custom hidden" style="display:block">
       <label style="display:block;margin-bottom:4px">f(x,y) — <code>u,v</code> centred</label>
       <textarea id="expr" rows="2">(u*u + v*v) * (Math.abs(u)^Math.abs(v))</textarea>
     </div>
-    <div class="row fieldonly customonly">
+    <div class="row r-mod">
       <label title="Result is taken mod this. Odd numbers give the nicest rings.">Modulus</label>
       <input type="number" id="modulus" value="17" min="2" max="512">
     </div>
-    <div class="row fieldonly customonly">
+    <div class="row r-mod">
       <label title="Sampling step — bigger = coarser pattern">Stride</label>
       <input type="number" id="stride" value="1" min="1" max="8">
     </div>
-    <div class="row fieldonly customonly">
+    <div class="row r-mod">
       <label title="Rotates which residues count as ink">Phase</label>
       <input type="range" id="phase" min="0" max="1" step="0.01" value="0">
       <span class="val" id="phase-v">0.00</span>
@@ -108,21 +163,18 @@
       <input type="range" id="density" min="0.05" max="1" step="0.05" value="0.45">
       <span class="val" id="density-v">0.45</span>
     </div>
-    <div class="row fieldonly">
+    <div class="row r-field">
       <label class="check"><input type="checkbox" id="vary" checked>
-        <span title="Each cell picks its own formula & modulus">Vary per cell</span></label>
+        <span title="Each cell picks its own formula &amp; modulus">Vary per cell</span></label>
     </div>
-    <div class="row noiseonly hidden">
+    <div class="row r-noise hidden">
       <label class="check"><input type="checkbox" id="ca" checked><span>Smooth (CA pass)</span></label>
     </div>
   </div>
 
   <div class="group">
     <div class="title">Mask</div>
-    <div class="row">
-      <label>Shape</label>
-      <select id="mask"></select>
-    </div>
+    <div class="row"><label>Shape</label><select id="mask"></select></div>
     <div class="row">
       <label>Size</label>
       <input type="range" id="mask-scale" min="0.4" max="1.45" step="0.05" value="1">
@@ -173,6 +225,7 @@
     </div>
     <div class="row">
       <label class="check"><input type="checkbox" id="sortlum" checked><span>Sort by luminance</span></label>
+      <button id="repal" class="sec" style="width:auto;padding:3px 9px;font-size:12px">Shuffle</button>
     </div>
   </div>
 
@@ -185,12 +238,22 @@
   </div>
 
   <div class="group">
-    <div class="title">Recipe</div>
+    <div class="titlerow">
+      <div class="title">Recipe</div>
+      <button id="copy-recipe" class="mini" disabled title="Copy this recipe to the clipboard">⧉ Copy</button>
+    </div>
     <div id="recipe">Click a sprite to inspect &amp; lock it.</div>
   </div>
 
-  <button id="export" class="sec">↓ Export PNG</button>
-  <div class="hint">click = lock + inspect · shift-click = reroll cell<br>drag = pan · wheel = zoom · R = regenerate</div>
+  <div class="btnrow">
+    <button id="export" class="sec">↓ PNG</button>
+    <button id="save" class="sec">↓ Session</button>
+    <button id="load" class="sec">↑ Load</button>
+  </div>
+  <input type="file" id="file" accept="application/json" class="hidden">
+  <div class="hint">click = lock + inspect · shift-click = reroll cell<br>
+    drag = pan · wheel = zoom · R = regenerate<br>
+    ← → = scrub · space = play · B = bookmark · C = copy recipe</div>
 </div>
 
 <div id="main">
@@ -200,13 +263,27 @@
       <button id="zin">+</button><button id="zout">−</button><button id="zreset">Reset</button>
     </div>
   </div>
+
+  <div id="timeline">
+    <div id="tl-head">
+      <button id="tl-first" title="First (Home)">⏮</button>
+      <button id="tl-prev" title="Back (←)">◀</button>
+      <button id="tl-play" title="Replay exploration (Space)">▶</button>
+      <button id="tl-next" title="Forward (→)">▶|</button>
+      <button id="tl-last" title="Latest (End)">⏭</button>
+      <button id="tl-mark" title="Bookmark this state (B)">☆</button>
+      <span id="tl-pos">0 / 0</span>
+      <span id="tl-label"></span>
+    </div>
+    <div id="tl-strip"></div>
+  </div>
 </div>
 
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
 
-/* ---------------------------------------------------------------- utils */
+/* ================================================================ utils */
 function mulberry32(a){
   return function(){
     a |= 0; a = a + 0x6D2B79F5 | 0;
@@ -215,15 +292,13 @@ function mulberry32(a){
     return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
-const hash2 = (a,b) => (Math.imul(a ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(b + 0x165667b1, 0xc2b2ae35)) >>> 0;
+const rand32 = () => (Math.random()*4294967296)>>>0;
 
 function popcount(n){ n = n>>>0; n = n - ((n>>>1)&0x55555555);
   n = (n&0x33333333) + ((n>>>2)&0x33333333);
   return ((n + (n>>>4) & 0x0f0f0f0f) * 0x01010101) >>> 24; }
-
 function digitSum(n){ n = Math.abs(n|0); let s=0; while(n>0){ s += n%10; n=(n/10)|0; } return s; }
 
-// C(n,k) mod m via a cached Pascal triangle — gives Sierpinski-family patterns.
 const pascalCache = new Map();
 function pascalMod(n,k,m){
   if(k<0||n<0||k>n) return 0;
@@ -239,10 +314,7 @@ function pascalMod(n,k,m){
   return tri[n][k];
 }
 
-/* -------------------------------------------------------------- fields */
-/* Every field takes centred, strided, offset integer coords (u,v) and the
-   per-sprite param bag p, and returns a raw integer. The modulus is applied
-   afterwards by the sampler, so fields never need to know about it.        */
+/* =============================================================== fields */
 const FIELDS = [
   {id:'circle',  name:'Circles   x²+y²',           f:(u,v,p)=> u*u + v*v},
   {id:'product', name:'Product   x·y',             f:(u,v,p)=> u*v},
@@ -267,8 +339,6 @@ const FIELDS = [
 ];
 const FIELD_BY_ID = Object.fromEntries(FIELDS.map(f=>[f.id,f]));
 
-/* --------------------------------------------------------------- masks */
-/* nx,ny are normalised to roughly [-1,1] over the whole sprite. r scales. */
 const MASKS = [
   {id:'none',    name:'None',              m:(nx,ny,r)=> true},
   {id:'disc',    name:'Disc',              m:(nx,ny,r)=> nx*nx+ny*ny <= r*r},
@@ -280,21 +350,19 @@ const MASKS = [
   {id:'taper',   name:'Taper (tree)',      m:(nx,ny,r)=> Math.abs(nx) <= r*(0.18+0.82*(ny+1)/2)},
   {id:'hourglass',name:'Hourglass',        m:(nx,ny,r)=> Math.abs(nx) <= r*(0.16+0.9*Math.abs(ny))},
   {id:'lens',    name:'Lens (vesica)',     m:(nx,ny,r)=> Math.abs(ny) <= r*Math.sqrt(Math.max(0,1-nx*nx))*0.9},
-  {id:'blob',    name:'Random blob (CA)',  m:null},   // handled specially
+  {id:'blob',    name:'Random blob (CA)',  m:null},
 ];
 const MASK_BY_ID = Object.fromEntries(MASKS.map(m=>[m.id,m]));
 
-/* -------------------------------------------------------- symmetry fold */
+/* ====================================================== symmetry folding */
 function seedDims(w,h,mode){
   const hw = Math.ceil(w/2), hh = Math.ceil(h/2);
   switch(mode){
     case 'horizontal': return [hw,h];
     case 'vertical':   return [w,hh];
     case 'rot180':     return [w,hh];
-    case 'quadrant':
-    case 'diagonal':
-    case 'rot90':      return [hw,hh];
-    default:           return [w,h];
+    case 'quadrant': case 'diagonal': case 'rot90': return [hw,hh];
+    default: return [w,h];
   }
 }
 function fold(x,y,w,h,mode){
@@ -320,52 +388,55 @@ function fold(x,y,w,h,mode){
   return [sx,sy];
 }
 
-/* ------------------------------------------------------------- palette */
-let sharedPalette = [];
-function buildPalette(){
-  const bpc = +$('bpc').value, levels = 1<<bpc, step = 255/(levels-1);
-  const out = [];
-  if(bpc<=3){
-    for(let r=0;r<levels;r++) for(let g=0;g<levels;g++) for(let b=0;b<levels;b++)
-      out.push(rgbHex(Math.round(r*step),Math.round(g*step),Math.round(b*step)));
-    for(let i=out.length-1;i>0;i--){ const j=(Math.random()*(i+1))|0; [out[i],out[j]]=[out[j],out[i]]; }
-    sharedPalette = out;
-  } else {
-    const seen = new Set();
-    while(seen.size < 256){
-      const r=Math.round(((Math.random()*levels)|0)*step),
-            g=Math.round(((Math.random()*levels)|0)*step),
-            b=Math.round(((Math.random()*levels)|0)*step);
-      seen.add(rgbHex(r,g,b));
-    }
-    sharedPalette = [...seen];
-  }
-}
+/* =============================================================== palette */
 const rgbHex = (r,g,b) => '#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('');
 const hexRgb = h => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
 const lum = h => { const [r,g,b]=hexRgb(h); return 0.2126*r+0.7152*g+0.0722*b; };
 const darken = (h,k) => { const [r,g,b]=hexRgb(h); return rgbHex((r*k)|0,(g*k)|0,(b*k)|0); };
 
-/* ------------------------------------------------------ sprite factory */
+/* Deterministic: the palette is a pure function of (seed, bits), so any
+   timeline entry can be replayed exactly.                                */
+const palCache = new Map();
+function paletteFor(seed, bpc){
+  const key = seed+'/'+bpc;
+  if(palCache.has(key)) return palCache.get(key);
+  const rnd = mulberry32(seed ^ 0x5bf03635);
+  const levels = 1<<bpc, step = 255/(levels-1);
+  let out = [];
+  if(bpc<=3){
+    for(let r=0;r<levels;r++) for(let g=0;g<levels;g++) for(let b=0;b<levels;b++)
+      out.push(rgbHex(Math.round(r*step),Math.round(g*step),Math.round(b*step)));
+    for(let i=out.length-1;i>0;i--){ const j=(rnd()*(i+1))|0; [out[i],out[j]]=[out[j],out[i]]; }
+  } else {
+    const seen = new Set();
+    let guard = 0;
+    while(seen.size<256 && guard++<20000){
+      seen.add(rgbHex(Math.round(((rnd()*levels)|0)*step),
+                      Math.round(((rnd()*levels)|0)*step),
+                      Math.round(((rnd()*levels)|0)*step)));
+    }
+    out = [...seen];
+  }
+  if(palCache.size>64) palCache.clear();
+  palCache.set(key,out);
+  return out;
+}
+
+/* ======================================================== sprite factory */
 const ODDS = [3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,37,41,47,53];
 
-function generateSprite(seed, cfg){
+/* g is a flat generator config; pure function of (seed, g). */
+function generateSprite(seed, g){
   const rnd = mulberry32(seed);
   const {w,h,sym,coverage,ncol,useCA,source,formulaId,modulus,vary,stride,phase,
-         colorMode,maskId,maskScale,maskInvert,outline,sortLum,customFn} = cfg;
+         colorMode,maskId,maskScale,maskInvert,outline,sortLum,customFn,palette} = g;
 
   const [sw,sh] = seedDims(w,h,sym);
-
-  /* --- per-sprite parameters ------------------------------------------ */
   const pick = arr => arr[(rnd()*arr.length)|0];
+
   let fid = formulaId, M = modulus, st = stride, mid = maskId;
-  if(source==='field'){
-    if(vary){
-      fid = pick(FIELDS).id;
-      M   = pick(ODDS);
-      st  = 1 + ((rnd()*3)|0);
-    }
-  }
+  if(source==='field' && vary){ fid = pick(FIELDS).id; M = pick(ODDS); st = 1 + ((rnd()*3)|0); }
+  else if(source==='field' && fid==='mix') fid = pick(FIELDS).id;
   if(mid==='mix') mid = pick(MASKS.filter(m=>m.id!=='none')).id;
 
   const p = {
@@ -376,22 +447,21 @@ function generateSprite(seed, cfg){
     c: ((rnd()*7)|0)-3 || 1, d: ((rnd()*11)|0)-5, e: ((rnd()*11)|0)-5,
   };
 
-  /* --- colors --------------------------------------------------------- */
-  const pool = [...sharedPalette];
+  const pool = [...palette];
   const colors = [];
   for(let i=0, n=Math.min(ncol,pool.length); i<n; i++)
     colors.push(pool.splice((rnd()*pool.length)|0,1)[0]);
   if(sortLum) colors.sort((a,b)=>lum(a)-lum(b));
   const nc = colors.length;
 
-  /* --- mask (evaluated in seed space, mirrored by the fold) ------------ */
+  /* mask */
   const maskFn = MASK_BY_ID[mid] ? MASK_BY_ID[mid].m : null;
   let blob = null;
   if(mid==='blob'){
     blob = Array.from({length:sh},()=>new Uint8Array(sw));
     for(let y=0;y<sh;y++) for(let x=0;x<sw;x++) blob[y][x] = rnd()<0.58 ? 1:0;
     for(let pass=0; pass<2; pass++){
-      const nx = Array.from({length:sh},()=>new Uint8Array(sw));
+      const nb = Array.from({length:sh},()=>new Uint8Array(sw));
       for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
         let n=0;
         for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
@@ -399,12 +469,12 @@ function generateSprite(seed, cfg){
           const ax=x+dx, ay=y+dy;
           if(ax>=0&&ax<sw&&ay>=0&&ay<sh) n+=blob[ay][ax];
         }
-        nx[y][x] = blob[y][x] ? (n>=2?1:0) : (n>=5?1:0);
+        nb[y][x] = blob[y][x] ? (n>=2?1:0) : (n>=5?1:0);
       }
-      blob = nx;
+      blob = nb;
     }
   }
-  const cxf = (w-1)/2, cyf = (h-1)/2;
+  const cxf=(w-1)/2, cyf=(h-1)/2;
   function inMask(sx,sy){
     if(mid==='none') return true;
     let ok;
@@ -413,7 +483,7 @@ function generateSprite(seed, cfg){
     return maskInvert ? !ok : ok;
   }
 
-  /* --- seed region ----------------------------------------------------- */
+  /* seed region */
   const cx = Math.floor((w-1)/2), cy = Math.floor((h-1)/2);
   const field = FIELD_BY_ID[fid] || FIELD_BY_ID.circle;
   const seedGrid = Array.from({length:sh},()=>new Uint8Array(sw));
@@ -447,44 +517,37 @@ function generateSprite(seed, cfg){
       catch(e){ n = u*u+v*v; }
       if(!Number.isFinite(n)) n = 0;
       n = Math.round(n);
-      let vm = ((n % M) + M) % M;
+      const vm = ((n % M) + M) % M;
       const t = (vm/M + phase) % 1;
       if(t >= coverage){ seedGrid[y][x]=0; continue; }
-      let ci;
-      if(colorMode==='solid')      ci = 1;
-      else if(colorMode==='cycle') ci = 1 + (vm % nc);
-      else                         ci = 1 + Math.min(nc-1, ((t/coverage)*nc)|0);
-      seedGrid[y][x] = ci;
+      seedGrid[y][x] = colorMode==='solid' ? 1
+                     : colorMode==='cycle' ? 1 + (vm % nc)
+                     : 1 + Math.min(nc-1, ((t/coverage)*nc)|0);
     }
   }
 
-  /* mask the seed region */
   for(let y=0;y<sh;y++) for(let x=0;x<sw;x++) if(!inMask(x,y)) seedGrid[y][x]=0;
 
-  /* --- unfold to the full sprite --------------------------------------- */
   let grid = Array.from({length:h},()=>new Uint8Array(w));
   for(let y=0;y<h;y++) for(let x=0;x<w;x++){
     const [sx,sy] = fold(x,y,w,h,sym);
     if(sx>=0&&sx<sw&&sy>=0&&sy<sh) grid[y][x] = seedGrid[sy][sx];
   }
 
-  /* --- outline ---------------------------------------------------------- */
   const paint = [...colors];
   if(outline && nc>0){
-    const oc = darken(colors[0], 0.32);
-    paint.push(oc);
+    paint.push(darken(colors[0],0.32));
     const oi = paint.length;
     const out = grid.map(r=>Uint8Array.from(r));
     for(let y=0;y<h;y++) for(let x=0;x<w;x++){
       if(grid[y][x]) continue;
-      if((x>0&&grid[y][x-1]) || (x<w-1&&grid[y][x+1]) ||
-         (y>0&&grid[y-1][x]) || (y<h-1&&grid[y+1][x])) out[y][x]=oi;
+      if((x>0&&grid[y][x-1])||(x<w-1&&grid[y][x+1])||(y>0&&grid[y-1][x])||(y<h-1&&grid[y+1][x])) out[y][x]=oi;
     }
     grid = out;
   }
 
   const recipe = source==='noise'
-    ? `noise · cov ${coverage.toFixed(2)}${useCA?' · CA':''} · mask ${mid}`
+    ? `noise · cov ${coverage.toFixed(2)}${useCA?' · CA':''} · mask ${mid} · ${sym}`
     : `${source==='custom'?'custom':fid} % ${M} · stride ${st} · off(${p.ox},${p.oy})` +
       (fid==='conic' ? ` · [${p.a},${p.b},${p.c},${p.d},${p.e}]` : '') +
       ` · mask ${mid}${maskInvert?'⁻¹':''} · ${sym}`;
@@ -492,74 +555,116 @@ function generateSprite(seed, cfg){
   return {grid, colors:paint, recipe, w, h};
 }
 
-/* -------------------------------------------------------------- sheet */
-const canvas = $('cv'), ctx = canvas.getContext('2d');
-const stage = $('stage');
-const off = document.createElement('canvas'), offCtx = off.getContext('2d');
-let cells = [];                       // [row][col] = {seed, locked, sprite}
-let view = {x:0,y:0,s:1};
-let drag=null, panned=false;
+/* ================================================================ state */
+/* S is the single source of truth. render() is a pure function of S, so
+   every timeline entry replays bit-identically.                          */
+const CFG_KEYS = ['source','formula','expr','modulus','stride','phase','density','vary','ca',
+  'mask','mask-scale','mask-invert','outline','sw','sh','symmetry','bpc','ncol','colormode',
+  'sortlum','cols','rows','spacing','scale'];
+const NUM_KEYS = new Set(['modulus','stride','phase','density','mask-scale','sw','sh','bpc',
+  'ncol','cols','rows','spacing','scale']);
+const BOOL_KEYS = new Set(['vary','ca','mask-invert','outline','sortlum']);
+const LABELS = {
+  source:'Source', formula:'Formula', expr:'Expression', modulus:'Modulus', stride:'Stride',
+  phase:'Phase', density:'Coverage', vary:'Vary per cell', ca:'CA smooth', mask:'Mask',
+  'mask-scale':'Mask size', 'mask-invert':'Mask invert', outline:'Outline', sw:'Sprite width',
+  sh:'Sprite height', symmetry:'Symmetry', bpc:'Gamut', ncol:'Colors', colormode:'Color mode',
+  sortlum:'Sort by luminance', cols:'Columns', rows:'Rows', spacing:'Spacing', scale:'Scale',
+};
 
-function readCfg(){
+let S = null;                 // {cfg, cells, paletteSeed}
+let timeline = [];            // append-only log
+let playhead = -1;
+const MAX_ENTRIES = 400;
+
+const newCell = () => ({seed:rand32(), locked:false, lockCfg:null});
+
+function defaultState(){
+  const cfg = {};
+  for(const k of CFG_KEYS){
+    const el = $(k);
+    cfg[k] = BOOL_KEYS.has(k) ? el.checked : (NUM_KEYS.has(k) ? +el.value : el.value);
+  }
+  cfg.formula = 'mix'; cfg.mask = 'none';
+  const rows = cfg.rows, cols = cfg.cols, list = [];
+  for(let i=0;i<rows*cols;i++) list.push(newCell());
+  return {cfg, cells:{rows, cols, list}, paletteSeed: rand32()};
+}
+/* cells are treated as immutable — every mutation builds a new object — so
+   snapshots share the reference and a slider drag costs one small cfg copy. */
+const cloneState = s => ({cfg:{...s.cfg}, cells:s.cells, paletteSeed:s.paletteSeed});
+
+/* Cells are shared by reference between entries that didn't touch them,
+   so a slider drag costs one small cfg object per frame, not a grid copy. */
+function reconcileCells(){
+  const rows = S.cfg.rows, cols = S.cfg.cols, c = S.cells;
+  if(c.rows===rows && c.cols===cols) return false;
+  const list = [];
+  for(let r=0;r<rows;r++) for(let x=0;x<cols;x++)
+    list.push((r<c.rows && x<c.cols) ? c.list[r*c.cols+x] : newCell());
+  S.cells = {rows, cols, list};
+  return true;
+}
+
+/* map a stored cfg to the flat generator config */
+function toGen(cfg, paletteSeed){
   let customFn = null;
-  if($('source').value==='custom'){
-    try { customFn = new Function('x','y','u','v','w','h','P','return ('+$('expr').value+');'); customFn(0,0,0,0,8,8,{M:7,a:1,b:1,c:1,d:0,e:0}); }
-    catch(err){ console.warn('Custom expression failed, falling back to x²+y²:', err.message); customFn = null; }
+  if(cfg.source==='custom'){
+    try{
+      customFn = new Function('x','y','u','v','w','h','P','return ('+cfg.expr+');');
+      customFn(0,0,1,1,8,8,{M:7,a:1,b:1,c:1,d:0,e:0});
+    }catch(err){ console.warn('Custom expression failed, using x²+y²:', err.message); customFn=null; }
   }
   return {
-    w:+$('sw').value||16, h:+$('sh').value||16,
-    cols:+$('cols').value||8, rows:+$('rows').value||6,
-    spacing:+$('spacing').value||0, px:+$('scale').value||4,
-    sym:$('symmetry').value,
-    coverage:+$('density').value, ncol:+$('ncol').value||4,
-    useCA:$('ca').checked, source:$('source').value,
-    formulaId:$('formula').value, modulus:+$('modulus').value||17,
-    vary:$('vary').checked, stride:+$('stride').value||1, phase:+$('phase').value,
-    colorMode:$('colormode').value, maskId:$('mask').value,
-    maskScale:+$('mask-scale').value, maskInvert:$('mask-invert').checked,
-    outline:$('outline').checked, sortLum:$('sortlum').checked,
-    customFn
+    w:cfg.sw, h:cfg.sh, sym:cfg.symmetry, coverage:cfg.density, ncol:cfg.ncol,
+    useCA:cfg.ca, source:cfg.source, formulaId:cfg.formula, modulus:cfg.modulus,
+    vary:cfg.vary, stride:cfg.stride, phase:cfg.phase, colorMode:cfg.colormode,
+    maskId:cfg.mask, maskScale:cfg['mask-scale'], maskInvert:cfg['mask-invert'],
+    outline:cfg.outline, sortLum:cfg.sortlum, customFn,
+    palette: paletteFor(paletteSeed, cfg.bpc),
   };
 }
 
-function buildSheet(reseed){
-  const cfg = readCfg();
-  const {cols,rows,w,h,px,spacing} = cfg;
+/* =============================================================== render */
+const canvas = $('cv'), ctx = canvas.getContext('2d');
+const stage = $('stage');
+const off = document.createElement('canvas'), offCtx = off.getContext('2d');
+let view = {x:0,y:0,s:1};
+let drag=null, panned=false;
+let lastSprites = [];
 
-  if(cells.length!==rows) cells.length = rows;
-  for(let r=0;r<rows;r++){
-    if(!cells[r]) cells[r]=[];
-    cells[r].length = cols;
-    for(let c=0;c<cols;c++)
-      if(!cells[r][c]) cells[r][c] = {seed:(Math.random()*4294967296)>>>0, locked:false, sprite:null};
-  }
+function render(){
+  const cfg = S.cfg, {rows,cols,list} = S.cells;
+  const w=cfg.sw, h=cfg.sh, px=cfg.scale, sp=cfg.spacing;
+  const gen = toGen(cfg, S.paletteSeed);
+  const outerW=(w+sp)*px, outerH=(h+sp)*px;
 
-  const outerW = (w+spacing)*px, outerH = (h+spacing)*px;
-  off.width = cols*outerW; off.height = rows*outerH;
+  off.width = Math.max(1, cols*outerW);
+  off.height = Math.max(1, rows*outerH);
   offCtx.clearRect(0,0,off.width,off.height);
   offCtx.imageSmoothingEnabled = false;
+  lastSprites = new Array(rows*cols);
 
   for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
-    const cell = cells[r][c];
-    const stale = !cell.sprite || cell.sprite.w!==w || cell.sprite.h!==h;
-    if(reseed && !cell.locked) cell.seed = (Math.random()*4294967296)>>>0;
-    if(stale || !cell.locked) cell.sprite = generateSprite(cell.seed, cfg);
-
-    const sp = cell.sprite, X0=c*outerW, Y0=r*outerH;
-    for(let y=0;y<sp.h;y++) for(let x=0;x<sp.w;x++){
-      const v = sp.grid[y][x];
+    const cell = list[r*cols+c];
+    const g = (cell.locked && cell.lockCfg)
+      ? toGen(cell.lockCfg, cell.lockCfg._paletteSeed) : gen;
+    const sprite = generateSprite(cell.seed, g);
+    lastSprites[r*cols+c] = sprite;
+    const X0=c*outerW, Y0=r*outerH;
+    for(let y=0;y<sprite.h;y++) for(let x=0;x<sprite.w;x++){
+      const v = sprite.grid[y][x];
       if(!v) continue;
-      offCtx.fillStyle = sp.colors[v-1] || '#ffffff';
+      offCtx.fillStyle = sprite.colors[v-1] || '#ffffff';
       offCtx.fillRect(X0+x*px, Y0+y*px, px, px);
     }
     if(cell.locked){
       offCtx.strokeStyle='rgba(239,68,68,.85)'; offCtx.lineWidth=1.5;
-      offCtx.strokeRect(X0-1.5, Y0-1.5, sp.w*px+3, sp.h*px+3);
+      offCtx.strokeRect(X0-1.5, Y0-1.5, sprite.w*px+3, sprite.h*px+3);
     }
   }
   resizeMain(); draw();
 }
-
 function resizeMain(){ canvas.width = stage.clientWidth; canvas.height = stage.clientHeight; }
 function draw(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
@@ -568,22 +673,174 @@ function draw(){
   ctx.drawImage(off,0,0); ctx.restore();
 }
 function center(){
-  view.x = (canvas.width - off.width*view.s)/2;
-  view.y = (canvas.height - off.height*view.s)/2;
+  view.x=(canvas.width-off.width*view.s)/2;
+  view.y=(canvas.height-off.height*view.s)/2;
   draw();
 }
-function zoom(s, fx, fy){
-  s = Math.max(0.1, Math.min(s, 40));
+function zoom(s,fx,fy){
+  s=Math.max(0.1,Math.min(s,40));
   if(fx==null){ fx=canvas.width/2; fy=canvas.height/2; }
-  view.x = fx - (fx-view.x)*(s/view.s);
-  view.y = fy - (fy-view.y)*(s/view.s);
+  view.x = fx-(fx-view.x)*(s/view.s);
+  view.y = fy-(fy-view.y)*(s/view.s);
   view.s = s; draw();
 }
 
-/* ------------------------------------------------------------ interaction */
+/* ============================================================= timeline */
+const strip = $('tl-strip');
+const THUMB_W = 104, THUMB_H = 62;
+
+function makeThumb(entry){
+  const c = entry.thumb || document.createElement('canvas');
+  c.width=THUMB_W; c.height=THUMB_H;
+  const g = c.getContext('2d');
+  g.clearRect(0,0,THUMB_W,THUMB_H);
+  g.fillStyle='#0b0f14'; g.fillRect(0,0,THUMB_W,THUMB_H);
+  const k = Math.min(THUMB_W/off.width, THUMB_H/off.height);
+  const dw = off.width*k, dh = off.height*k;
+  g.imageSmoothingEnabled = true;
+  g.drawImage(off, (THUMB_W-dw)/2, (THUMB_H-dh)/2, dw, dh);
+  entry.thumb = c;
+}
+
+function diffLabel(prev, next){
+  if(!prev) return 'session start';
+  const changed = CFG_KEYS.filter(k=>prev.cfg[k]!==next.cfg[k]);
+  if(changed.length===0) return 'no config change';
+  if(changed.length>3) return `${changed.length} settings changed`;
+  return changed.map(k=>{
+    const a = prev.cfg[k], b = next.cfg[k];
+    const fmt = v => typeof v==='boolean' ? (v?'on':'off')
+               : (k==='phase'||k==='density'||k==='mask-scale') ? (+v).toFixed(2)
+               : String(v).length>14 ? String(v).slice(0,14)+'…' : v;
+    return `${LABELS[k]} ${fmt(a)} → ${fmt(b)}`;
+  }).join(' · ');
+}
+
+/* Append-only: rewinding moves the playhead; editing from the past appends
+   a new entry at the end rather than truncating the future.               */
+function commit(key, explicitLabel){
+  reconcileCells();
+  const snap = cloneState(S);
+  const prev = timeline[timeline.length-1];
+  const label = explicitLabel || diffLabel(prev ? prev.state : null, snap);
+  const now = Date.now();
+  const atEnd = playhead === timeline.length-1;
+  const canCoalesce = prev && atEnd && key.startsWith('cfg:') && prev.key===key
+                      && (now-prev.ts) < 700 && !prev.bookmark;
+
+  render();
+
+  if(canCoalesce){
+    prev.state = snap;
+    prev.ts = now;
+    prev.label = diffLabel(timeline.length>1 ? timeline[timeline.length-2].state : null, snap);
+    makeThumb(prev);
+  } else {
+    const entry = {key, label, ts:now, state:snap, thumb:null, bookmark:false, from:playhead};
+    makeThumb(entry);
+    timeline.push(entry);
+    if(timeline.length > MAX_ENTRIES){ timeline.shift(); stripBuilt = -1; }
+  }
+  playhead = timeline.length-1;
+  refreshStrip();
+}
+
+function goTo(i){
+  if(i<0||i>=timeline.length||i===playhead) return;
+  playhead = i;
+  S = cloneState(timeline[i].state);
+  writeUI();
+  render();
+  refreshStrip();
+}
+
+let stripBuilt = 0;
+function refreshStrip(){
+  /* rebuild only when the entry count changed; otherwise just restyle */
+  if(stripBuilt !== timeline.length){
+    strip.textContent = '';
+    timeline.forEach((e,i)=>{
+      const f = document.createElement('div');
+      f.className='frame'; f.dataset.i=i;
+      f.appendChild(e.thumb);
+      const idx = document.createElement('span');
+      idx.className='idx'; idx.textContent = '#'+(i+1);
+      f.appendChild(idx);
+      const st = document.createElement('span');
+      st.className='star'; st.textContent = e.bookmark ? '★' : '';
+      f.appendChild(st);
+      strip.appendChild(f);
+    });
+    stripBuilt = timeline.length;
+  }
+  [...strip.children].forEach((f,i)=>{
+    f.classList.toggle('cur', i===playhead);
+    const en = timeline[i];
+    f.title = `#${i+1} · ${en.label}` +
+      (en.from>=0 && en.from!==i-1 ? `  (branched from #${en.from+1})` : '');
+    f.lastChild.textContent = timeline[i].bookmark ? '★' : '';
+  });
+  const cur = strip.children[playhead];
+  if(cur) cur.scrollIntoView({block:'nearest', inline:'nearest'});
+  $('tl-pos').textContent = `${playhead+1} / ${timeline.length}`;
+  const e = timeline[playhead];
+  $('tl-label').innerHTML = e
+    ? (playhead < timeline.length-1
+        ? `<span id="tl-past">◂ rewound</span> — <b>${escapeHtml(e.label)}</b> · edits append at #${timeline.length+1}`
+        : `<b>${escapeHtml(e.label)}</b>`)
+    : '';
+  $('tl-mark').textContent = e && e.bookmark ? '★' : '☆';
+  $('tl-mark').classList.toggle('on', !!(e && e.bookmark));
+}
+const escapeHtml = s => String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+let playTimer = null;
+function togglePlay(){
+  if(playTimer){ clearInterval(playTimer); playTimer=null; $('tl-play').classList.remove('on'); $('tl-play').textContent='▶'; return; }
+  if(playhead >= timeline.length-1) goTo(0);
+  $('tl-play').classList.add('on'); $('tl-play').textContent='❚❚';
+  playTimer = setInterval(()=>{
+    if(playhead >= timeline.length-1) togglePlay();
+    else goTo(playhead+1);
+  }, 340);
+}
+
+/* ================================================================== UI */
+function fillSelects(){
+  $('formula').innerHTML = '<option value="mix">Random mix</option>' +
+    FIELDS.map(f=>`<option value="${f.id}">${f.name}</option>`).join('');
+  $('mask').innerHTML = MASKS.map(m=>`<option value="${m.id}">${m.name}</option>`).join('') +
+    '<option value="mix">Random mix</option>';
+}
+function syncVisibility(){
+  const s = S ? S.cfg.source : $('source').value;
+  document.querySelectorAll('.r-field').forEach(el=>el.classList.toggle('hidden', s!=='field'));
+  document.querySelectorAll('.r-custom').forEach(el=>el.classList.toggle('hidden', s!=='custom'));
+  document.querySelectorAll('.r-noise').forEach(el=>el.classList.toggle('hidden', s!=='noise'));
+  document.querySelectorAll('.r-mod').forEach(el=>el.classList.toggle('hidden', s==='noise'));
+}
+const READOUTS = {density:'density-v', phase:'phase-v', 'mask-scale':'mask-scale-v'};
+function syncReadouts(){ for(const k in READOUTS) $(READOUTS[k]).textContent = (+S.cfg[k]).toFixed(2); }
+
+function readUI(){
+  for(const k of CFG_KEYS){
+    const el = $(k);
+    S.cfg[k] = BOOL_KEYS.has(k) ? el.checked : (NUM_KEYS.has(k) ? (+el.value||0) : el.value);
+  }
+}
+function writeUI(){
+  for(const k of CFG_KEYS){
+    const el = $(k);
+    if(BOOL_KEYS.has(k)) el.checked = S.cfg[k];
+    else el.value = S.cfg[k];
+  }
+  syncVisibility(); syncReadouts();
+}
+
+/* ========================================================== interaction */
 stage.addEventListener('mousedown', e=>{
   if(e.button!==0) return;
-  drag = {x:e.clientX-view.x, y:e.clientY-view.y}; panned=false;
+  drag={x:e.clientX-view.x, y:e.clientY-view.y}; panned=false;
 });
 window.addEventListener('mousemove', e=>{
   if(!drag) return;
@@ -593,18 +850,29 @@ window.addEventListener('mousemove', e=>{
 window.addEventListener('mouseup', e=>{
   if(!drag) return; drag=null;
   if(panned) return;
-  const cfg = readCfg();
-  const rect = canvas.getBoundingClientRect();
-  const wx = (e.clientX-rect.left-view.x)/view.s, wy=(e.clientY-rect.top-view.y)/view.s;
-  const outerW=(cfg.w+cfg.spacing)*cfg.px, outerH=(cfg.h+cfg.spacing)*cfg.px;
+  const cfg = S.cfg, rect = canvas.getBoundingClientRect();
+  const wx=(e.clientX-rect.left-view.x)/view.s, wy=(e.clientY-rect.top-view.y)/view.s;
+  const outerW=(cfg.sw+cfg.spacing)*cfg.scale, outerH=(cfg.sh+cfg.spacing)*cfg.scale;
   const c=Math.floor(wx/outerW), r=Math.floor(wy/outerH);
-  if(r<0||c<0||r>=cfg.rows||c>=cfg.cols||!cells[r]||!cells[r][c]) return;
-  if(wx-c*outerW > cfg.w*cfg.px || wy-r*outerH > cfg.h*cfg.px) return;
-  const cell = cells[r][c];
-  if(e.shiftKey){ cell.locked=false; cell.seed=(Math.random()*4294967296)>>>0; }
-  else cell.locked = !cell.locked;
-  buildSheet(false);
-  $('recipe').textContent = `[${r},${c}] seed ${cell.seed}\n${cell.sprite.recipe}`;
+  const {rows,cols,list}=S.cells;
+  if(r<0||c<0||r>=rows||c>=cols) return;
+  if(wx-c*outerW > cfg.sw*cfg.scale || wy-r*outerH > cfg.sh*cfg.scale) return;
+
+  const i = r*cols+c, cell = list[i];
+  const nl = list.slice();
+  if(e.shiftKey){
+    nl[i] = {seed:rand32(), locked:false, lockCfg:null};
+    S.cells = {rows,cols,list:nl};
+    commit('cells:reroll', `reroll cell [${r},${c}]`);
+  } else {
+    const locking = !cell.locked;
+    nl[i] = {seed:cell.seed, locked:locking,
+             lockCfg: locking ? {...cfg, _paletteSeed:S.paletteSeed} : null};
+    S.cells = {rows,cols,list:nl};
+    commit('cells:lock', `${locking?'lock':'unlock'} cell [${r},${c}]`);
+  }
+  const sp = lastSprites[i];
+  if(sp) showRecipe(r, c, nl[i], sp);
 });
 stage.addEventListener('wheel', e=>{
   e.preventDefault();
@@ -612,54 +880,163 @@ stage.addEventListener('wheel', e=>{
   zoom(view.s*Math.exp(-e.deltaY*0.002), e.clientX-rect.left, e.clientY-rect.top);
 }, {passive:false});
 
-/* ------------------------------------------------------------------ wiring */
-function fillSelects(){
-  $('formula').innerHTML = '<option value="mix">Random mix</option>' +
-    FIELDS.map(f=>`<option value="${f.id}">${f.name}</option>`).join('');
-  $('formula').value = 'mix';
-  $('mask').innerHTML = MASKS.map(m=>`<option value="${m.id}">${m.name}</option>`).join('') +
-    '<option value="mix">Random mix</option>';
-  $('mask').value = 'none';
+/* The recipe is a complete reproduction record: seed + this block regenerates
+   the sprite exactly, which is what makes it worth putting on the clipboard. */
+let recipeText = '';
+function showRecipe(r, c, cell, sprite){
+  const cfg = (cell.locked && cell.lockCfg) ? cell.lockCfg : S.cfg;
+  const pseed = (cell.locked && cell.lockCfg) ? cell.lockCfg._paletteSeed : S.paletteSeed;
+  const pad = k => (k+'         ').slice(0,9);
+  const lines = [
+    `sprite    [${r},${c}]  frame #${playhead+1}${cell.locked?'  (locked)':''}`,
+    `${pad('seed')} ${cell.seed}`,
+    `${pad('recipe')} ${sprite.recipe}`,
+    `${pad('size')} ${sprite.w}×${sprite.h}  ${cfg.symmetry}`,
+    `${pad('ink')} coverage ${(+cfg.density).toFixed(2)}  phase ${(+cfg.phase).toFixed(2)}`,
+    `${pad('color')} ${cfg.ncol}× ${cfg.colormode}  ${cfg.bpc}-bit  pal ${pseed}`,
+  ];
+  if(cfg.source==='custom') lines.push(`${pad('expr')} ${cfg.expr}`);
+  recipeText = lines.join('\n');
+  $('recipe').textContent = recipeText;
+  $('copy-recipe').disabled = false;
 }
-function syncVisibility(){
-  const s = $('source').value;
-  document.querySelectorAll('.fieldonly').forEach(el=>el.classList.toggle('hidden', s==='noise'));
-  document.querySelectorAll('.customonly').forEach(el=>el.classList.toggle('hidden', s==='noise'));
-  document.querySelectorAll('.noiseonly').forEach(el=>el.classList.toggle('hidden', s!=='noise'));
-  $('formula').closest('.row').classList.toggle('hidden', s!=='field');
-  $('expr').closest('.row').classList.toggle('hidden', s!=='custom');
-  $('vary').closest('.row').classList.toggle('hidden', s!=='field');
+
+function copyRecipe(){
+  const btn = $('copy-recipe');
+  if(!recipeText) return;
+  const done = ok => {
+    btn.textContent = ok ? '✓ Copied' : '✗ Failed';
+    btn.classList.toggle('done', ok);
+    clearTimeout(btn._t);
+    btn._t = setTimeout(()=>{ btn.textContent='⧉ Copy'; btn.classList.remove('done'); }, 1400);
+    if(!ok) console.warn('Clipboard unavailable. Recipe:\n'+recipeText);
+  };
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(recipeText).then(()=>done(true), ()=>done(fallbackCopy()));
+  } else {
+    done(fallbackCopy());   /* file:// pages have no async clipboard */
+  }
 }
-const readouts = {density:'density-v', phase:'phase-v', 'mask-scale':'mask-scale-v'};
-function syncReadouts(){ for(const k in readouts) $(readouts[k]).textContent = (+$(k).value).toFixed(2); }
+function fallbackCopy(){
+  const ta = document.createElement('textarea');
+  ta.value = recipeText;
+  ta.setAttribute('readonly','');
+  ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+  document.body.appendChild(ta);
+  ta.select(); ta.setSelectionRange(0, recipeText.length);
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch(err){ ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+$('copy-recipe').addEventListener('click', copyRecipe);
 
-fillSelects(); syncVisibility(); syncReadouts();
-
-$('regen').addEventListener('click', ()=>{ buildPalette(); buildSheet(true); });
-$('source').addEventListener('change', ()=>{ syncVisibility(); buildSheet(false); });
-['sw','sh','cols','rows','spacing','scale','symmetry','density','phase','ca','ncol',
- 'formula','modulus','stride','vary','colormode','mask','mask-scale','mask-invert',
- 'outline','sortlum'].forEach(id=>{
-  const el = $(id);
-  el.addEventListener('input', ()=>{ syncReadouts(); buildSheet(false); });
-  el.addEventListener('change', ()=>{ syncReadouts(); buildSheet(false); });
+strip.addEventListener('click', e=>{
+  const f = e.target.closest('.frame');
+  if(f) goTo(+f.dataset.i);
 });
-$('expr').addEventListener('input', ()=>buildSheet(false));
-$('bpc').addEventListener('change', ()=>{ buildPalette(); buildSheet(false); });
+
+/* ============================================================== wiring */
+fillSelects();
+S = defaultState();
+writeUI();
+
+for(const k of CFG_KEYS){
+  const el = $(k);
+  const handler = ()=>{ readUI(); syncVisibility(); syncReadouts(); commit('cfg:'+k); };
+  el.addEventListener('input', handler);
+  if(el.tagName==='SELECT' || el.type==='checkbox') el.addEventListener('change', handler);
+}
+$('regen').addEventListener('click', ()=>{
+  const {rows,cols,list}=S.cells;
+  S.cells = {rows,cols,list:list.map(c=>c.locked?c:{seed:rand32(),locked:false,lockCfg:null})};
+  S.paletteSeed = rand32();
+  commit('cells:regen', 'regenerate sheet');
+});
+$('repal').addEventListener('click', ()=>{ S.paletteSeed = rand32(); commit('pal', 'shuffle palette'); });
+
 $('export').addEventListener('click', ()=>{
   const a=document.createElement('a');
-  a.download='procedural_sprites.png'; a.href=off.toDataURL('image/png'); a.click();
+  a.download=`sprites_${String(playhead+1).padStart(3,'0')}.png`;
+  a.href=off.toDataURL('image/png'); a.click();
 });
+$('save').addEventListener('click', ()=>{
+  /* cells are shared by reference between entries, so pool them and store an
+     index — a long slider drag then costs a few bytes per entry, not a grid. */
+  const pool = [], seen = new Map();
+  const data = {
+    format:'sprite-gen-timeline', version:2, playhead, cellPool: pool,
+    entries: timeline.map(e=>{
+      let ci = seen.get(e.state.cells);
+      if(ci===undefined){ ci = pool.length; seen.set(e.state.cells, ci); pool.push(e.state.cells); }
+      return {key:e.key, label:e.label, ts:e.ts, bookmark:e.bookmark,
+              cfg:e.state.cfg, paletteSeed:e.state.paletteSeed, cells:ci};
+    }),
+  };
+  const blob = new Blob([JSON.stringify(data)], {type:'application/json'});
+  const a=document.createElement('a');
+  a.download='sprite_session.json'; a.href=URL.createObjectURL(blob); a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+});
+$('load').addEventListener('click', ()=>$('file').click());
+$('file').addEventListener('change', e=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    try{
+      const d = JSON.parse(rd.result);
+      if(d.format!=='sprite-gen-timeline') throw new Error('not a sprite session file');
+      timeline = d.entries.map(x=>({
+        key:x.key, label:x.label, ts:x.ts, bookmark:x.bookmark, thumb:null, from:-1,
+        state: x.state ? x.state                                   /* v1 */
+             : {cfg:x.cfg, cells:d.cellPool[x.cells], paletteSeed:x.paletteSeed},
+      }));
+      stripBuilt = -1;
+      /* thumbnails are derived, so rebuild them by replaying each state */
+      timeline.forEach(en=>{ S = cloneState(en.state); render(); makeThumb(en); });
+      playhead = Math.min(d.playhead ?? timeline.length-1, timeline.length-1);
+      S = cloneState(timeline[playhead].state);
+      writeUI(); render(); refreshStrip(); center();
+      console.log(`Loaded ${timeline.length} timeline entries.`);
+    }catch(err){ console.error('Load failed:', err.message); }
+    e.target.value='';
+  };
+  rd.readAsText(f);
+});
+
+$('tl-first').addEventListener('click', ()=>goTo(0));
+$('tl-prev').addEventListener('click', ()=>goTo(playhead-1));
+$('tl-next').addEventListener('click', ()=>goTo(playhead+1));
+$('tl-last').addEventListener('click', ()=>goTo(timeline.length-1));
+$('tl-play').addEventListener('click', togglePlay);
+$('tl-mark').addEventListener('click', ()=>{
+  const e = timeline[playhead];
+  if(!e) return;
+  e.bookmark = !e.bookmark; refreshStrip();
+});
+
 $('zin').addEventListener('click', ()=>zoom(view.s*1.5));
 $('zout').addEventListener('click', ()=>zoom(view.s/1.5));
 $('zreset').addEventListener('click', ()=>{ view.s=1; center(); });
+
 window.addEventListener('keydown', e=>{
-  if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT') return;
-  if(e.key==='r'||e.key==='R'){ buildPalette(); buildSheet(true); }
+  const t=e.target.tagName;
+  if(t==='INPUT'||t==='TEXTAREA'||t==='SELECT') return;
+  switch(e.key){
+    case 'ArrowLeft':  goTo(playhead-1); e.preventDefault(); break;
+    case 'ArrowRight': goTo(playhead+1); e.preventDefault(); break;
+    case 'Home': goTo(0); e.preventDefault(); break;
+    case 'End':  goTo(timeline.length-1); e.preventDefault(); break;
+    case ' ': togglePlay(); e.preventDefault(); break;
+    case 'b': case 'B': $('tl-mark').click(); break;
+    case 'r': case 'R': $('regen').click(); break;
+    case 'c': case 'C': copyRecipe(); break;
+  }
 });
 window.addEventListener('resize', ()=>{ resizeMain(); draw(); });
 
-buildPalette(); resizeMain(); buildSheet(true);
+commit('init', 'session start');
 requestAnimationFrame(()=>{ resizeMain(); center(); });
 </script>
 </body>
