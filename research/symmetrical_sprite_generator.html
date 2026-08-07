@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Procedural Sprite Generator — Modulo Fields</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --sunk:#0b0f14; --line:#2a3038;
+    --ink:#e6edf3; --dim:#8b949e; --accent:#4f8cff; --lock:#ef4444;
+  }
+  *{box-sizing:border-box}
+  body{
+    background:var(--bg); color:var(--ink); margin:0; overflow:hidden;
+    display:flex; height:100vh;
+    font:14px/1.35 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  #sidebar{
+    width:308px; flex:0 0 308px; background:var(--panel);
+    border-right:1px solid var(--line); padding:12px; display:flex;
+    flex-direction:column; gap:10px; overflow-y:auto; z-index:10;
+  }
+  #sidebar::-webkit-scrollbar{width:8px}
+  #sidebar::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  h1{font-size:16px; margin:0 0 2px; text-align:center; letter-spacing:.02em}
+  .group{background:#1c222b; border:1px solid var(--line); border-radius:8px; padding:9px 10px}
+  .group > .title{
+    font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--dim); font-weight:700; margin-bottom:7px;
+  }
+  .row{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:5px}
+  .row:first-of-type{margin-top:0}
+  label{font-size:12.5px; color:#adbac7; white-space:nowrap}
+  input[type=number], select, textarea{
+    background:var(--sunk); color:var(--ink); border:1px solid #30363d;
+    border-radius:5px; padding:3px 6px; font:inherit; font-size:12.5px;
+  }
+  input[type=number]{width:64px}
+  select{flex:1 1 auto; min-width:0}
+  textarea{width:100%; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; resize:vertical}
+  input[type=range]{flex:1 1 auto; min-width:0; accent-color:var(--accent)}
+  input[type=checkbox]{accent-color:var(--accent); width:15px; height:15px}
+  .check{display:flex; align-items:center; gap:7px; cursor:pointer}
+  .val{font-family:ui-monospace,monospace; font-size:11px; color:var(--dim); width:34px; text-align:right}
+  button{
+    background:var(--accent); color:#fff; border:0; padding:8px 12px; border-radius:6px;
+    cursor:pointer; font:inherit; font-weight:600; width:100%;
+  }
+  button:hover{filter:brightness(1.12)} button:active{transform:scale(.985)}
+  button.sec{background:#30363d}
+  #main{flex:1 1 auto; position:relative}
+  #stage{position:absolute; inset:0; overflow:hidden; cursor:crosshair}
+  canvas{position:absolute; transform-origin:0 0; image-rendering:pixelated}
+  .toolbar{
+    position:absolute; bottom:14px; right:14px; display:flex; gap:6px; z-index:20;
+    background:rgba(22,27,34,.85); padding:6px; border-radius:8px; backdrop-filter:blur(4px);
+    border:1px solid var(--line);
+  }
+  .toolbar button{width:auto; padding:4px 11px; background:#30363d}
+  #recipe{
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; color:#9fd0ff;
+    background:var(--sunk); border:1px solid #30363d; border-radius:6px; padding:7px;
+    min-height:34px; word-break:break-word; line-height:1.5;
+  }
+  .hint{font-size:11px; color:#6e7681; text-align:center; line-height:1.5}
+  .hidden{display:none !important}
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h1>Sprite Gen — Modulo Fields</h1>
+  <button id="regen">↻ Regenerate Sheet</button>
+
+  <div class="group">
+    <div class="title">Source</div>
+    <div class="row">
+      <label>Data</label>
+      <select id="source">
+        <option value="field" selected>Modulo field</option>
+        <option value="noise">Random noise</option>
+        <option value="custom">Custom expression</option>
+      </select>
+    </div>
+    <div class="row fieldonly">
+      <label>Formula</label>
+      <select id="formula"></select>
+    </div>
+    <div class="row customonly hidden" style="display:block">
+      <label style="display:block;margin-bottom:4px">f(x,y) — <code>u,v</code> centred</label>
+      <textarea id="expr" rows="2">(u*u + v*v) * (Math.abs(u)^Math.abs(v))</textarea>
+    </div>
+    <div class="row fieldonly customonly">
+      <label title="Result is taken mod this. Odd numbers give the nicest rings.">Modulus</label>
+      <input type="number" id="modulus" value="17" min="2" max="512">
+    </div>
+    <div class="row fieldonly customonly">
+      <label title="Sampling step — bigger = coarser pattern">Stride</label>
+      <input type="number" id="stride" value="1" min="1" max="8">
+    </div>
+    <div class="row fieldonly customonly">
+      <label title="Rotates which residues count as ink">Phase</label>
+      <input type="range" id="phase" min="0" max="1" step="0.01" value="0">
+      <span class="val" id="phase-v">0.00</span>
+    </div>
+    <div class="row">
+      <label title="Fraction of residues that become ink">Coverage</label>
+      <input type="range" id="density" min="0.05" max="1" step="0.05" value="0.45">
+      <span class="val" id="density-v">0.45</span>
+    </div>
+    <div class="row fieldonly">
+      <label class="check"><input type="checkbox" id="vary" checked>
+        <span title="Each cell picks its own formula & modulus">Vary per cell</span></label>
+    </div>
+    <div class="row noiseonly hidden">
+      <label class="check"><input type="checkbox" id="ca" checked><span>Smooth (CA pass)</span></label>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Mask</div>
+    <div class="row">
+      <label>Shape</label>
+      <select id="mask"></select>
+    </div>
+    <div class="row">
+      <label>Size</label>
+      <input type="range" id="mask-scale" min="0.4" max="1.45" step="0.05" value="1">
+      <span class="val" id="mask-scale-v">1.00</span>
+    </div>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="mask-invert"><span>Invert</span></label>
+      <label class="check"><input type="checkbox" id="outline"><span>Outline</span></label>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Sprite</div>
+    <div class="row"><label>Width</label><input type="number" id="sw" value="16" min="2" max="64"></div>
+    <div class="row"><label>Height</label><input type="number" id="sh" value="16" min="2" max="64"></div>
+    <div class="row">
+      <label>Symmetry</label>
+      <select id="symmetry">
+        <option value="none">None</option>
+        <option value="horizontal" selected>Horizontal</option>
+        <option value="vertical">Vertical</option>
+        <option value="quadrant">Quadrant</option>
+        <option value="diagonal">Dihedral (8-fold)</option>
+        <option value="rot90">Rotate 90° (pinwheel)</option>
+        <option value="rot180">Rotate 180°</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Palette</div>
+    <div class="row">
+      <label>Gamut</label>
+      <select id="bpc">
+        <option value="1">1-bit</option><option value="2">2-bit</option>
+        <option value="3" selected>3-bit</option><option value="4">4-bit</option>
+        <option value="8">8-bit</option>
+      </select>
+    </div>
+    <div class="row"><label>Colors / sprite</label><input type="number" id="ncol" value="4" min="1" max="16"></div>
+    <div class="row">
+      <label>Assignment</label>
+      <select id="colormode">
+        <option value="bands" selected>Bands (ramp)</option>
+        <option value="cycle">Cycle residue</option>
+        <option value="solid">Solid</option>
+      </select>
+    </div>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="sortlum" checked><span>Sort by luminance</span></label>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Sheet</div>
+    <div class="row"><label>Columns</label><input type="number" id="cols" value="8" min="1" max="50"></div>
+    <div class="row"><label>Rows</label><input type="number" id="rows" value="6" min="1" max="50"></div>
+    <div class="row"><label>Spacing</label><input type="number" id="spacing" value="2" min="0" max="16"></div>
+    <div class="row"><label>Scale (px)</label><input type="number" id="scale" value="4" min="1" max="24"></div>
+  </div>
+
+  <div class="group">
+    <div class="title">Recipe</div>
+    <div id="recipe">Click a sprite to inspect &amp; lock it.</div>
+  </div>
+
+  <button id="export" class="sec">↓ Export PNG</button>
+  <div class="hint">click = lock + inspect · shift-click = reroll cell<br>drag = pan · wheel = zoom · R = regenerate</div>
+</div>
+
+<div id="main">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div class="toolbar">
+      <button id="zin">+</button><button id="zout">−</button><button id="zreset">Reset</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+/* ---------------------------------------------------------------- utils */
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const hash2 = (a,b) => (Math.imul(a ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(b + 0x165667b1, 0xc2b2ae35)) >>> 0;
+
+function popcount(n){ n = n>>>0; n = n - ((n>>>1)&0x55555555);
+  n = (n&0x33333333) + ((n>>>2)&0x33333333);
+  return ((n + (n>>>4) & 0x0f0f0f0f) * 0x01010101) >>> 24; }
+
+function digitSum(n){ n = Math.abs(n|0); let s=0; while(n>0){ s += n%10; n=(n/10)|0; } return s; }
+
+// C(n,k) mod m via a cached Pascal triangle — gives Sierpinski-family patterns.
+const pascalCache = new Map();
+function pascalMod(n,k,m){
+  if(k<0||n<0||k>n) return 0;
+  if(n>180) n%=181;
+  if(k>n) k=n;
+  let tri = pascalCache.get(m);
+  if(!tri){ tri=[[1]]; pascalCache.set(m,tri); }
+  while(tri.length<=n){
+    const prev = tri[tri.length-1], row=[1];
+    for(let i=1;i<prev.length;i++) row.push((prev[i-1]+prev[i])%m);
+    row.push(1); tri.push(row);
+  }
+  return tri[n][k];
+}
+
+/* -------------------------------------------------------------- fields */
+/* Every field takes centred, strided, offset integer coords (u,v) and the
+   per-sprite param bag p, and returns a raw integer. The modulus is applied
+   afterwards by the sampler, so fields never need to know about it.        */
+const FIELDS = [
+  {id:'circle',  name:'Circles   x²+y²',           f:(u,v,p)=> u*u + v*v},
+  {id:'product', name:'Product   x·y',             f:(u,v,p)=> u*v},
+  {id:'xor',     name:'XOR   |x| ^ |y|',           f:(u,v,p)=> Math.abs(u) ^ Math.abs(v)},
+  {id:'and',     name:'AND   |x| & |y|',           f:(u,v,p)=> Math.abs(u) & Math.abs(v)},
+  {id:'or',      name:'OR   |x| | |y|',            f:(u,v,p)=> Math.abs(u) | Math.abs(v)},
+  {id:'diamond', name:'Diamond   |x|+|y|',         f:(u,v,p)=> Math.abs(u) + Math.abs(v)},
+  {id:'cheby',   name:'Square   max(|x|,|y|)',     f:(u,v,p)=> Math.max(Math.abs(u),Math.abs(v))},
+  {id:'hyper',   name:'Hyperbola   x²−y²',         f:(u,v,p)=> u*u - v*v},
+  {id:'skew',    name:'Skewed   x²+xy+y²',         f:(u,v,p)=> u*u + u*v + v*v},
+  {id:'cubic',   name:'Cubic   x³+y³',             f:(u,v,p)=> u*u*u + v*v*v},
+  {id:'trefoil', name:'Trefoil   x³−3xy²',         f:(u,v,p)=> u*u*u - 3*u*v*v},
+  {id:'quartic', name:'Quartic   x⁴+y⁴',           f:(u,v,p)=> u*u*u*u + v*v*v*v},
+  {id:'conic',   name:'Random conic   ax²+bxy+…',  f:(u,v,p)=> p.a*u*u + p.b*u*v + p.c*v*v + p.d*u + p.e*v},
+  {id:'popcnt',  name:'Popcount(x·y)',             f:(u,v,p)=> popcount(Math.abs(u*v))},
+  {id:'popsum',  name:'Popcount(x²+y²)',           f:(u,v,p)=> popcount(Math.abs(u*u+v*v))},
+  {id:'ringxor', name:'(x²+y²)·(x^y+1)',           f:(u,v,p)=> (u*u+v*v) * ((Math.abs(u)^Math.abs(v))+1)},
+  {id:'digsum',  name:'Digitsum(x²+y²)',           f:(u,v,p)=> digitSum(u*u+v*v)},
+  {id:'pascal',  name:'Binomial C(|x|+|y|,|x|)',   f:(u,v,p)=> pascalMod(Math.abs(u)+Math.abs(v), Math.abs(u), p.M)},
+  {id:'shift',   name:'(x<<3) ^ (y·y)',            f:(u,v,p)=> (Math.abs(u)<<3) ^ (v*v)},
+  {id:'mixmul',  name:'x·y·(x+y)',                 f:(u,v,p)=> u*v*(u+v)},
+];
+const FIELD_BY_ID = Object.fromEntries(FIELDS.map(f=>[f.id,f]));
+
+/* --------------------------------------------------------------- masks */
+/* nx,ny are normalised to roughly [-1,1] over the whole sprite. r scales. */
+const MASKS = [
+  {id:'none',    name:'None',              m:(nx,ny,r)=> true},
+  {id:'disc',    name:'Disc',              m:(nx,ny,r)=> nx*nx+ny*ny <= r*r},
+  {id:'diamond', name:'Diamond',           m:(nx,ny,r)=> Math.abs(nx)+Math.abs(ny) <= r*1.25},
+  {id:'square',  name:'Square',            m:(nx,ny,r)=> Math.max(Math.abs(nx),Math.abs(ny)) <= r*0.95},
+  {id:'super',   name:'Superellipse',      m:(nx,ny,r)=> Math.pow(Math.abs(nx),4)+Math.pow(Math.abs(ny),4) <= Math.pow(r,4)},
+  {id:'ring',    name:'Ring',              m:(nx,ny,r)=>{const d=Math.hypot(nx,ny); return d<=r && d>=r*0.5;}},
+  {id:'cross',   name:'Cross',             m:(nx,ny,r)=> (Math.abs(nx)<=r*0.34 || Math.abs(ny)<=r*0.34) && Math.max(Math.abs(nx),Math.abs(ny))<=r},
+  {id:'taper',   name:'Taper (tree)',      m:(nx,ny,r)=> Math.abs(nx) <= r*(0.18+0.82*(ny+1)/2)},
+  {id:'hourglass',name:'Hourglass',        m:(nx,ny,r)=> Math.abs(nx) <= r*(0.16+0.9*Math.abs(ny))},
+  {id:'lens',    name:'Lens (vesica)',     m:(nx,ny,r)=> Math.abs(ny) <= r*Math.sqrt(Math.max(0,1-nx*nx))*0.9},
+  {id:'blob',    name:'Random blob (CA)',  m:null},   // handled specially
+];
+const MASK_BY_ID = Object.fromEntries(MASKS.map(m=>[m.id,m]));
+
+/* -------------------------------------------------------- symmetry fold */
+function seedDims(w,h,mode){
+  const hw = Math.ceil(w/2), hh = Math.ceil(h/2);
+  switch(mode){
+    case 'horizontal': return [hw,h];
+    case 'vertical':   return [w,hh];
+    case 'rot180':     return [w,hh];
+    case 'quadrant':
+    case 'diagonal':
+    case 'rot90':      return [hw,hh];
+    default:           return [w,h];
+  }
+}
+function fold(x,y,w,h,mode){
+  const hw = Math.ceil(w/2), hh = Math.ceil(h/2);
+  let sx=x, sy=y;
+  switch(mode){
+    case 'horizontal': if(sx>=hw) sx=w-1-sx; break;
+    case 'vertical':   if(sy>=hh) sy=h-1-sy; break;
+    case 'quadrant':   if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy; break;
+    case 'rot180':     if(sy>=hh){ sy=h-1-sy; sx=w-1-sx; } break;
+    case 'diagonal': {
+      if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy;
+      if(hw===hh && sx>sy){ const t=sx; sx=sy; sy=t; }
+      break;
+    }
+    case 'rot90': {
+      if(w!==h){ if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy; break; }
+      let g=0;
+      while((sx>=hw || sy>=hh) && g++<4){ const nx=h-1-sy, ny=sx; sx=nx; sy=ny; }
+      break;
+    }
+  }
+  return [sx,sy];
+}
+
+/* ------------------------------------------------------------- palette */
+let sharedPalette = [];
+function buildPalette(){
+  const bpc = +$('bpc').value, levels = 1<<bpc, step = 255/(levels-1);
+  const out = [];
+  if(bpc<=3){
+    for(let r=0;r<levels;r++) for(let g=0;g<levels;g++) for(let b=0;b<levels;b++)
+      out.push(rgbHex(Math.round(r*step),Math.round(g*step),Math.round(b*step)));
+    for(let i=out.length-1;i>0;i--){ const j=(Math.random()*(i+1))|0; [out[i],out[j]]=[out[j],out[i]]; }
+    sharedPalette = out;
+  } else {
+    const seen = new Set();
+    while(seen.size < 256){
+      const r=Math.round(((Math.random()*levels)|0)*step),
+            g=Math.round(((Math.random()*levels)|0)*step),
+            b=Math.round(((Math.random()*levels)|0)*step);
+      seen.add(rgbHex(r,g,b));
+    }
+    sharedPalette = [...seen];
+  }
+}
+const rgbHex = (r,g,b) => '#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('');
+const hexRgb = h => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+const lum = h => { const [r,g,b]=hexRgb(h); return 0.2126*r+0.7152*g+0.0722*b; };
+const darken = (h,k) => { const [r,g,b]=hexRgb(h); return rgbHex((r*k)|0,(g*k)|0,(b*k)|0); };
+
+/* ------------------------------------------------------ sprite factory */
+const ODDS = [3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,37,41,47,53];
+
+function generateSprite(seed, cfg){
+  const rnd = mulberry32(seed);
+  const {w,h,sym,coverage,ncol,useCA,source,formulaId,modulus,vary,stride,phase,
+         colorMode,maskId,maskScale,maskInvert,outline,sortLum,customFn} = cfg;
+
+  const [sw,sh] = seedDims(w,h,sym);
+
+  /* --- per-sprite parameters ------------------------------------------ */
+  const pick = arr => arr[(rnd()*arr.length)|0];
+  let fid = formulaId, M = modulus, st = stride, mid = maskId;
+  if(source==='field'){
+    if(vary){
+      fid = pick(FIELDS).id;
+      M   = pick(ODDS);
+      st  = 1 + ((rnd()*3)|0);
+    }
+  }
+  if(mid==='mix') mid = pick(MASKS.filter(m=>m.id!=='none')).id;
+
+  const p = {
+    M,
+    ox: ((rnd()*17)|0) - 8,
+    oy: ((rnd()*17)|0) - 8,
+    a: ((rnd()*7)|0)-3 || 1, b: ((rnd()*7)|0)-3,
+    c: ((rnd()*7)|0)-3 || 1, d: ((rnd()*11)|0)-5, e: ((rnd()*11)|0)-5,
+  };
+
+  /* --- colors --------------------------------------------------------- */
+  const pool = [...sharedPalette];
+  const colors = [];
+  for(let i=0, n=Math.min(ncol,pool.length); i<n; i++)
+    colors.push(pool.splice((rnd()*pool.length)|0,1)[0]);
+  if(sortLum) colors.sort((a,b)=>lum(a)-lum(b));
+  const nc = colors.length;
+
+  /* --- mask (evaluated in seed space, mirrored by the fold) ------------ */
+  const maskFn = MASK_BY_ID[mid] ? MASK_BY_ID[mid].m : null;
+  let blob = null;
+  if(mid==='blob'){
+    blob = Array.from({length:sh},()=>new Uint8Array(sw));
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++) blob[y][x] = rnd()<0.58 ? 1:0;
+    for(let pass=0; pass<2; pass++){
+      const nx = Array.from({length:sh},()=>new Uint8Array(sw));
+      for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+        let n=0;
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+          if(!dx&&!dy) continue;
+          const ax=x+dx, ay=y+dy;
+          if(ax>=0&&ax<sw&&ay>=0&&ay<sh) n+=blob[ay][ax];
+        }
+        nx[y][x] = blob[y][x] ? (n>=2?1:0) : (n>=5?1:0);
+      }
+      blob = nx;
+    }
+  }
+  const cxf = (w-1)/2, cyf = (h-1)/2;
+  function inMask(sx,sy){
+    if(mid==='none') return true;
+    let ok;
+    if(mid==='blob') ok = !!(blob[sy] && blob[sy][sx]);
+    else ok = maskFn((sx-cxf)/(w/2), (sy-cyf)/(h/2), maskScale);
+    return maskInvert ? !ok : ok;
+  }
+
+  /* --- seed region ----------------------------------------------------- */
+  const cx = Math.floor((w-1)/2), cy = Math.floor((h-1)/2);
+  const field = FIELD_BY_ID[fid] || FIELD_BY_ID.circle;
+  const seedGrid = Array.from({length:sh},()=>new Uint8Array(sw));
+
+  if(source==='noise'){
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++)
+      seedGrid[y][x] = rnd()<coverage ? 1 + ((rnd()*nc)|0) : 0;
+    if(useCA){
+      const out = Array.from({length:sh},()=>new Uint8Array(sw));
+      for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+        let n=0; const tally={};
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+          if(!dx&&!dy) continue;
+          const ax=x+dx, ay=y+dy;
+          if(ax<0||ax>=sw||ay<0||ay>=sh) continue;
+          const c=seedGrid[ay][ax];
+          if(c>0){ n++; tally[c]=(tally[c]||0)+1; }
+        }
+        if(seedGrid[y][x]===0){
+          if(n>=3){ let best=1,bc=0; for(const k in tally) if(tally[k]>bc){bc=tally[k];best=+k;} out[y][x]=best; }
+        } else out[y][x] = n>=2 ? seedGrid[y][x] : 0;
+      }
+      for(let y=0;y<sh;y++) seedGrid[y].set(out[y]);
+    }
+  } else {
+    const fn = (source==='custom' && customFn) ? customFn : null;
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+      const u = (x-cx)*st + p.ox, v = (y-cy)*st + p.oy;
+      let n;
+      try { n = fn ? fn(x,y,u,v,w,h,p) : field.f(u,v,p); }
+      catch(e){ n = u*u+v*v; }
+      if(!Number.isFinite(n)) n = 0;
+      n = Math.round(n);
+      let vm = ((n % M) + M) % M;
+      const t = (vm/M + phase) % 1;
+      if(t >= coverage){ seedGrid[y][x]=0; continue; }
+      let ci;
+      if(colorMode==='solid')      ci = 1;
+      else if(colorMode==='cycle') ci = 1 + (vm % nc);
+      else                         ci = 1 + Math.min(nc-1, ((t/coverage)*nc)|0);
+      seedGrid[y][x] = ci;
+    }
+  }
+
+  /* mask the seed region */
+  for(let y=0;y<sh;y++) for(let x=0;x<sw;x++) if(!inMask(x,y)) seedGrid[y][x]=0;
+
+  /* --- unfold to the full sprite --------------------------------------- */
+  let grid = Array.from({length:h},()=>new Uint8Array(w));
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const [sx,sy] = fold(x,y,w,h,sym);
+    if(sx>=0&&sx<sw&&sy>=0&&sy<sh) grid[y][x] = seedGrid[sy][sx];
+  }
+
+  /* --- outline ---------------------------------------------------------- */
+  const paint = [...colors];
+  if(outline && nc>0){
+    const oc = darken(colors[0], 0.32);
+    paint.push(oc);
+    const oi = paint.length;
+    const out = grid.map(r=>Uint8Array.from(r));
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+      if(grid[y][x]) continue;
+      if((x>0&&grid[y][x-1]) || (x<w-1&&grid[y][x+1]) ||
+         (y>0&&grid[y-1][x]) || (y<h-1&&grid[y+1][x])) out[y][x]=oi;
+    }
+    grid = out;
+  }
+
+  const recipe = source==='noise'
+    ? `noise · cov ${coverage.toFixed(2)}${useCA?' · CA':''} · mask ${mid}`
+    : `${source==='custom'?'custom':fid} % ${M} · stride ${st} · off(${p.ox},${p.oy})` +
+      (fid==='conic' ? ` · [${p.a},${p.b},${p.c},${p.d},${p.e}]` : '') +
+      ` · mask ${mid}${maskInvert?'⁻¹':''} · ${sym}`;
+
+  return {grid, colors:paint, recipe, w, h};
+}
+
+/* -------------------------------------------------------------- sheet */
+const canvas = $('cv'), ctx = canvas.getContext('2d');
+const stage = $('stage');
+const off = document.createElement('canvas'), offCtx = off.getContext('2d');
+let cells = [];                       // [row][col] = {seed, locked, sprite}
+let view = {x:0,y:0,s:1};
+let drag=null, panned=false;
+
+function readCfg(){
+  let customFn = null;
+  if($('source').value==='custom'){
+    try { customFn = new Function('x','y','u','v','w','h','P','return ('+$('expr').value+');'); customFn(0,0,0,0,8,8,{M:7,a:1,b:1,c:1,d:0,e:0}); }
+    catch(err){ console.warn('Custom expression failed, falling back to x²+y²:', err.message); customFn = null; }
+  }
+  return {
+    w:+$('sw').value||16, h:+$('sh').value||16,
+    cols:+$('cols').value||8, rows:+$('rows').value||6,
+    spacing:+$('spacing').value||0, px:+$('scale').value||4,
+    sym:$('symmetry').value,
+    coverage:+$('density').value, ncol:+$('ncol').value||4,
+    useCA:$('ca').checked, source:$('source').value,
+    formulaId:$('formula').value, modulus:+$('modulus').value||17,
+    vary:$('vary').checked, stride:+$('stride').value||1, phase:+$('phase').value,
+    colorMode:$('colormode').value, maskId:$('mask').value,
+    maskScale:+$('mask-scale').value, maskInvert:$('mask-invert').checked,
+    outline:$('outline').checked, sortLum:$('sortlum').checked,
+    customFn
+  };
+}
+
+function buildSheet(reseed){
+  const cfg = readCfg();
+  const {cols,rows,w,h,px,spacing} = cfg;
+
+  if(cells.length!==rows) cells.length = rows;
+  for(let r=0;r<rows;r++){
+    if(!cells[r]) cells[r]=[];
+    cells[r].length = cols;
+    for(let c=0;c<cols;c++)
+      if(!cells[r][c]) cells[r][c] = {seed:(Math.random()*4294967296)>>>0, locked:false, sprite:null};
+  }
+
+  const outerW = (w+spacing)*px, outerH = (h+spacing)*px;
+  off.width = cols*outerW; off.height = rows*outerH;
+  offCtx.clearRect(0,0,off.width,off.height);
+  offCtx.imageSmoothingEnabled = false;
+
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    const cell = cells[r][c];
+    const stale = !cell.sprite || cell.sprite.w!==w || cell.sprite.h!==h;
+    if(reseed && !cell.locked) cell.seed = (Math.random()*4294967296)>>>0;
+    if(stale || !cell.locked) cell.sprite = generateSprite(cell.seed, cfg);
+
+    const sp = cell.sprite, X0=c*outerW, Y0=r*outerH;
+    for(let y=0;y<sp.h;y++) for(let x=0;x<sp.w;x++){
+      const v = sp.grid[y][x];
+      if(!v) continue;
+      offCtx.fillStyle = sp.colors[v-1] || '#ffffff';
+      offCtx.fillRect(X0+x*px, Y0+y*px, px, px);
+    }
+    if(cell.locked){
+      offCtx.strokeStyle='rgba(239,68,68,.85)'; offCtx.lineWidth=1.5;
+      offCtx.strokeRect(X0-1.5, Y0-1.5, sp.w*px+3, sp.h*px+3);
+    }
+  }
+  resizeMain(); draw();
+}
+
+function resizeMain(){ canvas.width = stage.clientWidth; canvas.height = stage.clientHeight; }
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.imageSmoothingEnabled = false;
+  ctx.save(); ctx.translate(view.x,view.y); ctx.scale(view.s,view.s);
+  ctx.drawImage(off,0,0); ctx.restore();
+}
+function center(){
+  view.x = (canvas.width - off.width*view.s)/2;
+  view.y = (canvas.height - off.height*view.s)/2;
+  draw();
+}
+function zoom(s, fx, fy){
+  s = Math.max(0.1, Math.min(s, 40));
+  if(fx==null){ fx=canvas.width/2; fy=canvas.height/2; }
+  view.x = fx - (fx-view.x)*(s/view.s);
+  view.y = fy - (fy-view.y)*(s/view.s);
+  view.s = s; draw();
+}
+
+/* ------------------------------------------------------------ interaction */
+stage.addEventListener('mousedown', e=>{
+  if(e.button!==0) return;
+  drag = {x:e.clientX-view.x, y:e.clientY-view.y}; panned=false;
+});
+window.addEventListener('mousemove', e=>{
+  if(!drag) return;
+  if(Math.abs(e.clientX-drag.x-view.x)>2||Math.abs(e.clientY-drag.y-view.y)>2) panned=true;
+  view.x=e.clientX-drag.x; view.y=e.clientY-drag.y; draw();
+});
+window.addEventListener('mouseup', e=>{
+  if(!drag) return; drag=null;
+  if(panned) return;
+  const cfg = readCfg();
+  const rect = canvas.getBoundingClientRect();
+  const wx = (e.clientX-rect.left-view.x)/view.s, wy=(e.clientY-rect.top-view.y)/view.s;
+  const outerW=(cfg.w+cfg.spacing)*cfg.px, outerH=(cfg.h+cfg.spacing)*cfg.px;
+  const c=Math.floor(wx/outerW), r=Math.floor(wy/outerH);
+  if(r<0||c<0||r>=cfg.rows||c>=cfg.cols||!cells[r]||!cells[r][c]) return;
+  if(wx-c*outerW > cfg.w*cfg.px || wy-r*outerH > cfg.h*cfg.px) return;
+  const cell = cells[r][c];
+  if(e.shiftKey){ cell.locked=false; cell.seed=(Math.random()*4294967296)>>>0; }
+  else cell.locked = !cell.locked;
+  buildSheet(false);
+  $('recipe').textContent = `[${r},${c}] seed ${cell.seed}\n${cell.sprite.recipe}`;
+});
+stage.addEventListener('wheel', e=>{
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  zoom(view.s*Math.exp(-e.deltaY*0.002), e.clientX-rect.left, e.clientY-rect.top);
+}, {passive:false});
+
+/* ------------------------------------------------------------------ wiring */
+function fillSelects(){
+  $('formula').innerHTML = '<option value="mix">Random mix</option>' +
+    FIELDS.map(f=>`<option value="${f.id}">${f.name}</option>`).join('');
+  $('formula').value = 'mix';
+  $('mask').innerHTML = MASKS.map(m=>`<option value="${m.id}">${m.name}</option>`).join('') +
+    '<option value="mix">Random mix</option>';
+  $('mask').value = 'none';
+}
+function syncVisibility(){
+  const s = $('source').value;
+  document.querySelectorAll('.fieldonly').forEach(el=>el.classList.toggle('hidden', s==='noise'));
+  document.querySelectorAll('.customonly').forEach(el=>el.classList.toggle('hidden', s==='noise'));
+  document.querySelectorAll('.noiseonly').forEach(el=>el.classList.toggle('hidden', s!=='noise'));
+  $('formula').closest('.row').classList.toggle('hidden', s!=='field');
+  $('expr').closest('.row').classList.toggle('hidden', s!=='custom');
+  $('vary').closest('.row').classList.toggle('hidden', s!=='field');
+}
+const readouts = {density:'density-v', phase:'phase-v', 'mask-scale':'mask-scale-v'};
+function syncReadouts(){ for(const k in readouts) $(readouts[k]).textContent = (+$(k).value).toFixed(2); }
+
+fillSelects(); syncVisibility(); syncReadouts();
+
+$('regen').addEventListener('click', ()=>{ buildPalette(); buildSheet(true); });
+$('source').addEventListener('change', ()=>{ syncVisibility(); buildSheet(false); });
+['sw','sh','cols','rows','spacing','scale','symmetry','density','phase','ca','ncol',
+ 'formula','modulus','stride','vary','colormode','mask','mask-scale','mask-invert',
+ 'outline','sortlum'].forEach(id=>{
+  const el = $(id);
+  el.addEventListener('input', ()=>{ syncReadouts(); buildSheet(false); });
+  el.addEventListener('change', ()=>{ syncReadouts(); buildSheet(false); });
+});
+$('expr').addEventListener('input', ()=>buildSheet(false));
+$('bpc').addEventListener('change', ()=>{ buildPalette(); buildSheet(false); });
+$('export').addEventListener('click', ()=>{
+  const a=document.createElement('a');
+  a.download='procedural_sprites.png'; a.href=off.toDataURL('image/png'); a.click();
+});
+$('zin').addEventListener('click', ()=>zoom(view.s*1.5));
+$('zout').addEventListener('click', ()=>zoom(view.s/1.5));
+$('zreset').addEventListener('click', ()=>{ view.s=1; center(); });
+window.addEventListener('keydown', e=>{
+  if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT') return;
+  if(e.key==='r'||e.key==='R'){ buildPalette(); buildSheet(true); }
+});
+window.addEventListener('resize', ()=>{ resizeMain(); draw(); });
+
+buildPalette(); resizeMain(); buildSheet(true);
+requestAnimationFrame(()=>{ resizeMain(); center(); });
+</script>
+</body>
+</html>
