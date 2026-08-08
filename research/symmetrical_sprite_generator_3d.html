@@ -786,32 +786,100 @@ function resizeMain(){
  * persp are present and unused so R2 is an addition rather than a refactor.
  * World units are RASTER pixels = sheet texels x resample scale. */
 const Cam = {
-  target:{x:0, z:0}, logZoom:0,
-  yaw:0, pitch:-Math.PI/2, persp:0,   /* R2 */
+  target:{x:0, y:0, z:0}, logZoom:0,
+  yaw:0, pitch:-Math.PI/2, persp:0,
   vw:1, vh:1,
 };
+/* R2 · damped desired-state. Input writes here; a RAF loop eases the live Cam
+ * toward it with a frame-rate-independent decay, so feel does not depend on
+ * refresh rate. */
+const Want = {tx:0, tz:0, logZoom:0, yaw:0, pitch:-Math.PI/2, persp:0};
+const PITCH_MIN = -89.9*Math.PI/180, PITCH_MAX = -5*Math.PI/180;
+const PRESETS = {
+  top:      {yaw:0,               pitch:-90*Math.PI/180,     persp:0},
+  dimetric: {yaw:45*Math.PI/180,  pitch:-26.565*Math.PI/180, persp:0},
+  trueIso:  {yaw:45*Math.PI/180,  pitch:-35.264*Math.PI/180, persp:0},
+  free:     {yaw:30*Math.PI/180,  pitch:-40*Math.PI/180,     persp:0.65},
+};
 const camScale = () => Math.exp(Cam.logZoom);
-function project(wx, wz){
-  const s = camScale();
-  return { x: Cam.vw/2 + (wx-Cam.target.x)*s, y: Cam.vh/2 + (wz-Cam.target.z)*s };
+const halfHOf  = () => (Cam.vh/2)/camScale();
+const TAN_ORTHO = 1e-4, TAN_WIDE = Math.tan(25*Math.PI/180);
+
+/* right comes straight from yaw: cross(forward, worldUp) collapses to zero at
+ * pitch = -90, which is the mode we spend most of our time in. */
+function basis(){
+  const cy=Math.cos(Cam.yaw), sy=Math.sin(Cam.yaw);
+  const cp=Math.cos(Cam.pitch), sp=Math.sin(Cam.pitch);
+  const f={x:cp*sy, y:sp, z:-cp*cy}, r={x:cy, y:0, z:sy};
+  const u={x:r.y*f.z-r.z*f.y, y:r.z*f.x-r.x*f.z, z:r.x*f.y-r.y*f.x};
+  return {f,r,u};
 }
+function tanHalfFov(){
+  if(Cam.persp<=0) return 0;
+  return Math.exp(Math.log(TAN_ORTHO) + Cam.persp*(Math.log(TAN_WIDE)-Math.log(TAN_ORTHO)));
+}
+const camDist = () => { const t=tanHalfFov(); return t===0 ? 2e4 : halfHOf()/t; };
+function camPos(){
+  const {f}=basis(), d=camDist();
+  return {x:Cam.target.x-f.x*d, y:Cam.target.y-f.y*d, z:Cam.target.z-f.z*d};
+}
+/* World -> screen. persp===0 is a real branch, not a tiny fov, so top-down
+ * reduces EXACTLY to translate+scale and the byte-identity test stays possible. */
+function project(wx, wy, wz){
+  if(wz===undefined){ wz=wy; wy=0; }              /* project(x,z) shorthand */
+  const {f,r,u}=basis();
+  const dx=wx-Cam.target.x, dy=wy-Cam.target.y, dz=wz-Cam.target.z;
+  const th=tanHalfFov(), aspect=Cam.vw/Cam.vh;
+  if(th===0){
+    const s=camScale();
+    return { x: Cam.vw/2 + (dx*r.x+dy*r.y+dz*r.z)*s,
+             y: Cam.vh/2 - (dx*u.x+dy*u.y+dz*u.z)*s };
+  }
+  const p=camPos(), vx=wx-p.x, vy=wy-p.y, vz=wz-p.z;
+  const zz = vx*f.x+vy*f.y+vz*f.z;
+  if(zz<=1e-6) return {x:NaN, y:NaN};
+  const nx = ((vx*r.x+vy*r.y+vz*r.z)/zz)/(th*aspect);
+  const ny = ((vx*u.x+vy*u.y+vz*u.z)/zz)/th;
+  return { x:(Cam.vw/2)*(1+nx), y:(Cam.vh/2)*(1-ny) };
+}
+/* Screen -> ground plane y=0. Projection-agnostic: ortho, dimetric and full
+ * perspective all hand back a ray, so this is one function for every mode. */
 function pick(sx, sy){
-  const s = camScale();
-  return { x: Cam.target.x + (sx-Cam.vw/2)/s, z: Cam.target.z + (sy-Cam.vh/2)/s };
+  const {f,r,u}=basis(), th=tanHalfFov(), aspect=Cam.vw/Cam.vh;
+  const nx=(sx/(Cam.vw/2))-1, ny=1-(sy/(Cam.vh/2));
+  let o, d;
+  if(th===0){
+    const hh=halfHOf(), D=camDist();
+    o={ x:Cam.target.x + r.x*nx*hh*aspect + u.x*ny*hh - f.x*D,
+        y:Cam.target.y + r.y*nx*hh*aspect + u.y*ny*hh - f.y*D,
+        z:Cam.target.z + r.z*nx*hh*aspect + u.z*ny*hh - f.z*D };
+    d=f;
+  } else {
+    o=camPos();
+    d={ x:f.x+r.x*nx*th*aspect+u.x*ny*th,
+        y:f.y+r.y*nx*th*aspect+u.y*ny*th,
+        z:f.z+r.z*nx*th*aspect+u.z*ny*th };
+  }
+  if(Math.abs(d.y)<1e-9) return null;
+  const t=-o.y/d.y;
+  if(t<0) return null;
+  return { x:o.x+t*d.x, z:o.z+t*d.z };
 }
-/* Cursor-anchored zoom: unproject before, change zoom, unproject after, shift
- * the target by the difference. Survives non-diagonal transforms unchanged. */
+const isTopDown = () => Cam.persp===0 && Cam.yaw===0 && Math.abs(Cam.pitch+Math.PI/2)<1e-9;
+
 function zoomAt(dLog, sx, sy){
   if(sx==null){ sx=Cam.vw/2; sy=Cam.vh/2; }
   const a = pick(sx, sy);
   Cam.logZoom = Math.max(Math.log(0.05), Math.min(Math.log(64), Cam.logZoom+dLog));
   const b = pick(sx, sy);
-  Cam.target.x += a.x-b.x; Cam.target.z += a.z-b.z;
+  if(a && b){ Cam.target.x += a.x-b.x; Cam.target.z += a.z-b.z; }
+  Want.logZoom = Cam.logZoom; Want.tx = Cam.target.x; Want.tz = Cam.target.z;
   draw();
 }
 function zoom(s, fx, fy){ zoomAt(Math.log(s) - Cam.logZoom, fx, fy); }  /* legacy shim */
 function center(){
-  Cam.target.x = rasterW()/2; Cam.target.z = rasterH()/2;
+  Cam.target.x = Want.tx = rasterW()/2;
+  Cam.target.z = Want.tz = rasterH()/2;
   draw();
 }
 const rasterW = () => off.width  * S.cfg.scale;
@@ -898,8 +966,9 @@ const GL = {
     this.renderer.setClearColor(0x000000, 0);
     this.canvas = c;
     this.scene = new THREE.Scene();
-    this.cam = new THREE.OrthographicCamera(-1,1,1,-1, 0.1, 1e5);
-    this.cam.up.set(0,0,-1);
+    this.cam  = new THREE.OrthographicCamera(-1,1,1,-1, 1, 1e5);
+    this.camP = new THREE.PerspectiveCamera(50, 1, 1, 1e5);
+    this.cam.up.set(0,0,-1); this.camP.up.set(0,0,-1);
     this.tex = new THREE.CanvasTexture(off);
     this.tex.magFilter = THREE.NearestFilter;
     this.tex.minFilter = THREE.NearestFilter;   /* mipmaps arrive with R2's oblique views */
@@ -972,18 +1041,126 @@ const GL = {
   render(){
     if(!this.ok) return;
     this.geom();
-    if(atlasDirty){ this.tex.needsUpdate = true; }
+    if(atlasDirty){ this.tex.needsUpdate = true; Vox.dirty = true; }
+    if(Vox.on && (Vox.dirty || !Vox.mesh)) Vox.build(this.scene);
+    if(!Vox.on) Vox.dispose();
+    this.mesh.visible = !Vox.on;
     this.mat.uniforms.uSize.value.set(off.width, off.height);
     this.mat.uniforms.uScale.value = S.cfg.scale;
     this.mat.uniforms.uKernel.value = ({none:0, box:1, over:2})[S.cfg.kernel||'over'];
-    const s = camScale(), halfH = (Cam.vh/2)/s, halfW = (Cam.vw/2)/s;
-    const c = this.cam;
-    c.left=-halfW; c.right=halfW; c.top=halfH; c.bottom=-halfH;
-    c.near = 1; c.far = 4e4;
-    c.position.set(Cam.target.x, 2e4, Cam.target.z);
-    c.lookAt(Cam.target.x, 0, Cam.target.z);
+    /* One state, two projection objects. persp===0 takes the exact ortho path
+     * so top-down stays byte-comparable with the 2D renderer; anything above 0
+     * is a dolly with a matching fov, which keeps the pivot framed identically
+     * (exactly in the plane normal to the view axis; the ground plane
+     * foreshortens, which is the effect we wanted). */
+    const th = tanHalfFov(), d = camDist(), p = camPos(), {u} = basis();
+    const halfH = halfHOf(), halfW = halfH*(Cam.vw/Cam.vh);
+    const extent = Math.max(rasterW(), rasterH()) + halfH*2;
+    let c;
+    if(th === 0){
+      c = this.cam;
+      c.left=-halfW; c.right=halfW; c.top=halfH; c.bottom=-halfH;
+      c.near = Math.max(1, d-extent); c.far = d+extent;
+    } else {
+      c = this.camP;
+      c.fov = 2*Math.atan(th)*180/Math.PI;
+      c.aspect = Cam.vw/Cam.vh;
+      c.near = Math.max(1, d-extent); c.far = d+extent;
+    }
+    c.up.set(u.x, u.y, u.z);
+    c.position.set(p.x, p.y, p.z);
+    c.lookAt(Cam.target.x, Cam.target.y, Cam.target.z);
     c.updateProjectionMatrix();
     this.renderer.render(this.scene, c);
+  },
+};
+
+/* ======================================================== Rv · voxel extrusion
+ * NOT mode C (§5) — that needs f: Z^3 -> Z and touches generation. This is the
+ * stepping stone: extrude the existing 2D result along Y, with height driven by
+ * the palette index. Because the palette is luminance-sorted, height == relief
+ * for free, which is §5 mode B's "elevation as a data channel" arriving early.
+ * Generation is untouched; this reads lastSprites and nothing else. */
+const Vox = {
+  on:false, mesh:null, depth:5, mode:'luma', lit:false, dirty:true,
+  MAX: 200000,
+  light(scene){
+    if(this.lit) return;
+    const key = new THREE.DirectionalLight(0xffffff, 0.85); key.position.set(0.6,1,0.35);
+    const fill = new THREE.DirectionalLight(0x88aaff, 0.28); fill.position.set(-0.5,0.4,-0.6);
+    scene.add(key, fill, new THREE.AmbientLight(0xffffff, 0.42));
+    this.lit = true;
+  },
+  height(v, ncol){
+    if(this.mode === 'slab') return this.depth;
+    /* palette is luminance-sorted, so index maps monotonically to brightness */
+    return 1 + ((v-1)/Math.max(1,ncol-1))*(this.depth-1);
+  },
+  dispose(){
+    if(!this.mesh) return;
+    this.mesh.parent && this.mesh.parent.remove(this.mesh);
+    this.mesh.geometry.dispose(); this.mesh.material.dispose();
+    this.mesh = null;
+  },
+  build(scene){
+    this.dispose();
+    const cfg = S.cfg, {rows, cols} = S.cells;
+    const px = cfg.scale, ow=(cfg.sw+cfg.spacing)*px, oh=(cfg.sh+cfg.spacing)*px;
+
+    let n = 0;
+    for(let i=0;i<lastSprites.length;i++){
+      const sp = lastSprites[i]; if(!sp) continue;
+      for(let y=0;y<sp.h;y++){ const row=sp.grid[y]; for(let x=0;x<sp.w;x++) if(row[x]) n++; }
+    }
+    if(n === 0) return;
+    if(n > this.MAX){
+      console.warn(`Rv: ${n} voxels exceeds budget ${this.MAX} — extruding the selected cell only`);
+    }
+    const only = n > this.MAX ? (sel || {r:0,c:0}) : null;
+    if(only){
+      const sp = lastSprites[only.r*cols+only.c];
+      n = 0; if(sp) for(let y=0;y<sp.h;y++){ const row=sp.grid[y]; for(let x=0;x<sp.w;x++) if(row[x]) n++; }
+      if(!n) return;
+    }
+
+    const geo = new THREE.BoxGeometry(1,1,1);
+    /* r128 needs vertexColors:true for instanceColor to reach the fragment, but
+     * that also makes the vertex shader read a `color` attribute BoxGeometry
+     * doesn't have — which resolves to black. Supply a white one so the two
+     * multiply to the instance colour. */
+    const white = new Float32Array(geo.attributes.position.count*3).fill(1);
+    geo.setAttribute('color', new THREE.BufferAttribute(white, 3));
+    const mat = new THREE.MeshLambertMaterial({vertexColors:true});
+    const mesh = new THREE.InstancedMesh(geo, mat, n);
+    const m = new THREE.Matrix4(), col = new THREE.Color();
+    let k = 0;
+    for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+      if(only && (r!==only.r || c!==only.c)) continue;
+      const sp = lastSprites[r*cols+c]; if(!sp) continue;
+      const ncol = sp.colors.length;
+      const X0 = only ? 0 : c*ow, Z0 = only ? 0 : r*oh;
+      for(let y=0;y<sp.h;y++){
+        const row = sp.grid[y];
+        for(let x=0;x<sp.w;x++){
+          const v = row[x]; if(!v) continue;
+          const hh = this.height(v, ncol);
+          m.makeScale(px, hh*px, px);
+          m.setPosition(X0 + (x+0.5)*px, hh*px/2, Z0 + (y+0.5)*px);
+          mesh.setMatrixAt(k, m);
+          col.set(sp.colors[v-1] || '#ffffff');
+          mesh.setColorAt(k, col);
+          k++;
+        }
+      }
+    }
+    mesh.count = k;
+    mesh.instanceMatrix.needsUpdate = true;
+    if(mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    this.light(scene);
+    scene.add(mesh);
+    this.mesh = mesh;
+    this.dirty = false;
+    console.log(`Rv: ${k} voxels · depth ${this.depth} · ${this.mode}${only?' (selected cell only)':''}`);
   },
 };
 
@@ -1012,23 +1189,88 @@ function draw(){
 function drawOverlays(){
   const cfg = S.cfg, {rows, cols, list} = S.cells;
   const px = cfg.scale, ow=(cfg.sw+cfg.spacing)*px, oh=(cfg.sh+cfg.spacing)*px;
-  const s = camScale();
-  ctx.save();
-  ctx.translate(Cam.vw/2 - Cam.target.x*s, Cam.vh/2 - Cam.target.z*s);
-  ctx.scale(s, s);
+  const sw = cfg.sw*px, sh = cfg.sh*px;
+
+  /* Rects are projected corner-by-corner rather than drawn under a 2D affine,
+   * because under orbit a cell outline is a quadrilateral, not a rectangle.
+   * project() is the same function the picker inverts, so the outline and the
+   * hit region cannot drift apart. */
+  const quad = (x, z, w, h, pad) => {
+    const a=project(x-pad,z-pad), b=project(x+w+pad,z-pad);
+    const c=project(x+w+pad,z+h+pad), d=project(x-pad,z+h+pad);
+    if([a,b,c,d].some(p=>!isFinite(p.x)||!isFinite(p.y))) return;
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y);
+    ctx.lineTo(c.x,c.y); ctx.lineTo(d.x,d.y); ctx.closePath(); ctx.stroke();
+  };
   for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
     if(!list[r*cols+c].locked) continue;
-    ctx.strokeStyle='rgba(239,68,68,.85)'; ctx.lineWidth=Math.max(0.5, 1.5/s);
-    ctx.strokeRect(c*ow-1.5/s, r*oh-1.5/s, cfg.sw*px+3/s, cfg.sh*px+3/s);
+    ctx.strokeStyle='rgba(239,68,68,.85)'; ctx.lineWidth=1.5; ctx.setLineDash([]);
+    quad(c*ow, r*oh, sw, sh, 1.5/camScale());
   }
   if(sel && sel.r<rows && sel.c<cols){
-    ctx.strokeStyle='#4f8cff'; ctx.lineWidth=Math.max(1,2/s);
-    ctx.setLineDash([4/s, 3/s]);
-    ctx.strokeRect(sel.c*ow-2/s, sel.r*oh-2/s, cfg.sw*px+4/s, cfg.sh*px+4/s);
+    ctx.strokeStyle='#4f8cff'; ctx.lineWidth=2; ctx.setLineDash([4,3]);
+    quad(sel.c*ow, sel.r*oh, sw, sh, 2/camScale());
     ctx.setLineDash([]);
   }
-  ctx.restore();
 }
+
+/* ================================================= R2 · orbit + damping (§3.6)
+ * Frame-rate-independent decay: x += (want-x)*(1-exp(-k*dt)). The `* 0.9 per
+ * frame` form makes the feel depend on refresh rate, which is obvious on a
+ * 120 Hz panel. */
+const DAMP_K = 16;
+let animRaf = 0, animLast = 0;
+function needsAnim(){
+  return Math.abs(Want.yaw-Cam.yaw) > 1e-5 || Math.abs(Want.pitch-Cam.pitch) > 1e-5
+      || Math.abs(Want.persp-Cam.persp) > 1e-5 || Math.abs(Want.logZoom-Cam.logZoom) > 1e-5
+      || Math.abs(Want.tx-Cam.target.x) > 1e-3 || Math.abs(Want.tz-Cam.target.z) > 1e-3;
+}
+function kick(){
+  if(animRaf) return;
+  animLast = performance.now();
+  animRaf = requestAnimationFrame(step);
+}
+function step(t){
+  animRaf = 0;
+  const dt = Math.min(0.05, (t-animLast)/1000); animLast = t;
+  const a = 1 - Math.exp(-DAMP_K*dt);
+  Cam.yaw     += (Want.yaw     - Cam.yaw)*a;
+  Cam.pitch   += (Want.pitch   - Cam.pitch)*a;
+  Cam.persp   += (Want.persp   - Cam.persp)*a;
+  Cam.logZoom += (Want.logZoom - Cam.logZoom)*a;
+  Cam.target.x += (Want.tx - Cam.target.x)*a;
+  Cam.target.z += (Want.tz - Cam.target.z)*a;
+  if(!needsAnim()){                 /* land exactly, so isTopDown() can be strict */
+    Cam.yaw=Want.yaw; Cam.pitch=Want.pitch; Cam.persp=Want.persp;
+    Cam.logZoom=Want.logZoom; Cam.target.x=Want.tx; Cam.target.z=Want.tz;
+    draw(); return;
+  }
+  draw(); kick();
+}
+function goPreset(name){
+  const p = PRESETS[name]; if(!p) return;
+  if(!GL.on && p.pitch !== -Math.PI/2){ if(GL.ok || GL.init()){ GL.on = true; GL.resize(); } }
+  Want.yaw=p.yaw; Want.pitch=p.pitch; Want.persp=p.persp;
+  console.log('camera:', name);
+  kick();
+}
+/* Orbit on middle/right drag or Alt+LMB. LMB stays pan+select, unchanged. */
+let orbit = null;
+stage.addEventListener('contextmenu', e=>{ if(orbit) e.preventDefault(); });
+stage.addEventListener('mousedown', e=>{
+  if(e.button!==0 && e.button!==1 && e.button!==2) return;
+  if(e.button===0 && !e.altKey) return;
+  e.preventDefault();
+  if(!GL.on){ if(GL.ok || GL.init()){ GL.on = true; GL.resize(); } }
+  orbit = {sx:e.clientX, sy:e.clientY, yaw:Want.yaw, pitch:Want.pitch};
+});
+window.addEventListener('mousemove', e=>{
+  if(!orbit) return;
+  Want.yaw   = orbit.yaw   + (e.clientX-orbit.sx)*0.008;
+  Want.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, orbit.pitch + (e.clientY-orbit.sy)*0.006));
+  kick();
+});
+window.addEventListener('mouseup', ()=>{ orbit = null; });
 
 /* ============================================================= timeline */
 const strip = $('tl-strip');
@@ -1188,15 +1430,21 @@ function writeUI(){
  * motion at any zoom. Under R2's oblique projections this line is unchanged —
  * only the basis it moves along picks up yaw. */
 stage.addEventListener('mousedown', e=>{
-  if(e.button!==0) return;
+  if(e.button!==0 || e.altKey) return;
   drag={sx:e.clientX, sy:e.clientY, tx:Cam.target.x, tz:Cam.target.z}; panned=false;
 });
 window.addEventListener('mousemove', e=>{
   if(!drag) return;
   const dx = e.clientX-drag.sx, dy = e.clientY-drag.sy;
   if(Math.abs(dx)>2 || Math.abs(dy)>2) panned=true;
-  const s = camScale();
-  Cam.target.x = drag.tx - dx/s; Cam.target.z = drag.tz - dy/s;
+  const s = camScale(), {r,u} = basis();
+  /* Pan along the camera's own basis projected onto the ground plane, so a
+   * pixel of mouse motion is a pixel of content motion at any yaw. Reduces to
+   * the old behaviour exactly at pitch = -90. */
+  const gx = -dx/s, gy = -dy/s;
+  const fx = r.x*gx - u.x*gy, fz = r.z*gx - u.z*gy;
+  const k = Math.max(0.15, Math.abs(Math.sin(Cam.pitch)));   /* grazing guard */
+  Cam.target.x = Want.tx = drag.tx + fx/k; Cam.target.z = Want.tz = drag.tz + fz/k;
   draw();
 });
 window.addEventListener('mouseup', e=>{
@@ -1235,7 +1483,7 @@ window.addEventListener('keydown', e=>{
     console.log('renderer:', GL.on ? 'GL (shader resample)' : '2D (JS resample)');
     draw();
   }
-  if(e.key==='k'||e.key==='K'){
+  if(e.key==='j'||e.key==='J'){
     const order = ['over','box','none'];
     S.cfg.kernel = order[(order.indexOf(S.cfg.kernel||'over')+1) % 3];
     atlasDirty = true;
@@ -1244,6 +1492,37 @@ window.addEventListener('keydown', e=>{
       : S.cfg.kernel==='box' ? '(area average: alpha 1, symmetric, no glow)'
       : '(nearest: crisp, export-exact)');
     draw();
+  }
+  /* Rv · voxels. Enabling forces GL and tilts the camera — a top-down voxel
+   * view is indistinguishable from the flat sheet, which is §5 mode A's whole
+   * problem restated in three dimensions. */
+  if(e.key==='x'||e.key==='X'){
+    if(!GL.ok && !GL.init()){ console.warn('Rv: no WebGL'); return; }
+    Vox.on = !Vox.on; Vox.dirty = true;
+    if(Vox.on){
+      GL.on = true; GL.resize();
+      if(isTopDown()) goPreset('dimetric');
+    }
+    console.log('voxels:', Vox.on ? `on · depth ${Vox.depth} · ${Vox.mode}` : 'off');
+    draw();
+  }
+  if(Vox.on && (e.key===','||e.key==='.')){
+    Vox.depth = Math.max(1, Math.min(64, Vox.depth + (e.key==='.' ? 1 : -1)));
+    Vox.dirty = true; console.log('voxel depth:', Vox.depth); draw();
+  }
+  if(Vox.on && (e.key==='m'||e.key==='M')){
+    Vox.mode = Vox.mode==='luma' ? 'slab' : 'luma';
+    Vox.dirty = true; console.log('voxel height:', Vox.mode); draw();
+  }
+  if(e.key==='1') goPreset('top');
+  if(e.key==='2') goPreset('dimetric');
+  if(e.key==='3') goPreset('trueIso');
+  if(e.key==='4') goPreset('free');
+  if(e.key==='0'){ goPreset('top'); Cam.logZoom=Want.logZoom=0; center(); }
+  if(e.key==='['){ Want.persp=Math.max(0, Want.persp-0.15); kick(); }
+  if(e.key===']'){
+    if(!GL.on){ if(GL.ok || GL.init()){ GL.on=true; GL.resize(); } }
+    Want.persp=Math.min(1, Want.persp+0.15); kick();
   }
 }, true);
 
