@@ -60,7 +60,17 @@
     background:rgba(22,27,34,.85); padding:6px; border-radius:8px; backdrop-filter:blur(4px);
     border:1px solid var(--line);
   }
-  .toolbar button{width:auto; padding:4px 11px; background:#30363d}
+  .toolbar button{width:auto; padding:4px 10px; background:#30363d}
+  .toolbar button.on{background:#1f6feb; border-color:#1f6feb; color:#fff}
+  .toolbar .sep{width:1px; align-self:stretch; background:#30363d; margin:0 2px}
+  #hud{
+    position:absolute; left:14px; bottom:14px; z-index:20; pointer-events:none;
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; line-height:1.65;
+    color:#8b98a8; background:rgba(22,27,34,.78); border:1px solid var(--line);
+    border-radius:8px; padding:6px 9px; backdrop-filter:blur(4px); white-space:pre;
+  }
+  #hud b{color:#9fd0ff; font-weight:600}
+  #hud i{color:#5b6470; font-style:normal}
   #recipe{
     font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; color:#9fd0ff;
     background:var(--sunk); border:1px solid #30363d; border-radius:6px; padding:7px;
@@ -316,14 +326,38 @@
     <div id="recipe">Click a sprite to inspect &amp; lock it.</div>
   </div>
 
+  <div class="group">
+    <div class="title">Export</div>
+    <div class="row">
+      <label title="Nearest expansion of the 1:1 atlas. Integer only — a fractional asset export is the one operation that cannot be lossless.">Asset ×</label>
+      <input type="number" id="ex-mult" value="4" min="1" max="16">
+    </div>
+    <div class="btnrow">
+      <button id="export" class="sec">↓ Sheet PNG</button>
+      <button id="ex-manifest" class="sec">↓ Manifest</button>
+    </div>
+    <div class="row"><label title="Long edge of the exported image, in pixels">View px</label>
+      <input type="number" id="ex-size" value="2048" min="256" max="8192" step="256"></div>
+    <div class="row"><label title="Render at N× and box-downsample">Supersample</label>
+      <select id="ex-ss"><option value="1">1×</option><option value="2" selected>2×</option><option value="3">3×</option></select></div>
+    <div class="row"><label title="Turntable frames over one 360° yaw sweep">Frames</label>
+      <input type="number" id="ex-frames" value="24" min="4" max="64"></div>
+    <div class="btnrow">
+      <button id="ex-view" class="sec">↓ View PNG</button>
+      <button id="ex-turn" class="sec">↓ Turntable</button>
+    </div>
+    <button id="ex-verify" class="sec" title="§10.4 — view export must be BYTE-identical to the asset export at top-down">✓ Verify §10.4</button>
+  </div>
+
   <div class="btnrow">
-    <button id="export" class="sec">↓ PNG</button>
     <button id="save" class="sec">↓ Session</button>
     <button id="load" class="sec">↑ Load</button>
   </div>
   <input type="file" id="file" accept="application/json" class="hidden">
   <div class="hint">click = select · ctrl-click = lock · alt-click = keep<br>
-    shift-click = reroll · drag = pan · wheel = zoom<br>
+    shift-click = reroll · drag = pan · right-drag = orbit · wheel = zoom<br>
+    1–4 = camera · 0 = frame · X = scene · E = elevation · [ ] = perspective<br>
+    V = renderer · J = kernel · , . = lift/depth<br>
     R = regenerate · K = keep · C = copy · B = bookmark<br>
     ← → = scrub · space = play</div>
 </div>
@@ -332,8 +366,17 @@
   <div id="stage">
     <canvas id="cv"></canvas>
     <!-- R1: GL canvas is created in JS and inserted here at runtime -->
+    <div id="hud"></div>
     <div class="toolbar">
-      <button id="zin">+</button><button id="zout">−</button><button id="zreset">Reset</button>
+      <button id="v-top" title="Top-down (1)">▣</button>
+      <button id="v-dim" title="2:1 dimetric (2)">◱</button>
+      <button id="v-iso" title="True isometric (3)">◈</button>
+      <button id="v-per" title="Free perspective (4)">◐</button>
+      <span class="sep"></span>
+      <button id="v-scene" title="Scene mode (X)">Quad</button>
+      <button id="v-elev" title="Elevation channel (E)">Flat</button>
+      <span class="sep"></span>
+      <button id="zin">+</button><button id="zout">−</button><button id="zreset">Frame</button>
     </div>
   </div>
 
@@ -367,6 +410,9 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- OrbitControls is not in the r128 core bundle; it ships alongside it in the
+     same npm package, so this is the matching build, not a mismatched one. -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -717,7 +763,6 @@ function toGen(cfg, paletteSeed){
 const canvas = $('cv'), ctx = canvas.getContext('2d');
 const stage = $('stage');
 const off = document.createElement('canvas'), offCtx = off.getContext('2d');
-let drag=null, panned=false;
 let lastSprites = [];
 let sel = null;                 /* {r,c} — a view overlay, not part of S */
 
@@ -772,12 +817,22 @@ function render(){
     }
   }
   offCtx.putImageData(img, 0, 0);
-  atlasDirty = true;
+  atlasDirty = true; atlasVersion++;
   resizeMain(); draw();
 }
 function resizeMain(){
+  const prevScale = Math.exp(Cam.logZoom);
   canvas.width = stage.clientWidth; canvas.height = stage.clientHeight;
   Cam.vw = canvas.width; Cam.vh = canvas.height;
+  if(rigOK){
+    /* halfH is derived from rig distance AND viewport height, so holding the
+     * distance fixed across a resize would change px-per-world-unit — enlarge
+     * the window and the sprites would grow. Hold the scale instead: a bigger
+     * window shows more sheet, which is what every 2D tool does. */
+    controls.minDistance = distForScale(SCALE_MAX);
+    controls.maxDistance = distForScale(SCALE_MIN);
+    applyScale(prevScale); syncCamFromRig();
+  }
   if(GL.on) GL.resize();
 }
 
@@ -790,11 +845,17 @@ const Cam = {
   yaw:0, pitch:-Math.PI/2, persp:0,
   vw:1, vh:1,
 };
-/* R2 · damped desired-state. Input writes here; a RAF loop eases the live Cam
- * toward it with a frame-rate-independent decay, so feel does not depend on
- * refresh rate. */
-const Want = {tx:0, tz:0, logZoom:0, yaw:0, pitch:-Math.PI/2, persp:0};
-const PITCH_MIN = -89.9*Math.PI/180, PITCH_MAX = -5*Math.PI/180;
+/* R2 · Cam is now DERIVED, not driven. OrbitControls owns {target, azimuth,
+ * polar, distance} on a proxy rig; syncCamFromRig() projects that onto the six
+ * fields above once per change. Everything downstream — project(), pick(),
+ * GL.syncCamera(), the 2D fallback blit — reads Cam exactly as before, so the
+ * verified R0 maths is untouched. There is no desired-state and no easing:
+ * that pair is what used to blow the camera up (see the R2 section below).
+ * `persp` is the one field the rig does NOT own, because it changes the shape
+ * of the projection rather than the pose, and holding halfH fixed across the
+ * change is what makes it pop-free (§3.3). */
+const POLAR_MAX = 85*Math.PI/180;                /* pitch >= -5 deg: never edge-on */
+const SCALE_MIN = 0.05, SCALE_MAX = 64;
 const PRESETS = {
   top:      {yaw:0,               pitch:-90*Math.PI/180,     persp:0},
   dimetric: {yaw:45*Math.PI/180,  pitch:-26.565*Math.PI/180, persp:0},
@@ -867,20 +928,53 @@ function pick(sx, sy){
 }
 const isTopDown = () => Cam.persp===0 && Cam.yaw===0 && Math.abs(Cam.pitch+Math.PI/2)<1e-9;
 
+/* Cursor-anchored zoom. r128 OrbitControls has no zoomToCursor, so this stays
+ * ours: unproject the cursor onto the ground BEFORE, change the rig distance,
+ * unproject AFTER, translate the whole rig by the difference. The translation
+ * is rigid (target and eye move together), so the spherical pose is unchanged
+ * and there is nothing for OrbitControls to disagree with. */
 function zoomAt(dLog, sx, sy){
+  if(!rigOK) return;
+  cancelTween();
   if(sx==null){ sx=Cam.vw/2; sy=Cam.vh/2; }
   const a = pick(sx, sy);
-  Cam.logZoom = Math.max(Math.log(0.05), Math.min(Math.log(64), Cam.logZoom+dLog));
+  applyScale(Math.exp(Cam.logZoom + dLog));
+  syncCamFromRig();
   const b = pick(sx, sy);
-  if(a && b){ Cam.target.x += a.x-b.x; Cam.target.z += a.z-b.z; }
-  Want.logZoom = Cam.logZoom; Want.tx = Cam.target.x; Want.tz = Cam.target.z;
-  draw();
+  if(a && b){
+    let dx = a.x-b.x, dz = a.z-b.z;
+    /* A ray/ground intersection is unbounded as the ray goes grazing, and the
+     * anchor correction inherits that. Capping it at a few view-heights is the
+     * difference between "the anchor degrades near the horizon" and "the
+     * camera leaves the solar system". */
+    const cap = 8*halfHOf(), m = Math.hypot(dx, dz);
+    if(!isFinite(m)) dx = dz = 0;
+    else if(m > cap){ dx *= cap/m; dz *= cap/m; }
+    translateRig(dx, dz);
+  }
+  clampRig();
+  syncCamFromRig();
+  scheduleDraw();
 }
 function zoom(s, fx, fy){ zoomAt(Math.log(s) - Cam.logZoom, fx, fy); }  /* legacy shim */
 function center(){
-  Cam.target.x = Want.tx = rasterW()/2;
-  Cam.target.z = Want.tz = rasterH()/2;
+  if(rigOK){
+    translateRig(rasterW()/2 - Cam.target.x, rasterH()/2 - Cam.target.z);
+    syncCamFromRig();
+  }
   draw();
+}
+/* preset `0`: centre AND fit. Framing is a camera operation now, so the reset
+ * button may as well do the whole job. */
+function frameSheet(){
+  if(!rigOK){ draw(); return; }
+  cancelTween();
+  const rw = Math.max(1, rasterW()), rh = Math.max(1, rasterH());
+  applyScale(Math.min(Cam.vw/rw, Cam.vh/rh)*0.92);
+  syncCamFromRig();
+  translateRig(rw/2 - Cam.target.x, rh/2 - Cam.target.z);
+  syncCamFromRig();
+  scheduleDraw();
 }
 const rasterW = () => off.width  * S.cfg.scale;
 const rasterH = () => off.height * S.cfg.scale;
@@ -890,6 +984,12 @@ const rasterH = () => off.height * S.cfg.scale;
  * then a source-over chain in draw order. NOT an area average — two half-
  * covering opaque rects give alpha 0.75 and weights 1/3 : 2/3, and that
  * translucency is the glow. Validated headless in panzoom-r0-harness.js. */
+/* atlasVersion is the upload cursor for the GPU side. `atlasDirty` is consumed
+ * by the 2D resample and cleared by it; the GL path has no such consumer, so it
+ * used to re-upload the whole atlas every single frame of an orbit. A monotonic
+ * counter compared against a per-texture watermark fixes that, and gives Cards
+ * and Vox a cheap rebuild trigger for free. */
+let atlasVersion = 0, colVersion = 0;
 let atlasDirty = true, offR = document.createElement('canvas'), offRKey = '';
 function coverage1D(srcN, s){
   const W = Math.ceil(srcN*s - 1e-9), out = new Array(W);
@@ -949,11 +1049,16 @@ function buildResampled(){
  * SHADER rather than baked into the texture (§7.5). That keeps the atlas binary-
  * alpha, makes `scale` a live uniform with no regeneration, and carries the
  * colourisation into every camera angle R2 adds. */
+const SCENE_MODES = ['quad','cards','voxels'];
+let sceneMode = 'quad';
 const GL = {
   on:false, ok:false, canvas:null, renderer:null, scene:null, cam:null,
-  mesh:null, tex:null, mat:null,
+  mesh:null, tex:null, mat:null, texVersion:-1, failed:false,
   init(){
-    if(this.ok || typeof THREE === 'undefined') return this.ok;
+    if(this.ok) return true;
+    /* one attempt only: ensureGL() is called from tweens and from draw(), and
+     * retrying a failed context every frame just spams the console. */
+    if(this.failed || typeof THREE === 'undefined') return false;
     const c = document.createElement('canvas');
     c.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; display:none';
     if(getComputedStyle(stage).position === 'static') stage.style.position = 'relative';
@@ -962,7 +1067,7 @@ const GL = {
     canvas.style.position = 'relative'; canvas.style.zIndex = '1';
     try{
       this.renderer = new THREE.WebGLRenderer({canvas:c, alpha:true, antialias:false});
-    }catch(err){ console.warn('R1: WebGL unavailable, staying on the 2D renderer', err); return false; }
+    }catch(err){ this.failed = true; console.warn('R1: WebGL unavailable, staying on the 2D renderer', err); return false; }
     this.renderer.setClearColor(0x000000, 0);
     this.canvas = c;
     this.scene = new THREE.Scene();
@@ -1038,24 +1143,22 @@ const GL = {
     this.mesh.geometry = g;
     this.mesh.userData = {rw, rh};
   },
-  render(){
-    if(!this.ok) return;
-    this.geom();
-    if(atlasDirty){ this.tex.needsUpdate = true; Vox.dirty = true; }
-    if(Vox.on && (Vox.dirty || !Vox.mesh)) Vox.build(this.scene);
-    if(!Vox.on) Vox.dispose();
-    this.mesh.visible = !Vox.on;
-    this.mat.uniforms.uSize.value.set(off.width, off.height);
-    this.mat.uniforms.uScale.value = S.cfg.scale;
-    this.mat.uniforms.uKernel.value = ({none:0, box:1, over:2})[S.cfg.kernel||'over'];
-    /* One state, two projection objects. persp===0 takes the exact ortho path
-     * so top-down stays byte-comparable with the 2D renderer; anything above 0
-     * is a dolly with a matching fov, which keeps the pivot framed identically
-     * (exactly in the plane normal to the view axis; the ground plane
-     * foreshortens, which is the effect we wanted). */
+  /* Split out of render() because picking needs it too: a Raycaster has to be
+   * built from the SAME camera the frame was drawn with, or a click at a
+   * grazing pitch selects the neighbour. Returns the live camera object.
+   *
+   * One state, two projection objects. persp===0 takes the exact ortho path so
+   * top-down stays byte-comparable with the 2D renderer; anything above 0 is a
+   * dolly with a matching fov, which keeps the pivot framed identically
+   * (exactly in the plane normal to the view axis; the ground plane
+   * foreshortens, which is the effect we wanted). */
+  syncCamera(){
     const th = tanHalfFov(), d = camDist(), p = camPos(), {u} = basis();
     const halfH = halfHOf(), halfW = halfH*(Cam.vw/Cam.vh);
-    const extent = Math.max(rasterW(), rasterH()) + halfH*2;
+    /* elevation pushes geometry off the ground plane now, so the depth range
+     * has to cover the tallest card / voxel stack as well as the sheet. */
+    const lift = Math.max(Cards.reach(), Vox.reach());
+    const extent = Math.max(rasterW(), rasterH()) + halfH*2 + lift*2;
     let c;
     if(th === 0){
       c = this.cam;
@@ -1071,7 +1174,213 @@ const GL = {
     c.position.set(p.x, p.y, p.z);
     c.lookAt(Cam.target.x, Cam.target.y, Cam.target.z);
     c.updateProjectionMatrix();
-    this.renderer.render(this.scene, c);
+    c.updateMatrixWorld(true);
+    return c;
+  },
+  render(){
+    if(!this.ok) return;
+    this.geom();
+    if(this.texVersion !== atlasVersion){
+      this.tex.needsUpdate = true; this.texVersion = atlasVersion;
+      Vox.dirty = true; Cards.dirty = true;
+    }
+    if(sceneMode !== 'voxels') Vox.dispose();
+    if(sceneMode !== 'cards')  Cards.dispose();
+    if(sceneMode === 'voxels' && (Vox.dirty || !Vox.mesh)) Vox.build(this.scene);
+    if(sceneMode === 'cards')  Cards.sync(this.scene);
+    this.mesh.visible = (sceneMode === 'quad');
+    this.mat.uniforms.uSize.value.set(off.width, off.height);
+    this.mat.uniforms.uScale.value = S.cfg.scale;
+    this.mat.uniforms.uKernel.value = ({none:0, box:1, over:2})[S.cfg.kernel||'over'];
+    this.renderer.render(this.scene, this.syncCamera());
+  },
+};
+
+/* ============================================ R3 · mode B, instanced cards (§5)
+ * One InstancedMesh, one unit quad, rows*cols instances, and a per-instance
+ * vec2 giving the cell's texel origin in the atlas. That is the whole port —
+ * the magnification shader is the R1 one with `uSize` swapped for `uSpan` in
+ * the coverage window, so fractional `scale` colourisation survives verbatim.
+ *
+ * The reason to bother, restated: once each cell is its own object, ELEVATION
+ * BECOMES A DATA CHANNEL. Lock state stops being a red rectangle you can only
+ * read from directly overhead and becomes a lift you can read from any angle.
+ * Mean luminance / ink coverage / colour count turn the sheet into a terrain
+ * over whatever parameter you are currently pushing, and orbit becomes the
+ * instrument for reading it. That is the one genuinely functional argument for
+ * putting a camera over a sprite sheet, so it is the rung worth landing.
+ *
+ * Atlas V is flipped (CanvasTexture.flipY), so texel row 0 of the sampler is
+ * the BOTTOM source row. Cell (r,c) therefore starts at
+ *     ix0 = c*outerW,  iy0 = atlasH - r*outerH - sh
+ * and the quad's uv (v=1 at z=0) lands sprite row 0 at the near edge, which is
+ * the same orientation the mode-A quad already has. */
+const ELEV_CHANNELS = ['flat','luma','ink','colors'];
+const ELEV_LABEL = {flat:'Flat', luma:'Luminance', ink:'Ink coverage', colors:'Colour count'};
+
+function hexLuma(hex){
+  const t = hex.charAt(0)==='#' ? hex.slice(1) : hex;
+  const n = parseInt(t.length===3 ? t[0]+t[0]+t[1]+t[1]+t[2]+t[2] : t, 16);
+  if(!isFinite(n)) return 0;
+  return (0.2126*((n>>16)&0xff) + 0.7152*((n>>8)&0xff) + 0.0722*(n&0xff))/255;
+}
+/* Metrics are pure functions of the sprite, so they memoise on it and die with
+ * it. Nothing here reaches back into generation. */
+function spriteMetrics(sp){
+  if(sp._met) return sp._met;
+  const lut = sp.colors.map(hexLuma);
+  let ink = 0, lum = 0;
+  for(let y=0;y<sp.h;y++){
+    const row = sp.grid[y];
+    for(let x=0;x<sp.w;x++){ const v = row[x]; if(!v) continue; ink++; lum += lut[v-1]||0; }
+  }
+  sp._met = { ink: ink/(sp.w*sp.h), luma: ink ? lum/ink : 0,
+              colors: Math.min(1, sp.colors.length/16) };
+  return sp._met;
+}
+
+const Cards = {
+  mesh:null, dirty:true, key:'', channel:'flat', liftMul:1.0,
+  LOCK_LIFT:0.30, KEEP_LIFT:0.62,          /* in sprite-heights */
+  unit(){ return S.cfg.sh * S.cfg.scale; },
+  reach(){ return this.mesh ? this.mesh.userData.maxY||0 : 0; },
+  keptSeeds(){
+    const set = new Set();
+    for(const it of collection) set.add(it.seed);
+    return set;
+  },
+  elevOf(i, kept){
+    const cell = S.cells.list[i], sp = lastSprites[i], unit = this.unit();
+    let y = 0;
+    if(sp && this.channel !== 'flat') y += spriteMetrics(sp)[this.channel]*this.liftMul*unit;
+    if(cell && cell.locked) y += this.LOCK_LIFT*unit;
+    if(cell && kept.has(cell.seed)) y += this.KEEP_LIFT*unit;
+    return y;
+  },
+  /* Elevation of one cell, for the overlay pass. Cheap enough to call per cell. */
+  cellY(r, c){
+    if(sceneMode !== 'cards') return 0;
+    const i = r*S.cells.cols + c;
+    if(i < 0 || i >= S.cells.list.length) return 0;
+    return this.elevOf(i, this._kept || (this._kept = this.keptSeeds()));
+  },
+  material(){
+    if(this._mat) return this._mat;
+    this._mat = new THREE.ShaderMaterial({
+      /* alphaTest 0.5 rather than transparent sorting: sprite alpha is binary
+       * except at fractional scale, so discarding below half is
+       * order-independent AND keeps depthWrite honest between lifted cards.
+       * (§5 mode B. The soft resample fringe is the price; it is one texel.) */
+      transparent:true, depthWrite:true, depthTest:true, side:THREE.FrontSide,
+      uniforms:{ uAtlas:{value:null}, uSize:{value:new THREE.Vector2(1,1)},
+                 uSpan:{value:new THREE.Vector2(1,1)}, uScale:{value:1}, uKernel:{value:2} },
+      vertexShader:`
+        attribute vec2 aCell;
+        varying vec2 vUv; varying vec2 vCell;
+        void main(){
+          vUv = uv; vCell = aCell;
+          gl_Position = projectionMatrix*modelViewMatrix*instanceMatrix*vec4(position,1.0);
+        }`,
+      fragmentShader:`
+        precision highp float;
+        uniform sampler2D uAtlas; uniform vec2 uSize; uniform vec2 uSpan;
+        uniform float uScale; uniform int uKernel;
+        varying vec2 vUv; varying vec2 vCell;
+        vec4 texel(float ix, float iy){
+          return texture2D(uAtlas, (vCell + vec2(ix,iy) + 0.5)/uSize);
+        }
+        void main(){
+          vec2 raster = vUv*uSpan*uScale;
+          vec2 j = floor(raster);
+          float s = uScale;
+          vec2 i0 = floor(j/s);
+          vec2 i1 = min(floor((j+1.0-1e-4)/s), uSpan-1.0);
+          vec2 c0 = min((i0+1.0)*s, j+1.0) - max(i0*s, j);
+          vec2 c1 = max(vec2(0.0), min((i1+1.0)*s, j+1.0) - max(i1*s, j));
+          c1 *= step(0.5, i1-i0);
+          if(uKernel == 0){
+            gl_FragColor = texel(floor(raster.x/s), floor(raster.y/s));
+            if(gl_FragColor.a < 0.5) discard;
+            return;
+          }
+          float cw[4]; vec4 cc[4];
+          cc[0]=texel(i0.x,i0.y); cw[0]=c0.x*c0.y;
+          cc[1]=texel(i1.x,i0.y); cw[1]=c1.x*c0.y;
+          cc[2]=texel(i0.x,i1.y); cw[2]=c0.x*c1.y;
+          cc[3]=texel(i1.x,i1.y); cw[3]=c1.x*c1.y;
+          vec3 P = vec3(0.0); float A = 0.0;
+          for(int k=0;k<4;k++){
+            float a = cw[k]*cc[k].a;
+            if(uKernel == 1){ P += cc[k].rgb*a; A += a; }
+            else { P = cc[k].rgb*a + P*(1.0-a); A = a + A*(1.0-a); }
+          }
+          if(A < 0.5) discard;
+          gl_FragColor = vec4(P/A, min(A,1.0));
+        }`,
+    });
+    return this._mat;
+  },
+  dispose(){
+    this._kept = null;
+    if(!this.mesh) return;
+    this.mesh.parent && this.mesh.parent.remove(this.mesh);
+    this.mesh.geometry.dispose();
+    this.mesh = null; this.key = '';
+  },
+  signature(){
+    const cfg = S.cfg, {rows, cols, list} = S.cells;
+    let locks = 0;
+    for(let i=0;i<list.length;i++) if(list[i].locked) locks = (locks*31 + i + 1)|0;
+    return [rows,cols,cfg.sw,cfg.sh,cfg.spacing,cfg.scale,this.channel,
+            this.liftMul,locks,colVersion,atlasVersion].join('|');
+  },
+  sync(scene){
+    const key = this.signature();
+    if(this.mesh && key === this.key && !this.dirty) return;
+    this.build(scene, key);
+  },
+  build(scene, key){
+    const cfg = S.cfg, {rows, cols} = S.cells;
+    const n = rows*cols;
+    const px = cfg.scale, ow = (cfg.sw+cfg.spacing)*px, oh = (cfg.sh+cfg.spacing)*px;
+    const sw = cfg.sw*px, sh = cfg.sh*px;
+    const kept = this._kept = this.keptSeeds();
+
+    if(!this.mesh || this.mesh.count !== n){
+      this.dispose();
+      const g = new THREE.PlaneGeometry(1,1);
+      g.rotateX(-Math.PI/2);          /* into XZ, normal +Y */
+      g.translate(0.5, 0, 0.5);       /* origin at the (-x,-z) corner */
+      g.setAttribute('aCell', new THREE.InstancedBufferAttribute(new Float32Array(n*2), 2));
+      this.mesh = new THREE.InstancedMesh(g, this.material(), n);
+      this.mesh.frustumCulled = false;
+      scene.add(this.mesh);
+    }
+    const mesh = this.mesh, cell = mesh.geometry.attributes.aCell;
+    const m = new THREE.Matrix4();
+    const AH = off.height;
+    let maxY = 0;
+    for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+      const i = r*cols + c;
+      const y = this.elevOf(i, kept);
+      if(y > maxY) maxY = y;
+      m.makeScale(sw, 1, sh);
+      m.setPosition(c*ow, y, r*oh);
+      mesh.setMatrixAt(i, m);
+      cell.array[i*2]   = c*(cfg.sw+cfg.spacing);
+      cell.array[i*2+1] = AH - r*(cfg.sh+cfg.spacing) - cfg.sh;
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    cell.needsUpdate = true;
+    const u = this.material().uniforms;
+    u.uAtlas.value = GL.tex;
+    u.uSize.value.set(off.width, off.height);
+    u.uSpan.value.set(cfg.sw, cfg.sh);
+    u.uScale.value = px;
+    u.uKernel.value = ({none:0, box:1, over:2})[cfg.kernel||'over'];
+    mesh.userData.maxY = maxY;
+    this.key = key || this.signature();
+    this.dirty = false;
   },
 };
 
@@ -1082,8 +1391,9 @@ const GL = {
  * for free, which is §5 mode B's "elevation as a data channel" arriving early.
  * Generation is untouched; this reads lastSprites and nothing else. */
 const Vox = {
-  on:false, mesh:null, depth:5, mode:'luma', lit:false, dirty:true,
+  mesh:null, depth:5, mode:'luma', lit:false, dirty:true,
   MAX: 200000,
+  reach(){ return this.mesh ? this.depth*S.cfg.scale : 0; },
   light(scene){
     if(this.lit) return;
     const key = new THREE.DirectionalLight(0xffffff, 0.85); key.position.set(0.6,1,0.35);
@@ -1164,7 +1474,243 @@ const Vox = {
   },
 };
 
+/* ================================================================ R4 · export (§10)
+ * Two paths, one invariant. The invariant is that SPRITE ALPHA IS BINARY: a
+ * texel is ink or it is nothing. That is what makes both exports lossless for
+ * the same reason — canvas getImageData round-trips lose colour only in
+ * partially-transparent texels, and a GPU readback is wrong only if the
+ * framebuffer holds premultiplied alpha. With no partial alpha in the atlas,
+ * neither failure has anywhere to happen.
+ *
+ * Two things could break it, and R1/R3 already dealt with both: the fractional
+ * resample lives in the MAGNIFICATION SHADER rather than being baked into the
+ * atlas (§7.5), and the lock indicator moved out of render() into the overlay
+ * and the card elevation (§10.1). The rule, stated once: nothing that is not
+ * sprite ink is ever drawn into the atlas.
+ *
+ *   asset export — "give me the sprites". CPU, from the atlas, always top-down
+ *                  1:1, integer nearest expansion only. A game engine's input.
+ *   view  export — "give me the picture". GPU, through whatever camera is on
+ *                  screen, arbitrary resolution, supersampled. A post's input.
+ *
+ * §10.4 ties them: at top-down, persp 0, integer scale, nearest kernel, the two
+ * must agree BYTE FOR BYTE. That one assertion catches colour-space mismatch,
+ * premultiplication error, filter selection, half-texel offset, row flip and
+ * snapping failure simultaneously, and every one of those is a bug that
+ * otherwise ships. `Verify §10.4` in the sidebar runs it. */
+const ExportCfg = { mult:4, size:2048, ss:2, frames:24, grid:6 };
+
+function downloadBlob(blob, name){
+  const a = document.createElement('a');
+  a.download = name; a.href = URL.createObjectURL(blob); a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+}
+function downloadCanvas(cv, name){
+  if(cv.toBlob) cv.toBlob(b => downloadBlob(b, name), 'image/png');
+  else { const a=document.createElement('a'); a.download=name; a.href=cv.toDataURL('image/png'); a.click(); }
+}
+
+/* --- asset path ------------------------------------------------------------
+ * Block-replication through a Uint32 view rather than drawImage: nearest is a
+ * renderer HINT, block copy is a guarantee. Every mult x mult block is exactly
+ * uniform by construction (acceptance test 14) and no texel can acquire
+ * fractional alpha on the way out. */
+function assetCanvas(mult){
+  mult = Math.max(1, Math.round(mult||1));
+  const AW = off.width, AH = off.height, W = AW*mult, H = AH*mult;
+  const src = new Uint32Array(offCtx.getImageData(0,0,AW,AH).data.buffer);
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  const img = g.createImageData(W, H), dst = new Uint32Array(img.data.buffer);
+  for(let y=0;y<AH;y++){
+    const row = y*AW, top = y*mult*W;
+    for(let x=0;x<AW;x++){
+      const v = src[row+x];
+      if(!v) continue;                                   /* stays 0x00000000 */
+      const x0 = x*mult;
+      for(let dy=0;dy<mult;dy++){
+        const o = top + dy*W + x0;
+        for(let dx=0;dx<mult;dx++) dst[o+dx] = v;
+      }
+    }
+  }
+  g.putImageData(img, 0, 0);
+  return cv;
+}
+/* The recipe IS the reproduction record, so the manifest turns the PNG from a
+ * picture into a regenerable asset — which is the artifact this tool actually
+ * produces. Everything else in the system already treats states as the thing
+ * and pixels as the derivative. */
+function buildManifest(mult){
+  mult = Math.max(1, Math.round(mult||1));
+  const cfg = S.cfg, {rows, cols, list} = S.cells;
+  const ow = (cfg.sw+cfg.spacing)*mult, oh = (cfg.sh+cfg.spacing)*mult;
+  const cells = [];
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    const i = r*cols+c, cell = list[i], sp = lastSprites[i];
+    cells.push({ row:r, col:c, seed:cell.seed, locked:!!cell.locked,
+                 recipe: sp ? sp.recipe : null,
+                 x:c*ow, y:r*oh, w:cfg.sw*mult, h:cfg.sh*mult,
+                 cfg: (cell.locked && cell.lockCfg) ? cell.lockCfg : undefined });
+  }
+  return { format:'mosprites-manifest', version:1,
+           sheet:{ width:off.width*mult, height:off.height*mult, mult,
+                   cols, rows, spriteW:cfg.sw, spriteH:cfg.sh, spacing:cfg.spacing },
+           cfg, paletteSeed:S.paletteSeed, cells };
+}
+
+/* --- view path -------------------------------------------------------------
+ * Resolution is a PARAMETER, never canvas.clientWidth, and the render goes to a
+ * WebGLRenderTarget rather than through preserveDrawingBuffer — the latter taxes
+ * every frame of interactive use for a feature used once a session. So a 4096²
+ * export out of a 900 px viewport costs no resize, no flicker, no aspect change.
+ *
+ * Camera handling: Cam.vw/vh are swapped for the target size and logZoom is
+ * shifted by log(exportH/viewportH), which holds halfH — the pivot and the
+ * VERTICAL extent survive, only the horizontal frustum changes. That makes
+ * aspect changes predictable instead of surprising. */
+function renderView(W, H, ss, opt){
+  opt = opt || {};
+  if(!GL.ok && !GL.init()){ console.warn('R4: view export needs WebGL'); return null; }
+  ss = Math.max(1, Math.min(4, Math.round(ss||1)));
+  const rw = Math.round(W)*ss, rh = Math.round(H)*ss;
+  const r = GL.renderer;
+  const rt = new THREE.WebGLRenderTarget(rw, rh, {
+    minFilter:THREE.NearestFilter, magFilter:THREE.NearestFilter,
+    format:THREE.RGBAFormat, type:THREE.UnsignedByteType,
+    depthBuffer:true, stencilBuffer:false });
+  const save = {vw:Cam.vw, vh:Cam.vh, logZoom:Cam.logZoom,
+                tx:Cam.target.x, ty:Cam.target.y, tz:Cam.target.z};
+  Cam.vw = rw; Cam.vh = rh;
+  if(opt.fit === 'sheet'){
+    /* exact: 1 raster unit -> mult pixels. This is the framing §10.4 asserts on. */
+    Cam.target.x = rasterW()/2; Cam.target.y = 0; Cam.target.z = rasterH()/2;
+    Cam.logZoom = Math.log(rh/Math.max(1, rasterH()));
+  } else if(opt.fit === 'circle'){
+    /* conservative: the sheet's XZ bounding circle plus whatever elevation is
+     * on, so an orbiting camera never clips a corner mid-sweep. */
+    const R = Math.hypot(rasterW(), rasterH())/2 + Math.max(Cards.reach(), Vox.reach());
+    Cam.target.x = rasterW()/2; Cam.target.y = 0; Cam.target.z = rasterH()/2;
+    Cam.logZoom = Math.log(Math.min(rw, rh)*0.94/(2*Math.max(1, R)));
+  } else {
+    Cam.logZoom = save.logZoom + Math.log(rh/Math.max(1, save.vh));
+  }
+  const prev = r.getRenderTarget();
+  r.setRenderTarget(rt);
+  r.setClearColor(0x000000, 0);
+  r.clear(true, true, true);
+  GL.render();                       /* same scene, same shader, same code path */
+  const buf = new Uint8Array(rw*rh*4);
+  r.readRenderTargetPixels(rt, 0, 0, rw, rh, buf);
+  r.setRenderTarget(prev);
+  rt.dispose();
+  Cam.vw=save.vw; Cam.vh=save.vh; Cam.logZoom=save.logZoom;
+  Cam.target.x=save.tx; Cam.target.y=save.ty; Cam.target.z=save.tz;
+  return readbackToCanvas(buf, rw, rh, ss);
+}
+/* readRenderTargetPixels hands back GL row order (bottom-up); flip it here, and
+ * fold the supersample box down in the same pass. The average is ALPHA-WEIGHTED,
+ * so a transparent texel contributes no colour — averaging straight RGBA would
+ * drag black in from the empty texels and fringe every sprite edge. At ss = 1
+ * this reduces to an exact copy, which §10.4 depends on. */
+function readbackToCanvas(buf, rw, rh, ss){
+  const W = rw/ss, H = rh/ss, n = ss*ss;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  const img = g.createImageData(W, H), d = img.data;
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    let R=0,G=0,B=0,A=0;
+    for(let sy=0;sy<ss;sy++){
+      const base = (rh-1-(y*ss+sy))*rw*4;
+      for(let sx=0;sx<ss;sx++){
+        const o = base + (x*ss+sx)*4, a = buf[o+3];
+        if(!a) continue;
+        R += buf[o]*a; G += buf[o+1]*a; B += buf[o+2]*a; A += a;
+      }
+    }
+    const k = (y*W+x)*4;
+    if(A > 0){ d[k]=R/A; d[k+1]=G/A; d[k+2]=B/A; d[k+3]=A/n; }
+  }
+  g.putImageData(img, 0, 0);
+  return cv;
+}
+
+/* Turntable. Driven by FRAME INDEX, never by wall clock — everything else in
+ * this system is a pure function of state, so a turntable that rendered
+ * differently depending on how fast the machine was would be the odd one out.
+ * It also means frames can be produced far slower than real time without
+ * tearing the motion (acceptance test 17).
+ * Packed as one contact sheet rather than N downloads: one file, no zip
+ * dependency, and ffmpeg or any sprite animator can take it apart. */
+function exportTurntable(){
+  const N = Math.max(4, Math.min(64, ExportCfg.frames|0));
+  const cols = Math.min(N, ExportCfg.grid), rows = Math.ceil(N/cols);
+  const cell = Math.max(64, Math.round(ExportCfg.size/cols/8)*8);
+  const savePose = {yaw:Cam.yaw, pitch:Cam.pitch, persp:Cam.persp};
+  if(isTopDown()) Cam.pitch = PRESETS.dimetric.pitch;   /* an orbit of a plan view is a still */
+  const sheet = document.createElement('canvas');
+  sheet.width = cols*cell; sheet.height = rows*cell;
+  const g = sheet.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  let ok = true;
+  for(let i=0;i<N;i++){
+    Cam.yaw = savePose.yaw + (i/N)*Math.PI*2;
+    const cv = renderView(cell, cell, ExportCfg.ss, {fit:'circle'});
+    if(!cv){ ok = false; break; }
+    g.drawImage(cv, (i%cols)*cell, ((i/cols)|0)*cell);
+  }
+  Cam.yaw = savePose.yaw; Cam.pitch = savePose.pitch; Cam.persp = savePose.persp;
+  syncCamFromRig(); Cam.persp = savePose.persp; draw();
+  if(!ok) return;
+  console.log(`R4: turntable ${N} frames · ${cell}px cells · ${cols}x${rows} contact sheet`);
+  downloadCanvas(sheet, `turntable_${N}f_${cell}px.png`);
+}
+
+/* §10.4. Not "visually identical" — identical bytes. */
+function verifyExport(){
+  const cfg = S.cfg, mult = Math.round(cfg.scale);
+  if(Math.abs(cfg.scale - mult) > 1e-9){
+    console.warn(`R4 verify: scale ${cfg.scale} is not an integer; §10.4 is only defined at integer scale.`);
+    return false;
+  }
+  if(!GL.ok && !GL.init()){ console.warn('R4 verify: needs WebGL'); return false; }
+  const save = {kernel: cfg.kernel, mode: sceneMode, persp: Cam.persp,
+                yaw: Cam.yaw, pitch: Cam.pitch};
+  cfg.kernel = 'none'; sceneMode = 'quad';
+  Cam.yaw = 0; Cam.pitch = -Math.PI/2; Cam.persp = 0;
+  const a = assetCanvas(mult);
+  const b = renderView(off.width*mult, off.height*mult, 1, {fit:'sheet'});
+  cfg.kernel = save.kernel; sceneMode = save.mode;
+  syncCamFromRig(); Cam.persp = save.persp;
+  Cards.dirty = Vox.dirty = true;
+  draw();
+  if(!b) return false;
+  if(a.width !== b.width || a.height !== b.height){
+    console.error(`R4 verify: FAIL — size ${a.width}x${a.height} vs ${b.width}x${b.height}`);
+    return false;
+  }
+  const da = a.getContext('2d').getImageData(0,0,a.width,a.height).data;
+  const db = b.getContext('2d').getImageData(0,0,b.width,b.height).data;
+  let diff = 0, first = -1, worst = 0;
+  for(let i=0;i<da.length;i++){
+    const e = Math.abs(da[i]-db[i]);
+    if(e){ diff++; worst = Math.max(worst, e); if(first < 0) first = i; }
+  }
+  if(!diff){
+    console.log(`R4 verify: PASS — view export is byte-identical to the asset export ` +
+                `(${a.width}x${a.height}, scale ${mult}, ${da.length} bytes).`);
+    return true;
+  }
+  const px = (first/4)|0;
+  console.error(`R4 verify: FAIL — ${diff} of ${da.length} bytes differ (max Δ${worst}); ` +
+                `first at pixel (${px % a.width}, ${(px/a.width)|0}) channel ${first % 4}.`);
+  return false;
+}
+
 function draw(){
+  /* The 2D blit is a diagonal affine and cannot express yaw, pitch or a scene
+   * graph, so anything that is not a top-down quad promotes itself to GL. */
+  if((!isTopDown() || sceneMode !== 'quad') && !GL.on) ensureGL();
   const use3d = GL.on && GL.ok;
   if(GL.canvas) GL.canvas.style.display = use3d ? 'block' : 'none';
 
@@ -1181,6 +1727,7 @@ function draw(){
     ctx.restore();
   }
   drawOverlays();
+  updateHUD();
 }
 
 /* Overlays are drawn in the view, never into the atlas (§10.1). Selection and
@@ -1195,82 +1742,330 @@ function drawOverlays(){
    * because under orbit a cell outline is a quadrilateral, not a rectangle.
    * project() is the same function the picker inverts, so the outline and the
    * hit region cannot drift apart. */
-  const quad = (x, z, w, h, pad) => {
-    const a=project(x-pad,z-pad), b=project(x+w+pad,z-pad);
-    const c=project(x+w+pad,z+h+pad), d=project(x-pad,z+h+pad);
+  Cards._kept = null;                  /* at most one collection scan per frame */
+  const quad = (x, z, w, h, pad, y) => {
+    y = y || 0;
+    const a=project(x-pad,y,z-pad), b=project(x+w+pad,y,z-pad);
+    const c=project(x+w+pad,y,z+h+pad), d=project(x-pad,y,z+h+pad);
     if([a,b,c,d].some(p=>!isFinite(p.x)||!isFinite(p.y))) return;
     ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y);
     ctx.lineTo(c.x,c.y); ctx.lineTo(d.x,d.y); ctx.closePath(); ctx.stroke();
   };
+  /* R3: a lifted card only reads as lifted if you can see what it lifted FROM.
+   * Ground footprint + four corner risers is the cheap 2D-overlay stand-in for
+   * a drop shadow, and it costs no GPU state. */
+  const risers = (x, z, w, h, y) => {
+    if(!(y > 0.5)) return;
+    ctx.save(); ctx.globalAlpha=0.4; ctx.setLineDash([]); ctx.lineWidth=1;
+    quad(x, z, w, h, 0, 0);
+    ctx.beginPath();
+    for(const [cx,cz] of [[x,z],[x+w,z],[x+w,z+h],[x,z+h]]){
+      const g = project(cx,0,cz), t = project(cx,y,cz);
+      if(!isFinite(g.x)||!isFinite(t.x)) continue;
+      ctx.moveTo(g.x,g.y); ctx.lineTo(t.x,t.y);
+    }
+    ctx.stroke(); ctx.restore();
+  };
   for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
     if(!list[r*cols+c].locked) continue;
+    const y = Cards.cellY(r,c);
     ctx.strokeStyle='rgba(239,68,68,.85)'; ctx.lineWidth=1.5; ctx.setLineDash([]);
-    quad(c*ow, r*oh, sw, sh, 1.5/camScale());
+    risers(c*ow, r*oh, sw, sh, y);
+    quad(c*ow, r*oh, sw, sh, 1.5/camScale(), y);
   }
   if(sel && sel.r<rows && sel.c<cols){
-    ctx.strokeStyle='#4f8cff'; ctx.lineWidth=2; ctx.setLineDash([4,3]);
-    quad(sel.c*ow, sel.r*oh, sw, sh, 2/camScale());
+    const y = Cards.cellY(sel.r, sel.c);
+    ctx.strokeStyle='#4f8cff'; ctx.lineWidth=2;
+    ctx.setLineDash([]); risers(sel.c*ow, sel.r*oh, sw, sh, y);
+    ctx.setLineDash([4,3]);
+    quad(sel.c*ow, sel.r*oh, sw, sh, 2/camScale(), y);
     ctx.setLineDash([]);
   }
 }
 
-/* ================================================= R2 · orbit + damping (§3.6)
- * Frame-rate-independent decay: x += (want-x)*(1-exp(-k*dt)). The `* 0.9 per
- * frame` form makes the feel depend on refresh rate, which is obvious on a
- * 120 Hz panel. */
-const DAMP_K = 16;
-let animRaf = 0, animLast = 0;
-function needsAnim(){
-  return Math.abs(Want.yaw-Cam.yaw) > 1e-5 || Math.abs(Want.pitch-Cam.pitch) > 1e-5
-      || Math.abs(Want.persp-Cam.persp) > 1e-5 || Math.abs(Want.logZoom-Cam.logZoom) > 1e-5
-      || Math.abs(Want.tx-Cam.target.x) > 1e-3 || Math.abs(Want.tz-Cam.target.z) > 1e-3;
+/* ================================================= R2 · camera control (§3.6)
+ * ADOPTED: THREE.OrbitControls, damping OFF. This reverses panzoomwow.md §3.6,
+ * which said to write our own. What changed is the diagnosis, not the taste.
+ *
+ *   The hand-rolled rig kept blowing up, and the cause was structural rather
+ *   than a tuning bug. Cursor-anchored zoom works by picking the ground point
+ *   under the cursor, changing zoom, picking again, and translating the pivot
+ *   by the difference. That is exact only if the camera is IDENTICAL between
+ *   the two picks. Under exponential damping it never is — Cam is in flight
+ *   toward Want — so the correction is computed for a pose the camera is
+ *   already leaving. The residual seeds the next wheel tick; and because a
+ *   ray/ground intersection diverges as the ray goes grazing, the error is
+ *   unbounded rather than merely oscillatory. Two or three ticks near the
+ *   pitch clamp and `target` is at 1e9, near/far collapse, and the view is
+ *   gone. The same coupling let a pan fight an in-flight preset tween, and
+ *   the old `k = max(0.15, |sin pitch|)` pan guard multiplied it by 6.7.
+ *
+ *   Removing damping removes the premise. Input applies instantly, both picks
+ *   see one pose, the anchor is exact. OrbitControls then supplies pointer
+ *   capture, touch, polar clamping and button state for free, and its own
+ *   quirks (no zoomToCursor in r128, no ortho/perspective blend) are things we
+ *   were already implementing on top of our own rig anyway.
+ *
+ * The rig is a PROXY camera and is never rendered. OrbitControls owns
+ * {target, azimuth, polar, distance}; syncCamFromRig() derives Cam from the
+ * rig's GEOMETRY rather than from the controls' internal spherical, so direct
+ * pose writes during a preset tween stay consistent without an update() dance;
+ * GL.syncCamera() then builds the real ortho or perspective camera from Cam.
+ * project() and pick() never learn that any of this happened, which is why the
+ * R0 round-trip numbers still stand.
+ *
+ * Angle mapping, checked against basis():  yaw = -azimuth,  pitch = polar-90°.
+ * And at polar -> 0, three.js' lookAt degeneracy nudge lands camera-right on
+ * +X and camera-up on -Z — exactly the top-down convention the atlas quad was
+ * built for, so no up-vector special case is needed.  */
+const RIG_FOV = 50, RIG_TAN = Math.tan(RIG_FOV*Math.PI/360);
+const HAS_THREE = (typeof THREE !== 'undefined');
+const rig  = HAS_THREE ? new THREE.PerspectiveCamera(RIG_FOV, 1, 0.1, 1e7) : null;
+const _v3  = HAS_THREE ? new THREE.Vector3() : null;
+const _rc  = HAS_THREE ? new THREE.Raycaster() : null;
+const _ndc = HAS_THREE ? new THREE.Vector2() : null;
+let controls = null, rigOK = false, orbitStock = false;
+
+const distForScale = sc => (Cam.vh/2)/(Math.max(1e-6, sc)*RIG_TAN);
+const scaleForDist = d  => (Cam.vh/2)/(Math.max(1e-6, d )*RIG_TAN);
+
+let drawRaf = 0;
+function scheduleDraw(){
+  if(drawRaf) return;
+  drawRaf = requestAnimationFrame(()=>{ drawRaf = 0; draw(); });
 }
-function kick(){
-  if(animRaf) return;
-  animLast = performance.now();
-  animRaf = requestAnimationFrame(step);
+function ensureGL(){
+  if(GL.ok || GL.init()){ GL.on = true; GL.resize(); return true; }
+  return false;
 }
-function step(t){
-  animRaf = 0;
-  const dt = Math.min(0.05, (t-animLast)/1000); animLast = t;
-  const a = 1 - Math.exp(-DAMP_K*dt);
-  Cam.yaw     += (Want.yaw     - Cam.yaw)*a;
-  Cam.pitch   += (Want.pitch   - Cam.pitch)*a;
-  Cam.persp   += (Want.persp   - Cam.persp)*a;
-  Cam.logZoom += (Want.logZoom - Cam.logZoom)*a;
-  Cam.target.x += (Want.tx - Cam.target.x)*a;
-  Cam.target.z += (Want.tz - Cam.target.z)*a;
-  if(!needsAnim()){                 /* land exactly, so isTopDown() can be strict */
-    Cam.yaw=Want.yaw; Cam.pitch=Want.pitch; Cam.persp=Want.persp;
-    Cam.logZoom=Want.logZoom; Cam.target.x=Want.tx; Cam.target.z=Want.tz;
-    draw(); return;
+
+/* Every rig move below is either a rigid translation (target and eye together,
+ * so the spherical pose is untouched) or a pose write at fixed distance. Those
+ * are the only two shapes that cannot desynchronise from OrbitControls. */
+function translateRig(dx, dz){
+  if(!rigOK || !isFinite(dx) || !isFinite(dz)) return;
+  controls.target.x += dx; controls.target.z += dz;
+  rig.position.x    += dx; rig.position.z    += dz;
+  rig.updateMatrixWorld();
+}
+function applyScale(sc){
+  if(!rigOK) return;
+  sc = Math.min(SCALE_MAX, Math.max(SCALE_MIN, sc));
+  const v = _v3.copy(rig.position).sub(controls.target);
+  if(v.lengthSq() < 1e-12) v.set(0,1,0);
+  rig.position.copy(controls.target).add(v.setLength(distForScale(sc)));
+  rig.updateMatrixWorld();
+}
+function setRigPose(az, po){
+  if(!rigOK) return;
+  po = Math.max(0, Math.min(POLAR_MAX, po));
+  const d = Math.max(1e-6, _v3.copy(rig.position).sub(controls.target).length());
+  _v3.setFromSphericalCoords(d, po, az);
+  rig.position.copy(controls.target).add(_v3);
+  rig.lookAt(controls.target); rig.updateMatrixWorld();
+}
+/* The backstop. Pan is bounded by mouse travel and cannot run away, but the
+ * zoom anchor is a ray intersection and in principle can; a hard box one sheet
+ * wide around the sheet makes "lost in the void" unreachable rather than
+ * merely unlikely. Applied as a rigid translation, so it never changes pose. */
+function clampRig(){
+  if(!rigOK) return;
+  const rw = Math.max(1, rasterW()), rh = Math.max(1, rasterH()), t = controls.target;
+  const cx = Math.min(rw*2, Math.max(-rw, t.x)), cz = Math.min(rh*2, Math.max(-rh, t.z));
+  if(cx !== t.x || cz !== t.z) translateRig(cx-t.x, cz-t.z);
+  if(t.y !== 0){ rig.position.y -= t.y; t.y = 0; rig.updateMatrixWorld(); }
+}
+function syncCamFromRig(){
+  if(!rigOK) return;
+  const t = controls.target;
+  Cam.target.x = t.x; Cam.target.y = 0; Cam.target.z = t.z;
+  const v = _v3.copy(rig.position).sub(t);
+  const d = Math.max(1e-6, v.length());
+  let po = Math.acos(Math.min(1, Math.max(-1, v.y/d)));
+  let az = Math.atan2(v.x, v.z);
+  /* OrbitControls runs Spherical.makeSafe(), which clamps polar to 1e-6 — so
+   * EXACT top-down is unreachable by construction. Snapping the last 1e-4 rad
+   * (0.006°, under a tenth of a pixel across a 1000 px sheet) puts it back in
+   * reach, which is what keeps isTopDown() strict and acceptance test 1
+   * (byte-identity with the 2D renderer at top-down) a thing we can assert. */
+  if(Math.abs(po) < 1e-4) po = 0;
+  if(Math.abs(az) < 1e-4) az = 0;
+  Cam.pitch = po - Math.PI/2;
+  Cam.yaw   = -az;
+  Cam.logZoom = Math.log(scaleForDist(d));
+}
+
+/* Pose tweens: presets and the persp dolly. Not damping — this is a finite,
+ * interruptible animation with a known endpoint that it lands on EXACTLY, so
+ * `Cam.persp === 0` and `pitch === -90°` stay reachable states rather than
+ * asymptotes. Any pointer input cancels it (see the 'start' hook below). */
+let tween = null, tweenRaf = 0;
+function cancelTween(){ tween = null; }
+function tweenTo(spec, dur){
+  if(!rigOK) return;
+  const v = _v3.copy(rig.position).sub(controls.target);
+  const d = Math.max(1e-6, v.length());
+  const fromPo = Math.acos(Math.min(1, Math.max(-1, v.y/d)));
+  const fromAz = Math.atan2(v.x, v.z);
+  let toAz = (spec.az === undefined) ? fromAz : spec.az;
+  toAz = fromAz + Math.atan2(Math.sin(toAz-fromAz), Math.cos(toAz-fromAz));   /* short arc */
+  tween = { t0: performance.now(), dur: dur || 420, fromAz, toAz, fromPo,
+            toPo: (spec.po === undefined) ? fromPo : spec.po,
+            fromPe: Cam.persp,
+            toPe: (spec.persp === undefined) ? Cam.persp : spec.persp };
+  if((tween.toPo !== 0 || tween.toPe > 0) && !ensureGL()){
+    /* the 2D blit is a diagonal affine; without GL an oblique pose would show
+     * a top-down image under an oblique overlay, which is worse than refusing */
+    console.warn('no WebGL — oblique views need the GL renderer; holding top-down ortho');
+    tween.toPo = 0; tween.toPe = 0;
   }
-  draw(); kick();
+  if(!tweenRaf) tweenRaf = requestAnimationFrame(tweenStep);
 }
+function tweenStep(now){
+  tweenRaf = 0;
+  if(!tween) return;
+  const k = Math.min(1, (now - tween.t0)/tween.dur), e = 1 - Math.pow(1-k, 3);
+  if(k >= 1){
+    setRigPose(tween.toAz, tween.toPo);
+    Cam.persp = tween.toPe;                       /* land exactly, not asymptotically */
+    tween = null;
+    if(controls && controls.update) controls.update();
+  } else {
+    setRigPose(tween.fromAz + (tween.toAz-tween.fromAz)*e,
+               tween.fromPo + (tween.toPo-tween.fromPo)*e);
+    Cam.persp = tween.fromPe + (tween.toPe-tween.fromPe)*e;
+    tweenRaf = requestAnimationFrame(tweenStep);
+  }
+  syncCamFromRig(); draw();
+}
+
+const PRESET_LABEL = {top:'Top-down', dimetric:'2:1 dimetric',
+                      trueIso:'True isometric', free:'Free perspective'};
+let presetName = 'top';
 function goPreset(name){
-  const p = PRESETS[name]; if(!p) return;
-  if(!GL.on && p.pitch !== -Math.PI/2){ if(GL.ok || GL.init()){ GL.on = true; GL.resize(); } }
-  Want.yaw=p.yaw; Want.pitch=p.pitch; Want.persp=p.persp;
-  console.log('camera:', name);
-  kick();
+  const p = PRESETS[name];
+  if(!p || !rigOK) return;
+  presetName = name;
+  tweenTo({az:-p.yaw, po:p.pitch+Math.PI/2, persp:p.persp}, 420);
+  console.log('camera:', PRESET_LABEL[name] || name);
 }
-/* Orbit on middle/right drag or Alt+LMB. LMB stays pan+select, unchanged. */
-let orbit = null;
-stage.addEventListener('contextmenu', e=>{ if(orbit) e.preventDefault(); });
-stage.addEventListener('mousedown', e=>{
-  if(e.button!==0 && e.button!==1 && e.button!==2) return;
-  if(e.button===0 && !e.altKey) return;
-  e.preventDefault();
-  if(!GL.on){ if(GL.ok || GL.init()){ GL.on = true; GL.resize(); } }
-  orbit = {sx:e.clientX, sy:e.clientY, yaw:Want.yaw, pitch:Want.pitch};
-});
-window.addEventListener('mousemove', e=>{
-  if(!orbit) return;
-  Want.yaw   = orbit.yaw   + (e.clientX-orbit.sx)*0.008;
-  Want.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, orbit.pitch + (e.clientY-orbit.sy)*0.006));
-  kick();
-});
-window.addEventListener('mouseup', ()=>{ orbit = null; });
+function nudgePersp(d){
+  const base = tween ? tween.toPe : Cam.persp;
+  const t = Math.max(0, Math.min(1, base + d));
+  if(t > 0) ensureGL();
+  tweenTo({persp:t}, 260);
+}
+
+/* Degradation path if the OrbitControls script does not load: pan and zoom
+ * still work, orbit does not. No orbit means no grazing rays, so the failure
+ * mode is "less tool", not "broken tool". */
+function FallbackControls(object, dom){
+  const L = {};
+  const fire = t => (L[t]||[]).forEach(f=>f({type:t}));
+  this.object = object; this.domElement = dom;
+  this.target = new THREE.Vector3();
+  this.enabled = true; this.minDistance = 0; this.maxDistance = Infinity;
+  this.mouseButtons = {}; this.touches = {};
+  this.addEventListener = (t,f)=>{ (L[t]||(L[t]=[])).push(f); };
+  this.update = ()=>{ object.lookAt(this.target); object.updateMatrixWorld(); fire('change'); };
+  let last = null;
+  dom.addEventListener('pointerdown', e=>{ if(e.button===0){ last={x:e.clientX,y:e.clientY}; fire('start'); } });
+  window.addEventListener('pointermove', e=>{
+    if(!last) return;
+    const k = (2*halfHOf())/Math.max(1, Cam.vh);
+    translateRig(-(e.clientX-last.x)*k, -(e.clientY-last.y)*k);
+    last = {x:e.clientX, y:e.clientY};
+    syncCamFromRig(); fire('change');
+  });
+  window.addEventListener('pointerup', ()=>{ if(last){ last=null; fire('end'); } });
+}
+
+function initRig(){
+  if(rigOK || !rig) return rigOK;
+  Cam.vw = stage.clientWidth || 1; Cam.vh = stage.clientHeight || 1;
+  rig.up.set(0,1,0);
+  rig.position.set(0, distForScale(1), 0);
+  orbitStock = (typeof THREE.OrbitControls === 'function');
+  controls = orbitStock ? new THREE.OrbitControls(rig, stage) : new FallbackControls(rig, stage);
+  controls.target.set(0,0,0);
+  if(orbitStock){
+    controls.enableDamping   = false;   /* the entire point of the exercise */
+    controls.screenSpacePanning = false;/* pan in the GROUND plane, not the film plane */
+    controls.enableZoom      = false;   /* superseded by cursor-anchored zoomAt() */
+    controls.minPolarAngle   = 0;
+    controls.maxPolarAngle   = POLAR_MAX;
+    controls.rotateSpeed     = 0.9;
+    controls.mouseButtons = {LEFT:THREE.MOUSE.PAN, MIDDLE:THREE.MOUSE.ROTATE, RIGHT:THREE.MOUSE.ROTATE};
+    controls.touches      = {ONE:THREE.TOUCH.PAN, TWO:THREE.TOUCH.DOLLY_ROTATE};
+    controls.minDistance  = distForScale(SCALE_MAX);
+    controls.maxDistance  = distForScale(SCALE_MIN);
+    controls.update();
+  } else {
+    console.error('OrbitControls failed to load — orbit is disabled; pan and zoom still work.');
+  }
+  controls.addEventListener('change', ()=>{ clampRig(); syncCamFromRig(); scheduleDraw(); });
+  controls.addEventListener('start',  ()=>{ cancelTween(); });
+  rigOK = true;
+  applyScale(1); syncCamFromRig();
+  return true;
+}
+initRig();
+
+/* Alt+LMB orbits, as it did before. r128 OrbitControls has no modifier map, so
+ * the binding is flipped in the capture phase — which runs before the control's
+ * own bubble-phase pointerdown on the same element. */
+stage.addEventListener('pointerdown', e=>{
+  const wantsOrbit = (e.button===1 || e.button===2 || (e.button===0 && e.altKey));
+  if(orbitStock && e.button===0)
+    controls.mouseButtons.LEFT = e.altKey ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+  if(wantsOrbit) ensureGL();
+}, true);
+/* The toolbar lives inside the controls' DOM element; without this a click on
+ * '+' also starts a pan. */
+document.querySelector('.toolbar').addEventListener('pointerdown', e=>e.stopPropagation());
+
+/* ------------------------------------------------------------------- HUD */
+function updateHUD(){
+  const el = $('hud'); if(!el) return;
+  const deg = r => (r*180/Math.PI);
+  const yaw = ((deg(Cam.yaw)%360)+360)%360;
+  const proj = Cam.persp <= 0 ? 'ortho' : 'persp ' + Cam.persp.toFixed(2);
+  const extra = sceneMode === 'cards'
+      ? '  elev ' + ELEV_LABEL[Cards.channel] + (Cards.channel==='flat' ? '' : ' x'+Cards.liftMul.toFixed(2))
+      : sceneMode === 'voxels' ? '  depth ' + Vox.depth + ' · ' + Vox.mode : '';
+  el.innerHTML =
+    '<b>' + (PRESET_LABEL[presetName]||presetName) + '</b>  yaw ' + yaw.toFixed(1) +
+      '°  pitch ' + deg(Cam.pitch).toFixed(1) + '°  ' + proj + '\n' +
+    '<b>' + sceneMode + '</b>' + extra + '  zoom ' + camScale().toFixed(2) + 'x  ' +
+      (GL.on ? 'GL' : '2D') + '/' + (S.cfg.kernel||'over') + '\n' +
+    '<i>1-4 camera · 0 frame · X scene · E elevation · [ ] persp · V renderer · J kernel</i>';
+  const btn = {top:'v-top', dimetric:'v-dim', trueIso:'v-iso', free:'v-per'};
+  for(const k in btn) $(btn[k]).classList.toggle('on', presetName === k);
+  $('v-scene').textContent = sceneMode.charAt(0).toUpperCase()+sceneMode.slice(1);
+  $('v-scene').classList.toggle('on', sceneMode !== 'quad');
+  $('v-elev').textContent = ELEV_LABEL[Cards.channel];
+  $('v-elev').classList.toggle('on', sceneMode==='cards' && Cards.channel !== 'flat');
+  $('v-elev').style.opacity = sceneMode==='cards' ? '1' : '.45';
+}
+
+function setScene(mode){
+  sceneMode = mode;
+  if(mode !== 'quad' && !ensureGL()){ sceneMode = 'quad'; console.warn('no WebGL — staying on the 2D quad'); }
+  /* A top-down view of elevated geometry is indistinguishable from the flat
+   * sheet — §5 mode A's whole problem restated one dimension up — so entering
+   * a 3D scene from top-down tilts the camera to prove it worked. */
+  if(sceneMode !== 'quad' && isTopDown()) goPreset('dimetric');
+  Cards.dirty = Vox.dirty = true;
+  console.log('scene:', sceneMode);
+  draw();
+}
+function cycleElev(d){
+  const i = ELEV_CHANNELS.indexOf(Cards.channel);
+  Cards.channel = ELEV_CHANNELS[(i + (d||1) + ELEV_CHANNELS.length) % ELEV_CHANNELS.length];
+  Cards.dirty = true;
+  if(sceneMode !== 'cards') setScene('cards');
+  else { console.log('elevation:', ELEV_LABEL[Cards.channel]); draw(); }
+}
 
 /* ============================================================= timeline */
 const strip = $('tl-strip');
@@ -1426,55 +2221,66 @@ function writeUI(){
 }
 
 /* ========================================================== interaction */
-/* Pan moves the camera target, so a pixel of mouse motion is a pixel of content
- * motion at any zoom. Under R2's oblique projections this line is unchanged —
- * only the basis it moves along picks up yaw. */
-stage.addEventListener('mousedown', e=>{
-  if(e.button!==0 || e.altKey) return;
-  drag={sx:e.clientX, sy:e.clientY, tx:Cam.target.x, tz:Cam.target.z}; panned=false;
+/* Pan, orbit and pointer capture are OrbitControls' job now (see R2). What is
+ * left here is the part it has no opinion about: turning a click that did NOT
+ * move into a cell selection, and cursor-anchored zoom. */
+let clickStart = null;
+stage.addEventListener('pointerdown', e=>{
+  clickStart = (e.button === 0) ? {x:e.clientX, y:e.clientY, alt:e.altKey,
+                                   shift:e.shiftKey, ctrl:e.ctrlKey||e.metaKey} : null;
 });
-window.addEventListener('mousemove', e=>{
-  if(!drag) return;
-  const dx = e.clientX-drag.sx, dy = e.clientY-drag.sy;
-  if(Math.abs(dx)>2 || Math.abs(dy)>2) panned=true;
-  const s = camScale(), {r,u} = basis();
-  /* Pan along the camera's own basis projected onto the ground plane, so a
-   * pixel of mouse motion is a pixel of content motion at any yaw. Reduces to
-   * the old behaviour exactly at pitch = -90. */
-  const gx = -dx/s, gy = -dy/s;
-  const fx = r.x*gx - u.x*gy, fz = r.z*gx - u.z*gy;
-  const k = Math.max(0.15, Math.abs(Math.sin(Cam.pitch)));   /* grazing guard */
-  Cam.target.x = Want.tx = drag.tx + fx/k; Cam.target.z = Want.tz = drag.tz + fz/k;
-  draw();
-});
-window.addEventListener('mouseup', e=>{
-  if(!drag) return; drag=null;
-  if(panned) return;
-  const cfg = S.cfg, rect = canvas.getBoundingClientRect();
-  /* pick() is projection-agnostic: the same call serves top-down now and
-   * dimetric/perspective at R2, because all three hand back a ray. */
-  const p = pick(e.clientX-rect.left, e.clientY-rect.top);
-  if(!p) return;
-  const outerW=(cfg.sw+cfg.spacing)*cfg.scale, outerH=(cfg.sh+cfg.spacing)*cfg.scale;
-  const c=Math.floor(p.x/outerW), r=Math.floor(p.z/outerH);
-  const {rows,cols,list}=S.cells;
-  if(r<0||c<0||r>=rows||c>=cols) return;
-  if(p.x-c*outerW > cfg.sw*cfg.scale || p.z-r*outerH > cfg.sh*cfg.scale) return;
-
+window.addEventListener('pointerup', e=>{
+  const st = clickStart; clickStart = null;
+  if(!st || e.button !== 0) return;
+  /* travel threshold, not a `panned` flag: OrbitControls owns the drag state
+   * and an orbit that ends over a sprite must not also select it. */
+  if(Math.abs(e.clientX-st.x) > 3 || Math.abs(e.clientY-st.y) > 3) return;
+  const rect = canvas.getBoundingClientRect();
+  const hit = pickCell(e.clientX-rect.left, e.clientY-rect.top);
+  if(!hit) return;
+  const {r,c} = hit;
   sel = {r,c};
-  if(e.shiftKey)      rerollCell(r,c);
-  else if(e.ctrlKey || e.metaKey) toggleLock(r,c);
-  else                { draw(); selectCell(r,c); }
-  if(e.altKey) keepSelected();
+  if(st.shift)     rerollCell(r,c);
+  else if(st.ctrl) toggleLock(r,c);
+  else             { draw(); selectCell(r,c); }
+  if(st.alt) keepSelected();
 });
+
+/* Two implementations behind one interface, chosen by scene state (§6).
+ *  · coplanar (quad, flat cards) — analytic ray/plane, O(1), exact, and
+ *    projection-agnostic because ortho, dimetric and perspective all hand back
+ *    a ray. Keeps the "inside the sprite, not the gutter" test verbatim.
+ *  · elevated (cards with a live elevation channel) — Raycaster against the
+ *    InstancedMesh; `instanceId` IS the cell index. 2500 instances is far under
+ *    anything that would want a BVH, and it beats a GPU id-buffer readback,
+ *    which is a pipeline stall for a problem this small. */
+function pickCell(sx, sy){
+  const cfg = S.cfg, {rows, cols} = S.cells;
+  if(sceneMode === 'cards' && GL.on && GL.ok && Cards.mesh && _rc){
+    _ndc.set(sx/Cam.vw*2 - 1, -(sy/Cam.vh*2 - 1));
+    _rc.setFromCamera(_ndc, GL.syncCamera());
+    const h = _rc.intersectObject(Cards.mesh, false)[0];
+    if(!h || h.instanceId === undefined || h.instanceId === null) return null;
+    return {r: (h.instanceId/cols)|0, c: h.instanceId % cols};
+  }
+  const p = pick(sx, sy);
+  if(!p) return null;
+  const ow=(cfg.sw+cfg.spacing)*cfg.scale, oh=(cfg.sh+cfg.spacing)*cfg.scale;
+  const c = Math.floor(p.x/ow), r = Math.floor(p.z/oh);
+  if(r<0 || c<0 || r>=rows || c>=cols) return null;
+  if(p.x-c*ow > cfg.sw*cfg.scale || p.z-r*oh > cfg.sh*cfg.scale) return null;
+  return {r,c};
+}
+
 stage.addEventListener('wheel', e=>{
   e.preventDefault();
   const rect = canvas.getBoundingClientRect();
   zoomAt(-e.deltaY*0.002, e.clientX-rect.left, e.clientY-rect.top);
 }, {passive:false});
 
-/* R1 toggles. 'v' swaps renderer, 'k' cycles the resample kernel — the 2D and
- * GL paths are peers, and comparing them is how the shader gets validated. */
+/* View keys. The renderer pair (2D JS resample / GL shader resample) stays a
+ * toggle rather than a mode, because comparing them IS how the shader is
+ * validated; 'j' cycles the kernel for the same reason. */
 window.addEventListener('keydown', e=>{
   if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT'||e.target.tagName==='TEXTAREA') return;
   if(e.key==='v'||e.key==='V'){
@@ -1486,31 +2292,30 @@ window.addEventListener('keydown', e=>{
   if(e.key==='j'||e.key==='J'){
     const order = ['over','box','none'];
     S.cfg.kernel = order[(order.indexOf(S.cfg.kernel||'over')+1) % 3];
-    atlasDirty = true;
+    atlasDirty = true; Cards.dirty = true;
     console.log('resample kernel:', S.cfg.kernel,
       S.cfg.kernel==='over' ? '(fillRect-exact: alpha 0.75 edge, 0.684 corner)'
       : S.cfg.kernel==='box' ? '(area average: alpha 1, symmetric, no glow)'
       : '(nearest: crisp, export-exact)');
     draw();
   }
-  /* Rv · voxels. Enabling forces GL and tilts the camera — a top-down voxel
-   * view is indistinguishable from the flat sheet, which is §5 mode A's whole
-   * problem restated in three dimensions. */
+  /* R3 · scene graph: quad -> cards -> voxels. Generation is untouched by all
+   * three; these are display layers with a hard boundary (§5). */
   if(e.key==='x'||e.key==='X'){
-    if(!GL.ok && !GL.init()){ console.warn('Rv: no WebGL'); return; }
-    Vox.on = !Vox.on; Vox.dirty = true;
-    if(Vox.on){
-      GL.on = true; GL.resize();
-      if(isTopDown()) goPreset('dimetric');
+    setScene(SCENE_MODES[(SCENE_MODES.indexOf(sceneMode)+1) % SCENE_MODES.length]);
+  }
+  if(e.key==='e'||e.key==='E') cycleElev(e.shiftKey ? -1 : 1);
+  if(e.key===','||e.key==='.'){
+    const d = (e.key==='.' ? 1 : -1);
+    if(sceneMode==='voxels'){
+      Vox.depth = Math.max(1, Math.min(64, Vox.depth + d));
+      Vox.dirty = true; console.log('voxel depth:', Vox.depth); draw();
+    } else if(sceneMode==='cards'){
+      Cards.liftMul = Math.max(0, Math.min(8, +(Cards.liftMul + d*0.25).toFixed(2)));
+      Cards.dirty = true; console.log('card lift:', Cards.liftMul); draw();
     }
-    console.log('voxels:', Vox.on ? `on · depth ${Vox.depth} · ${Vox.mode}` : 'off');
-    draw();
   }
-  if(Vox.on && (e.key===','||e.key==='.')){
-    Vox.depth = Math.max(1, Math.min(64, Vox.depth + (e.key==='.' ? 1 : -1)));
-    Vox.dirty = true; console.log('voxel depth:', Vox.depth); draw();
-  }
-  if(Vox.on && (e.key==='m'||e.key==='M')){
+  if(sceneMode==='voxels' && (e.key==='m'||e.key==='M')){
     Vox.mode = Vox.mode==='luma' ? 'slab' : 'luma';
     Vox.dirty = true; console.log('voxel height:', Vox.mode); draw();
   }
@@ -1518,12 +2323,9 @@ window.addEventListener('keydown', e=>{
   if(e.key==='2') goPreset('dimetric');
   if(e.key==='3') goPreset('trueIso');
   if(e.key==='4') goPreset('free');
-  if(e.key==='0'){ goPreset('top'); Cam.logZoom=Want.logZoom=0; center(); }
-  if(e.key==='['){ Want.persp=Math.max(0, Want.persp-0.15); kick(); }
-  if(e.key===']'){
-    if(!GL.on){ if(GL.ok || GL.init()){ GL.on=true; GL.resize(); } }
-    Want.persp=Math.min(1, Want.persp+0.15); kick();
-  }
+  if(e.key==='0'){ goPreset('top'); frameSheet(); }
+  if(e.key==='[') nudgePersp(-0.15);
+  if(e.key===']') nudgePersp(+0.15);
 }, true);
 
 function cellAt(r,c){ return S.cells.list[r*S.cells.cols+c]; }
@@ -1681,6 +2483,7 @@ function drawSpriteTo(cv, sprite, box){
 }
 
 function renderCollection(){
+  colVersion++; Cards.dirty = true;
   colList.textContent = '';
   $('col-count').textContent = String(collection.length);
   if(!collection.length){
@@ -1872,11 +2675,37 @@ $('regen').addEventListener('click', ()=>{
 });
 $('repal').addEventListener('click', ()=>{ S.paletteSeed = rand32(); commit('pal', 'shuffle palette'); });
 
+/* R4: the sheet PNG comes from the clean-atlas pass now, not off.toDataURL().
+ * The atlas has been overlay-free since R1, so this is really about making the
+ * multiplier explicit and the expansion exact rather than a filter hint. */
+const exNum = (id, key, lo, hi) => {
+  const el = $(id);
+  const read = ()=>{ ExportCfg[key] = Math.max(lo, Math.min(hi, +el.value||lo)); };
+  el.addEventListener('input', read); read();
+};
+exNum('ex-mult', 'mult', 1, 16);
+exNum('ex-size', 'size', 256, 8192);
+exNum('ex-frames', 'frames', 4, 64);
+$('ex-ss').addEventListener('change', e=>{ ExportCfg.ss = +e.target.value||1; });
+
 $('export').addEventListener('click', ()=>{
-  const a=document.createElement('a');
-  a.download=`sprites_${String(playhead+1).padStart(3,'0')}.png`;
-  a.href=off.toDataURL('image/png'); a.click();
+  const m = ExportCfg.mult;
+  downloadCanvas(assetCanvas(m), `sprites_${String(playhead+1).padStart(3,'0')}_x${m}.png`);
 });
+$('ex-manifest').addEventListener('click', ()=>{
+  const m = ExportCfg.mult;
+  downloadBlob(new Blob([JSON.stringify(buildManifest(m), null, 1)], {type:'application/json'}),
+               `sprites_${String(playhead+1).padStart(3,'0')}_x${m}.json`);
+});
+$('ex-view').addEventListener('click', ()=>{
+  const H = ExportCfg.size, W = Math.round(H*(Cam.vw/Cam.vh));
+  const cv = renderView(W, H, ExportCfg.ss);
+  if(cv){ console.log(`R4: view export ${W}x${H} @ ${ExportCfg.ss}x supersample`);
+          downloadCanvas(cv, `view_${W}x${H}.png`); }
+  draw();
+});
+$('ex-turn').addEventListener('click', exportTurntable);
+$('ex-verify').addEventListener('click', verifyExport);
 $('save').addEventListener('click', ()=>{
   /* cells are shared by reference between entries, so pool them and store an
      index — a long slider drag then costs a few bytes per entry, not a grid. */
@@ -1919,7 +2748,7 @@ $('file').addEventListener('change', e=>{
       renderCollection();
       playhead = Math.min(d.playhead ?? timeline.length-1, timeline.length-1);
       S = cloneState(timeline[playhead].state);
-      writeUI(); render(); refreshStrip(); center();
+      writeUI(); render(); refreshStrip(); frameSheet();
       console.log(`Loaded ${timeline.length} timeline entries.`);
     }catch(err){ console.error('Load failed:', err.message); }
     e.target.value='';
@@ -1940,7 +2769,14 @@ $('tl-mark').addEventListener('click', ()=>{
 
 $('zin').addEventListener('click', ()=>zoomAt(Math.log(1.5)));
 $('zout').addEventListener('click', ()=>zoomAt(-Math.log(1.5)));
-$('zreset').addEventListener('click', ()=>{ Cam.logZoom=0; center(); });
+$('zreset').addEventListener('click', frameSheet);
+$('v-top').addEventListener('click', ()=>goPreset('top'));
+$('v-dim').addEventListener('click', ()=>goPreset('dimetric'));
+$('v-iso').addEventListener('click', ()=>goPreset('trueIso'));
+$('v-per').addEventListener('click', ()=>goPreset('free'));
+$('v-scene').addEventListener('click', ()=>
+  setScene(SCENE_MODES[(SCENE_MODES.indexOf(sceneMode)+1) % SCENE_MODES.length]));
+$('v-elev').addEventListener('click', ()=>cycleElev(1));
 
 window.addEventListener('keydown', e=>{
   const t=e.target.tagName;
@@ -1975,7 +2811,7 @@ function refreshSelection(){
 
 renderCollection();
 commit('init', 'session start');
-requestAnimationFrame(()=>{ resizeMain(); center(); });
+requestAnimationFrame(()=>{ resizeMain(); frameSheet(); });
 </script>
 </body>
 </html>
