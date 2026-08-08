@@ -1,0 +1,1702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Procedural Sprite Generator — Modulo Fields + Timeline</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --sunk:#0b0f14; --line:#2a3038;
+    --ink:#e6edf3; --dim:#8b949e; --accent:#4f8cff; --lock:#ef4444; --mark:#f0b429;
+  }
+  *{box-sizing:border-box}
+  body{
+    background:var(--bg); color:var(--ink); margin:0; overflow:hidden;
+    display:flex; height:100vh;
+    font:14px/1.35 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  #sidebar{
+    width:308px; flex:0 0 308px; background:var(--panel);
+    border-right:1px solid var(--line); padding:12px; display:flex;
+    flex-direction:column; gap:10px; overflow-y:auto; z-index:10;
+  }
+  #sidebar::-webkit-scrollbar{width:8px}
+  #sidebar::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  h1{font-size:16px; margin:0 0 2px; text-align:center; letter-spacing:.02em}
+  .group{background:#1c222b; border:1px solid var(--line); border-radius:8px; padding:9px 10px}
+  .group > .title{
+    font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--dim); font-weight:700; margin-bottom:7px;
+  }
+  .row{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:5px}
+  .row:first-of-type{margin-top:0}
+  label{font-size:12.5px; color:#adbac7; white-space:nowrap}
+  input[type=number], select, textarea{
+    background:var(--sunk); color:var(--ink); border:1px solid #30363d;
+    border-radius:5px; padding:3px 6px; font:inherit; font-size:12.5px;
+  }
+  input[type=number]{width:64px}
+  select{flex:1 1 auto; min-width:0}
+  textarea{width:100%; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; resize:vertical}
+  input[type=range]{flex:1 1 auto; min-width:0; accent-color:var(--accent)}
+  input[type=checkbox]{accent-color:var(--accent); width:15px; height:15px}
+  .check{display:flex; align-items:center; gap:7px; cursor:pointer}
+  .val{font-family:ui-monospace,monospace; font-size:11px; color:var(--dim); width:34px; text-align:right}
+  button{
+    background:var(--accent); color:#fff; border:0; padding:8px 12px; border-radius:6px;
+    cursor:pointer; font:inherit; font-weight:600; width:100%;
+  }
+  button:hover{filter:brightness(1.12)} button:active{transform:scale(.985)}
+  button.sec{background:#30363d}
+  .btnrow{display:flex; gap:6px}
+  #main{flex:1 1 auto; display:flex; flex-direction:column; min-width:0}
+  #stage{flex:1 1 auto; position:relative; overflow:hidden; cursor:crosshair}
+  /* scoped to the sprite sheet only — a bare `canvas` selector also catches
+     the timeline and collection thumbnails and rips them out of the flow */
+  #cv{position:absolute; transform-origin:0 0; image-rendering:pixelated}
+  canvas{image-rendering:pixelated}
+  .toolbar{
+    position:absolute; bottom:14px; right:14px; display:flex; gap:6px; z-index:20;
+    background:rgba(22,27,34,.85); padding:6px; border-radius:8px; backdrop-filter:blur(4px);
+    border:1px solid var(--line);
+  }
+  .toolbar button{width:auto; padding:4px 11px; background:#30363d}
+  #recipe{
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; color:#9fd0ff;
+    background:var(--sunk); border:1px solid #30363d; border-radius:6px; padding:7px;
+    min-height:34px; max-height:150px; overflow:auto; word-break:break-word;
+    line-height:1.55; white-space:pre-wrap;
+  }
+  #recipe::-webkit-scrollbar{width:7px}
+  #recipe::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  .titlerow{display:flex; align-items:center; justify-content:space-between; margin-bottom:7px}
+  .titlerow > .title{margin-bottom:0}
+  .mini{
+    width:auto; background:#30363d; padding:2px 9px; font-size:11px; font-weight:600;
+    border-radius:4px; line-height:1.5;
+  }
+  .mini:disabled{opacity:.4; cursor:default}
+  .mini.done{background:#2ea043}
+  .mini.on{background:var(--lock)}
+
+  /* ---- collection (right panel) ---- */
+  #collection{
+    width:246px; flex:0 0 246px; background:var(--panel); border-left:1px solid var(--line);
+    display:flex; flex-direction:column; z-index:10; min-height:0;
+  }
+  #collection.collapsed{width:32px; flex-basis:32px}
+  #collection.collapsed #col-list, #collection.collapsed #col-foot,
+  #collection.collapsed #col-head .grow{display:none}
+  #col-head{
+    display:flex; align-items:center; gap:6px; padding:9px 8px 9px 10px;
+    border-bottom:1px solid #21262d;
+  }
+  #col-head .title{
+    font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--dim); font-weight:700; margin:0;
+  }
+  #col-count{
+    font:11px/1 ui-monospace,monospace; color:var(--ink); background:#30363d;
+    padding:3px 6px; border-radius:9px;
+  }
+  .grow{flex:1 1 auto; min-width:0; display:flex; align-items:center; gap:6px}
+  #col-toggle{width:auto; background:transparent; color:var(--dim); padding:2px 4px; font-size:12px}
+  #col-toggle:hover{color:var(--ink)}
+  #col-list{flex:1 1 auto; overflow-y:auto; overflow-x:hidden; padding:8px; display:flex;
+    flex-direction:column; gap:6px}
+  #col-list::-webkit-scrollbar{width:8px}
+  #col-list::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  #col-empty{color:#6e7681; font-size:11.5px; text-align:center; padding:18px 6px; line-height:1.6}
+  .item{
+    background:#1c222b; border:1px solid var(--line); border-radius:7px; padding:6px;
+    display:flex; gap:7px; align-items:flex-start; cursor:grab;
+  }
+  .item.sel{border-color:var(--accent)}
+  .item.drop-before{box-shadow:0 -2px 0 var(--accent)}
+  .item.drop-after{box-shadow:0 2px 0 var(--accent)}
+  .item.dragging{opacity:.4}
+  .item canvas{
+    display:block; position:static; background:var(--sunk); border-radius:4px;
+    flex:0 0 auto; cursor:pointer;
+  }
+  .item .body{flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:3px}
+  .item input.name{
+    background:transparent; border:1px solid transparent; color:var(--ink);
+    font-size:12px; font-weight:600; padding:1px 3px; width:100%; border-radius:3px;
+  }
+  .item input.name:hover{border-color:#30363d}
+  .item input.name:focus{background:var(--sunk); border-color:var(--accent); outline:none}
+  .item .meta{
+    font:10px/1.4 ui-monospace,monospace; color:#6e7681; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap;
+  }
+  .item .acts{display:flex; gap:3px; margin-top:1px}
+  .item .acts button{
+    width:auto; background:#262c35; color:#adbac7; padding:1px 6px; font-size:11px;
+    border-radius:3px; font-weight:500; line-height:1.5;
+  }
+  .item .acts button:hover{background:#3a424e; color:var(--ink)}
+  .item .acts button.del:hover{background:var(--lock); color:#fff}
+  #col-foot{padding:8px; border-top:1px solid #21262d; display:flex}
+  #col-foot button{background:#30363d; font-size:12px; padding:6px 8px}
+  #col-foot button.prim{background:var(--accent)}
+  .hint{font-size:11px; color:#6e7681; text-align:center; line-height:1.5}
+  .hidden{display:none !important}
+
+  /* ---- timeline ---- */
+  #timeline{
+    flex:0 0 auto; background:var(--panel); border-top:1px solid var(--line);
+    display:flex; flex-direction:column; user-select:none;
+  }
+  #tl-head{
+    display:flex; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid #21262d;
+  }
+  #tl-head button{
+    width:auto; background:#30363d; padding:3px 9px; font-size:13px; line-height:1.2;
+  }
+  #tl-head button.on{background:var(--accent)}
+  #tl-pos{
+    font-family:ui-monospace,monospace; font-size:11.5px; color:var(--dim);
+    white-space:nowrap; min-width:74px;
+  }
+  #tl-label{
+    font-size:12px; color:#adbac7; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; flex:1 1 auto; min-width:0;
+  }
+  #tl-label b{color:var(--ink); font-weight:600}
+  #tl-past{color:var(--mark)}
+  #tl-strip{
+    display:flex; gap:5px; overflow-x:auto; overflow-y:hidden;
+    padding:7px 10px 9px; height:86px; align-items:flex-start;
+  }
+  #tl-strip::-webkit-scrollbar{height:8px}
+  #tl-strip::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  .frame{
+    position:relative; flex:0 0 auto; border:2px solid #262c35; border-radius:5px;
+    background:var(--sunk); cursor:pointer; padding:0; line-height:0; overflow:hidden;
+  }
+  .frame:hover{border-color:#4a5361}
+  .frame.cur{border-color:var(--accent); box-shadow:0 0 0 2px rgba(79,140,255,.25)}
+  .frame canvas{display:block; position:static}
+  .frame .idx{
+    position:absolute; left:0; bottom:0; font:10px/1.4 ui-monospace,monospace;
+    background:rgba(0,0,0,.66); color:#c9d1d9; padding:0 4px; border-top-right-radius:4px;
+  }
+  .frame .star{
+    position:absolute; right:2px; top:1px; font-size:11px; line-height:1; color:var(--mark);
+    text-shadow:0 0 3px #000;
+  }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h1>Sprite Gen — Modulo Fields</h1>
+  <button id="regen">↻ Regenerate Sheet</button>
+
+  <div class="group">
+    <div class="title">Source</div>
+    <div class="row">
+      <label>Data</label>
+      <select id="source">
+        <option value="field" selected>Modulo field</option>
+        <option value="noise">Random noise</option>
+        <option value="custom">Custom expression</option>
+      </select>
+    </div>
+    <div class="row r-field">
+      <label>Formula</label>
+      <select id="formula"></select>
+    </div>
+    <div class="row r-custom hidden" style="display:block">
+      <label style="display:block;margin-bottom:4px">f(x,y) — <code>u,v</code> centred</label>
+      <textarea id="expr" rows="2">(u*u + v*v) * (Math.abs(u)^Math.abs(v))</textarea>
+    </div>
+    <div class="row r-mod">
+      <label title="Result is taken mod this. Odd numbers give the nicest rings.">Modulus</label>
+      <input type="number" id="modulus" value="17" min="2" max="512">
+    </div>
+    <div class="row r-mod">
+      <label title="Sampling step — bigger = coarser pattern">Stride</label>
+      <input type="number" id="stride" value="1" min="1" max="8">
+    </div>
+    <div class="row r-mod">
+      <label title="Rotates which residues count as ink">Phase</label>
+      <input type="range" id="phase" min="0" max="1" step="0.01" value="0">
+      <span class="val" id="phase-v">0.00</span>
+    </div>
+    <div class="row">
+      <label title="Fraction of residues that become ink">Coverage</label>
+      <input type="range" id="density" min="0.05" max="1" step="0.05" value="0.45">
+      <span class="val" id="density-v">0.45</span>
+    </div>
+    <div class="row r-field">
+      <label class="check"><input type="checkbox" id="vary" checked>
+        <span title="Each cell picks its own formula &amp; modulus">Vary per cell</span></label>
+    </div>
+    <div class="row r-noise hidden">
+      <label class="check"><input type="checkbox" id="ca" checked><span>Smooth (CA pass)</span></label>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Mask</div>
+    <div class="row"><label>Shape</label><select id="mask"></select></div>
+    <div class="row">
+      <label>Size</label>
+      <input type="range" id="mask-scale" min="0.4" max="1.45" step="0.05" value="1">
+      <span class="val" id="mask-scale-v">1.00</span>
+    </div>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="mask-invert"><span>Invert</span></label>
+      <label class="check"><input type="checkbox" id="outline"><span>Outline</span></label>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Sprite</div>
+    <div class="row"><label>Width</label><input type="number" id="sw" value="16" min="2" max="64"></div>
+    <div class="row"><label>Height</label><input type="number" id="sh" value="16" min="2" max="64"></div>
+    <div class="row">
+      <label>Symmetry</label>
+      <select id="symmetry">
+        <option value="none">None</option>
+        <option value="horizontal" selected>Horizontal</option>
+        <option value="vertical">Vertical</option>
+        <option value="quadrant">Quadrant</option>
+        <option value="diagonal">Dihedral (8-fold)</option>
+        <option value="rot90">Rotate 90° (pinwheel)</option>
+        <option value="rot180">Rotate 180°</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Palette</div>
+    <div class="row">
+      <label>Gamut</label>
+      <select id="bpc">
+        <option value="1">1-bit</option><option value="2">2-bit</option>
+        <option value="3" selected>3-bit</option><option value="4">4-bit</option>
+        <option value="8">8-bit</option>
+      </select>
+    </div>
+    <div class="row"><label>Colors / sprite</label><input type="number" id="ncol" value="4" min="1" max="16"></div>
+    <div class="row">
+      <label>Assignment</label>
+      <select id="colormode">
+        <option value="bands" selected>Bands (ramp)</option>
+        <option value="cycle">Cycle residue</option>
+        <option value="solid">Solid</option>
+      </select>
+    </div>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="sortlum" checked><span>Sort by luminance</span></label>
+      <button id="repal" class="sec" style="width:auto;padding:3px 9px;font-size:12px">Shuffle</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Sheet</div>
+    <div class="row"><label>Columns</label><input type="number" id="cols" value="8" min="1" max="50"></div>
+    <div class="row"><label>Rows</label><input type="number" id="rows" value="6" min="1" max="50"></div>
+    <div class="row"><label>Spacing</label><input type="number" id="spacing" value="2" min="0" max="16"></div>
+    <div class="row"><label>Scale (px)</label><input type="number" id="scale" value="4" min="1" max="24"></div>
+  </div>
+
+  <div class="group">
+    <div class="titlerow">
+      <div class="title">Recipe</div>
+      <div style="display:flex;gap:4px">
+        <button id="lock-sel" class="mini" disabled title="Lock this sprite (ctrl-click)">🔒</button>
+        <button id="copy-recipe" class="mini" disabled title="Copy this recipe to the clipboard (C)">⧉</button>
+        <button id="keep-sel" class="mini" disabled title="Keep in collection (K / alt-click)">+ Keep</button>
+      </div>
+    </div>
+    <div id="recipe">Click a sprite to inspect &amp; lock it.</div>
+  </div>
+
+  <div class="btnrow">
+    <button id="export" class="sec">↓ PNG</button>
+    <button id="save" class="sec">↓ Session</button>
+    <button id="load" class="sec">↑ Load</button>
+  </div>
+  <input type="file" id="file" accept="application/json" class="hidden">
+  <div class="hint">click = select · ctrl-click = lock · alt-click = keep<br>
+    shift-click = reroll · drag = pan · wheel = zoom<br>
+    R = regenerate · K = keep · C = copy · B = bookmark<br>
+    ← → = scrub · space = play</div>
+</div>
+
+<div id="main">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <!-- R1: GL canvas is created in JS and inserted here at runtime -->
+    <div class="toolbar">
+      <button id="zin">+</button><button id="zout">−</button><button id="zreset">Reset</button>
+    </div>
+  </div>
+
+  <div id="timeline">
+    <div id="tl-head">
+      <button id="tl-first" title="First (Home)">⏮</button>
+      <button id="tl-prev" title="Back (←)">◀</button>
+      <button id="tl-play" title="Replay exploration (Space)">▶</button>
+      <button id="tl-next" title="Forward (→)">▶|</button>
+      <button id="tl-last" title="Latest (End)">⏭</button>
+      <button id="tl-mark" title="Bookmark this state (B)">☆</button>
+      <span id="tl-pos">0 / 0</span>
+      <span id="tl-label"></span>
+    </div>
+    <div id="tl-strip"></div>
+  </div>
+</div>
+
+<div id="collection">
+  <div id="col-head">
+    <button id="col-toggle" title="Collapse / expand">▶</button>
+    <div class="grow">
+      <span class="title">Collection</span>
+      <span id="col-count">0</span>
+    </div>
+  </div>
+  <div id="col-list"></div>
+  <div id="col-foot">
+    <button id="col-sheet" class="prim" title="Export the collection as one packed sprite sheet">↓ Export Sheet</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+/* ================================================================ utils */
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rand32 = () => (Math.random()*4294967296)>>>0;
+
+function popcount(n){ n = n>>>0; n = n - ((n>>>1)&0x55555555);
+  n = (n&0x33333333) + ((n>>>2)&0x33333333);
+  return ((n + (n>>>4) & 0x0f0f0f0f) * 0x01010101) >>> 24; }
+function digitSum(n){ n = Math.abs(n|0); let s=0; while(n>0){ s += n%10; n=(n/10)|0; } return s; }
+
+const pascalCache = new Map();
+function pascalMod(n,k,m){
+  if(k<0||n<0||k>n) return 0;
+  if(n>180) n%=181;
+  if(k>n) k=n;
+  let tri = pascalCache.get(m);
+  if(!tri){ tri=[[1]]; pascalCache.set(m,tri); }
+  while(tri.length<=n){
+    const prev = tri[tri.length-1], row=[1];
+    for(let i=1;i<prev.length;i++) row.push((prev[i-1]+prev[i])%m);
+    row.push(1); tri.push(row);
+  }
+  return tri[n][k];
+}
+
+/* =============================================================== fields */
+const FIELDS = [
+  {id:'circle',  name:'Circles   x²+y²',           f:(u,v,p)=> u*u + v*v},
+  {id:'product', name:'Product   x·y',             f:(u,v,p)=> u*v},
+  {id:'xor',     name:'XOR   |x| ^ |y|',           f:(u,v,p)=> Math.abs(u) ^ Math.abs(v)},
+  {id:'and',     name:'AND   |x| & |y|',           f:(u,v,p)=> Math.abs(u) & Math.abs(v)},
+  {id:'or',      name:'OR   |x| | |y|',            f:(u,v,p)=> Math.abs(u) | Math.abs(v)},
+  {id:'diamond', name:'Diamond   |x|+|y|',         f:(u,v,p)=> Math.abs(u) + Math.abs(v)},
+  {id:'cheby',   name:'Square   max(|x|,|y|)',     f:(u,v,p)=> Math.max(Math.abs(u),Math.abs(v))},
+  {id:'hyper',   name:'Hyperbola   x²−y²',         f:(u,v,p)=> u*u - v*v},
+  {id:'skew',    name:'Skewed   x²+xy+y²',         f:(u,v,p)=> u*u + u*v + v*v},
+  {id:'cubic',   name:'Cubic   x³+y³',             f:(u,v,p)=> u*u*u + v*v*v},
+  {id:'trefoil', name:'Trefoil   x³−3xy²',         f:(u,v,p)=> u*u*u - 3*u*v*v},
+  {id:'quartic', name:'Quartic   x⁴+y⁴',           f:(u,v,p)=> u*u*u*u + v*v*v*v},
+  {id:'conic',   name:'Random conic   ax²+bxy+…',  f:(u,v,p)=> p.a*u*u + p.b*u*v + p.c*v*v + p.d*u + p.e*v},
+  {id:'popcnt',  name:'Popcount(x·y)',             f:(u,v,p)=> popcount(Math.abs(u*v))},
+  {id:'popsum',  name:'Popcount(x²+y²)',           f:(u,v,p)=> popcount(Math.abs(u*u+v*v))},
+  {id:'ringxor', name:'(x²+y²)·(x^y+1)',           f:(u,v,p)=> (u*u+v*v) * ((Math.abs(u)^Math.abs(v))+1)},
+  {id:'digsum',  name:'Digitsum(x²+y²)',           f:(u,v,p)=> digitSum(u*u+v*v)},
+  {id:'pascal',  name:'Binomial C(|x|+|y|,|x|)',   f:(u,v,p)=> pascalMod(Math.abs(u)+Math.abs(v), Math.abs(u), p.M)},
+  {id:'shift',   name:'(x<<3) ^ (y·y)',            f:(u,v,p)=> (Math.abs(u)<<3) ^ (v*v)},
+  {id:'mixmul',  name:'x·y·(x+y)',                 f:(u,v,p)=> u*v*(u+v)},
+];
+const FIELD_BY_ID = Object.fromEntries(FIELDS.map(f=>[f.id,f]));
+
+const MASKS = [
+  {id:'none',    name:'None',              m:(nx,ny,r)=> true},
+  {id:'disc',    name:'Disc',              m:(nx,ny,r)=> nx*nx+ny*ny <= r*r},
+  {id:'diamond', name:'Diamond',           m:(nx,ny,r)=> Math.abs(nx)+Math.abs(ny) <= r*1.25},
+  {id:'square',  name:'Square',            m:(nx,ny,r)=> Math.max(Math.abs(nx),Math.abs(ny)) <= r*0.95},
+  {id:'super',   name:'Superellipse',      m:(nx,ny,r)=> Math.pow(Math.abs(nx),4)+Math.pow(Math.abs(ny),4) <= Math.pow(r,4)},
+  {id:'ring',    name:'Ring',              m:(nx,ny,r)=>{const d=Math.hypot(nx,ny); return d<=r && d>=r*0.5;}},
+  {id:'cross',   name:'Cross',             m:(nx,ny,r)=> (Math.abs(nx)<=r*0.34 || Math.abs(ny)<=r*0.34) && Math.max(Math.abs(nx),Math.abs(ny))<=r},
+  {id:'taper',   name:'Taper (tree)',      m:(nx,ny,r)=> Math.abs(nx) <= r*(0.18+0.82*(ny+1)/2)},
+  {id:'hourglass',name:'Hourglass',        m:(nx,ny,r)=> Math.abs(nx) <= r*(0.16+0.9*Math.abs(ny))},
+  {id:'lens',    name:'Lens (vesica)',     m:(nx,ny,r)=> Math.abs(ny) <= r*Math.sqrt(Math.max(0,1-nx*nx))*0.9},
+  {id:'blob',    name:'Random blob (CA)',  m:null},
+];
+const MASK_BY_ID = Object.fromEntries(MASKS.map(m=>[m.id,m]));
+
+/* ====================================================== symmetry folding */
+function seedDims(w,h,mode){
+  const hw = Math.ceil(w/2), hh = Math.ceil(h/2);
+  switch(mode){
+    case 'horizontal': return [hw,h];
+    case 'vertical':   return [w,hh];
+    case 'rot180':     return [w,hh];
+    case 'quadrant': case 'diagonal': case 'rot90': return [hw,hh];
+    default: return [w,h];
+  }
+}
+function fold(x,y,w,h,mode){
+  const hw = Math.ceil(w/2), hh = Math.ceil(h/2);
+  let sx=x, sy=y;
+  switch(mode){
+    case 'horizontal': if(sx>=hw) sx=w-1-sx; break;
+    case 'vertical':   if(sy>=hh) sy=h-1-sy; break;
+    case 'quadrant':   if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy; break;
+    case 'rot180':     if(sy>=hh){ sy=h-1-sy; sx=w-1-sx; } break;
+    case 'diagonal': {
+      if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy;
+      if(hw===hh && sx>sy){ const t=sx; sx=sy; sy=t; }
+      break;
+    }
+    case 'rot90': {
+      if(w!==h){ if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy; break; }
+      let g=0;
+      while((sx>=hw || sy>=hh) && g++<4){ const nx=h-1-sy, ny=sx; sx=nx; sy=ny; }
+      break;
+    }
+  }
+  return [sx,sy];
+}
+
+/* =============================================================== palette */
+const rgbHex = (r,g,b) => '#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('');
+const hexRgb = h => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+const lum = h => { const [r,g,b]=hexRgb(h); return 0.2126*r+0.7152*g+0.0722*b; };
+const darken = (h,k) => { const [r,g,b]=hexRgb(h); return rgbHex((r*k)|0,(g*k)|0,(b*k)|0); };
+
+/* Deterministic: the palette is a pure function of (seed, bits), so any
+   timeline entry can be replayed exactly.                                */
+const palCache = new Map();
+function paletteFor(seed, bpc){
+  const key = seed+'/'+bpc;
+  if(palCache.has(key)) return palCache.get(key);
+  const rnd = mulberry32(seed ^ 0x5bf03635);
+  const levels = 1<<bpc, step = 255/(levels-1);
+  let out = [];
+  if(bpc<=3){
+    for(let r=0;r<levels;r++) for(let g=0;g<levels;g++) for(let b=0;b<levels;b++)
+      out.push(rgbHex(Math.round(r*step),Math.round(g*step),Math.round(b*step)));
+    for(let i=out.length-1;i>0;i--){ const j=(rnd()*(i+1))|0; [out[i],out[j]]=[out[j],out[i]]; }
+  } else {
+    const seen = new Set();
+    let guard = 0;
+    while(seen.size<256 && guard++<20000){
+      seen.add(rgbHex(Math.round(((rnd()*levels)|0)*step),
+                      Math.round(((rnd()*levels)|0)*step),
+                      Math.round(((rnd()*levels)|0)*step)));
+    }
+    out = [...seen];
+  }
+  if(palCache.size>64) palCache.clear();
+  palCache.set(key,out);
+  return out;
+}
+
+/* ======================================================== sprite factory */
+const ODDS = [3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,37,41,47,53];
+
+/* g is a flat generator config; pure function of (seed, g). */
+function generateSprite(seed, g){
+  const rnd = mulberry32(seed);
+  const {w,h,sym,coverage,ncol,useCA,source,formulaId,modulus,vary,stride,phase,
+         colorMode,maskId,maskScale,maskInvert,outline,sortLum,customFn,palette} = g;
+
+  const [sw,sh] = seedDims(w,h,sym);
+  const pick = arr => arr[(rnd()*arr.length)|0];
+
+  let fid = formulaId, M = modulus, st = stride, mid = maskId;
+  if(source==='field' && vary){ fid = pick(FIELDS).id; M = pick(ODDS); st = 1 + ((rnd()*3)|0); }
+  else if(source==='field' && fid==='mix') fid = pick(FIELDS).id;
+  if(mid==='mix') mid = pick(MASKS.filter(m=>m.id!=='none')).id;
+
+  const p = {
+    M,
+    ox: ((rnd()*17)|0) - 8,
+    oy: ((rnd()*17)|0) - 8,
+    a: ((rnd()*7)|0)-3 || 1, b: ((rnd()*7)|0)-3,
+    c: ((rnd()*7)|0)-3 || 1, d: ((rnd()*11)|0)-5, e: ((rnd()*11)|0)-5,
+  };
+
+  const pool = [...palette];
+  const colors = [];
+  for(let i=0, n=Math.min(ncol,pool.length); i<n; i++)
+    colors.push(pool.splice((rnd()*pool.length)|0,1)[0]);
+  if(sortLum) colors.sort((a,b)=>lum(a)-lum(b));
+  const nc = colors.length;
+
+  /* mask */
+  const maskFn = MASK_BY_ID[mid] ? MASK_BY_ID[mid].m : null;
+  let blob = null;
+  if(mid==='blob'){
+    blob = Array.from({length:sh},()=>new Uint8Array(sw));
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++) blob[y][x] = rnd()<0.58 ? 1:0;
+    for(let pass=0; pass<2; pass++){
+      const nb = Array.from({length:sh},()=>new Uint8Array(sw));
+      for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+        let n=0;
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+          if(!dx&&!dy) continue;
+          const ax=x+dx, ay=y+dy;
+          if(ax>=0&&ax<sw&&ay>=0&&ay<sh) n+=blob[ay][ax];
+        }
+        nb[y][x] = blob[y][x] ? (n>=2?1:0) : (n>=5?1:0);
+      }
+      blob = nb;
+    }
+  }
+  const cxf=(w-1)/2, cyf=(h-1)/2;
+  function inMask(sx,sy){
+    if(mid==='none') return true;
+    let ok;
+    if(mid==='blob') ok = !!(blob[sy] && blob[sy][sx]);
+    else ok = maskFn((sx-cxf)/(w/2), (sy-cyf)/(h/2), maskScale);
+    return maskInvert ? !ok : ok;
+  }
+
+  /* seed region */
+  const cx = Math.floor((w-1)/2), cy = Math.floor((h-1)/2);
+  const field = FIELD_BY_ID[fid] || FIELD_BY_ID.circle;
+  const seedGrid = Array.from({length:sh},()=>new Uint8Array(sw));
+
+  if(source==='noise'){
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++)
+      seedGrid[y][x] = rnd()<coverage ? 1 + ((rnd()*nc)|0) : 0;
+    if(useCA){
+      const out = Array.from({length:sh},()=>new Uint8Array(sw));
+      for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+        let n=0; const tally={};
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+          if(!dx&&!dy) continue;
+          const ax=x+dx, ay=y+dy;
+          if(ax<0||ax>=sw||ay<0||ay>=sh) continue;
+          const c=seedGrid[ay][ax];
+          if(c>0){ n++; tally[c]=(tally[c]||0)+1; }
+        }
+        if(seedGrid[y][x]===0){
+          if(n>=3){ let best=1,bc=0; for(const k in tally) if(tally[k]>bc){bc=tally[k];best=+k;} out[y][x]=best; }
+        } else out[y][x] = n>=2 ? seedGrid[y][x] : 0;
+      }
+      for(let y=0;y<sh;y++) seedGrid[y].set(out[y]);
+    }
+  } else {
+    const fn = (source==='custom' && customFn) ? customFn : null;
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+      const u = (x-cx)*st + p.ox, v = (y-cy)*st + p.oy;
+      let n;
+      try { n = fn ? fn(x,y,u,v,w,h,p) : field.f(u,v,p); }
+      catch(e){ n = u*u+v*v; }
+      if(!Number.isFinite(n)) n = 0;
+      n = Math.round(n);
+      const vm = ((n % M) + M) % M;
+      const t = (vm/M + phase) % 1;
+      if(t >= coverage){ seedGrid[y][x]=0; continue; }
+      seedGrid[y][x] = colorMode==='solid' ? 1
+                     : colorMode==='cycle' ? 1 + (vm % nc)
+                     : 1 + Math.min(nc-1, ((t/coverage)*nc)|0);
+    }
+  }
+
+  for(let y=0;y<sh;y++) for(let x=0;x<sw;x++) if(!inMask(x,y)) seedGrid[y][x]=0;
+
+  let grid = Array.from({length:h},()=>new Uint8Array(w));
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const [sx,sy] = fold(x,y,w,h,sym);
+    if(sx>=0&&sx<sw&&sy>=0&&sy<sh) grid[y][x] = seedGrid[sy][sx];
+  }
+
+  const paint = [...colors];
+  if(outline && nc>0){
+    paint.push(darken(colors[0],0.32));
+    const oi = paint.length;
+    const out = grid.map(r=>Uint8Array.from(r));
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+      if(grid[y][x]) continue;
+      if((x>0&&grid[y][x-1])||(x<w-1&&grid[y][x+1])||(y>0&&grid[y-1][x])||(y<h-1&&grid[y+1][x])) out[y][x]=oi;
+    }
+    grid = out;
+  }
+
+  const recipe = source==='noise'
+    ? `noise · cov ${coverage.toFixed(2)}${useCA?' · CA':''} · mask ${mid} · ${sym}`
+    : `${source==='custom'?'custom':fid} % ${M} · stride ${st} · off(${p.ox},${p.oy})` +
+      (fid==='conic' ? ` · [${p.a},${p.b},${p.c},${p.d},${p.e}]` : '') +
+      ` · mask ${mid}${maskInvert?'⁻¹':''} · ${sym}`;
+
+  return {grid, colors:paint, recipe, w, h};
+}
+
+/* ================================================================ state */
+/* S is the single source of truth. render() is a pure function of S, so
+   every timeline entry replays bit-identically.                          */
+const CFG_KEYS = ['source','formula','expr','modulus','stride','phase','density','vary','ca',
+  'mask','mask-scale','mask-invert','outline','sw','sh','symmetry','bpc','ncol','colormode',
+  'sortlum','cols','rows','spacing','scale'];
+const NUM_KEYS = new Set(['modulus','stride','phase','density','mask-scale','sw','sh','bpc',
+  'ncol','cols','rows','spacing','scale']);
+const BOOL_KEYS = new Set(['vary','ca','mask-invert','outline','sortlum']);
+const LABELS = {
+  source:'Source', formula:'Formula', expr:'Expression', modulus:'Modulus', stride:'Stride',
+  phase:'Phase', density:'Coverage', vary:'Vary per cell', ca:'CA smooth', mask:'Mask',
+  'mask-scale':'Mask size', 'mask-invert':'Mask invert', outline:'Outline', sw:'Sprite width',
+  sh:'Sprite height', symmetry:'Symmetry', bpc:'Gamut', ncol:'Colors', colormode:'Color mode',
+  sortlum:'Sort by luminance', cols:'Columns', rows:'Rows', spacing:'Spacing', scale:'Scale',
+};
+
+let S = null;                 // {cfg, cells, paletteSeed}
+let timeline = [];            // append-only log
+let playhead = -1;
+const MAX_ENTRIES = 400;
+
+const newCell = () => ({seed:rand32(), locked:false, lockCfg:null});
+
+function defaultState(){
+  const cfg = {};
+  for(const k of CFG_KEYS){
+    const el = $(k);
+    cfg[k] = BOOL_KEYS.has(k) ? el.checked : (NUM_KEYS.has(k) ? +el.value : el.value);
+  }
+  cfg.formula = 'mix'; cfg.mask = 'none';
+  const rows = cfg.rows, cols = cfg.cols, list = [];
+  for(let i=0;i<rows*cols;i++) list.push(newCell());
+  return {cfg, cells:{rows, cols, list}, paletteSeed: rand32()};
+}
+/* cells are treated as immutable — every mutation builds a new object — so
+   snapshots share the reference and a slider drag costs one small cfg copy. */
+const cloneState = s => ({cfg:{...s.cfg}, cells:s.cells, paletteSeed:s.paletteSeed});
+
+/* Cells are shared by reference between entries that didn't touch them,
+   so a slider drag costs one small cfg object per frame, not a grid copy. */
+function reconcileCells(){
+  const rows = S.cfg.rows, cols = S.cfg.cols, c = S.cells;
+  if(c.rows===rows && c.cols===cols) return false;
+  const list = [];
+  for(let r=0;r<rows;r++) for(let x=0;x<cols;x++)
+    list.push((r<c.rows && x<c.cols) ? c.list[r*c.cols+x] : newCell());
+  S.cells = {rows, cols, list};
+  return true;
+}
+
+/* map a stored cfg to the flat generator config */
+function toGen(cfg, paletteSeed){
+  let customFn = null;
+  if(cfg.source==='custom'){
+    try{
+      customFn = new Function('x','y','u','v','w','h','P','return ('+cfg.expr+');');
+      customFn(0,0,1,1,8,8,{M:7,a:1,b:1,c:1,d:0,e:0});
+    }catch(err){ console.warn('Custom expression failed, using x²+y²:', err.message); customFn=null; }
+  }
+  return {
+    w:cfg.sw, h:cfg.sh, sym:cfg.symmetry, coverage:cfg.density, ncol:cfg.ncol,
+    useCA:cfg.ca, source:cfg.source, formulaId:cfg.formula, modulus:cfg.modulus,
+    vary:cfg.vary, stride:cfg.stride, phase:cfg.phase, colorMode:cfg.colormode,
+    maskId:cfg.mask, maskScale:cfg['mask-scale'], maskInvert:cfg['mask-invert'],
+    outline:cfg.outline, sortLum:cfg.sortlum, customFn,
+    palette: paletteFor(paletteSeed, cfg.bpc),
+  };
+}
+
+/* =============================================================== render */
+const canvas = $('cv'), ctx = canvas.getContext('2d');
+const stage = $('stage');
+const off = document.createElement('canvas'), offCtx = off.getContext('2d');
+let drag=null, panned=false;
+let lastSprites = [];
+let sel = null;                 /* {r,c} — a view overlay, not part of S */
+
+/* R1 · panzoomwow §4 — the atlas is built at 1:1, one texel per sprite pixel.
+ * `cfg.scale` has left the generation path entirely: magnification is now the
+ * camera's job and fractional scale is the resample stage (§7). Two consequences
+ * fall out for free:
+ *   · no fillRect — one Uint32 store per sprite pixel (§6.3 becomes trivial)
+ *   · alpha stays strictly binary, so §10.1 holds and the asset export is exact
+ * The lock indicator is NOT drawn here any more. Nothing that is not sprite ink
+ * is ever written into the atlas; overlays live in the view. */
+const HEXCACHE = new Map();
+function argbOf(hex){
+  let v = HEXCACHE.get(hex);
+  if(v === undefined){
+    const s = hex.charAt(0)==='#' ? hex.slice(1) : hex;
+    const n = parseInt(s.length===3 ? s[0]+s[0]+s[1]+s[1]+s[2]+s[2] : s, 16);
+    /* little-endian RGBA in a Uint32 view: 0xAABBGGRR */
+    v = (0xff<<24) | (((n)&0xff)<<16) | (((n>>8)&0xff)<<8) | ((n>>16)&0xff);
+    HEXCACHE.set(hex, v>>>0);
+    v = v>>>0;
+  }
+  return v;
+}
+function render(){
+  const cfg = S.cfg, {rows,cols,list} = S.cells;
+  const w=cfg.sw, h=cfg.sh, sp=cfg.spacing;
+  const gen = toGen(cfg, S.paletteSeed);
+  const outerW=w+sp, outerH=h+sp;            /* 1:1 — no cfg.scale here */
+
+  const AW = Math.max(1, cols*outerW), AH = Math.max(1, rows*outerH);
+  off.width = AW; off.height = AH;
+  offCtx.imageSmoothingEnabled = false;
+  const img = offCtx.createImageData(AW, AH);
+  const px32 = new Uint32Array(img.data.buffer);
+  lastSprites = new Array(rows*cols);
+
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    const cell = list[r*cols+c];
+    const g = (cell.locked && cell.lockCfg)
+      ? toGen(cell.lockCfg, cell.lockCfg._paletteSeed) : gen;
+    const sprite = generateSprite(cell.seed, g);
+    lastSprites[r*cols+c] = sprite;
+    const X0=c*outerW, Y0=r*outerH;
+    for(let y=0;y<sprite.h;y++){
+      const row = sprite.grid[y], base = (Y0+y)*AW + X0;
+      for(let x=0;x<sprite.w;x++){
+        const v = row[x];
+        if(!v) continue;
+        px32[base+x] = argbOf(sprite.colors[v-1] || '#ffffff');
+      }
+    }
+  }
+  offCtx.putImageData(img, 0, 0);
+  atlasDirty = true;
+  resizeMain(); draw();
+}
+function resizeMain(){
+  canvas.width = stage.clientWidth; canvas.height = stage.clientHeight;
+  Cam.vw = canvas.width; Cam.vh = canvas.height;
+  if(GL.on) GL.resize();
+}
+
+/* ==================================================== R0 · camera (§2, §3)
+ * One state, three projections. R1 ships the top-down branch only; yaw/pitch/
+ * persp are present and unused so R2 is an addition rather than a refactor.
+ * World units are RASTER pixels = sheet texels x resample scale. */
+const Cam = {
+  target:{x:0, z:0}, logZoom:0,
+  yaw:0, pitch:-Math.PI/2, persp:0,   /* R2 */
+  vw:1, vh:1,
+};
+const camScale = () => Math.exp(Cam.logZoom);
+function project(wx, wz){
+  const s = camScale();
+  return { x: Cam.vw/2 + (wx-Cam.target.x)*s, y: Cam.vh/2 + (wz-Cam.target.z)*s };
+}
+function pick(sx, sy){
+  const s = camScale();
+  return { x: Cam.target.x + (sx-Cam.vw/2)/s, z: Cam.target.z + (sy-Cam.vh/2)/s };
+}
+/* Cursor-anchored zoom: unproject before, change zoom, unproject after, shift
+ * the target by the difference. Survives non-diagonal transforms unchanged. */
+function zoomAt(dLog, sx, sy){
+  if(sx==null){ sx=Cam.vw/2; sy=Cam.vh/2; }
+  const a = pick(sx, sy);
+  Cam.logZoom = Math.max(Math.log(0.05), Math.min(Math.log(64), Cam.logZoom+dLog));
+  const b = pick(sx, sy);
+  Cam.target.x += a.x-b.x; Cam.target.z += a.z-b.z;
+  draw();
+}
+function zoom(s, fx, fy){ zoomAt(Math.log(s) - Cam.logZoom, fx, fy); }  /* legacy shim */
+function center(){
+  Cam.target.x = rasterW()/2; Cam.target.z = rasterH()/2;
+  draw();
+}
+const rasterW = () => off.width  * S.cfg.scale;
+const rasterH = () => off.height * S.cfg.scale;
+
+/* =============================================== R0.5 · resample (§7)
+ * The reference implementation of what fillRect actually does: box coverage,
+ * then a source-over chain in draw order. NOT an area average — two half-
+ * covering opaque rects give alpha 0.75 and weights 1/3 : 2/3, and that
+ * translucency is the glow. Validated headless in panzoom-r0-harness.js. */
+let atlasDirty = true, offR = document.createElement('canvas'), offRKey = '';
+function coverage1D(srcN, s){
+  const W = Math.ceil(srcN*s - 1e-9), out = new Array(W);
+  for(let j=0;j<W;j++){
+    const cs = [];
+    const i0 = Math.max(0, Math.floor(j/s)), i1 = Math.min(srcN-1, Math.floor((j+1-1e-9)/s));
+    for(let i=i0;i<=i1;i++){
+      const a = Math.max(i*s, j), b = Math.min((i+1)*s, j+1);
+      if(b>a) cs.push([i, b-a]);
+    }
+    out[j] = cs;
+  }
+  return out;
+}
+function buildResampled(){
+  const s = S.cfg.scale, kernel = S.cfg.kernel || 'over';
+  const key = off.width+'x'+off.height+'@'+s+':'+kernel+(atlasDirty?':D':'');
+  if(key === offRKey && !atlasDirty) return offR;
+  const AW = off.width, AH = off.height;
+  const src = new Uint32Array(offCtx.getImageData(0,0,AW,AH).data.buffer);
+  const cx = coverage1D(AW, s), cy = coverage1D(AH, s);
+  const W = cx.length, H = cy.length;
+  offR.width = W; offR.height = H;
+  const g = offR.getContext('2d');
+  const out = g.createImageData(W, H), o8 = out.data;
+
+  for(let jy=0; jy<H; jy++){
+    const ys = cy[jy];
+    for(let jx=0; jx<W; jx++){
+      const xs = cx[jx];
+      let R=0,G=0,B=0,A=0;                       /* premultiplied accumulator */
+      for(let m=0;m<ys.length;m++){              /* draw order: y outer, x inner */
+        const iy = ys[m][0], wy = ys[m][1];
+        for(let n=0;n<xs.length;n++){
+          const p = src[iy*AW + xs[n][0]];
+          const sa = (p>>>24)/255;               /* binary in practice */
+          if(sa === 0) continue;
+          const a = (kernel==='none' ? 1 : wy*xs[n][1]) * sa;
+          if(kernel==='none' && wy*xs[n][1] < 0.5) continue;
+          const r = p&0xff, gg = (p>>>8)&0xff, b = (p>>>16)&0xff;
+          if(kernel === 'box'){ R+=r*a; G+=gg*a; B+=b*a; A+=a; }
+          else { R = r*a + R*(1-a); G = gg*a + G*(1-a); B = b*a + B*(1-a); A = a + A*(1-a); }
+        }
+      }
+      const k = (jy*W + jx)*4;
+      if(A > 0){ o8[k]=R/A; o8[k+1]=G/A; o8[k+2]=B/A; o8[k+3]=Math.min(1,A)*255; }
+    }
+  }
+  g.putImageData(out, 0, 0);
+  offRKey = off.width+'x'+off.height+'@'+s+':'+kernel;
+  atlasDirty = false;
+  return offR;
+}
+
+/* ==================================================== R1 · GL renderer (§5 mode A)
+ * One quad, the 1:1 atlas as a CanvasTexture, and the resample as a MAGNIFICATION
+ * SHADER rather than baked into the texture (§7.5). That keeps the atlas binary-
+ * alpha, makes `scale` a live uniform with no regeneration, and carries the
+ * colourisation into every camera angle R2 adds. */
+const GL = {
+  on:false, ok:false, canvas:null, renderer:null, scene:null, cam:null,
+  mesh:null, tex:null, mat:null,
+  init(){
+    if(this.ok || typeof THREE === 'undefined') return this.ok;
+    const c = document.createElement('canvas');
+    c.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; display:none';
+    if(getComputedStyle(stage).position === 'static') stage.style.position = 'relative';
+    canvas.parentNode.insertBefore(c, canvas);
+    c.style.zIndex = '0';
+    canvas.style.position = 'relative'; canvas.style.zIndex = '1';
+    try{
+      this.renderer = new THREE.WebGLRenderer({canvas:c, alpha:true, antialias:false});
+    }catch(err){ console.warn('R1: WebGL unavailable, staying on the 2D renderer', err); return false; }
+    this.renderer.setClearColor(0x000000, 0);
+    this.canvas = c;
+    this.scene = new THREE.Scene();
+    this.cam = new THREE.OrthographicCamera(-1,1,1,-1, 0.1, 1e5);
+    this.cam.up.set(0,0,-1);
+    this.tex = new THREE.CanvasTexture(off);
+    this.tex.magFilter = THREE.NearestFilter;
+    this.tex.minFilter = THREE.NearestFilter;   /* mipmaps arrive with R2's oblique views */
+    this.tex.generateMipmaps = false;
+    this.mat = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, side:THREE.DoubleSide,
+      uniforms:{ uAtlas:{value:this.tex}, uSize:{value:new THREE.Vector2(1,1)},
+                 uScale:{value:1}, uKernel:{value:2} },
+      vertexShader:`
+        varying vec2 vUv;
+        void main(){ vUv = uv; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+      fragmentShader:`
+        precision highp float;
+        uniform sampler2D uAtlas; uniform vec2 uSize; uniform float uScale; uniform int uKernel;
+        varying vec2 vUv;
+        vec4 texel(float ix, float iy){
+          return texture2D(uAtlas, (vec2(ix,iy)+0.5)/uSize);
+        }
+        void main(){
+          vec2 raster = vUv*uSize*uScale;
+          vec2 j = floor(raster);
+          float s = uScale;
+          // <=2 contributing source texels per axis while s >= 1
+          vec2 i0 = floor(j/s);
+          vec2 i1 = min(floor((j+1.0-1e-4)/s), uSize-1.0);
+          vec2 c0 = min((i0+1.0)*s, j+1.0) - max(i0*s, j);
+          vec2 c1 = max(vec2(0.0), min((i1+1.0)*s, j+1.0) - max(i1*s, j));
+          c1 *= step(0.5, i1-i0);                       // zero when i1 == i0
+          if(uKernel == 0){                             // 'none' — nearest
+            gl_FragColor = texel(floor(raster.x/s), floor(raster.y/s));
+            if(gl_FragColor.a < 0.5) discard;
+            return;
+          }
+          float cw[4]; vec4 cc[4];
+          cc[0]=texel(i0.x,i0.y); cw[0]=c0.x*c0.y;      // draw order: y outer, x inner
+          cc[1]=texel(i1.x,i0.y); cw[1]=c1.x*c0.y;
+          cc[2]=texel(i0.x,i1.y); cw[2]=c0.x*c1.y;
+          cc[3]=texel(i1.x,i1.y); cw[3]=c1.x*c1.y;
+          vec3 P = vec3(0.0); float A = 0.0;
+          for(int k=0;k<4;k++){
+            float a = cw[k]*cc[k].a;
+            if(uKernel == 1){ P += cc[k].rgb*a; A += a; }        // box
+            else { P = cc[k].rgb*a + P*(1.0-a); A = a + A*(1.0-a); }  // over
+          }
+          if(A <= 0.001) discard;
+          gl_FragColor = vec4(P/A, min(A,1.0));
+        }`,
+    });
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(1,1), this.mat);
+    this.scene.add(this.mesh);
+    this.ok = true;
+    return true;
+  },
+  resize(){
+    if(!this.ok) return;
+    this.renderer.setPixelRatio(window.devicePixelRatio||1);
+    this.renderer.setSize(stage.clientWidth, stage.clientHeight, false);
+  },
+  geom(){
+    const rw = rasterW(), rh = rasterH();
+    if(this.mesh.userData.rw === rw && this.mesh.userData.rh === rh) return;
+    this.mesh.geometry.dispose();
+    /* rotateX(-90) puts the quad in XZ with v=1 at z=0, so atlas row 0 is the
+     * top row under a camera whose up is -Z. Then shift the corner to origin. */
+    const g = new THREE.PlaneGeometry(rw, rh);
+    g.rotateX(-Math.PI/2); g.translate(rw/2, 0, rh/2);
+    this.mesh.geometry = g;
+    this.mesh.userData = {rw, rh};
+  },
+  render(){
+    if(!this.ok) return;
+    this.geom();
+    if(atlasDirty){ this.tex.needsUpdate = true; }
+    this.mat.uniforms.uSize.value.set(off.width, off.height);
+    this.mat.uniforms.uScale.value = S.cfg.scale;
+    this.mat.uniforms.uKernel.value = ({none:0, box:1, over:2})[S.cfg.kernel||'over'];
+    const s = camScale(), halfH = (Cam.vh/2)/s, halfW = (Cam.vw/2)/s;
+    const c = this.cam;
+    c.left=-halfW; c.right=halfW; c.top=halfH; c.bottom=-halfH;
+    c.near = 1; c.far = 4e4;
+    c.position.set(Cam.target.x, 2e4, Cam.target.z);
+    c.lookAt(Cam.target.x, 0, Cam.target.z);
+    c.updateProjectionMatrix();
+    this.renderer.render(this.scene, c);
+  },
+};
+
+function draw(){
+  const use3d = GL.on && GL.ok;
+  if(GL.canvas) GL.canvas.style.display = use3d ? 'block' : 'none';
+
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.imageSmoothingEnabled = false;
+  if(use3d){
+    GL.render();                 /* GL paints the sheet; ctx is the overlay layer */
+  } else {
+    const s = camScale();
+    ctx.save();
+    ctx.translate(Cam.vw/2 - Cam.target.x*s, Cam.vh/2 - Cam.target.z*s);
+    ctx.scale(s, s);
+    ctx.drawImage(buildResampled(), 0, 0);
+    ctx.restore();
+  }
+  drawOverlays();
+}
+
+/* Overlays are drawn in the view, never into the atlas (§10.1). Selection and
+ * the lock indicator both live here now, which is also what un-bakes the red
+ * stroke that used to end up in every exported PNG. */
+function drawOverlays(){
+  const cfg = S.cfg, {rows, cols, list} = S.cells;
+  const px = cfg.scale, ow=(cfg.sw+cfg.spacing)*px, oh=(cfg.sh+cfg.spacing)*px;
+  const s = camScale();
+  ctx.save();
+  ctx.translate(Cam.vw/2 - Cam.target.x*s, Cam.vh/2 - Cam.target.z*s);
+  ctx.scale(s, s);
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    if(!list[r*cols+c].locked) continue;
+    ctx.strokeStyle='rgba(239,68,68,.85)'; ctx.lineWidth=Math.max(0.5, 1.5/s);
+    ctx.strokeRect(c*ow-1.5/s, r*oh-1.5/s, cfg.sw*px+3/s, cfg.sh*px+3/s);
+  }
+  if(sel && sel.r<rows && sel.c<cols){
+    ctx.strokeStyle='#4f8cff'; ctx.lineWidth=Math.max(1,2/s);
+    ctx.setLineDash([4/s, 3/s]);
+    ctx.strokeRect(sel.c*ow-2/s, sel.r*oh-2/s, cfg.sw*px+4/s, cfg.sh*px+4/s);
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+/* ============================================================= timeline */
+const strip = $('tl-strip');
+const THUMB_W = 104, THUMB_H = 62;
+
+function makeThumb(entry){
+  const c = entry.thumb || document.createElement('canvas');
+  c.width=THUMB_W; c.height=THUMB_H;
+  const g = c.getContext('2d');
+  g.clearRect(0,0,THUMB_W,THUMB_H);
+  g.fillStyle='#0b0f14'; g.fillRect(0,0,THUMB_W,THUMB_H);
+  const k = Math.min(THUMB_W/off.width, THUMB_H/off.height);
+  const dw = off.width*k, dh = off.height*k;
+  g.imageSmoothingEnabled = true;
+  g.drawImage(off, (THUMB_W-dw)/2, (THUMB_H-dh)/2, dw, dh);
+  entry.thumb = c;
+}
+
+function diffLabel(prev, next){
+  if(!prev) return 'session start';
+  const changed = CFG_KEYS.filter(k=>prev.cfg[k]!==next.cfg[k]);
+  if(changed.length===0) return 'no config change';
+  if(changed.length>3) return `${changed.length} settings changed`;
+  return changed.map(k=>{
+    const a = prev.cfg[k], b = next.cfg[k];
+    const fmt = v => typeof v==='boolean' ? (v?'on':'off')
+               : (k==='phase'||k==='density'||k==='mask-scale') ? (+v).toFixed(2)
+               : String(v).length>14 ? String(v).slice(0,14)+'…' : v;
+    return `${LABELS[k]} ${fmt(a)} → ${fmt(b)}`;
+  }).join(' · ');
+}
+
+/* Append-only: rewinding moves the playhead; editing from the past appends
+   a new entry at the end rather than truncating the future.               */
+function commit(key, explicitLabel){
+  reconcileCells();
+  const snap = cloneState(S);
+  const prev = timeline[timeline.length-1];
+  const label = explicitLabel || diffLabel(prev ? prev.state : null, snap);
+  const now = Date.now();
+  const atEnd = playhead === timeline.length-1;
+  const canCoalesce = prev && atEnd && key.startsWith('cfg:') && prev.key===key
+                      && (now-prev.ts) < 700 && !prev.bookmark;
+
+  render();
+
+  if(canCoalesce){
+    prev.state = snap;
+    prev.ts = now;
+    prev.label = diffLabel(timeline.length>1 ? timeline[timeline.length-2].state : null, snap);
+    makeThumb(prev);
+  } else {
+    const entry = {key, label, ts:now, state:snap, thumb:null, bookmark:false, from:playhead};
+    makeThumb(entry);
+    timeline.push(entry);
+    if(timeline.length > MAX_ENTRIES){ timeline.shift(); stripBuilt = -1; }
+  }
+  playhead = timeline.length-1;
+  refreshStrip();
+}
+
+function goTo(i){
+  if(i<0||i>=timeline.length||i===playhead) return;
+  playhead = i;
+  S = cloneState(timeline[i].state);
+  writeUI();
+  render();
+  refreshSelection();
+  refreshStrip();
+}
+
+let stripBuilt = 0;
+function refreshStrip(){
+  /* rebuild only when the entry count changed; otherwise just restyle */
+  if(stripBuilt !== timeline.length){
+    strip.textContent = '';
+    timeline.forEach((e,i)=>{
+      const f = document.createElement('div');
+      f.className='frame'; f.dataset.i=i;
+      f.appendChild(e.thumb);
+      const idx = document.createElement('span');
+      idx.className='idx'; idx.textContent = '#'+(i+1);
+      f.appendChild(idx);
+      const st = document.createElement('span');
+      st.className='star'; st.textContent = e.bookmark ? '★' : '';
+      f.appendChild(st);
+      strip.appendChild(f);
+    });
+    stripBuilt = timeline.length;
+  }
+  [...strip.children].forEach((f,i)=>{
+    f.classList.toggle('cur', i===playhead);
+    const en = timeline[i];
+    f.title = `#${i+1} · ${en.label}` +
+      (en.from>=0 && en.from!==i-1 ? `  (branched from #${en.from+1})` : '');
+    f.lastChild.textContent = timeline[i].bookmark ? '★' : '';
+  });
+  const cur = strip.children[playhead];
+  if(cur) cur.scrollIntoView({block:'nearest', inline:'nearest'});
+  $('tl-pos').textContent = `${playhead+1} / ${timeline.length}`;
+  const e = timeline[playhead];
+  $('tl-label').innerHTML = e
+    ? (playhead < timeline.length-1
+        ? `<span id="tl-past">◂ rewound</span> — <b>${escapeHtml(e.label)}</b> · edits append at #${timeline.length+1}`
+        : `<b>${escapeHtml(e.label)}</b>`)
+    : '';
+  $('tl-mark').textContent = e && e.bookmark ? '★' : '☆';
+  $('tl-mark').classList.toggle('on', !!(e && e.bookmark));
+}
+const escapeHtml = s => String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+let playTimer = null;
+function togglePlay(){
+  if(playTimer){ clearInterval(playTimer); playTimer=null; $('tl-play').classList.remove('on'); $('tl-play').textContent='▶'; return; }
+  if(playhead >= timeline.length-1) goTo(0);
+  $('tl-play').classList.add('on'); $('tl-play').textContent='❚❚';
+  playTimer = setInterval(()=>{
+    if(playhead >= timeline.length-1) togglePlay();
+    else goTo(playhead+1);
+  }, 340);
+}
+
+/* ================================================================== UI */
+function fillSelects(){
+  $('formula').innerHTML = '<option value="mix">Random mix</option>' +
+    FIELDS.map(f=>`<option value="${f.id}">${f.name}</option>`).join('');
+  $('mask').innerHTML = MASKS.map(m=>`<option value="${m.id}">${m.name}</option>`).join('') +
+    '<option value="mix">Random mix</option>';
+}
+function syncVisibility(){
+  const s = S ? S.cfg.source : $('source').value;
+  document.querySelectorAll('.r-field').forEach(el=>el.classList.toggle('hidden', s!=='field'));
+  document.querySelectorAll('.r-custom').forEach(el=>el.classList.toggle('hidden', s!=='custom'));
+  document.querySelectorAll('.r-noise').forEach(el=>el.classList.toggle('hidden', s!=='noise'));
+  document.querySelectorAll('.r-mod').forEach(el=>el.classList.toggle('hidden', s==='noise'));
+}
+const READOUTS = {density:'density-v', phase:'phase-v', 'mask-scale':'mask-scale-v'};
+function syncReadouts(){ for(const k in READOUTS) $(READOUTS[k]).textContent = (+S.cfg[k]).toFixed(2); }
+
+function readUI(){
+  for(const k of CFG_KEYS){
+    const el = $(k);
+    S.cfg[k] = BOOL_KEYS.has(k) ? el.checked : (NUM_KEYS.has(k) ? (+el.value||0) : el.value);
+  }
+}
+function writeUI(){
+  for(const k of CFG_KEYS){
+    const el = $(k);
+    if(BOOL_KEYS.has(k)) el.checked = S.cfg[k];
+    else el.value = S.cfg[k];
+  }
+  syncVisibility(); syncReadouts();
+}
+
+/* ========================================================== interaction */
+/* Pan moves the camera target, so a pixel of mouse motion is a pixel of content
+ * motion at any zoom. Under R2's oblique projections this line is unchanged —
+ * only the basis it moves along picks up yaw. */
+stage.addEventListener('mousedown', e=>{
+  if(e.button!==0) return;
+  drag={sx:e.clientX, sy:e.clientY, tx:Cam.target.x, tz:Cam.target.z}; panned=false;
+});
+window.addEventListener('mousemove', e=>{
+  if(!drag) return;
+  const dx = e.clientX-drag.sx, dy = e.clientY-drag.sy;
+  if(Math.abs(dx)>2 || Math.abs(dy)>2) panned=true;
+  const s = camScale();
+  Cam.target.x = drag.tx - dx/s; Cam.target.z = drag.tz - dy/s;
+  draw();
+});
+window.addEventListener('mouseup', e=>{
+  if(!drag) return; drag=null;
+  if(panned) return;
+  const cfg = S.cfg, rect = canvas.getBoundingClientRect();
+  /* pick() is projection-agnostic: the same call serves top-down now and
+   * dimetric/perspective at R2, because all three hand back a ray. */
+  const p = pick(e.clientX-rect.left, e.clientY-rect.top);
+  if(!p) return;
+  const outerW=(cfg.sw+cfg.spacing)*cfg.scale, outerH=(cfg.sh+cfg.spacing)*cfg.scale;
+  const c=Math.floor(p.x/outerW), r=Math.floor(p.z/outerH);
+  const {rows,cols,list}=S.cells;
+  if(r<0||c<0||r>=rows||c>=cols) return;
+  if(p.x-c*outerW > cfg.sw*cfg.scale || p.z-r*outerH > cfg.sh*cfg.scale) return;
+
+  sel = {r,c};
+  if(e.shiftKey)      rerollCell(r,c);
+  else if(e.ctrlKey || e.metaKey) toggleLock(r,c);
+  else                { draw(); selectCell(r,c); }
+  if(e.altKey) keepSelected();
+});
+stage.addEventListener('wheel', e=>{
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  zoomAt(-e.deltaY*0.002, e.clientX-rect.left, e.clientY-rect.top);
+}, {passive:false});
+
+/* R1 toggles. 'v' swaps renderer, 'k' cycles the resample kernel — the 2D and
+ * GL paths are peers, and comparing them is how the shader gets validated. */
+window.addEventListener('keydown', e=>{
+  if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT'||e.target.tagName==='TEXTAREA') return;
+  if(e.key==='v'||e.key==='V'){
+    if(!GL.ok && !GL.init()){ console.warn('R1: no WebGL, staying 2D'); return; }
+    GL.on = !GL.on; GL.resize();
+    console.log('renderer:', GL.on ? 'GL (shader resample)' : '2D (JS resample)');
+    draw();
+  }
+  if(e.key==='k'||e.key==='K'){
+    const order = ['over','box','none'];
+    S.cfg.kernel = order[(order.indexOf(S.cfg.kernel||'over')+1) % 3];
+    atlasDirty = true;
+    console.log('resample kernel:', S.cfg.kernel,
+      S.cfg.kernel==='over' ? '(fillRect-exact: alpha 0.75 edge, 0.684 corner)'
+      : S.cfg.kernel==='box' ? '(area average: alpha 1, symmetric, no glow)'
+      : '(nearest: crisp, export-exact)');
+    draw();
+  }
+}, true);
+
+function cellAt(r,c){ return S.cells.list[r*S.cells.cols+c]; }
+
+function rerollCell(r,c){
+  const {rows,cols,list}=S.cells, nl=list.slice();
+  nl[r*cols+c] = {seed:rand32(), locked:false, lockCfg:null};
+  S.cells = {rows,cols,list:nl};
+  commit('cells:reroll', `reroll cell [${r},${c}]`);
+  selectCell(r,c);
+}
+function toggleLock(r,c){
+  const {rows,cols,list}=S.cells, nl=list.slice(), cell=list[r*cols+c];
+  const locking = !cell.locked;
+  nl[r*cols+c] = {seed:cell.seed, locked:locking,
+                  lockCfg: locking ? {...S.cfg, _paletteSeed:S.paletteSeed} : null};
+  S.cells = {rows,cols,list:nl};
+  commit('cells:lock', `${locking?'lock':'unlock'} cell [${r},${c}]`);
+  selectCell(r,c);
+}
+function selectCell(r,c){
+  sel = {r,c};
+  const cell = cellAt(r,c), sp = lastSprites[r*S.cells.cols+c];
+  if(sp) showRecipe(r,c,cell,sp);
+  $('lock-sel').classList.toggle('on', !!cell.locked);
+  $('lock-sel').disabled = false;
+  $('keep-sel').disabled = false;
+  draw();
+}
+
+/* The recipe is a complete reproduction record: seed + this block regenerates
+   the sprite exactly, which is what makes it worth putting on the clipboard. */
+let recipeText = '';
+function showRecipe(r, c, cell, sprite){
+  const cfg = (cell.locked && cell.lockCfg) ? cell.lockCfg : S.cfg;
+  const pseed = (cell.locked && cell.lockCfg) ? cell.lockCfg._paletteSeed : S.paletteSeed;
+  const pad = k => (k+'         ').slice(0,9);
+  const lines = [
+    `sprite    [${r},${c}]  frame #${playhead+1}${cell.locked?'  (locked)':''}`,
+    `${pad('seed')} ${cell.seed}`,
+    `${pad('recipe')} ${sprite.recipe}`,
+    `${pad('size')} ${sprite.w}×${sprite.h}  ${cfg.symmetry}`,
+    `${pad('ink')} coverage ${(+cfg.density).toFixed(2)}  phase ${(+cfg.phase).toFixed(2)}`,
+    `${pad('color')} ${cfg.ncol}× ${cfg.colormode}  ${cfg.bpc}-bit  pal ${pseed}`,
+  ];
+  if(cfg.source==='custom') lines.push(`${pad('expr')} ${cfg.expr}`);
+  recipeText = lines.join('\n');
+  $('recipe').textContent = recipeText;
+  $('copy-recipe').disabled = false;
+}
+
+function copyRecipe(){
+  const btn = $('copy-recipe');
+  if(!recipeText) return;
+  const done = ok => {
+    btn.textContent = ok ? '✓ Copied' : '✗ Failed';
+    btn.classList.toggle('done', ok);
+    clearTimeout(btn._t);
+    btn._t = setTimeout(()=>{ btn.textContent='⧉ Copy'; btn.classList.remove('done'); }, 1400);
+    if(!ok) console.warn('Clipboard unavailable. Recipe:\n'+recipeText);
+  };
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(recipeText).then(()=>done(true), ()=>done(fallbackCopy()));
+  } else {
+    done(fallbackCopy());   /* file:// pages have no async clipboard */
+  }
+}
+function fallbackCopy(){
+  const ta = document.createElement('textarea');
+  ta.value = recipeText;
+  ta.setAttribute('readonly','');
+  ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+  document.body.appendChild(ta);
+  ta.select(); ta.setSelectionRange(0, recipeText.length);
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch(err){ ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+$('copy-recipe').addEventListener('click', copyRecipe);
+
+/* ============================================================ collection */
+/* The shelf of kept sprites. Deliberately OUTSIDE the timeline: scrubbing the
+   playhead must not un-collect anything. Each item stores seed + the frozen
+   config it was made under, so it re-renders exactly, forever.            */
+let collection = [];
+let colSel = null;
+let colSeq = 0;
+const colList = $('col-list');
+
+function itemGen(item){ return toGen(item.cfg, item.cfg._paletteSeed); }
+function itemSprite(item){ return generateSprite(item.seed, itemGen(item)); }
+
+function autoName(sprite){
+  const m = /^(\S+) % (\d+)/.exec(sprite.recipe);
+  const base = m ? `${m[1]}·${m[2]}` : sprite.recipe.split(' ')[0];
+  let name = base, n = 2;
+  while(collection.some(i=>i.name===name)) name = `${base} (${n++})`;
+  return name;
+}
+
+function keepSelected(){
+  if(!sel) return;
+  const {r,c} = sel;
+  if(r>=S.cells.rows || c>=S.cells.cols) return;
+  const cell = cellAt(r,c), sprite = lastSprites[r*S.cells.cols+c];
+  if(!sprite) return;
+  const cfg = {};
+  for(const k of CFG_KEYS) cfg[k] = (cell.locked && cell.lockCfg) ? cell.lockCfg[k] : S.cfg[k];
+  cfg._paletteSeed = (cell.locked && cell.lockCfg) ? cell.lockCfg._paletteSeed : S.paletteSeed;
+  const item = {
+    id: ++colSeq, name: autoName(sprite), seed: cell.seed, cfg,
+    frame: playhead+1, from:[r,c], ts: Date.now(),
+  };
+  collection.push(item);
+  colSel = item.id;
+  renderCollection();
+  const el = colList.querySelector(`[data-id="${item.id}"]`);
+  if(el) el.scrollIntoView({block:'nearest'});
+}
+
+function removeItem(id){
+  collection = collection.filter(i=>i.id!==id);
+  if(colSel===id) colSel=null;
+  renderCollection();
+}
+
+/* Restore adopts the config the sprite was made under AND stamps its seed into
+   cell [0,0]. Because a sprite is a pure function of (seed,cfg), that makes the
+   exact sprite reappear rather than merely "something similar".            */
+function restoreItem(item){
+  for(const k of CFG_KEYS) S.cfg[k] = item.cfg[k];
+  S.paletteSeed = item.cfg._paletteSeed;
+  writeUI();
+  reconcileCells();
+  const {rows,cols,list} = S.cells, nl = list.slice();
+  nl[0] = {seed:item.seed, locked:false, lockCfg:null};
+  S.cells = {rows,cols,list:nl};
+  commit('restore', `restore "${item.name}"`);
+  selectCell(0,0);
+}
+
+function drawSpriteTo(cv, sprite, box){
+  const k = Math.max(1, Math.floor(Math.min(box/sprite.w, box/sprite.h)));
+  cv.width = sprite.w*k; cv.height = sprite.h*k;
+  const g = cv.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  g.clearRect(0,0,cv.width,cv.height);
+  for(let y=0;y<sprite.h;y++) for(let x=0;x<sprite.w;x++){
+    const v = sprite.grid[y][x];
+    if(!v) continue;
+    g.fillStyle = sprite.colors[v-1] || '#fff';
+    g.fillRect(x*k, y*k, k, k);
+  }
+}
+
+function renderCollection(){
+  colList.textContent = '';
+  $('col-count').textContent = String(collection.length);
+  if(!collection.length){
+    const p = document.createElement('div');
+    p.id='col-empty';
+    p.textContent = 'Nothing kept yet.\nSelect a sprite and press K (or alt-click it).';
+    colList.appendChild(p);
+    return;
+  }
+  collection.forEach((item, idx)=>{
+    const sprite = itemSprite(item);
+    const row = document.createElement('div');
+    row.className = 'item' + (colSel===item.id ? ' sel' : '');
+    row.draggable = true;
+    row.dataset.id = item.id;
+    row.dataset.idx = idx;
+
+    const cv = document.createElement('canvas');
+    drawSpriteTo(cv, sprite, 46);
+    cv.title = 'Show this recipe';
+    cv.addEventListener('click', ()=>{
+      colSel = item.id;
+      recipeText = itemRecipe(item, sprite);
+      $('recipe').textContent = recipeText;
+      $('copy-recipe').disabled = false;
+      renderCollection();
+    });
+    row.appendChild(cv);
+
+    const body = document.createElement('div');
+    body.className = 'body';
+
+    const name = document.createElement('input');
+    name.className = 'name'; name.type = 'text'; name.value = item.name;
+    name.title = 'Rename';
+    name.addEventListener('input', ()=>{ item.name = name.value; });
+    name.addEventListener('keydown', ev=>{ if(ev.key==='Enter') name.blur(); ev.stopPropagation(); });
+    body.appendChild(name);
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = `${sprite.w}×${sprite.h} · #${item.frame} · ${item.seed}`;
+    meta.title = sprite.recipe;
+    body.appendChild(meta);
+
+    const acts = document.createElement('div');
+    acts.className = 'acts';
+    const mk = (label, title, fn, cls) => {
+      const b = document.createElement('button');
+      b.textContent = label; b.title = title;
+      if(cls) b.className = cls;
+      b.addEventListener('click', fn);
+      acts.appendChild(b);
+    };
+    mk('⟲', 'Restore these settings and stamp the sprite at [0,0]', ()=>restoreItem(item));
+    mk('⧉', 'Copy this recipe', ()=>{ recipeText = itemRecipe(item, sprite); copyRecipe(); });
+    mk('↓', 'Export this sprite as PNG', ()=>exportItem(item, sprite));
+    mk('✕', 'Remove from collection', ()=>removeItem(item.id), 'del');
+    body.appendChild(acts);
+
+    row.appendChild(body);
+    colList.appendChild(row);
+  });
+}
+
+function itemRecipe(item, sprite){
+  const cfg = item.cfg, pad = k => (k+'         ').slice(0,9);
+  const lines = [
+    `kept      "${item.name}"  from [${item.from[0]},${item.from[1]}] @ frame #${item.frame}`,
+    `${pad('seed')} ${item.seed}`,
+    `${pad('recipe')} ${sprite.recipe}`,
+    `${pad('size')} ${sprite.w}×${sprite.h}  ${cfg.symmetry}`,
+    `${pad('ink')} coverage ${(+cfg.density).toFixed(2)}  phase ${(+cfg.phase).toFixed(2)}`,
+    `${pad('color')} ${cfg.ncol}× ${cfg.colormode}  ${cfg.bpc}-bit  pal ${cfg._paletteSeed}`,
+  ];
+  if(cfg.source==='custom') lines.push(`${pad('expr')} ${cfg.expr}`);
+  return lines.join('\n');
+}
+
+const safeName = n => (n.replace(/[^a-z0-9._-]+/gi,'_').replace(/^_+|_+$/g,'') || 'sprite');
+
+function exportItem(item, sprite){
+  const cv = document.createElement('canvas');
+  drawSpriteTo(cv, sprite, sprite.w*8);
+  const a = document.createElement('a');
+  a.download = safeName(item.name)+'.png';
+  a.href = cv.toDataURL('image/png'); a.click();
+}
+
+/* Packs the collection into one sheet. Cells are sized to the largest kept
+   sprite so mixed dimensions still align to a regular grid. */
+function exportCollectionSheet(){
+  if(!collection.length){ console.warn('Collection is empty — nothing to export.'); return; }
+  const sprites = collection.map(itemSprite);
+  const cw = Math.max(...sprites.map(s=>s.w)), ch = Math.max(...sprites.map(s=>s.h));
+  const px = S.cfg.scale, gap = S.cfg.spacing;
+  const cols = Math.min(collection.length, Math.max(1, Math.ceil(Math.sqrt(collection.length))));
+  const rows = Math.ceil(collection.length/cols);
+  const ow = (cw+gap)*px, oh = (ch+gap)*px;
+  const cv = document.createElement('canvas');
+  cv.width = cols*ow; cv.height = rows*oh;
+  const g = cv.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  sprites.forEach((sp,i)=>{
+    const X0 = (i%cols)*ow + (((cw-sp.w)/2)|0)*px;
+    const Y0 = ((i/cols)|0)*oh + (((ch-sp.h)/2)|0)*px;
+    for(let y=0;y<sp.h;y++) for(let x=0;x<sp.w;x++){
+      const v = sp.grid[y][x];
+      if(!v) continue;
+      g.fillStyle = sp.colors[v-1] || '#fff';
+      g.fillRect(X0+x*px, Y0+y*px, px, px);
+    }
+  });
+  const a = document.createElement('a');
+  a.download = `collection_${collection.length}.png`;
+  a.href = cv.toDataURL('image/png'); a.click();
+  console.log(`Exported ${collection.length} sprites as ${cols}×${rows} @ ${cw}×${ch}.`);
+}
+
+/* drag to reorder */
+let dragIdx = null;
+colList.addEventListener('dragstart', e=>{
+  const row = e.target.closest ? e.target.closest('.item') : null;
+  if(!row) return;
+  dragIdx = +row.dataset.idx;
+  row.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  try{ e.dataTransfer.setData('text/plain', String(dragIdx)); }catch(err){}
+});
+colList.addEventListener('dragover', e=>{
+  e.preventDefault();
+  const row = e.target.closest ? e.target.closest('.item') : null;
+  [...colList.children].forEach(r=>r.classList.remove('drop-before','drop-after'));
+  if(!row || dragIdx===null) return;
+  const rect = row.getBoundingClientRect();
+  row.classList.add(e.clientY < rect.top+rect.height/2 ? 'drop-before' : 'drop-after');
+});
+colList.addEventListener('drop', e=>{
+  e.preventDefault();
+  const row = e.target.closest ? e.target.closest('.item') : null;
+  if(!row || dragIdx===null) return;
+  const rect = row.getBoundingClientRect();
+  let to = +row.dataset.idx + (e.clientY < rect.top+rect.height/2 ? 0 : 1);
+  reorder(dragIdx, to);
+  dragIdx = null;
+});
+colList.addEventListener('dragend', ()=>{
+  dragIdx = null;
+  [...colList.children].forEach(r=>r.classList.remove('dragging','drop-before','drop-after'));
+});
+function reorder(from, to){
+  if(from===to || from===to-1){ renderCollection(); return; }
+  const [it] = collection.splice(from,1);
+  collection.splice(from < to ? to-1 : to, 0, it);
+  renderCollection();
+}
+
+$('keep-sel').addEventListener('click', keepSelected);
+$('lock-sel').addEventListener('click', ()=>{ if(sel) toggleLock(sel.r, sel.c); });
+$('col-sheet').addEventListener('click', exportCollectionSheet);
+$('col-toggle').addEventListener('click', ()=>{
+  const c = $('collection');
+  c.classList.toggle('collapsed');
+  $('col-toggle').textContent = c.classList.contains('collapsed') ? '◀' : '▶';
+  resizeMain(); draw();
+});
+
+strip.addEventListener('click', e=>{
+  const f = e.target.closest('.frame');
+  if(f) goTo(+f.dataset.i);
+});
+
+/* ============================================================== wiring */
+fillSelects();
+S = defaultState();
+writeUI();
+
+for(const k of CFG_KEYS){
+  const el = $(k);
+  const handler = ()=>{ readUI(); syncVisibility(); syncReadouts(); commit('cfg:'+k); };
+  el.addEventListener('input', handler);
+  if(el.tagName==='SELECT' || el.type==='checkbox') el.addEventListener('change', handler);
+}
+$('regen').addEventListener('click', ()=>{
+  const {rows,cols,list}=S.cells;
+  S.cells = {rows,cols,list:list.map(c=>c.locked?c:{seed:rand32(),locked:false,lockCfg:null})};
+  S.paletteSeed = rand32();
+  commit('cells:regen', 'regenerate sheet');
+});
+$('repal').addEventListener('click', ()=>{ S.paletteSeed = rand32(); commit('pal', 'shuffle palette'); });
+
+$('export').addEventListener('click', ()=>{
+  const a=document.createElement('a');
+  a.download=`sprites_${String(playhead+1).padStart(3,'0')}.png`;
+  a.href=off.toDataURL('image/png'); a.click();
+});
+$('save').addEventListener('click', ()=>{
+  /* cells are shared by reference between entries, so pool them and store an
+     index — a long slider drag then costs a few bytes per entry, not a grid. */
+  const pool = [], seen = new Map();
+  const data = {
+    format:'sprite-gen-timeline', version:3, playhead, cellPool: pool,
+    collection: collection.map(i=>({...i})),
+    entries: timeline.map(e=>{
+      let ci = seen.get(e.state.cells);
+      if(ci===undefined){ ci = pool.length; seen.set(e.state.cells, ci); pool.push(e.state.cells); }
+      return {key:e.key, label:e.label, ts:e.ts, bookmark:e.bookmark,
+              cfg:e.state.cfg, paletteSeed:e.state.paletteSeed, cells:ci};
+    }),
+  };
+  const blob = new Blob([JSON.stringify(data)], {type:'application/json'});
+  const a=document.createElement('a');
+  a.download='sprite_session.json'; a.href=URL.createObjectURL(blob); a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+});
+$('load').addEventListener('click', ()=>$('file').click());
+$('file').addEventListener('change', e=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    try{
+      const d = JSON.parse(rd.result);
+      if(d.format!=='sprite-gen-timeline') throw new Error('not a sprite session file');
+      timeline = d.entries.map(x=>({
+        key:x.key, label:x.label, ts:x.ts, bookmark:x.bookmark, thumb:null, from:-1,
+        state: x.state ? x.state                                   /* v1 */
+             : {cfg:x.cfg, cells:d.cellPool[x.cells], paletteSeed:x.paletteSeed},
+      }));
+      stripBuilt = -1;
+      /* thumbnails are derived, so rebuild them by replaying each state */
+      timeline.forEach(en=>{ S = cloneState(en.state); render(); makeThumb(en); });
+      collection = (d.collection||[]).map(i=>({...i}));
+      colSeq = collection.reduce((m,i)=>Math.max(m,i.id||0), 0);
+      colSel = null; sel = null;
+      renderCollection();
+      playhead = Math.min(d.playhead ?? timeline.length-1, timeline.length-1);
+      S = cloneState(timeline[playhead].state);
+      writeUI(); render(); refreshStrip(); center();
+      console.log(`Loaded ${timeline.length} timeline entries.`);
+    }catch(err){ console.error('Load failed:', err.message); }
+    e.target.value='';
+  };
+  rd.readAsText(f);
+});
+
+$('tl-first').addEventListener('click', ()=>goTo(0));
+$('tl-prev').addEventListener('click', ()=>goTo(playhead-1));
+$('tl-next').addEventListener('click', ()=>goTo(playhead+1));
+$('tl-last').addEventListener('click', ()=>goTo(timeline.length-1));
+$('tl-play').addEventListener('click', togglePlay);
+$('tl-mark').addEventListener('click', ()=>{
+  const e = timeline[playhead];
+  if(!e) return;
+  e.bookmark = !e.bookmark; refreshStrip();
+});
+
+$('zin').addEventListener('click', ()=>zoomAt(Math.log(1.5)));
+$('zout').addEventListener('click', ()=>zoomAt(-Math.log(1.5)));
+$('zreset').addEventListener('click', ()=>{ Cam.logZoom=0; center(); });
+
+window.addEventListener('keydown', e=>{
+  const t=e.target.tagName;
+  if(t==='INPUT'||t==='TEXTAREA'||t==='SELECT') return;
+  switch(e.key){
+    case 'ArrowLeft':  goTo(playhead-1); e.preventDefault(); break;
+    case 'ArrowRight': goTo(playhead+1); e.preventDefault(); break;
+    case 'Home': goTo(0); e.preventDefault(); break;
+    case 'End':  goTo(timeline.length-1); e.preventDefault(); break;
+    case ' ': togglePlay(); e.preventDefault(); break;
+    case 'b': case 'B': $('tl-mark').click(); break;
+    case 'r': case 'R': $('regen').click(); break;
+    case 'c': case 'C': copyRecipe(); break;
+    case 'k': case 'K': keepSelected(); break;
+  }
+});
+window.addEventListener('resize', ()=>{ resizeMain(); draw(); });
+
+function refreshSelection(){
+  if(sel && (sel.r>=S.cells.rows || sel.c>=S.cells.cols)) sel = null;
+  const has = !!sel;
+  $('keep-sel').disabled = !has;
+  $('lock-sel').disabled = !has;
+  if(has){
+    const cell = cellAt(sel.r, sel.c), sp = lastSprites[sel.r*S.cells.cols+sel.c];
+    $('lock-sel').classList.toggle('on', !!cell.locked);
+    if(sp) showRecipe(sel.r, sel.c, cell, sp);
+  } else {
+    $('lock-sel').classList.remove('on');
+  }
+}
+
+renderCollection();
+commit('init', 'session start');
+requestAnimationFrame(()=>{ resizeMain(); center(); });
+</script>
+</body>
+</html>
