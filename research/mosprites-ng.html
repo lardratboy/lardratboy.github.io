@@ -474,8 +474,9 @@ const OPS = {
   over: (d,a_d, s,a) => [s*a + d*(1-a), a + a_d*(1-a)],
   /* commutative: order-independent, symmetry-preserving */
   add:  (d,a_d, s,a) => [d + s*a, Math.min(1, a_d + a)],
-  /* commutative in the limit; darkens */
-  mul:  (d,a_d, s,a) => [d*(1-a) + d*s*a, a + a_d*(1-a)],
+  /* darkens; the product term must be normalised — d and s are 0..255, so
+     the blend is d*s/255, not d*s. Without the divisor `mul` returns ~40000. */
+  mul:  (d,a_d, s,a) => [d*(1-a) + (d*s/255)*a, a + a_d*(1-a)],
 };
 
 const ORDERS = {
@@ -494,6 +495,32 @@ const srgb2lin = c => { c/=255; return (c<=0.04045 ? c/12.92 : Math.pow((c+0.055
 const lin2srgb = c => { c/=255; return (c<=0.0031308 ? c*12.92 : 1.055*Math.pow(c,1/2.4)-0.055)*255; };
 
 const span = (a0,a1,b0,b1) => Math.max(0, Math.min(a1,b1)-Math.max(a0,b0));
+
+/* ---------------------------------------------------------- output contract
+   The kernel accumulates PREMULTIPLIED colour in the WORKING space (linear or
+   sRGB, per policy.space). It never converts and never unpremultiplies.
+
+   There is exactly one boundary step, resolve(), and it does both, in this
+   order, because both operations are only defined on unpremultiplied colour:
+
+       1. unpremultiply   — ImageData is NOT premultiplied
+       2. transfer curve  — lin2srgb is defined on a colour, not on colour×α
+
+   Doing either out of order corrupts precisely the partial-alpha pixels the
+   seam field is made of, which is the one place it would be mistaken for
+   browser divergence rather than a defect. See ng §4. */
+function resolve(R,G,B,A,W,H,linear){
+  const out = new Uint8ClampedArray(W*H*4);          /* clamps on assignment */
+  for(let k=0;k<W*H;k++){
+    const a=A[k], i=k*4;
+    if(a<=1e-9){ out[i]=out[i+1]=out[i+2]=out[i+3]=0; continue; }
+    let r=R[k]/a, g=G[k]/a, b=B[k]/a;                /* 1. unpremultiply */
+    if(linear){ r=lin2srgb(r); g=lin2srgb(g); b=lin2srgb(b); }   /* 2. curve */
+    out[i]=Math.round(r); out[i+1]=Math.round(g); out[i+2]=Math.round(b);
+    out[i+3]=Math.round(a*255);
+  }
+  return out;
+}
 
 /* Pure software rasterizer: grid: (x,y) -> [r,g,b] | null. Returns Float64 RGBA planes */
 function raster(grid, w, h, opts){
@@ -519,8 +546,9 @@ function raster(grid, w, h, opts){
       }
     }
   }
-  if(linear) for(let k=0;k<W*H;k++){ R[k]=lin2srgb(R[k]); G[k]=lin2srgb(G[k]); B[k]=lin2srgb(B[k]); }
-  return {R,G,B,A,W,H};
+  /* premultiplied, working space — see the output contract above. Callers
+     that need pixels use resolve(); callers that check closed forms do not. */
+  return {R,G,B,A,W,H,linear};
 }
 
 /* =============================================================== fields */
@@ -761,7 +789,19 @@ function generateSprite(seed, g){
       (fid==='conic' ? ` · [${p.a},${p.b},${p.c},${p.d},${p.e}]` : '') +
       ` · mask ${mid}${maskInvert?'⁻¹':''} · ${sym}`;
 
-  return {grid, colors:paint, recipe, w, h, fid, p};
+  /* Ρ needs Φ's function, not Φ's output — ng §2.2. Published over full
+     sprite coordinates so order:'byField' paints in field order. For
+     source:'noise' there is no generating field; the default is used and the
+     ordering degenerates to a documented fallback rather than a silent one. */
+  const fieldFn = (x, y) => {
+    const u = (x-cx)*st + p.ox, v = (y-cy)*st + p.oy;
+    let n;
+    try { n = (source==='custom' && customFn) ? customFn(x,y,u,v,w,h,p) : field.f(u,v,p); }
+    catch(e){ n = u*u + v*v; }
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  return {grid, colors:paint, recipe, w, h, fid, p, st, field:fieldFn};
 }
 
 /* ================================================================ state */
@@ -913,29 +953,7 @@ function rasterize(cv, items, layout, policy){
   let matteRGB = null;
   if(policy.matte) matteRGB = hexRgb(policy.matte);
 
-  /* Build grid evaluation function for software kernel over all items */
-  const gridFn = (x, y) => {
-    /* find which cell (if any) contains (x, y) */
-    for(const it of items){
-      const s = it.sprite;
-      let X = it.col*outerW + Math.floor((layout.cellW - s.w)/2)*p;
-      let Y = it.row*outerH + Math.floor((layout.cellH - s.h)/2)*p;
-      if(policy.seamphase === 'local'){ X = Math.round(X); Y = Math.round(Y); }
-      
-      const relX = (x - X)/p;
-      const relY = (y - Y)/p;
-      if(relX >= 0 && relX < s.w && relY >= 0 && relY < s.h){
-        const cx = Math.floor(relX), cy = Math.floor(relY);
-        const v = s.grid[cy] ? s.grid[cy][cx] : 0;
-        if(v > 0 && s.colors[v-1]){
-          return hexRgb(s.colors[v-1]);
-        }
-      }
-    }
-    return null;
-  };
-
-  /* Allocate total Float64 buffers for high precision accumulation */
+  /* Float64 accumulation, premultiplied, working space */
   const R = new Float64Array(W*H), G = new Float64Array(W*H),
         B = new Float64Array(W*H), A = new Float64Array(W*H);
 
@@ -955,15 +973,11 @@ function rasterize(cv, items, layout, policy){
     let Y0 = it.row*outerH + Math.floor((layout.cellH - s.h)/2)*p;
     if(policy.seamphase === 'local'){ X0 = Math.round(X0); Y0 = Math.round(Y0); }
 
-    /* Field function for order='byField' */
-    const fieldObj = FIELD_BY_ID[s.fid] || FIELD_BY_ID.circle;
-    const fieldFn = (cx, cy) => {
-      const u = (cx - Math.floor((s.w-1)/2))*(s.st||1) + (s.p ? s.p.ox : 0);
-      const v = (cy - Math.floor((s.h-1)/2))*(s.st||1) + (s.p ? s.p.oy : 0);
-      return fieldObj.f(u, v, s.p || {M:17,a:1,b:1,c:1,d:0,e:0});
-    };
-
-    const seq = (ORDERS[policy.order] || ORDERS.rowMajor)(s.w, s.h, fieldFn);
+    /* order:'byField' needs Φ's FUNCTION, not Φ's output. generateSprite
+       publishes the closure (ng §2.2); reconstructing it from sprite fields
+       silently fell back to a default circle field, so the apparent light was
+       never actually generated by the sprite's own field. */
+    const seq = (ORDERS[policy.order] || ORDERS.rowMajor)(s.w, s.h, s.field || (()=>0));
 
     for(const [x, y] of seq){
       const v = s.grid[y][x]; if(!v) continue;
@@ -983,20 +997,9 @@ function rasterize(cv, items, layout, policy){
     }
   }
 
-  if(linear){
-    for(let k=0;k<W*H;k++){ R[k]=lin2srgb(R[k]); G[k]=lin2srgb(G[k]); B[k]=lin2srgb(B[k]); }
-  }
-
-  /* Copy output RGBA float planes to ImageData byte buffer */
+  /* single boundary step: unpremultiply, then transfer curve */
   const imgData = g.createImageData(W, H);
-  const data = imgData.data;
-  for(let k=0; k<W*H; k++){
-    const idx = k*4;
-    data[idx]   = Math.min(255, Math.max(0, Math.round(R[k])));
-    data[idx+1] = Math.min(255, Math.max(0, Math.round(G[k])));
-    data[idx+2] = Math.min(255, Math.max(0, Math.round(B[k])));
-    data[idx+3] = Math.min(255, Math.max(0, Math.round(A[k]*255)));
-  }
+  imgData.data.set(resolve(R,G,B,A,W,H,linear));
   g.putImageData(imgData, 0, 0);
 
   /* Magnification is integer nearest-neighbour applied AFTER rasterising. */
@@ -1051,24 +1054,31 @@ function measureDivergence(sprite, policy){
   const ctxC = cvCanvas.getContext('2d');
   const imgC = ctxC.getImageData(0, 0, cvCanvas.width, cvCanvas.height);
 
-  let diffCount = 0, maxDelta = 0;
-  const totalPixels = imgK.width * imgK.height;
+  /* Divergence is decomposed by alpha, because the two halves mean different
+     things (ng §4). Opaque pixels involve no compositing subtlety: agreement
+     there is a correctness requirement on US, and any delta is our defect.
+     Partial-alpha pixels are where Skia's internal precision and rounding
+     legitimately differ, and that residue is a measurement of the browser.
+     Reporting one undecomposed number lets our own bugs read as the browser's. */
+  const zone = () => ({diff:0, total:0, maxDelta:0});
+  const opaque = zone(), translucent = zone();
 
   for(let i=0; i<imgK.data.length; i+=4){
-    const dr = Math.abs(imgK.data[i]   - imgC.data[i]);
-    const dg = Math.abs(imgK.data[i+1] - imgC.data[i+1]);
-    const db = Math.abs(imgK.data[i+2] - imgC.data[i+2]);
-    const da = Math.abs(imgK.data[i+3] - imgC.data[i+3]);
-    const localMax = Math.max(dr, dg, db, da);
-    if(localMax > maxDelta) maxDelta = localMax;
-    if(dr > 1 || dg > 1 || db > 1 || da > 1) diffCount++;
+    const z = (imgK.data[i+3] === 255 && imgC.data[i+3] === 255) ? opaque : translucent;
+    const d = Math.max(
+      Math.abs(imgK.data[i]   - imgC.data[i]),   Math.abs(imgK.data[i+1] - imgC.data[i+1]),
+      Math.abs(imgK.data[i+2] - imgC.data[i+2]), Math.abs(imgK.data[i+3] - imgC.data[i+3]));
+    z.total++;
+    if(d > z.maxDelta) z.maxDelta = d;
+    if(d > 1) z.diff++;
   }
 
+  const totalPixels = imgK.width * imgK.height;
+  const diffCount = opaque.diff + translucent.diff;
   return {
-    diffCount,
-    totalPixels,
+    diffCount, totalPixels, opaque, translucent,
     percentDiff: totalPixels > 0 ? (diffCount / totalPixels) * 100 : 0,
-    maxDelta
+    maxDelta: Math.max(opaque.maxDelta, translucent.maxDelta),
   };
 }
 
@@ -1731,7 +1741,11 @@ function runSelfTest(){
     const g=(x,y)=> y!==0 ? null : (x===0?A : x===1?Bc : null);
     const s=raster(g,2,1,{scale:4.5,W:9,H:5,op:'over',matte:[11,15,20]});
     const l=raster(g,2,1,{scale:4.5,W:9,H:5,op:'over',matte:[11,15,20],linear:true});
-    const Y=(r,i)=>0.2126*r.R[i]+0.7152*r.G[i]+0.0722*r.B[i];
+    /* resolve() first: the kernel returns working space, so comparing raw
+       planes would compare a linear number against an sRGB one. */
+    const px = r => resolve(r.R,r.G,r.B,r.A,r.W,r.H,!!r.linear);
+    const Y = (r,i) => { const d=px(r); return 0.2126*d[i*4]+0.7152*d[i*4+1]+0.0722*d[i*4+2]; };
+    /* compared after resolve(), since the kernel now returns working space */
     t('K4 linear-light seam carries more luminance than sRGB blend',
       Y(l,4) > Y(s,4), `Y ${(Y(s,4)/255).toFixed(3)} -> ${(Y(l,4)/255).toFixed(3)} (x${(Y(l,4)/Y(s,4)).toFixed(2)})`);
   }
@@ -1792,10 +1806,77 @@ function runSelfTest(){
     const divInt = measureDivergence(sprite, pInteger);
     const divFrac = measureDivergence(sprite, pFrac);
 
-    t('Conformance: Kernel and Canvas2D agree byte-exact at integer scale', divInt.diffCount === 0 && divInt.maxDelta === 0,
+    t('Conformance: byte-exact at integer scale', divInt.diffCount === 0 && divInt.maxDelta === 0,
       `scale=4 -> ${divInt.diffCount} px differ, max Δ${divInt.maxDelta}`);
-    t('Conformance: Divergence measured and reported at fractional scale', divFrac.diffCount >= 0,
-      `scale=4.25 -> ${divFrac.percentDiff.toFixed(1)}% px differ (max Δ${divFrac.maxDelta})`);
+
+    /* Opaque pixels are a correctness requirement on us, not a measurement of
+       the browser: no compositing subtlety applies where α = 1, so a delta
+       there is our defect. Asserted, not reported. */
+    t('Conformance: opaque pixels agree at fractional scale (ours to get right)',
+      divFrac.opaque.maxDelta <= 1,
+      `scale=4.25 -> ${divFrac.opaque.total} opaque px, max Δ${divFrac.opaque.maxDelta}`);
+
+    /* Partial-alpha residue is the browser's. Bounded, not asserted to zero —
+       but bounded, because an unbounded "report" cannot fail and so cannot
+       catch a regression. ng §4. */
+    t('Conformance: partial-alpha divergence within bound (browser residue)',
+      divFrac.translucent.maxDelta <= 8,
+      `scale=4.25 -> ${divFrac.translucent.total} translucent px, ` +
+      `${divFrac.translucent.diff} differ, max Δ${divFrac.translucent.maxDelta} (bound 8)`);
+  }
+
+  /* ---- A-series: regressions that the original build shipped. Each of these
+     failed once; they are asserted so they cannot fail silently again. */
+  {
+    /* A1 — mul must normalise the product term */
+    const [mulOut] = OPS.mul(200, 1, 200, 1.0);
+    t('A1 `mul` output stays within 0..255', mulOut <= 255,
+      `mul(200,200,α=1) = ${mulOut.toFixed(1)}`);
+
+    /* A3 — the transfer curve is defined on unpremultiplied colour */
+    const gWhite = (x,y)=> (x===0&&y===0) ? [255,255,255] : null;
+    const lin = raster(gWhite,1,1,{scale:0.5,W:1,H:1,op:'over',linear:true});
+    const px = resolve(lin.R,lin.G,lin.B,lin.A,1,1,true);
+    t('A3 linear space unpremultiplies before the transfer curve',
+      Math.abs(px[0]-255) <= 1,
+      `white at α=${lin.A[0].toFixed(2)} resolves to ${px[0]} (must stay 255)`);
+
+    /* A4 — ImageData is unpremultiplied */
+    const gHalf = (x,y)=> (x===0&&y===0) ? [200,100,50] : null;
+    const h = raster(gHalf,1,1,{scale:0.5,W:1,H:1,op:'over'});
+    const hp = resolve(h.R,h.G,h.B,h.A,1,1,false);
+    t('A4 resolve() unpremultiplies: colour survives partial coverage',
+      Math.abs(hp[0]-200)<=1 && Math.abs(hp[1]-100)<=1 && Math.abs(hp[2]-50)<=1,
+      `α=${h.A[0].toFixed(2)} -> rgb(${hp[0]},${hp[1]},${hp[2]}) with α=${hp[3]}`);
+
+    /* A5 — Φ publishes its closure and byField actually consumes it */
+    const cfgA = {w:16, h:16, sym:'horizontal', coverage:0.5, ncol:4, useCA:false,
+      source:'field', formulaId:'trefoil', modulus:17, vary:false, stride:2, phase:0,
+      colorMode:'bands', maskId:'none', maskScale:1, maskInvert:false, outline:false,
+      sortLum:true, palette:paletteFor(2468, 3)};
+    const sA = generateSprite(1357, cfgA);
+    const distinct = new Set();
+    for(let y=0;y<sA.h;y++) for(let x=0;x<sA.w;x++) distinct.add(sA.field(x,y));
+    const circle = (x,y)=>{ const u=(x-7)*2, v=(y-7)*2; return u*u+v*v; };
+    let matchesCircle = true;
+    for(let y=0;y<sA.h && matchesCircle;y++) for(let x=0;x<sA.w;x++)
+      if(sA.field(x,y) !== circle(x,y)){ matchesCircle=false; break; }
+    t('A5 sprite publishes its own field, not a circle fallback',
+      typeof sA.field === 'function' && distinct.size > 1 && !matchesCircle,
+      `${distinct.size} distinct values from formulaId='trefoil', stride=${sA.st}`);
+
+    /* A6 — byField ordering differs from row-major on a real sprite */
+    const polR = {scale:4.25, seamphase:'local', matte:null, magnify:1,
+                  operator:'over', order:'rowMajor', space:'srgb'};
+    const polF = {...polR, order:'byField'};
+    const lay = soloLayout(sA);
+    const ca = rasterize(document.createElement('canvas'), [{sprite:sA,col:0,row:0}], lay, polR);
+    const cb = rasterize(document.createElement('canvas'), [{sprite:sA,col:0,row:0}], lay, polF);
+    const da = ca.getContext('2d').getImageData(0,0,ca.width,ca.height).data;
+    const db = cb.getContext('2d').getImageData(0,0,cb.width,cb.height).data;
+    let nd=0; for(let i=0;i<da.length;i+=4) if(Math.abs(da[i]-db[i])>1) nd++;
+    t('A6 byField ordering produces a field-coherent bias distinct from row-major',
+      nd > 0, `${nd} px differ`);
   }
 
   let passCount = 0;
