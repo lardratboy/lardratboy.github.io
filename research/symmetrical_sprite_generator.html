@@ -301,7 +301,35 @@
     <div class="row"><label>Columns</label><input type="number" id="cols" value="8" min="1" max="50"></div>
     <div class="row"><label>Rows</label><input type="number" id="rows" value="6" min="1" max="50"></div>
     <div class="row"><label>Spacing</label><input type="number" id="spacing" value="2" min="0" max="16"></div>
-    <div class="row"><label>Scale (px)</label><input type="number" id="scale" value="4" min="1" max="24"></div>
+    <div class="row"><label>Scale (px)</label><input type="number" id="scale" value="4" min="1" max="24" step="0.05"></div>
+    <div class="row"><label>Seam phase</label>
+      <select id="seamphase" title="Where each sprite's raster origin falls. Only has an effect at fractional scale.">
+        <option value="global">Global — sheet is one surface</option>
+        <option value="local">Local — sprite is portable</option>
+      </select></div>
+    <div class="row"><label>Matte</label>
+      <select id="matte" title="Composited under the sprites. At fractional scale this is an input to the seam colours, not decoration.">
+        <option value="transparent">Transparent</option>
+        <option value="stage">Stage (#0b0f14)</option>
+        <option value="white">White</option>
+        <option value="black">Black</option>
+      </select></div>
+    <div id="seam-readout" class="hint" style="margin-top:6px"></div>
+  </div>
+
+  <div class="group">
+    <div class="title">Export</div>
+    <div class="row"><label>Preset</label>
+      <select id="preset" title="What the PNG means, not how good it is.">
+        <option value="seen">As seen</option>
+        <option value="asset">Sprite asset</option>
+        <option value="screen">Screenshot (viewport)</option>
+      </select></div>
+    <div class="row"><label>Magnify</label>
+      <input type="number" id="magnify" value="1" min="1" max="16" step="1"
+             title="Integer nearest-neighbour blow-up applied after rasterising. Never re-rasters at a larger scale — that would change q and give you a different colour field.">
+    </div>
+    <div id="preset-note" class="hint" style="margin-top:6px"></div>
   </div>
 
   <div class="group">
@@ -646,7 +674,7 @@ function generateSprite(seed, g){
    every timeline entry replays bit-identically.                          */
 const CFG_KEYS = ['source','formula','expr','modulus','stride','phase','density','vary','ca',
   'mask','mask-scale','mask-invert','outline','sw','sh','symmetry','bpc','ncol','colormode',
-  'sortlum','cols','rows','spacing','scale'];
+  'sortlum','cols','rows','spacing','scale','seamphase','matte'];
 const NUM_KEYS = new Set(['modulus','stride','phase','density','mask-scale','sw','sh','bpc',
   'ncol','cols','rows','spacing','scale']);
 const BOOL_KEYS = new Set(['vary','ca','mask-invert','outline','sortlum']);
@@ -656,6 +684,7 @@ const LABELS = {
   'mask-scale':'Mask size', 'mask-invert':'Mask invert', outline:'Outline', sw:'Sprite width',
   sh:'Sprite height', symmetry:'Symmetry', bpc:'Gamut', ncol:'Colors', colormode:'Color mode',
   sortlum:'Sort by luminance', cols:'Columns', rows:'Rows', spacing:'Spacing', scale:'Scale',
+  seamphase:'Seam phase', matte:'Matte',
 };
 
 let S = null;                 // {cfg, cells, paletteSeed}
@@ -720,44 +749,147 @@ let drag=null, panned=false;
 let lastSprites = [];
 let sel = null;                 /* {r,c} — a view overlay, not part of S */
 
+/* ============================================ raster policy & rasteriser
+
+   Every pixel this tool emits comes out of rasterize(). EXTENT — which
+   sprites, laid out how — is the caller's business and is *supposed* to
+   differ between paths; that difference is the tool's expressiveness.
+   POLICY is the pixel contract, and it is one shared object, so two output
+   paths can now only disagree on purpose.
+
+   None of this is visible at integer scale. At fractional scale, cell edges
+   land inside device pixels and Canvas2D antialiases each fillRect
+   separately, manufacturing a second deterministic palette on a sublattice
+   of period q = denom(scale) — see aamazing.md. Every field below moves
+   those colours, and every one of them used to be decided ad hoc per path. */
+
+const STAGE_BG = '#0b0f14';
+const MATTES = { transparent:null, stage:STAGE_BG, white:'#ffffff', black:'#000000' };
+
+const gcd = (a,b) => b ? gcd(b, a%b) : Math.abs(a);
+/* q = denominator of p in lowest terms = period of the seam lattice.
+   null => irrational to tolerance: quasi-periodic, three gap lengths. */
+function denom(p, maxq = 512){
+  for(let q=1;q<=maxq;q++) if(Math.abs(p*q - Math.round(p*q)) < 1e-9) return q;
+  return null;
+}
+
+function makePolicy(cfg, over){
+  return Object.assign({
+    scale:     +cfg.scale,
+    seamphase: cfg.seamphase || 'global',
+    matte:     (cfg.matte in MATTES) ? MATTES[cfg.matte] : null,
+    magnify:   1,
+  }, over || {});
+}
+
+/* Presets are semantic choices, not quality settings. */
+const PRESETS = {
+  /* what the eye tuned, byte for byte */
+  seen:  cfg => ({}),
+  /* palette-exact, portable, engine-safe: N colours, no seams, no matte */
+  asset: cfg => ({ scale: Math.max(1, Math.round(+cfg.scale)),
+                   seamphase: 'local', matte: null }),
+};
+
+const policyLabel = p =>
+  `p=${p.scale} q=${denom(p.scale) ?? '\u221e'} · ${p.seamphase} phase · ` +
+  `matte ${p.matte || 'none'} · \u00d7${p.magnify}`;
+
+const sheetLayout = cfg =>
+  ({cols:+cfg.cols, rows:+cfg.rows, cellW:+cfg.sw, cellH:+cfg.sh, spacing:+cfg.spacing});
+const soloLayout = sprite =>
+  ({cols:1, rows:1, cellW:sprite.w, cellH:sprite.h, spacing:0});
+
+/* items: [{sprite, col, row}] */
+function rasterize(cv, items, layout, policy){
+  const p = policy.scale, sp = layout.spacing;
+  const outerW = (layout.cellW + sp) * p, outerH = (layout.cellH + sp) * p;
+
+  /* canvas.width is an IDL unsigned long: a fractional assignment truncates
+     toward zero and silently clips the final sub-pixel column. */
+  const W = Math.max(1, Math.ceil(layout.cols * outerW));
+  const H = Math.max(1, Math.ceil(layout.rows * outerH));
+
+  const mag = Math.max(1, Math.round(policy.magnify || 1));
+  const base = (mag === 1) ? cv : document.createElement('canvas');
+  base.width = W; base.height = H;
+  const g = base.getContext('2d');
+  g.clearRect(0,0,W,H);
+
+  /* The matte is an input to the colour, not decoration. A seam pixel is
+     V = B(1-f) + A f^2 + G f(1-f); leaving it transparent leaves G
+     undefined, so the same PNG reads differently on every background it
+     lands on — including the one it was tuned against. */
+  if(policy.matte){ g.fillStyle = policy.matte; g.fillRect(0,0,W,H); }
+
+  g.imageSmoothingEnabled = false;
+  for(const it of items){
+    const s = it.sprite;
+    let X = it.col*outerW + Math.floor((layout.cellW - s.w)/2)*p;
+    let Y = it.row*outerH + Math.floor((layout.cellH - s.h)/2)*p;
+    /* 'local' snaps the origin so frac(X) = 0 and a sprite rasterises
+       identically wherever it sits — the sprite is the artifact.
+       'global' leaves it, and the seam texture flows across the whole
+       sheet as one continuous surface — the sheet is the artifact.
+       Neither is more correct; the old code picked by accident, per path. */
+    if(policy.seamphase === 'local'){ X = Math.round(X); Y = Math.round(Y); }
+    for(let y=0;y<s.h;y++) for(let x=0;x<s.w;x++){
+      const v = s.grid[y][x];
+      if(!v) continue;
+      g.fillStyle = s.colors[v-1] || '#ffffff';
+      g.fillRect(X + x*p, Y + y*p, p, p);
+    }
+  }
+
+  /* Magnification is integer nearest-neighbour applied AFTER rasterising.
+     Re-rastering at k*p would be wrong: q = denom(p), so 4.25 -> 8.5 moves
+     q from 4 to 2 and yields a different colour field, not a larger one. */
+  if(mag > 1){
+    cv.width = W*mag; cv.height = H*mag;
+    const c2 = cv.getContext('2d');
+    c2.imageSmoothingEnabled = false;
+    c2.clearRect(0,0,cv.width,cv.height);
+    c2.drawImage(base, 0, 0, W*mag, H*mag);
+  }
+  return cv;
+}
+
 function render(){
   const cfg = S.cfg, {rows,cols,list} = S.cells;
-  const w=cfg.sw, h=cfg.sh, px=cfg.scale, sp=cfg.spacing;
   const gen = toGen(cfg, S.paletteSeed);
-  const outerW=(w+sp)*px, outerH=(h+sp)*px;
-
-  off.width = Math.max(1, cols*outerW);
-  off.height = Math.max(1, rows*outerH);
-  offCtx.clearRect(0,0,off.width,off.height);
-  offCtx.imageSmoothingEnabled = false;
   lastSprites = new Array(rows*cols);
-
+  const items = [];
   for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
     const cell = list[r*cols+c];
     const g = (cell.locked && cell.lockCfg)
       ? toGen(cell.lockCfg, cell.lockCfg._paletteSeed) : gen;
     const sprite = generateSprite(cell.seed, g);
     lastSprites[r*cols+c] = sprite;
-    const X0=c*outerW, Y0=r*outerH;
-    for(let y=0;y<sprite.h;y++) for(let x=0;x<sprite.w;x++){
-      const v = sprite.grid[y][x];
-      if(!v) continue;
-      offCtx.fillStyle = sprite.colors[v-1] || '#ffffff';
-      offCtx.fillRect(X0+x*px, Y0+y*px, px, px);
-    }
-    if(cell.locked){
-      offCtx.strokeStyle='rgba(239,68,68,.85)'; offCtx.lineWidth=1.5;
-      offCtx.strokeRect(X0-1.5, Y0-1.5, sprite.w*px+3, sprite.h*px+3);
-    }
+    items.push({sprite, col:c, row:r});
   }
+  rasterize(off, items, sheetLayout(cfg), makePolicy(cfg));
   resizeMain(); draw();
 }
 function resizeMain(){ canvas.width = stage.clientWidth; canvas.height = stage.clientHeight; }
 function draw(){
+  if(!S) return;
   ctx.clearRect(0,0,canvas.width,canvas.height);
   ctx.imageSmoothingEnabled = false;
   ctx.save(); ctx.translate(view.x,view.y); ctx.scale(view.s,view.s);
   ctx.drawImage(off,0,0);
+  /* Lock and selection chrome is drawn here, on the screen canvas only.
+     It used to be stroked into `off`, which put red rectangles inside every
+     exported page-sheet PNG. */
+  {
+    const cfg=S.cfg, ow=(cfg.sw+cfg.spacing)*cfg.scale, oh=(cfg.sh+cfg.spacing)*cfg.scale;
+    ctx.strokeStyle='rgba(239,68,68,.85)'; ctx.lineWidth=1.5;
+    S.cells.list.forEach((cell,i)=>{
+      if(!cell.locked) return;
+      const c=i%S.cells.cols, r=(i/S.cells.cols)|0;
+      ctx.strokeRect(c*ow-1.5, r*oh-1.5, cfg.sw*cfg.scale+3, cfg.sh*cfg.scale+3);
+    });
+  }
   if(sel){
     const cfg=S.cfg, ow=(cfg.sw+cfg.spacing)*cfg.scale, oh=(cfg.sh+cfg.spacing)*cfg.scale;
     if(sel.r<S.cells.rows && sel.c<S.cells.cols){
@@ -918,7 +1050,40 @@ function syncVisibility(){
   document.querySelectorAll('.r-mod').forEach(el=>el.classList.toggle('hidden', s==='noise'));
 }
 const READOUTS = {density:'density-v', phase:'phase-v', 'mask-scale':'mask-scale-v'};
-function syncReadouts(){ for(const k in READOUTS) $(READOUTS[k]).textContent = (+S.cfg[k]).toFixed(2); }
+
+/* Turns aamazing.md into a live tooltip: what the current scale actually
+   does to the colour field, before you export and find out. */
+function seamReport(){
+  const cfg = S.cfg, p = +cfg.scale, n = +cfg.ncol, M = +cfg.modulus, w = +cfg.sw;
+  const q = denom(p);
+  if(q === 1) return `p = ${p} · integer · palette only (${n} colours), hard edges`;
+  if(q === null) return `p = ${p} · irrational · quasi-periodic seams, three gap lengths, never repeats`;
+  const share = ((q-1)/(q*p)*100).toFixed(1);
+  const g = gcd(q, M);
+  const mirror = (q <= 2 && (w-1) % q === 0) ? 'mirror intact' : 'mirror broken \u2014 reads as lit';
+  return `p = ${p} \u2192 q = ${q} · ${share}% seam px · gamut \u00d7${(q-1)*(n-1)} · ` +
+         `gcd(q, M=${M}) = ${g} ${g===1?'dense':'banded'} · ${mirror}`;
+}
+
+const PRESET_NOTES = {
+  seen:   'Byte-exact to the stage: fractional scale, matte and phase as set.',
+  asset:  'Scale rounded to integer, local phase, transparent. Palette-exact, portable.',
+  screen: 'The viewport as composited \u2014 crop, zoom and chrome included.',
+};
+function syncExportNote(){
+  const name = $('preset').value;
+  const mag = Math.max(1, Math.round(+$('magnify').value || 1));
+  const tail = (name === 'screen') ? '' : ` \u00d7${mag} nearest-neighbour.`;
+  $('preset-note').textContent = PRESET_NOTES[name] + tail;
+}
+
+function syncReadouts(){
+  for(const k in READOUTS) $(READOUTS[k]).textContent = (+S.cfg[k]).toFixed(2);
+  $('seam-readout').textContent = seamReport();
+  syncExportNote();
+}
+$('preset').addEventListener('change', syncExportNote);
+$('magnify').addEventListener('input', syncExportNote);
 
 function readUI(){
   for(const k of CFG_KEYS){
@@ -930,7 +1095,7 @@ function writeUI(){
   for(const k of CFG_KEYS){
     const el = $(k);
     if(BOOL_KEYS.has(k)) el.checked = S.cfg[k];
-    else el.value = S.cfg[k];
+    else el.value = S.cfg[k] ?? el.value;   /* pre-v4 sessions lack the newer keys */
   }
   syncVisibility(); syncReadouts();
 }
@@ -1109,18 +1274,12 @@ function restoreItem(item){
   selectCell(0,0);
 }
 
+/* Collection row thumbnails. Deliberately NOT an export path — these are
+   UI chrome sized to a 46px row, so they get their own integer fit. */
 function drawSpriteTo(cv, sprite, box){
   const k = Math.max(1, Math.floor(Math.min(box/sprite.w, box/sprite.h)));
-  cv.width = sprite.w*k; cv.height = sprite.h*k;
-  const g = cv.getContext('2d');
-  g.imageSmoothingEnabled = false;
-  g.clearRect(0,0,cv.width,cv.height);
-  for(let y=0;y<sprite.h;y++) for(let x=0;x<sprite.w;x++){
-    const v = sprite.grid[y][x];
-    if(!v) continue;
-    g.fillStyle = sprite.colors[v-1] || '#fff';
-    g.fillRect(x*k, y*k, k, k);
-  }
+  rasterize(cv, [{sprite, col:0, row:0}], soloLayout(sprite),
+            {scale:k, seamphase:'local', matte:null, magnify:1});
 }
 
 function renderCollection(){
@@ -1205,12 +1364,26 @@ function itemRecipe(item, sprite){
 
 const safeName = n => (n.replace(/[^a-z0-9._-]+/gi,'_').replace(/^_+|_+$/g,'') || 'sprite');
 
-function exportItem(item, sprite){
-  const cv = document.createElement('canvas');
-  drawSpriteTo(cv, sprite, sprite.w*8);
+const download = (cv, name) => {
   const a = document.createElement('a');
-  a.download = safeName(item.name)+'.png';
-  a.href = cv.toDataURL('image/png'); a.click();
+  a.download = name; a.href = cv.toDataURL('image/png'); a.click();
+};
+
+/* The one place an export policy is assembled. Every ↓ button routes here,
+   so the preset means the same thing on all of them. */
+function exportPolicy(){
+  const cfg = S.cfg, name = $('preset').value;
+  const over = PRESETS[name] ? PRESETS[name](cfg) : {};
+  over.magnify = Math.max(1, Math.round(+$('magnify').value || 1));
+  return makePolicy(cfg, over);
+}
+
+function exportItem(item, sprite){
+  const pol = exportPolicy();
+  const cv = rasterize(document.createElement('canvas'),
+                       [{sprite, col:0, row:0}], soloLayout(sprite), pol);
+  download(cv, safeName(item.name)+'.png');
+  console.log(`Exported "${item.name}" ${cv.width}\u00d7${cv.height} · ${policyLabel(pol)}`);
 }
 
 /* Packs the collection into one sheet. Cells are sized to the largest kept
@@ -1219,28 +1392,14 @@ function exportCollectionSheet(){
   if(!collection.length){ console.warn('Collection is empty — nothing to export.'); return; }
   const sprites = collection.map(itemSprite);
   const cw = Math.max(...sprites.map(s=>s.w)), ch = Math.max(...sprites.map(s=>s.h));
-  const px = S.cfg.scale, gap = S.cfg.spacing;
   const cols = Math.min(collection.length, Math.max(1, Math.ceil(Math.sqrt(collection.length))));
   const rows = Math.ceil(collection.length/cols);
-  const ow = (cw+gap)*px, oh = (ch+gap)*px;
-  const cv = document.createElement('canvas');
-  cv.width = cols*ow; cv.height = rows*oh;
-  const g = cv.getContext('2d');
-  g.imageSmoothingEnabled = false;
-  sprites.forEach((sp,i)=>{
-    const X0 = (i%cols)*ow + (((cw-sp.w)/2)|0)*px;
-    const Y0 = ((i/cols)|0)*oh + (((ch-sp.h)/2)|0)*px;
-    for(let y=0;y<sp.h;y++) for(let x=0;x<sp.w;x++){
-      const v = sp.grid[y][x];
-      if(!v) continue;
-      g.fillStyle = sp.colors[v-1] || '#fff';
-      g.fillRect(X0+x*px, Y0+y*px, px, px);
-    }
-  });
-  const a = document.createElement('a');
-  a.download = `collection_${collection.length}.png`;
-  a.href = cv.toDataURL('image/png'); a.click();
-  console.log(`Exported ${collection.length} sprites as ${cols}×${rows} @ ${cw}×${ch}.`);
+  const pol = exportPolicy();
+  const cv = rasterize(document.createElement('canvas'),
+    sprites.map((sprite,i)=>({sprite, col:i%cols, row:(i/cols)|0})),
+    {cols, rows, cellW:cw, cellH:ch, spacing:+S.cfg.spacing}, pol);
+  download(cv, `collection_${collection.length}.png`);
+  console.log(`Exported ${collection.length} sprites as ${cols}\u00d7${rows} @ ${cw}\u00d7${ch} · ${policyLabel(pol)}`);
 }
 
 /* drag to reorder */
@@ -1316,16 +1475,29 @@ $('regen').addEventListener('click', ()=>{
 $('repal').addEventListener('click', ()=>{ S.paletteSeed = rand32(); commit('pal', 'shuffle palette'); });
 
 $('export').addEventListener('click', ()=>{
-  const a=document.createElement('a');
-  a.download=`sprites_${String(playhead+1).padStart(3,'0')}.png`;
-  a.href=off.toDataURL('image/png'); a.click();
+  const name = `sprites_${String(playhead+1).padStart(3,'0')}.png`;
+  if($('preset').value === 'screen'){
+    /* The viewport as composited — chrome, crop, zoom and all. This is what
+       "save image as" on the canvas has always given you; it is now a
+       choice rather than a second, undocumented export path. */
+    download(canvas, name);
+    console.log(`Exported viewport ${canvas.width}\u00d7${canvas.height} @ zoom ${view.s.toFixed(2)} (chrome included).`);
+    return;
+  }
+  const pol = exportPolicy();
+  const cols = S.cells.cols;
+  const cv = rasterize(document.createElement('canvas'),
+    lastSprites.map((sprite,i)=>({sprite, col:i%cols, row:(i/cols)|0})),
+    sheetLayout(S.cfg), pol);
+  download(cv, name);
+  console.log(`Exported sheet ${cv.width}\u00d7${cv.height} · ${policyLabel(pol)}`);
 });
 $('save').addEventListener('click', ()=>{
   /* cells are shared by reference between entries, so pool them and store an
      index — a long slider drag then costs a few bytes per entry, not a grid. */
   const pool = [], seen = new Map();
   const data = {
-    format:'sprite-gen-timeline', version:3, playhead, cellPool: pool,
+    format:'sprite-gen-timeline', version:4, playhead, cellPool: pool,
     collection: collection.map(i=>({...i})),
     entries: timeline.map(e=>{
       let ci = seen.get(e.state.cells);
