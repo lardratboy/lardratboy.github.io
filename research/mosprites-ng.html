@@ -1,0 +1,1956 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoSprites NG — Next-Generation Procedural Sprite Generator</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --sunk:#0b0f14; --line:#2a3038;
+    --ink:#e6edf3; --dim:#8b949e; --accent:#4f8cff; --lock:#ef4444; --mark:#f0b429;
+  }
+  *{box-sizing:border-box}
+  body{
+    background:var(--bg); color:var(--ink); margin:0; overflow:hidden;
+    display:flex; height:100vh;
+    font:14px/1.35 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  #sidebar{
+    width:308px; flex:0 0 308px; background:var(--panel);
+    border-right:1px solid var(--line); padding:12px; display:flex;
+    flex-direction:column; gap:10px; overflow-y:auto; z-index:10;
+  }
+  #sidebar::-webkit-scrollbar{width:8px}
+  #sidebar::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  h1{font-size:16px; margin:0 0 2px; text-align:center; letter-spacing:.02em}
+  .group{background:#1c222b; border:1px solid var(--line); border-radius:8px; padding:9px 10px}
+  .group > .title{
+    font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--dim); font-weight:700; margin-bottom:7px;
+  }
+  .row{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:5px}
+  .row:first-of-type{margin-top:0}
+  label{font-size:12.5px; color:#adbac7; white-space:nowrap}
+  input[type=number], select, textarea{
+    background:var(--sunk); color:var(--ink); border:1px solid #30363d;
+    border-radius:5px; padding:3px 6px; font:inherit; font-size:12.5px;
+  }
+  input[type=number]{width:64px}
+  select{flex:1 1 auto; min-width:0}
+  textarea{width:100%; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; resize:vertical}
+  input[type=range]{flex:1 1 auto; min-width:0; accent-color:var(--accent)}
+  input[type=checkbox]{accent-color:var(--accent); width:15px; height:15px}
+  .check{display:flex; align-items:center; gap:7px; cursor:pointer}
+  .val{font-family:ui-monospace,monospace; font-size:11px; color:var(--dim); width:34px; text-align:right}
+  button{
+    background:var(--accent); color:#fff; border:0; padding:8px 12px; border-radius:6px;
+    cursor:pointer; font:inherit; font-weight:600; width:100%;
+  }
+  button:hover{filter:brightness(1.12)} button:active{transform:scale(.985)}
+  button.sec{background:#30363d}
+  .btnrow{display:flex; gap:6px}
+  #main{flex:1 1 auto; display:flex; flex-direction:column; min-width:0}
+  #stage{flex:1 1 auto; position:relative; overflow:hidden; cursor:crosshair}
+  /* scoped to the sprite sheet only — a bare `canvas` selector also catches
+     the timeline and collection thumbnails and rips them out of the flow */
+  #cv{position:absolute; transform-origin:0 0; image-rendering:pixelated}
+  canvas{image-rendering:pixelated}
+  .toolbar{
+    position:absolute; bottom:14px; right:14px; display:flex; gap:6px; z-index:20;
+    background:rgba(22,27,34,.85); padding:6px; border-radius:8px; backdrop-filter:blur(4px);
+    border:1px solid var(--line);
+  }
+  .toolbar button{width:auto; padding:4px 11px; background:#30363d}
+  #recipe{
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; color:#9fd0ff;
+    background:var(--sunk); border:1px solid #30363d; border-radius:6px; padding:7px;
+    min-height:34px; max-height:150px; overflow:auto; word-break:break-word;
+    line-height:1.55; white-space:pre-wrap;
+  }
+  #recipe::-webkit-scrollbar{width:7px}
+  #recipe::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  .titlerow{display:flex; align-items:center; justify-content:space-between; margin-bottom:7px}
+  .titlerow > .title{margin-bottom:0}
+  .mini{
+    width:auto; background:#30363d; padding:2px 9px; font-size:11px; font-weight:600;
+    border-radius:4px; line-height:1.5;
+  }
+  .mini:disabled{opacity:.4; cursor:default}
+  .mini.done{background:#2ea043}
+  .mini.on{background:var(--lock)}
+
+  /* ---- collection (right panel) ---- */
+  #collection{
+    width:246px; flex:0 0 246px; background:var(--panel); border-left:1px solid var(--line);
+    display:flex; flex-direction:column; z-index:10; min-height:0;
+  }
+  #collection.collapsed{width:32px; flex-basis:32px}
+  #collection.collapsed #col-list, #collection.collapsed #col-foot,
+  #collection.collapsed #col-head .grow{display:none}
+  #col-head{
+    display:flex; align-items:center; gap:6px; padding:9px 8px 9px 10px;
+    border-bottom:1px solid #21262d;
+  }
+  #col-head .title{
+    font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--dim); font-weight:700; margin:0;
+  }
+  #col-count{
+    font:11px/1 ui-monospace,monospace; color:var(--ink); background:#30363d;
+    padding:3px 6px; border-radius:9px;
+  }
+  .grow{flex:1 1 auto; min-width:0; display:flex; align-items:center; gap:6px}
+  #col-toggle{width:auto; background:transparent; color:var(--dim); padding:2px 4px; font-size:12px}
+  #col-toggle:hover{color:var(--ink)}
+  #col-list{flex:1 1 auto; overflow-y:auto; overflow-x:hidden; padding:8px; display:flex;
+    flex-direction:column; gap:6px}
+  #col-list::-webkit-scrollbar{width:8px}
+  #col-list::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  #col-empty{color:#6e7681; font-size:11.5px; text-align:center; padding:18px 6px; line-height:1.6}
+  .item{
+    background:#1c222b; border:1px solid var(--line); border-radius:7px; padding:6px;
+    display:flex; gap:7px; align-items:flex-start; cursor:grab;
+  }
+  .item.sel{border-color:var(--accent)}
+  .item.drop-before{box-shadow:0 -2px 0 var(--accent)}
+  .item.drop-after{box-shadow:0 2px 0 var(--accent)}
+  .item.dragging{opacity:.4}
+  .item canvas{
+    display:block; position:static; background:var(--sunk); border-radius:4px;
+    flex:0 0 auto; cursor:pointer;
+  }
+  .item .body{flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:3px}
+  .item input.name{
+    background:transparent; border:1px solid transparent; color:var(--ink);
+    font-size:12px; font-weight:600; padding:1px 3px; width:100%; border-radius:3px;
+  }
+  .item input.name:hover{border-color:#30363d}
+  .item input.name:focus{background:var(--sunk); border-color:var(--accent); outline:none}
+  .item .meta{
+    font:10px/1.4 ui-monospace,monospace; color:#6e7681; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap;
+  }
+  .item .acts{display:flex; gap:3px; margin-top:1px}
+  .item .acts button{
+    width:auto; background:#262c35; color:#adbac7; padding:1px 6px; font-size:11px;
+    border-radius:3px; font-weight:500; line-height:1.5;
+  }
+  .item .acts button:hover{background:#3a424e; color:var(--ink)}
+  .item .acts button.del:hover{background:var(--lock); color:#fff}
+  #col-foot{padding:8px; border-top:1px solid #21262d; display:flex}
+  #col-foot button{background:#30363d; font-size:12px; padding:6px 8px}
+  #col-foot button.prim{background:var(--accent)}
+  .hint{font-size:11px; color:#6e7681; text-align:center; line-height:1.5}
+  .hidden{display:none !important}
+
+  /* ---- timeline ---- */
+  #timeline{
+    flex:0 0 auto; background:var(--panel); border-top:1px solid var(--line);
+    display:flex; flex-direction:column; user-select:none;
+  }
+  #tl-head{
+    display:flex; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid #21262d;
+  }
+  #tl-head button{
+    width:auto; background:#30363d; padding:3px 9px; font-size:13px; line-height:1.2;
+  }
+  #tl-head button.on{background:var(--accent)}
+  #tl-pos{
+    font-family:ui-monospace,monospace; font-size:11.5px; color:var(--dim);
+    white-space:nowrap; min-width:74px;
+  }
+  #tl-label{
+    font-size:12px; color:#adbac7; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; flex:1 1 auto; min-width:0;
+  }
+  #tl-label b{color:var(--ink); font-weight:600}
+  #tl-past{color:var(--mark)}
+  #tl-strip{
+    display:flex; gap:5px; overflow-x:auto; overflow-y:hidden;
+    padding:7px 10px 9px; height:86px; align-items:flex-start;
+  }
+  #tl-strip::-webkit-scrollbar{height:8px}
+  #tl-strip::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+  .frame{
+    position:relative; flex:0 0 auto; border:2px solid #262c35; border-radius:5px;
+    background:var(--sunk); cursor:pointer; padding:0; line-height:0; overflow:hidden;
+  }
+  .frame:hover{border-color:#4a5361}
+  .frame.cur{border-color:var(--accent); box-shadow:0 0 0 2px rgba(79,140,255,.25)}
+  .frame canvas{display:block; position:static}
+  .frame .idx{
+    position:absolute; left:0; bottom:0; font:10px/1.4 ui-monospace,monospace;
+    background:rgba(0,0,0,.66); color:#c9d1d9; padding:0 4px; border-top-right-radius:4px;
+  }
+  .frame .star{
+    position:absolute; right:2px; top:1px; font-size:11px; line-height:1; color:var(--mark);
+    text-shadow:0 0 3px #000;
+  }
+
+  /* selftest overlay banner */
+  #selftest-banner{
+    position:absolute; top:10px; left:320px; z-index:100;
+    background:rgba(22,27,34,0.95); border:1px solid var(--accent);
+    color:var(--ink); padding:8px 14px; border-radius:6px;
+    font-family:ui-monospace,monospace; font-size:12px;
+    box-shadow:0 4px 12px rgba(0,0,0,0.5); backdrop-filter:blur(4px);
+  }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h1>MoSprites NG — Modulo Fields</h1>
+  <button id="regen">↻ Regenerate Sheet</button>
+
+  <div class="group">
+    <div class="title">Source</div>
+    <div class="row">
+      <label>Data</label>
+      <select id="source">
+        <option value="field" selected>Modulo field</option>
+        <option value="noise">Random noise</option>
+        <option value="custom">Custom expression</option>
+      </select>
+    </div>
+    <div class="row r-field">
+      <label>Formula</label>
+      <select id="formula"></select>
+    </div>
+    <div class="row r-custom hidden" style="display:block">
+      <label style="display:block;margin-bottom:4px">f(x,y) — <code>u,v</code> centred</label>
+      <textarea id="expr" rows="2">(u*u + v*v) * (Math.abs(u)^Math.abs(v))</textarea>
+    </div>
+    <div class="row r-mod">
+      <label title="Result is taken mod this. Odd numbers give the nicest rings.">Modulus</label>
+      <input type="number" id="modulus" value="17" min="2" max="512">
+    </div>
+    <div class="row r-mod">
+      <label title="Sampling step — bigger = coarser pattern">Stride</label>
+      <input type="number" id="stride" value="1" min="1" max="8">
+    </div>
+    <div class="row r-mod">
+      <label title="Rotates which residues count as ink">Phase</label>
+      <input type="range" id="phase" min="0" max="1" step="0.01" value="0">
+      <span class="val" id="phase-v">0.00</span>
+    </div>
+    <div class="row">
+      <label title="Fraction of residues that become ink">Coverage</label>
+      <input type="range" id="density" min="0.05" max="1" step="0.05" value="0.45">
+      <span class="val" id="density-v">0.45</span>
+    </div>
+    <div class="row r-field">
+      <label class="check"><input type="checkbox" id="vary" checked>
+        <span title="Each cell picks its own formula &amp; modulus">Vary per cell</span></label>
+    </div>
+    <div class="row r-noise hidden">
+      <label class="check"><input type="checkbox" id="ca" checked><span>Smooth (CA pass)</span></label>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Mask</div>
+    <div class="row"><label>Shape</label><select id="mask"></select></div>
+    <div class="row">
+      <label>Size</label>
+      <input type="range" id="mask-scale" min="0.4" max="1.45" step="0.05" value="1">
+      <span class="val" id="mask-scale-v">1.00</span>
+    </div>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="mask-invert"><span>Invert</span></label>
+      <label class="check"><input type="checkbox" id="outline"><span>Outline</span></label>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Sprite</div>
+    <div class="row"><label>Width</label><input type="number" id="sw" value="16" min="2" max="64"></div>
+    <div class="row"><label>Height</label><input type="number" id="sh" value="16" min="2" max="64"></div>
+    <div class="row">
+      <label>Symmetry</label>
+      <select id="symmetry">
+        <option value="none">None</option>
+        <option value="horizontal" selected>Horizontal</option>
+        <option value="vertical">Vertical</option>
+        <option value="quadrant">Quadrant</option>
+        <option value="diagonal">Dihedral (8-fold)</option>
+        <option value="rot90">Rotate 90° (pinwheel)</option>
+        <option value="rot180">Rotate 180°</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="title">Palette</div>
+    <div class="row">
+      <label>Gamut</label>
+      <select id="bpc">
+        <option value="1">1-bit</option><option value="2">2-bit</option>
+        <option value="3" selected>3-bit</option><option value="4">4-bit</option>
+        <option value="8">8-bit</option>
+      </select>
+    </div>
+    <div class="row"><label>Colors / sprite</label><input type="number" id="ncol" value="4" min="1" max="16"></div>
+    <div class="row">
+      <label>Assignment</label>
+      <select id="colormode">
+        <option value="bands" selected>Bands (ramp)</option>
+        <option value="cycle">Cycle residue</option>
+        <option value="solid">Solid</option>
+      </select>
+    </div>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="sortlum" checked><span>Sort by luminance</span></label>
+      <button id="repal" class="sec" style="width:auto;padding:3px 9px;font-size:12px">Shuffle</button>
+    </div>
+  </div>
+
+  <!-- NG Stage 6: Software Raster Policy Controls -->
+  <div class="group">
+    <div class="title">Rasterizer (NG)</div>
+    <div class="row"><label title="Composite operator: over (directional light) or add (commutative, preserves symmetry at q|w)">Operator</label>
+      <select id="operator">
+        <option value="over" selected>over (source-over, light direction)</option>
+        <option value="add">add (commutative, mirror intact at q|w)</option>
+        <option value="mul">mul (multiply, darkens)</option>
+      </select>
+    </div>
+    <div class="row"><label title="Traversal order: controls apparent light direction under non-commutative operators">Order</label>
+      <select id="order">
+        <option value="rowMajor" selected>Row major (light lower-right)</option>
+        <option value="colMajor">Col major (vertical bias)</option>
+        <option value="serpentine">Serpentine (woven fabric)</option>
+        <option value="radial">Radial (glow / vignette)</option>
+        <option value="morton">Morton (self-similar blocky)</option>
+        <option value="byField">By Field (field-coherent shading)</option>
+      </select>
+    </div>
+    <div class="row"><label title="Blending space: sRGB (dark pigment look) vs Linear (light-correct brightness)">Color Space</label>
+      <select id="space">
+        <option value="srgb" selected>sRGB (pigment, MoSprites look)</option>
+        <option value="linear">Linear (light-correct blend)</option>
+      </select>
+    </div>
+    <div class="row"><label>Columns</label><input type="number" id="cols" value="8" min="1" max="50"></div>
+    <div class="row"><label>Rows</label><input type="number" id="rows" value="6" min="1" max="50"></div>
+    <div class="row"><label>Spacing</label><input type="number" id="spacing" value="2" min="0" max="16"></div>
+    <div class="row"><label>Scale (px)</label><input type="number" id="scale" value="4" min="1" max="24" step="0.05"></div>
+    <div class="row"><label>Seam phase</label>
+      <select id="seamphase" title="Where each sprite's raster origin falls. Only has an effect at fractional scale.">
+        <option value="global">Global — sheet is one surface</option>
+        <option value="local">Local — sprite is portable</option>
+      </select></div>
+    <div class="row"><label>Matte</label>
+      <select id="matte" title="Composited under the sprites. At fractional scale this is an input to the seam colours, not decoration.">
+        <option value="transparent">Transparent</option>
+        <option value="stage">Stage (#0b0f14)</option>
+        <option value="white">White</option>
+        <option value="black">Black</option>
+      </select></div>
+    <div id="seam-readout" class="hint" style="margin-top:6px"></div>
+  </div>
+
+  <div class="group">
+    <div class="title">Export</div>
+    <div class="row"><label>Preset</label>
+      <select id="preset" title="What the PNG means, not how good it is.">
+        <option value="seen">As seen</option>
+        <option value="asset">Sprite asset</option>
+        <option value="screen">Screenshot (viewport)</option>
+      </select></div>
+    <div class="row"><label>Magnify</label>
+      <input type="number" id="magnify" value="1" min="1" max="16" step="1"
+             title="Integer nearest-neighbour blow-up applied after rasterising. Never re-rasters at a larger scale — that would change q and give you a different colour field.">
+    </div>
+    <div id="preset-note" class="hint" style="margin-top:6px"></div>
+  </div>
+
+  <div class="group">
+    <div class="titlerow">
+      <div class="title">Recipe</div>
+      <div style="display:flex;gap:4px">
+        <button id="lock-sel" class="mini" disabled title="Lock this sprite (ctrl-click)">🔒</button>
+        <button id="copy-recipe" class="mini" disabled title="Copy this recipe to the clipboard (C)">⧉</button>
+        <button id="keep-sel" class="mini" disabled title="Keep in collection (K / alt-click)">+ Keep</button>
+      </div>
+    </div>
+    <div id="recipe">Click a sprite to inspect &amp; lock it.</div>
+  </div>
+
+  <div class="btnrow">
+    <button id="export" class="sec">↓ PNG</button>
+    <button id="save" class="sec">↓ Session</button>
+    <button id="load" class="sec">↑ Load</button>
+  </div>
+  <input type="file" id="file" accept="application/json" class="hidden">
+  <div class="hint">click = select · ctrl-click = lock · alt-click = keep<br>
+    shift-click = reroll · drag = pan · wheel = zoom<br>
+    R = regenerate · K = keep · C = copy · B = bookmark<br>
+    ← → = scrub · space = play</div>
+</div>
+
+<div id="main">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div class="toolbar">
+      <button id="zin">+</button><button id="zout">−</button><button id="zreset">Reset</button>
+    </div>
+  </div>
+
+  <div id="timeline">
+    <div id="tl-head">
+      <button id="tl-first" title="First (Home)">⏮</button>
+      <button id="tl-prev" title="Back (←)">◀</button>
+      <button id="tl-play" title="Replay exploration (Space)">▶</button>
+      <button id="tl-next" title="Forward (→)">▶|</button>
+      <button id="tl-last" title="Latest (End)">⏭</button>
+      <button id="tl-mark" title="Bookmark this state (B)">☆</button>
+      <span id="tl-pos">0 / 0</span>
+      <span id="tl-label"></span>
+    </div>
+    <div id="tl-strip"></div>
+  </div>
+</div>
+
+<div id="collection">
+  <div id="col-head">
+    <button id="col-toggle" title="Collapse / expand">▶</button>
+    <div class="grow">
+      <span class="title">Collection</span>
+      <span id="col-count">0</span>
+    </div>
+  </div>
+  <div id="col-list"></div>
+  <div id="col-foot">
+    <button id="col-sheet" class="prim" title="Export the collection as one packed sprite sheet">↓ Export Sheet</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+/* ================================================================ utils */
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rand32 = () => (Math.random()*4294967296)>>>0;
+
+function popcount(n){ n = n>>>0; n = n - ((n>>>1)&0x55555555);
+  n = (n&0x33333333) + ((n>>>2)&0x33333333);
+  return ((n + (n>>>4) & 0x0f0f0f0f) * 0x01010101) >>> 24; }
+function digitSum(n){ n = Math.abs(n|0); let s=0; while(n>0){ s += n%10; n=(n/10)|0; } return s; }
+
+const pascalCache = new Map();
+function pascalMod(n,k,m){
+  if(k<0||n<0||k>n) return 0;
+  if(n>180) n%=181;
+  if(k>n) k=n;
+  let tri = pascalCache.get(m);
+  if(!tri){ tri=[[1]]; pascalCache.set(m,tri); }
+  while(tri.length<=n){
+    const prev = tri[tri.length-1], row=[1];
+    for(let i=1;i<prev.length;i++) row.push((prev[i-1]+prev[i])%m);
+    row.push(1); tri.push(row);
+  }
+  return tri[n][k];
+}
+
+/* ======================================================= software raster kernel (NG) */
+/* Separable analytic coverage, pluggable composite operator, pluggable
+   traversal order, linear-light option, float accumulation. */
+
+const part1by1 = n => { n=(n|(n<<8))&0x00ff00ff; n=(n|(n<<4))&0x0f0f0f0f;
+  n=(n|(n<<2))&0x33333333; return (n|(n<<1))&0x55555555; };
+const mortonKey = ([x,y]) => part1by1(x) | (part1by1(y)<<1);
+
+const OPS = {
+  /* non-commutative: order is a light direction */
+  over: (d,a_d, s,a) => [s*a + d*(1-a), a + a_d*(1-a)],
+  /* commutative: order-independent, symmetry-preserving */
+  add:  (d,a_d, s,a) => [d + s*a, Math.min(1, a_d + a)],
+  /* commutative in the limit; darkens */
+  mul:  (d,a_d, s,a) => [d*(1-a) + d*s*a, a + a_d*(1-a)],
+};
+
+const ORDERS = {
+  rowMajor:  (w,h) => { const o=[]; for(let y=0;y<h;y++) for(let x=0;x<w;x++) o.push([x,y]); return o; },
+  colMajor:  (w,h) => { const o=[]; for(let x=0;x<w;x++) for(let y=0;y<h;y++) o.push([x,y]); return o; },
+  serpentine:(w,h) => { const o=[]; for(let y=0;y<h;y++){ for(let i=0;i<w;i++) o.push([y%2?w-1-i:i, y]); } return o; },
+  radial:    (w,h) => ORDERS.rowMajor(w,h).sort((a,b)=>
+                Math.hypot(a[0]-(w-1)/2,a[1]-(h-1)/2) - Math.hypot(b[0]-(w-1)/2,b[1]-(h-1)/2)),
+  morton:    (w,h) => ORDERS.rowMajor(w,h).sort((a,b)=>mortonKey(a)-mortonKey(b)),
+  /* paint in order of field value, so apparent light direction is generated
+     by the same modulo field as the form */
+  byField:   (w,h,field) => ORDERS.rowMajor(w,h).sort((a,b)=>(field?field(a[0],a[1]):0)-(field?field(b[0],b[1]):0)),
+};
+
+const srgb2lin = c => { c/=255; return (c<=0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4))*255; };
+const lin2srgb = c => { c/=255; return (c<=0.0031308 ? c*12.92 : 1.055*Math.pow(c,1/2.4)-0.055)*255; };
+
+const span = (a0,a1,b0,b1) => Math.max(0, Math.min(a1,b1)-Math.max(a0,b0));
+
+/* Pure software rasterizer: grid: (x,y) -> [r,g,b] | null. Returns Float64 RGBA planes */
+function raster(grid, w, h, opts){
+  const { scale:p, origin=[0,0], W, H,
+          op='over', order='rowMajor', linear=false, matte=null, field=null } = opts;
+  const f = OPS[op] || OPS.over, seq = (ORDERS[order] || ORDERS.rowMajor)(w, h, field);
+  const R=new Float64Array(W*H), G=new Float64Array(W*H),
+        B=new Float64Array(W*H), A=new Float64Array(W*H);
+  const enc = linear ? srgb2lin : (c=>c);
+  if(matte){ const m = matte.map(enc);
+    for(let k=0;k<W*H;k++){ R[k]=m[0]; G[k]=m[1]; B[k]=m[2]; A[k]=1; } }
+  for(const [x,y] of seq){
+    const c = grid(x,y); if(!c) continue;
+    const [r,g,b] = c.map(enc);
+    const x0=origin[0]+x*p, y0=origin[1]+y*p;
+    for(let j=Math.max(0,Math.floor(y0)); j<Math.min(H,Math.ceil(y0+p)); j++){
+      const fy = span(y0,y0+p,j,j+1); if(fy<=0) continue;
+      for(let i=Math.max(0,Math.floor(x0)); i<Math.min(W,Math.ceil(x0+p)); i++){
+        const fx = span(x0,x0+p,i,i+1); if(fx<=0) continue;
+        const a = fx*fy, k=j*W+i, ad=A[k];                 /* coverage is separable */
+        [R[k]] = f(R[k],ad,r,a); [G[k]] = f(G[k],ad,g,a);
+        let na; [B[k],na] = f(B[k],ad,b,a); A[k]=na;
+      }
+    }
+  }
+  if(linear) for(let k=0;k<W*H;k++){ R[k]=lin2srgb(R[k]); G[k]=lin2srgb(G[k]); B[k]=lin2srgb(B[k]); }
+  return {R,G,B,A,W,H};
+}
+
+/* =============================================================== fields */
+const FIELDS = [
+  {id:'circle',  name:'Circles   x²+y²',           f:(u,v,p)=> u*u + v*v},
+  {id:'product', name:'Product   x·y',             f:(u,v,p)=> u*v},
+  {id:'xor',     name:'XOR   |x| ^ |y|',           f:(u,v,p)=> Math.abs(u) ^ Math.abs(v)},
+  {id:'and',     name:'AND   |x| & |y|',           f:(u,v,p)=> Math.abs(u) & Math.abs(v)},
+  {id:'or',      name:'OR   |x| | |y|',            f:(u,v,p)=> Math.abs(u) | Math.abs(v)},
+  {id:'diamond', name:'Diamond   |x|+|y|',         f:(u,v,p)=> Math.abs(u) + Math.abs(v)},
+  {id:'cheby',   name:'Square   max(|x|,|y|)',     f:(u,v,p)=> Math.max(Math.abs(u),Math.abs(v))},
+  {id:'hyper',   name:'Hyperbola   x²−y²',         f:(u,v,p)=> u*u - v*v},
+  {id:'skew',    name:'Skewed   x²+xy+y²',         f:(u,v,p)=> u*u + u*v + v*v},
+  {id:'cubic',   name:'Cubic   x³+y³',             f:(u,v,p)=> u*u*u + v*v*v},
+  {id:'trefoil', name:'Trefoil   x³−3xy²',         f:(u,v,p)=> u*u*u - 3*u*v*v},
+  {id:'quartic', name:'Quartic   x⁴+y⁴',           f:(u,v,p)=> u*u*u*u + v*v*v*v},
+  {id:'conic',   name:'Random conic   ax²+bxy+…',  f:(u,v,p)=> p.a*u*u + p.b*u*v + p.c*v*v + p.d*u + p.e*v},
+  {id:'popcnt',  name:'Popcount(x·y)',             f:(u,v,p)=> popcount(Math.abs(u*v))},
+  {id:'popsum',  name:'Popcount(x²+y²)',           f:(u,v,p)=> popcount(Math.abs(u*u+v*v))},
+  {id:'ringxor', name:'(x²+y²)·(x^y+1)',           f:(u,v,p)=> (u*u+v*v) * ((Math.abs(u)^Math.abs(v))+1)},
+  {id:'digsum',  name:'Digitsum(x²+y²)',           f:(u,v,p)=> digitSum(u*u+v*v)},
+  {id:'pascal',  name:'Binomial C(|x|+|y|,|x|)',   f:(u,v,p)=> pascalMod(Math.abs(u)+Math.abs(v), Math.abs(u), p.M)},
+  {id:'shift',   name:'(x<<3) ^ (y·y)',            f:(u,v,p)=> (Math.abs(u)<<3) ^ (v*v)},
+  {id:'mixmul',  name:'x·y·(x+y)',                 f:(u,v,p)=> u*v*(u+v)},
+];
+const FIELD_BY_ID = Object.fromEntries(FIELDS.map(f=>[f.id,f]));
+
+const MASKS = [
+  {id:'none',    name:'None',              m:(nx,ny,r)=> true},
+  {id:'disc',    name:'Disc',              m:(nx,ny,r)=> nx*nx+ny*ny <= r*r},
+  {id:'diamond', name:'Diamond',           m:(nx,ny,r)=> Math.abs(nx)+Math.abs(ny) <= r*1.25},
+  {id:'square',  name:'Square',            m:(nx,ny,r)=> Math.max(Math.abs(nx),Math.abs(ny)) <= r*0.95},
+  {id:'super',   name:'Superellipse',      m:(nx,ny,r)=> Math.pow(Math.abs(nx),4)+Math.pow(Math.abs(ny),4) <= Math.pow(r,4)},
+  {id:'ring',    name:'Ring',              m:(nx,ny,r)=>{const d=Math.hypot(nx,ny); return d<=r && d>=r*0.5;}},
+  {id:'cross',   name:'Cross',             m:(nx,ny,r)=> (Math.abs(nx)<=r*0.34 || Math.abs(ny)<=r*0.34) && Math.max(Math.abs(nx),Math.abs(ny))<=r},
+  {id:'taper',   name:'Taper (tree)',      m:(nx,ny,r)=> Math.abs(nx) <= r*(0.18+0.82*(ny+1)/2)},
+  {id:'hourglass',name:'Hourglass',        m:(nx,ny,r)=> Math.abs(nx) <= r*(0.16+0.9*Math.abs(ny))},
+  {id:'lens',    name:'Lens (vesica)',     m:(nx,ny,r)=> Math.abs(ny) <= r*Math.sqrt(Math.max(0,1-nx*nx))*0.9},
+  {id:'blob',    name:'Random blob (CA)',  m:null},
+];
+const MASK_BY_ID = Object.fromEntries(MASKS.map(m=>[m.id,m]));
+
+/* ====================================================== symmetry folding */
+function seedDims(w,h,mode){
+  const hw = Math.ceil(w/2), hh = Math.ceil(h/2);
+  switch(mode){
+    case 'horizontal': return [hw,h];
+    case 'vertical':   return [w,hh];
+    case 'rot180':     return [w,hh];
+    case 'quadrant': case 'diagonal': case 'rot90': return [hw,hh];
+    default: return [w,h];
+  }
+}
+function fold(x,y,w,h,mode){
+  const hw = Math.ceil(w/2), hh = Math.ceil(h/2);
+  let sx=x, sy=y;
+  switch(mode){
+    case 'horizontal': if(sx>=hw) sx=w-1-sx; break;
+    case 'vertical':   if(sy>=hh) sy=h-1-sy; break;
+    case 'quadrant':   if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy; break;
+    case 'rot180':     if(sy>=hh){ sy=h-1-sy; sx=w-1-sx; } break;
+    case 'diagonal': {
+      if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy;
+      if(hw===hh && sx>sy){ const t=sx; sx=sy; sy=t; }
+      break;
+    }
+    case 'rot90': {
+      if(w!==h){ if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy; break; }
+      let g=0;
+      while((sx>=hw || sy>=hh) && g++<4){ const nx=h-1-sy, ny=sx; sx=nx; sy=ny; }
+      break;
+    }
+  }
+  return [sx,sy];
+}
+
+/* =============================================================== palette */
+const rgbHex = (r,g,b) => '#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('');
+const hexRgb = h => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+const lum = h => { const [r,g,b]=hexRgb(h); return 0.2126*r+0.7152*g+0.0722*b; };
+const darken = (h,k) => { const [r,g,b]=hexRgb(h); return rgbHex((r*k)|0,(g*k)|0,(b*k)|0); };
+
+/* Deterministic: the palette is a pure function of (seed, bits), so any
+   timeline entry can be replayed exactly.                                */
+const palCache = new Map();
+function paletteFor(seed, bpc){
+  const key = seed+'/'+bpc;
+  if(palCache.has(key)) return palCache.get(key);
+  const rnd = mulberry32(seed ^ 0x5bf03635);
+  const levels = 1<<bpc, step = 255/(levels-1);
+  let out = [];
+  if(bpc<=3){
+    for(let r=0;r<levels;r++) for(let g=0;g<levels;g++) for(let b=0;b<levels;b++)
+      out.push(rgbHex(Math.round(r*step),Math.round(g*step),Math.round(b*step)));
+    for(let i=out.length-1;i>0;i--){ const j=(rnd()*(i+1))|0; [out[i],out[j]]=[out[j],out[i]]; }
+  } else {
+    const seen = new Set();
+    let guard = 0;
+    while(seen.size<256 && guard++<20000){
+      seen.add(rgbHex(Math.round(((rnd()*levels)|0)*step),
+                      Math.round(((rnd()*levels)|0)*step),
+                      Math.round(((rnd()*levels)|0)*step)));
+    }
+    out = [...seen];
+  }
+  if(palCache.size>64) palCache.clear();
+  palCache.set(key,out);
+  return out;
+}
+
+/* ======================================================== sprite factory */
+const ODDS = [3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,37,41,47,53];
+
+/* g is a flat generator config; pure function of (seed, g). */
+function generateSprite(seed, g){
+  const rnd = mulberry32(seed);
+  const {w,h,sym,coverage,ncol,useCA,source,formulaId,modulus,vary,stride,phase,
+         colorMode,maskId,maskScale,maskInvert,outline,sortLum,customFn,palette} = g;
+
+  const [sw,sh] = seedDims(w,h,sym);
+  const pick = arr => arr[(rnd()*arr.length)|0];
+
+  let fid = formulaId, M = modulus, st = stride, mid = maskId;
+  if(source==='field' && vary){ fid = pick(FIELDS).id; M = pick(ODDS); st = 1 + ((rnd()*3)|0); }
+  else if(source==='field' && fid==='mix') fid = pick(FIELDS).id;
+  if(mid==='mix') mid = pick(MASKS.filter(m=>m.id!=='none')).id;
+
+  const p = {
+    M,
+    ox: ((rnd()*17)|0) - 8,
+    oy: ((rnd()*17)|0) - 8,
+    a: ((rnd()*7)|0)-3 || 1, b: ((rnd()*7)|0)-3,
+    c: ((rnd()*7)|0)-3 || 1, d: ((rnd()*11)|0)-5, e: ((rnd()*11)|0)-5,
+  };
+
+  const pool = [...palette];
+  const colors = [];
+  for(let i=0, n=Math.min(ncol,pool.length); i<n; i++)
+    colors.push(pool.splice((rnd()*pool.length)|0,1)[0]);
+  if(sortLum) colors.sort((a,b)=>lum(a)-lum(b));
+  const nc = colors.length;
+
+  /* mask */
+  const maskFn = MASK_BY_ID[mid] ? MASK_BY_ID[mid].m : null;
+  let blob = null;
+  if(mid==='blob'){
+    blob = Array.from({length:sh},()=>new Uint8Array(sw));
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++) blob[y][x] = rnd()<0.58 ? 1:0;
+    for(let pass=0; pass<2; pass++){
+      const nb = Array.from({length:sh},()=>new Uint8Array(sw));
+      for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+        let n=0;
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+          if(!dx&&!dy) continue;
+          const ax=x+dx, ay=y+dy;
+          if(ax>=0&&ax<sw&&ay>=0&&ay<sh) n+=blob[ay][ax];
+        }
+        nb[y][x] = blob[y][x] ? (n>=2?1:0) : (n>=5?1:0);
+      }
+      blob = nb;
+    }
+  }
+  const cxf=(w-1)/2, cyf=(h-1)/2;
+  function inMask(sx,sy){
+    if(mid==='none') return true;
+    let ok;
+    if(mid==='blob') ok = !!(blob[sy] && blob[sy][sx]);
+    else ok = maskFn((sx-cxf)/(w/2), (sy-cyf)/(h/2), maskScale);
+    return maskInvert ? !ok : ok;
+  }
+
+  /* seed region */
+  const cx = Math.floor((w-1)/2), cy = Math.floor((h-1)/2);
+  const field = FIELD_BY_ID[fid] || FIELD_BY_ID.circle;
+  const seedGrid = Array.from({length:sh},()=>new Uint8Array(sw));
+
+  if(source==='noise'){
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++)
+      seedGrid[y][x] = rnd()<coverage ? 1 + ((rnd()*nc)|0) : 0;
+    if(useCA){
+      const out = Array.from({length:sh},()=>new Uint8Array(sw));
+      for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+        let n=0; const tally={};
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+          if(!dx&&!dy) continue;
+          const ax=x+dx, ay=y+dy;
+          if(ax<0||ax>=sw||ay<0||ay>=sh) continue;
+          const c=seedGrid[ay][ax];
+          if(c>0){ n++; tally[c]=(tally[c]||0)+1; }
+        }
+        if(seedGrid[y][x]===0){
+          if(n>=3){ let best=1,bc=0; for(const k in tally) if(tally[k]>bc){bc=tally[k];best=+k;} out[y][x]=best; }
+        } else out[y][x] = n>=2 ? seedGrid[y][x] : 0;
+      }
+      for(let y=0;y<sh;y++) seedGrid[y].set(out[y]);
+    }
+  } else {
+    const fn = (source==='custom' && customFn) ? customFn : null;
+    for(let y=0;y<sh;y++) for(let x=0;x<sw;x++){
+      const u = (x-cx)*st + p.ox, v = (y-cy)*st + p.oy;
+      let n;
+      try { n = fn ? fn(x,y,u,v,w,h,p) : field.f(u,v,p); }
+      catch(e){ n = u*u+v*v; }
+      if(!Number.isFinite(n)) n = 0;
+      n = Math.round(n);
+      const vm = ((n % M) + M) % M;
+      const t = (vm/M + phase) % 1;
+      if(t >= coverage){ seedGrid[y][x]=0; continue; }
+      seedGrid[y][x] = colorMode==='solid' ? 1
+                     : colorMode==='cycle' ? 1 + (vm % nc)
+                     : 1 + Math.min(nc-1, ((t/coverage)*nc)|0);
+    }
+  }
+
+  for(let y=0;y<sh;y++) for(let x=0;x<sw;x++) if(!inMask(x,y)) seedGrid[y][x]=0;
+
+  let grid = Array.from({length:h},()=>new Uint8Array(w));
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const [sx,sy] = fold(x,y,w,h,sym);
+    if(sx>=0&&sx<sw&&sy>=0&&sy<sh) grid[y][x] = seedGrid[sy][sx];
+  }
+
+  const paint = [...colors];
+  if(outline && nc>0){
+    paint.push(darken(colors[0],0.32));
+    const oi = paint.length;
+    const out = grid.map(r=>Uint8Array.from(r));
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+      if(grid[y][x]) continue;
+      if((x>0&&grid[y][x-1])||(x<w-1&&grid[y][x+1])||(y>0&&grid[y-1][x])||(y<h-1&&grid[y+1][x])) out[y][x]=oi;
+    }
+    grid = out;
+  }
+
+  const recipe = source==='noise'
+    ? `noise · cov ${coverage.toFixed(2)}${useCA?' · CA':''} · mask ${mid} · ${sym}`
+    : `${source==='custom'?'custom':fid} % ${M} · stride ${st} · off(${p.ox},${p.oy})` +
+      (fid==='conic' ? ` · [${p.a},${p.b},${p.c},${p.d},${p.e}]` : '') +
+      ` · mask ${mid}${maskInvert?'⁻¹':''} · ${sym}`;
+
+  return {grid, colors:paint, recipe, w, h, fid, p};
+}
+
+/* ================================================================ state */
+/* S is the single source of truth. render() is a pure function of S, so
+   every timeline entry replays bit-identically.                          */
+const CFG_KEYS = ['source','formula','expr','modulus','stride','phase','density','vary','ca',
+  'mask','mask-scale','mask-invert','outline','sw','sh','symmetry','bpc','ncol','colormode',
+  'sortlum','cols','rows','spacing','scale','seamphase','matte','operator','order','space'];
+const NUM_KEYS = new Set(['modulus','stride','phase','density','mask-scale','sw','sh','bpc',
+  'ncol','cols','rows','spacing','scale']);
+const BOOL_KEYS = new Set(['vary','ca','mask-invert','outline','sortlum']);
+const LABELS = {
+  source:'Source', formula:'Formula', expr:'Expression', modulus:'Modulus', stride:'Stride',
+  phase:'Phase', density:'Coverage', vary:'Vary per cell', ca:'CA smooth', mask:'Mask',
+  'mask-scale':'Mask size', 'mask-invert':'Mask invert', outline:'Outline', sw:'Sprite width',
+  sh:'Sprite height', symmetry:'Symmetry', bpc:'Gamut', ncol:'Colors', colormode:'Color mode',
+  sortlum:'Sort by luminance', cols:'Columns', rows:'Rows', spacing:'Spacing', scale:'Scale',
+  seamphase:'Seam phase', matte:'Matte', operator:'Operator', order:'Order', space:'Color Space',
+};
+
+let S = null;                 // {cfg, cells, paletteSeed}
+let timeline = [];            // append-only log
+let playhead = -1;
+const MAX_ENTRIES = 400;
+
+const newCell = () => ({seed:rand32(), locked:false, lockCfg:null});
+
+function defaultState(){
+  const cfg = {};
+  for(const k of CFG_KEYS){
+    const el = $(k);
+    cfg[k] = el ? (BOOL_KEYS.has(k) ? el.checked : (NUM_KEYS.has(k) ? +el.value : el.value)) : null;
+  }
+  cfg.formula = 'mix'; cfg.mask = 'none';
+  cfg.operator = cfg.operator || 'over';
+  cfg.order = cfg.order || 'rowMajor';
+  cfg.space = cfg.space || 'srgb';
+  const rows = cfg.rows, cols = cfg.cols, list = [];
+  for(let i=0;i<rows*cols;i++) list.push(newCell());
+  return {cfg, cells:{rows, cols, list}, paletteSeed: rand32()};
+}
+/* cells are treated as immutable — every mutation builds a new object — so
+   snapshots share the reference and a slider drag costs one small cfg copy. */
+const cloneState = s => ({cfg:{...s.cfg}, cells:s.cells, paletteSeed:s.paletteSeed});
+
+/* Cells are shared by reference between entries that didn't touch them,
+   so a slider drag costs one small cfg object per frame, not a grid copy. */
+function reconcileCells(){
+  const rows = S.cfg.rows, cols = S.cfg.cols, c = S.cells;
+  if(c.rows===rows && c.cols===cols) return false;
+  const list = [];
+  for(let r=0;r<rows;r++) for(let x=0;x<cols;x++)
+    list.push((r<c.rows && x<c.cols) ? c.list[r*c.cols+x] : newCell());
+  S.cells = {rows, cols, list};
+  return true;
+}
+
+/* map a stored cfg to the flat generator config */
+function toGen(cfg, paletteSeed){
+  let customFn = null;
+  if(cfg.source==='custom'){
+    try{
+      customFn = new Function('x','y','u','v','w','h','P','return ('+cfg.expr+');');
+      customFn(0,0,1,1,8,8,{M:7,a:1,b:1,c:1,d:0,e:0});
+    }catch(err){ console.warn('Custom expression failed, using x²+y²:', err.message); customFn=null; }
+  }
+  return {
+    w:cfg.sw, h:cfg.sh, sym:cfg.symmetry, coverage:cfg.density, ncol:cfg.ncol,
+    useCA:cfg.ca, source:cfg.source, formulaId:cfg.formula, modulus:cfg.modulus,
+    vary:cfg.vary, stride:cfg.stride, phase:cfg.phase, colorMode:cfg.colormode,
+    maskId:cfg.mask, maskScale:cfg['mask-scale'], maskInvert:cfg['mask-invert'],
+    outline:cfg.outline, sortLum:cfg.sortlum, customFn,
+    palette: paletteFor(paletteSeed, cfg.bpc),
+  };
+}
+
+/* =============================================================== render */
+const canvas = $('cv'), ctx = canvas.getContext('2d');
+const stage = $('stage');
+const off = document.createElement('canvas');
+let view = {x:0,y:0,s:1};
+let drag=null, panned=false;
+let lastSprites = [];
+let sel = null;                 /* {r,c} — a view overlay, not part of S */
+
+/* ============================================ raster policy & rasteriser (NG)
+
+   Every pixel this tool emits comes out of rasterize(), driven entirely by
+   the pure software kernel. Canvas2D NEVER writes exported or display files.
+
+   EXTENT — which sprites, laid out how — is the caller's business.
+   POLICY is the pixel contract: operator, order, space, scale, seamphase, matte. */
+
+const STAGE_BG = '#0b0f14';
+const MATTES = { transparent:null, stage:STAGE_BG, white:'#ffffff', black:'#000000' };
+
+const gcd = (a,b) => b ? gcd(b, a%b) : Math.abs(a);
+/* q = denominator of p in lowest terms = period of the seam lattice. */
+function denom(p, maxq = 512){
+  for(let q=1;q<=maxq;q++) if(Math.abs(p*q - Math.round(p*q)) < 1e-9) return q;
+  return null;
+}
+
+function makePolicy(cfg, over){
+  return Object.assign({
+    scale:     +cfg.scale,
+    seamphase: cfg.seamphase || 'global',
+    matte:     (cfg.matte in MATTES) ? MATTES[cfg.matte] : null,
+    magnify:   1,
+    operator:  cfg.operator || 'over',
+    order:     cfg.order || 'rowMajor',
+    space:     cfg.space || 'srgb',
+  }, over || {});
+}
+
+/* Presets are semantic choices, not quality settings. */
+const PRESETS = {
+  /* what the eye tuned, byte for byte */
+  seen:  cfg => ({}),
+  /* palette-exact, portable, engine-safe: N colours, no seams, no matte */
+  asset: cfg => ({ scale: Math.max(1, Math.round(+cfg.scale)),
+                   seamphase: 'local', matte: null }),
+};
+
+const policyLabel = p =>
+  `p=${p.scale} q=${denom(p.scale) ?? '\u221e'} · ${p.seamphase} phase · ` +
+  `op:${p.operator} order:${p.order} space:${p.space} · matte ${p.matte || 'none'} · \u00d7${p.magnify}`;
+
+const sheetLayout = cfg =>
+  ({cols:+cfg.cols, rows:+cfg.rows, cellW:+cfg.sw, cellH:+cfg.sh, spacing:+cfg.spacing});
+const soloLayout = sprite =>
+  ({cols:1, rows:1, cellW:sprite.w, cellH:sprite.h, spacing:0});
+
+/* items: [{sprite, col, row}]
+   SOFTWARE KERNEL RASTERIZER: Canvas2D is never used to draw primitives. */
+function rasterize(cv, items, layout, policy){
+  const p = policy.scale, sp = layout.spacing;
+  const outerW = (layout.cellW + sp) * p, outerH = (layout.cellH + sp) * p;
+
+  const W = Math.max(1, Math.ceil(layout.cols * outerW));
+  const H = Math.max(1, Math.ceil(layout.rows * outerH));
+
+  const mag = Math.max(1, Math.round(policy.magnify || 1));
+  const base = (mag === 1) ? cv : document.createElement('canvas');
+  base.width = W; base.height = H;
+  const g = base.getContext('2d');
+
+  /* Parse matte */
+  let matteRGB = null;
+  if(policy.matte) matteRGB = hexRgb(policy.matte);
+
+  /* Build grid evaluation function for software kernel over all items */
+  const gridFn = (x, y) => {
+    /* find which cell (if any) contains (x, y) */
+    for(const it of items){
+      const s = it.sprite;
+      let X = it.col*outerW + Math.floor((layout.cellW - s.w)/2)*p;
+      let Y = it.row*outerH + Math.floor((layout.cellH - s.h)/2)*p;
+      if(policy.seamphase === 'local'){ X = Math.round(X); Y = Math.round(Y); }
+      
+      const relX = (x - X)/p;
+      const relY = (y - Y)/p;
+      if(relX >= 0 && relX < s.w && relY >= 0 && relY < s.h){
+        const cx = Math.floor(relX), cy = Math.floor(relY);
+        const v = s.grid[cy] ? s.grid[cy][cx] : 0;
+        if(v > 0 && s.colors[v-1]){
+          return hexRgb(s.colors[v-1]);
+        }
+      }
+    }
+    return null;
+  };
+
+  /* Allocate total Float64 buffers for high precision accumulation */
+  const R = new Float64Array(W*H), G = new Float64Array(W*H),
+        B = new Float64Array(W*H), A = new Float64Array(W*H);
+
+  const linear = (policy.space === 'linear');
+  const enc = linear ? srgb2lin : (c=>c);
+  const f = OPS[policy.operator] || OPS.over;
+
+  if(matteRGB){
+    const m = matteRGB.map(enc);
+    for(let k=0;k<W*H;k++){ R[k]=m[0]; G[k]=m[1]; B[k]=m[2]; A[k]=1.0; }
+  }
+
+  /* Process item by item according to order and local coordinates */
+  for(const it of items){
+    const s = it.sprite;
+    let X0 = it.col*outerW + Math.floor((layout.cellW - s.w)/2)*p;
+    let Y0 = it.row*outerH + Math.floor((layout.cellH - s.h)/2)*p;
+    if(policy.seamphase === 'local'){ X0 = Math.round(X0); Y0 = Math.round(Y0); }
+
+    /* Field function for order='byField' */
+    const fieldObj = FIELD_BY_ID[s.fid] || FIELD_BY_ID.circle;
+    const fieldFn = (cx, cy) => {
+      const u = (cx - Math.floor((s.w-1)/2))*(s.st||1) + (s.p ? s.p.ox : 0);
+      const v = (cy - Math.floor((s.h-1)/2))*(s.st||1) + (s.p ? s.p.oy : 0);
+      return fieldObj.f(u, v, s.p || {M:17,a:1,b:1,c:1,d:0,e:0});
+    };
+
+    const seq = (ORDERS[policy.order] || ORDERS.rowMajor)(s.w, s.h, fieldFn);
+
+    for(const [x, y] of seq){
+      const v = s.grid[y][x]; if(!v) continue;
+      const hex = s.colors[v-1] || '#ffffff';
+      const [r, g, b] = hexRgb(hex).map(enc);
+      const x0 = X0 + x*p, y0 = Y0 + y*p;
+
+      for(let j=Math.max(0,Math.floor(y0)); j<Math.min(H,Math.ceil(y0+p)); j++){
+        const fy = span(y0,y0+p,j,j+1); if(fy<=0) continue;
+        for(let i=Math.max(0,Math.floor(x0)); i<Math.min(W,Math.ceil(x0+p)); i++){
+          const fx = span(x0,x0+p,i,i+1); if(fx<=0) continue;
+          const a = fx*fy, k=j*W+i, ad=A[k];
+          [R[k]] = f(R[k],ad,r,a); [G[k]] = f(G[k],ad,g,a);
+          let na; [B[k],na] = f(B[k],ad,b,a); A[k]=na;
+        }
+      }
+    }
+  }
+
+  if(linear){
+    for(let k=0;k<W*H;k++){ R[k]=lin2srgb(R[k]); G[k]=lin2srgb(G[k]); B[k]=lin2srgb(B[k]); }
+  }
+
+  /* Copy output RGBA float planes to ImageData byte buffer */
+  const imgData = g.createImageData(W, H);
+  const data = imgData.data;
+  for(let k=0; k<W*H; k++){
+    const idx = k*4;
+    data[idx]   = Math.min(255, Math.max(0, Math.round(R[k])));
+    data[idx+1] = Math.min(255, Math.max(0, Math.round(G[k])));
+    data[idx+2] = Math.min(255, Math.max(0, Math.round(B[k])));
+    data[idx+3] = Math.min(255, Math.max(0, Math.round(A[k]*255)));
+  }
+  g.putImageData(imgData, 0, 0);
+
+  /* Magnification is integer nearest-neighbour applied AFTER rasterising. */
+  if(mag > 1){
+    cv.width = W*mag; cv.height = H*mag;
+    const c2 = cv.getContext('2d');
+    c2.imageSmoothingEnabled = false;
+    c2.clearRect(0,0,cv.width,cv.height);
+    c2.drawImage(base, 0, 0, W*mag, H*mag);
+  }
+  return cv;
+}
+
+/* Reference Canvas2D rasterizer used strictly for conformance measurement (§4) */
+function rasterizeCanvas2D(cv, items, layout, policy){
+  const p = policy.scale, sp = layout.spacing;
+  const outerW = (layout.cellW + sp) * p, outerH = (layout.cellH + sp) * p;
+  const W = Math.max(1, Math.ceil(layout.cols * outerW));
+  const H = Math.max(1, Math.ceil(layout.rows * outerH));
+
+  cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  g.clearRect(0,0,W,H);
+  if(policy.matte){ g.fillStyle = policy.matte; g.fillRect(0,0,W,H); }
+  g.imageSmoothingEnabled = false;
+
+  for(const it of items){
+    const s = it.sprite;
+    let X = it.col*outerW + Math.floor((layout.cellW - s.w)/2)*p;
+    let Y = it.row*outerH + Math.floor((layout.cellH - s.h)/2)*p;
+    if(policy.seamphase === 'local'){ X = Math.round(X); Y = Math.round(Y); }
+    for(let y=0;y<s.h;y++) for(let x=0;x<s.w;x++){
+      const v = s.grid[y][x];
+      if(!v) continue;
+      g.fillStyle = s.colors[v-1] || '#ffffff';
+      g.fillRect(X + x*p, Y + y*p, p, p);
+    }
+  }
+  return cv;
+}
+
+/* ======================================================= divergence & conformance (NG) */
+function measureDivergence(sprite, policy){
+  const layout = soloLayout(sprite);
+  const cvKernel = document.createElement('canvas');
+  rasterize(cvKernel, [{sprite, col:0, row:0}], layout, policy);
+  const ctxK = cvKernel.getContext('2d');
+  const imgK = ctxK.getImageData(0, 0, cvKernel.width, cvKernel.height);
+
+  const cvCanvas = document.createElement('canvas');
+  rasterizeCanvas2D(cvCanvas, [{sprite, col:0, row:0}], layout, policy);
+  const ctxC = cvCanvas.getContext('2d');
+  const imgC = ctxC.getImageData(0, 0, cvCanvas.width, cvCanvas.height);
+
+  let diffCount = 0, maxDelta = 0;
+  const totalPixels = imgK.width * imgK.height;
+
+  for(let i=0; i<imgK.data.length; i+=4){
+    const dr = Math.abs(imgK.data[i]   - imgC.data[i]);
+    const dg = Math.abs(imgK.data[i+1] - imgC.data[i+1]);
+    const db = Math.abs(imgK.data[i+2] - imgC.data[i+2]);
+    const da = Math.abs(imgK.data[i+3] - imgC.data[i+3]);
+    const localMax = Math.max(dr, dg, db, da);
+    if(localMax > maxDelta) maxDelta = localMax;
+    if(dr > 1 || dg > 1 || db > 1 || da > 1) diffCount++;
+  }
+
+  return {
+    diffCount,
+    totalPixels,
+    percentDiff: totalPixels > 0 ? (diffCount / totalPixels) * 100 : 0,
+    maxDelta
+  };
+}
+
+function render(){
+  const cfg = S.cfg, {rows,cols,list} = S.cells;
+  const gen = toGen(cfg, S.paletteSeed);
+  lastSprites = new Array(rows*cols);
+  const items = [];
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    const cell = list[r*cols+c];
+    const g = (cell.locked && cell.lockCfg)
+      ? toGen(cell.lockCfg, cell.lockCfg._paletteSeed) : gen;
+    const sprite = generateSprite(cell.seed, g);
+    lastSprites[r*cols+c] = sprite;
+    items.push({sprite, col:c, row:r});
+  }
+  rasterize(off, items, sheetLayout(cfg), makePolicy(cfg));
+  resizeMain(); draw();
+}
+function resizeMain(){ canvas.width = stage.clientWidth; canvas.height = stage.clientHeight; }
+function draw(){
+  if(!S) return;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.imageSmoothingEnabled = false;
+  ctx.save(); ctx.translate(view.x,view.y); ctx.scale(view.s,view.s);
+  ctx.drawImage(off,0,0);
+  /* Lock and selection chrome is drawn here, on the screen canvas only. */
+  {
+    const cfg=S.cfg, ow=(cfg.sw+cfg.spacing)*cfg.scale, oh=(cfg.sh+cfg.spacing)*cfg.scale;
+    ctx.strokeStyle='rgba(239,68,68,.85)'; ctx.lineWidth=1.5;
+    S.cells.list.forEach((cell,i)=>{
+      if(!cell.locked) return;
+      const c=i%S.cells.cols, r=(i/S.cells.cols)|0;
+      ctx.strokeRect(c*ow-1.5, r*oh-1.5, cfg.sw*cfg.scale+3, cfg.sh*cfg.scale+3);
+    });
+  }
+  if(sel){
+    const cfg=S.cfg, ow=(cfg.sw+cfg.spacing)*cfg.scale, oh=(cfg.sh+cfg.spacing)*cfg.scale;
+    if(sel.r<S.cells.rows && sel.c<S.cells.cols){
+      ctx.strokeStyle='#4f8cff'; ctx.lineWidth=Math.max(1,2/view.s);
+      ctx.setLineDash([4/view.s, 3/view.s]);
+      ctx.strokeRect(sel.c*ow-2, sel.r*oh-2, cfg.sw*cfg.scale+4, cfg.sh*cfg.scale+4);
+      ctx.setLineDash([]);
+    }
+  }
+  ctx.restore();
+}
+function center(){
+  view.x=(canvas.width-off.width*view.s)/2;
+  view.y=(canvas.height-off.height*view.s)/2;
+  draw();
+}
+function zoom(s,fx,fy){
+  s=Math.max(0.1,Math.min(s,40));
+  if(fx==null){ fx=canvas.width/2; fy=canvas.height/2; }
+  view.x = fx-(fx-view.x)*(s/view.s);
+  view.y = fy-(fy-view.y)*(s/view.s);
+  view.s = s; draw();
+}
+
+/* ============================================================= timeline */
+const strip = $('tl-strip');
+const THUMB_W = 104, THUMB_H = 62;
+
+function makeThumb(entry){
+  const c = entry.thumb || document.createElement('canvas');
+  c.width=THUMB_W; c.height=THUMB_H;
+  const g = c.getContext('2d');
+  g.clearRect(0,0,THUMB_W,THUMB_H);
+  g.fillStyle='#0b0f14'; g.fillRect(0,0,THUMB_W,THUMB_H);
+  const k = Math.min(THUMB_W/off.width, THUMB_H/off.height);
+  const dw = off.width*k, dh = off.height*k;
+  g.imageSmoothingEnabled = true;
+  g.drawImage(off, (THUMB_W-dw)/2, (THUMB_H-dh)/2, dw, dh);
+  entry.thumb = c;
+}
+
+function diffLabel(prev, next){
+  if(!prev) return 'session start';
+  const changed = CFG_KEYS.filter(k=>prev.cfg[k]!==next.cfg[k]);
+  if(changed.length===0) return 'no config change';
+  if(changed.length>3) return `${changed.length} settings changed`;
+  return changed.map(k=>{
+    const a = prev.cfg[k], b = next.cfg[k];
+    const fmt = v => typeof v==='boolean' ? (v?'on':'off')
+               : (k==='phase'||k==='density'||k==='mask-scale') ? (+v).toFixed(2)
+               : String(v).length>14 ? String(v).slice(0,14)+'…' : v;
+    return `${LABELS[k]} ${fmt(a)} → ${fmt(b)}`;
+  }).join(' · ');
+}
+
+/* Append-only: rewinding moves the playhead; editing from the past appends
+   a new entry at the end rather than truncating the future.               */
+function commit(key, explicitLabel){
+  reconcileCells();
+  const snap = cloneState(S);
+  const prev = timeline[timeline.length-1];
+  const label = explicitLabel || diffLabel(prev ? prev.state : null, snap);
+  const now = Date.now();
+  const atEnd = playhead === timeline.length-1;
+  const canCoalesce = prev && atEnd && key.startsWith('cfg:') && prev.key===key
+                      && (now-prev.ts) < 700 && !prev.bookmark;
+
+  render();
+
+  if(canCoalesce){
+    prev.state = snap;
+    prev.ts = now;
+    prev.label = diffLabel(timeline.length>1 ? timeline[timeline.length-2].state : null, snap);
+    makeThumb(prev);
+  } else {
+    const entry = {key, label, ts:now, state:snap, thumb:null, bookmark:false, from:playhead};
+    makeThumb(entry);
+    timeline.push(entry);
+    if(timeline.length > MAX_ENTRIES){ timeline.shift(); stripBuilt = -1; }
+  }
+  playhead = timeline.length-1;
+  refreshStrip();
+}
+
+function goTo(i){
+  if(i<0||i>=timeline.length||i===playhead) return;
+  playhead = i;
+  S = cloneState(timeline[i].state);
+  writeUI();
+  render();
+  refreshSelection();
+  refreshStrip();
+}
+
+let stripBuilt = 0;
+function refreshStrip(){
+  /* rebuild only when the entry count changed; otherwise just restyle */
+  if(stripBuilt !== timeline.length){
+    strip.textContent = '';
+    timeline.forEach((e,i)=>{
+      const f = document.createElement('div');
+      f.className='frame'; f.dataset.i=i;
+      f.appendChild(e.thumb);
+      const idx = document.createElement('span');
+      idx.className='idx'; idx.textContent = '#'+(i+1);
+      f.appendChild(idx);
+      const st = document.createElement('span');
+      st.className='star'; st.textContent = e.bookmark ? '★' : '';
+      f.appendChild(st);
+      strip.appendChild(f);
+    });
+    stripBuilt = timeline.length;
+  }
+  [...strip.children].forEach((f,i)=>{
+    f.classList.toggle('cur', i===playhead);
+    const en = timeline[i];
+    f.title = `#${i+1} · ${en.label}` +
+      (en.from>=0 && en.from!==i-1 ? `  (branched from #${en.from+1})` : '');
+    f.lastChild.textContent = timeline[i].bookmark ? '★' : '';
+  });
+  const cur = strip.children[playhead];
+  if(cur) cur.scrollIntoView({block:'nearest', inline:'nearest'});
+  $('tl-pos').textContent = `${playhead+1} / ${timeline.length}`;
+  const e = timeline[playhead];
+  $('tl-label').innerHTML = e
+    ? (playhead < timeline.length-1
+        ? `<span id="tl-past">◂ rewound</span> — <b>${escapeHtml(e.label)}</b> · edits append at #${timeline.length+1}`
+        : `<b>${escapeHtml(e.label)}</b>`)
+    : '';
+  $('tl-mark').textContent = e && e.bookmark ? '★' : '☆';
+  $('tl-mark').classList.toggle('on', !!(e && e.bookmark));
+}
+const escapeHtml = s => String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+let playTimer = null;
+function togglePlay(){
+  if(playTimer){ clearInterval(playTimer); playTimer=null; $('tl-play').classList.remove('on'); $('tl-play').textContent='▶'; return; }
+  if(playhead >= timeline.length-1) goTo(0);
+  $('tl-play').classList.add('on'); $('tl-play').textContent='❚❚';
+  playTimer = setInterval(()=>{
+    if(playhead >= timeline.length-1) togglePlay();
+    else goTo(playhead+1);
+  }, 340);
+}
+
+/* ================================================================== UI */
+function fillSelects(){
+  $('formula').innerHTML = '<option value="mix">Random mix</option>' +
+    FIELDS.map(f=>`<option value="${f.id}">${f.name}</option>`).join('');
+  $('mask').innerHTML = MASKS.map(m=>`<option value="${m.id}">${m.name}</option>`).join('') +
+    '<option value="mix">Random mix</option>';
+}
+function syncVisibility(){
+  const s = S ? S.cfg.source : $('source').value;
+  document.querySelectorAll('.r-field').forEach(el=>el.classList.toggle('hidden', s!=='field'));
+  document.querySelectorAll('.r-custom').forEach(el=>el.classList.toggle('hidden', s!=='custom'));
+  document.querySelectorAll('.r-noise').forEach(el=>el.classList.toggle('hidden', s!=='noise'));
+  document.querySelectorAll('.r-mod').forEach(el=>el.classList.toggle('hidden', s==='noise'));
+}
+const READOUTS = {density:'density-v', phase:'phase-v', 'mask-scale':'mask-scale-v'};
+
+/* Turns aamazing.md & ng §6 into a live tooltip: reports q, symmetry verdict (N2) & divergence vs Canvas2D */
+function seamReport(){
+  const cfg = S.cfg, p = +cfg.scale, n = +cfg.ncol, M = +cfg.modulus, w = +cfg.sw;
+  const op = cfg.operator || 'over';
+  const q = denom(p);
+
+  let mirrorVerdict = '';
+  if(op === 'add'){
+    if(q !== null && w % q === 0){
+      mirrorVerdict = 'mirror intact — N2 symmetric (add @ q|w)';
+    } else {
+      mirrorVerdict = 'mirror broken (q ∤ w)';
+    }
+  } else {
+    if(q === 1){
+      mirrorVerdict = 'mirror intact (integer scale)';
+    } else {
+      mirrorVerdict = `mirror broken by non-commutative ${op}`;
+    }
+  }
+
+  if(q === 1) return `p = ${p} · integer scale · palette only (${n} colors) · ${mirrorVerdict}`;
+  if(q === null) return `p = ${p} · irrational scale · quasi-periodic seams · ${mirrorVerdict}`;
+
+  const share = ((q-1)/(q*p)*100).toFixed(1);
+  const g = gcd(q, M);
+
+  let divInfo = '';
+  if(lastSprites && lastSprites.length > 0){
+    const d = measureDivergence(lastSprites[0], makePolicy(cfg));
+    divInfo = ` · div vs Skia: ${d.percentDiff.toFixed(1)}% px (max Δ${d.maxDelta})`;
+  }
+
+  return `p = ${p} → q = ${q} · ${share}% seam px · op: ${op} · ` +
+         `gcd(q, M=${M}) = ${g} ${g===1?'dense':'banded'} · ${mirrorVerdict}${divInfo}`;
+}
+
+const PRESET_NOTES = {
+  seen:   'Byte-exact software raster: fractional scale, operator, order, space & matte as set.',
+  asset:  'Scale rounded to integer, local phase, transparent. Palette-exact, portable.',
+  screen: 'The viewport as composited \u2014 crop, zoom and chrome included.',
+};
+function syncExportNote(){
+  const name = $('preset').value;
+  const mag = Math.max(1, Math.round(+$('magnify').value || 1));
+  const tail = (name === 'screen') ? '' : ` \u00d7${mag} nearest-neighbour.`;
+  $('preset-note').textContent = PRESET_NOTES[name] + tail;
+}
+
+function syncReadouts(){
+  for(const k in READOUTS) $(READOUTS[k]).textContent = (+S.cfg[k]).toFixed(2);
+  $('seam-readout').textContent = seamReport();
+  syncExportNote();
+}
+$('preset').addEventListener('change', syncExportNote);
+$('magnify').addEventListener('input', syncExportNote);
+
+function readUI(){
+  for(const k of CFG_KEYS){
+    const el = $(k);
+    if(!el) continue;
+    S.cfg[k] = BOOL_KEYS.has(k) ? el.checked : (NUM_KEYS.has(k) ? (+el.value||0) : el.value);
+  }
+}
+function writeUI(){
+  for(const k of CFG_KEYS){
+    const el = $(k);
+    if(!el) continue;
+    if(BOOL_KEYS.has(k)) el.checked = S.cfg[k];
+    else el.value = S.cfg[k] ?? el.value;
+  }
+  syncVisibility(); syncReadouts();
+}
+
+/* ========================================================== interaction */
+stage.addEventListener('mousedown', e=>{
+  if(e.button!==0) return;
+  drag={x:e.clientX-view.x, y:e.clientY-view.y}; panned=false;
+});
+window.addEventListener('mousemove', e=>{
+  if(!drag) return;
+  if(Math.abs(e.clientX-drag.x-view.x)>2||Math.abs(e.clientY-drag.y-view.y)>2) panned=true;
+  view.x=e.clientX-drag.x; view.y=e.clientY-drag.y; draw();
+});
+window.addEventListener('mouseup', e=>{
+  if(!drag) return; drag=null;
+  if(panned) return;
+  const cfg = S.cfg, rect = canvas.getBoundingClientRect();
+  const wx=(e.clientX-rect.left-view.x)/view.s, wy=(e.clientY-rect.top-view.y)/view.s;
+  const outerW=(cfg.sw+cfg.spacing)*cfg.scale, outerH=(cfg.sh+cfg.spacing)*cfg.scale;
+  const c=Math.floor(wx/outerW), r=Math.floor(wy/outerH);
+  const {rows,cols,list}=S.cells;
+  if(r<0||c<0||r>=rows||c>=cols) return;
+  if(wx-c*outerW > cfg.sw*cfg.scale || wy-r*outerH > cfg.sh*cfg.scale) return;
+
+  const i = r*cols+c;
+  sel = {r,c};
+  if(e.shiftKey)      rerollCell(r,c);
+  else if(e.ctrlKey || e.metaKey) toggleLock(r,c);
+  else                { draw(); selectCell(r,c); }
+  if(e.altKey) keepSelected();
+});
+stage.addEventListener('wheel', e=>{
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  zoom(view.s*Math.exp(-e.deltaY*0.002), e.clientX-rect.left, e.clientY-rect.top);
+}, {passive:false});
+
+function cellAt(r,c){ return S.cells.list[r*S.cells.cols+c]; }
+
+function rerollCell(r,c){
+  const {rows,cols,list}=S.cells, nl=list.slice();
+  nl[r*cols+c] = {seed:rand32(), locked:false, lockCfg:null};
+  S.cells = {rows,cols,list:nl};
+  commit('cells:reroll', `reroll cell [${r},${c}]`);
+  selectCell(r,c);
+}
+function toggleLock(r,c){
+  const {rows,cols,list}=S.cells, nl=list.slice(), cell=list[r*cols+c];
+  const locking = !cell.locked;
+  nl[r*cols+c] = {seed:cell.seed, locked:locking,
+                  lockCfg: locking ? {...S.cfg, _paletteSeed:S.paletteSeed} : null};
+  S.cells = {rows,cols,list:nl};
+  commit('cells:lock', `${locking?'lock':'unlock'} cell [${r},${c}]`);
+  selectCell(r,c);
+}
+function selectCell(r,c){
+  sel = {r,c};
+  const cell = cellAt(r,c), sp = lastSprites[r*S.cells.cols+c];
+  if(sp) showRecipe(r,c,cell,sp);
+  $('lock-sel').classList.toggle('on', !!cell.locked);
+  $('lock-sel').disabled = false;
+  $('keep-sel').disabled = false;
+  draw();
+}
+
+/* The recipe is a complete reproduction record: seed + this block regenerates
+   the sprite exactly, which is what makes it worth putting on the clipboard. */
+let recipeText = '';
+function showRecipe(r, c, cell, sprite){
+  const cfg = (cell.locked && cell.lockCfg) ? cell.lockCfg : S.cfg;
+  const pseed = (cell.locked && cell.lockCfg) ? cell.lockCfg._paletteSeed : S.paletteSeed;
+  const pad = k => (k+'         ').slice(0,9);
+  const lines = [
+    `sprite    [${r},${c}]  frame #${playhead+1}${cell.locked?'  (locked)':''}`,
+    `${pad('seed')} ${cell.seed}`,
+    `${pad('recipe')} ${sprite.recipe}`,
+    `${pad('size')} ${sprite.w}×${sprite.h}  ${cfg.symmetry}`,
+    `${pad('raster')} op:${cfg.operator} order:${cfg.order} space:${cfg.space}`,
+    `${pad('ink')} coverage ${(+cfg.density).toFixed(2)}  phase ${(+cfg.phase).toFixed(2)}`,
+    `${pad('color')} ${cfg.ncol}× ${cfg.colormode}  ${cfg.bpc}-bit  pal ${pseed}`,
+  ];
+  if(cfg.source==='custom') lines.push(`${pad('expr')} ${cfg.expr}`);
+  recipeText = lines.join('\n');
+  $('recipe').textContent = recipeText;
+  $('copy-recipe').disabled = false;
+}
+
+function copyRecipe(){
+  const btn = $('copy-recipe');
+  if(!recipeText) return;
+  const done = ok => {
+    btn.textContent = ok ? '✓ Copied' : '✗ Failed';
+    btn.classList.toggle('done', ok);
+    clearTimeout(btn._t);
+    btn._t = setTimeout(()=>{ btn.textContent='⧉ Copy'; btn.classList.remove('done'); }, 1400);
+    if(!ok) console.warn('Clipboard unavailable. Recipe:\n'+recipeText);
+  };
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(recipeText).then(()=>done(true), ()=>done(fallbackCopy()));
+  } else {
+    done(fallbackCopy());
+  }
+}
+function fallbackCopy(){
+  const ta = document.createElement('textarea');
+  ta.value = recipeText;
+  ta.setAttribute('readonly','');
+  ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+  document.body.appendChild(ta);
+  ta.select(); ta.setSelectionRange(0, recipeText.length);
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch(err){ ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+$('copy-recipe').addEventListener('click', copyRecipe);
+
+/* ============================================================ collection */
+let collection = [];
+let colSel = null;
+let colSeq = 0;
+const colList = $('col-list');
+
+function itemGen(item){ return toGen(item.cfg, item.cfg._paletteSeed); }
+function itemSprite(item){ return generateSprite(item.seed, itemGen(item)); }
+
+function autoName(sprite){
+  const m = /^(\S+) % (\d+)/.exec(sprite.recipe);
+  const base = m ? `${m[1]}·${m[2]}` : sprite.recipe.split(' ')[0];
+  let name = base, n = 2;
+  while(collection.some(i=>i.name===name)) name = `${base} (${n++})`;
+  return name;
+}
+
+function keepSelected(){
+  if(!sel) return;
+  const {r,c} = sel;
+  if(r>=S.cells.rows || c>=S.cells.cols) return;
+  const cell = cellAt(r,c), sprite = lastSprites[r*S.cells.cols+c];
+  if(!sprite) return;
+  const cfg = {};
+  for(const k of CFG_KEYS) cfg[k] = (cell.locked && cell.lockCfg) ? cell.lockCfg[k] : S.cfg[k];
+  cfg._paletteSeed = (cell.locked && cell.lockCfg) ? cell.lockCfg._paletteSeed : S.paletteSeed;
+  const item = {
+    id: ++colSeq, name: autoName(sprite), seed: cell.seed, cfg,
+    frame: playhead+1, from:[r,c], ts: Date.now(),
+  };
+  collection.push(item);
+  colSel = item.id;
+  renderCollection();
+  const el = colList.querySelector(`[data-id="${item.id}"]`);
+  if(el) el.scrollIntoView({block:'nearest'});
+}
+
+function removeItem(id){
+  collection = collection.filter(i=>i.id!==id);
+  if(colSel===id) colSel=null;
+  renderCollection();
+}
+
+function restoreItem(item){
+  for(const k of CFG_KEYS) S.cfg[k] = item.cfg[k];
+  S.paletteSeed = item.cfg._paletteSeed;
+  writeUI();
+  reconcileCells();
+  const {rows,cols,list} = S.cells, nl = list.slice();
+  nl[0] = {seed:item.seed, locked:false, lockCfg:null};
+  S.cells = {rows,cols,list:nl};
+  commit('restore', `restore "${item.name}"`);
+  selectCell(0,0);
+}
+
+/* Collection row thumbnails rendered via software kernel */
+function drawSpriteTo(cv, sprite, box){
+  const k = Math.max(1, Math.floor(Math.min(box/sprite.w, box/sprite.h)));
+  rasterize(cv, [{sprite, col:0, row:0}], soloLayout(sprite),
+            {scale:k, seamphase:'local', matte:null, magnify:1, operator:'over', order:'rowMajor', space:'srgb'});
+}
+
+function renderCollection(){
+  colList.textContent = '';
+  $('col-count').textContent = String(collection.length);
+  if(!collection.length){
+    const p = document.createElement('div');
+    p.id='col-empty';
+    p.textContent = 'Nothing kept yet.\nSelect a sprite and press K (or alt-click it).';
+    colList.appendChild(p);
+    return;
+  }
+  collection.forEach((item, idx)=>{
+    const sprite = itemSprite(item);
+    const row = document.createElement('div');
+    row.className = 'item' + (colSel===item.id ? ' sel' : '');
+    row.draggable = true;
+    row.dataset.id = item.id;
+    row.dataset.idx = idx;
+
+    const cv = document.createElement('canvas');
+    drawSpriteTo(cv, sprite, 46);
+    cv.title = 'Show this recipe';
+    cv.addEventListener('click', ()=>{
+      colSel = item.id;
+      recipeText = itemRecipe(item, sprite);
+      $('recipe').textContent = recipeText;
+      $('copy-recipe').disabled = false;
+      renderCollection();
+    });
+    row.appendChild(cv);
+
+    const body = document.createElement('div');
+    body.className = 'body';
+
+    const name = document.createElement('input');
+    name.className = 'name'; name.type = 'text'; name.value = item.name;
+    name.title = 'Rename';
+    name.addEventListener('input', ()=>{ item.name = name.value; });
+    name.addEventListener('keydown', ev=>{ if(ev.key==='Enter') name.blur(); ev.stopPropagation(); });
+    body.appendChild(name);
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = `${sprite.w}×${sprite.h} · #${item.frame} · ${item.seed}`;
+    meta.title = sprite.recipe;
+    body.appendChild(meta);
+
+    const acts = document.createElement('div');
+    acts.className = 'acts';
+    const mk = (label, title, fn, cls) => {
+      const b = document.createElement('button');
+      b.textContent = label; b.title = title;
+      if(cls) b.className = cls;
+      b.addEventListener('click', fn);
+      acts.appendChild(b);
+    };
+    mk('⟲', 'Restore these settings and stamp the sprite at [0,0]', ()=>restoreItem(item));
+    mk('⧉', 'Copy this recipe', ()=>{ recipeText = itemRecipe(item, sprite); copyRecipe(); });
+    mk('↓', 'Export this sprite as PNG', ()=>exportItem(item, sprite));
+    mk('✕', 'Remove from collection', ()=>removeItem(item.id), 'del');
+    body.appendChild(acts);
+
+    row.appendChild(body);
+    colList.appendChild(row);
+  });
+}
+
+function itemRecipe(item, sprite){
+  const cfg = item.cfg, pad = k => (k+'         ').slice(0,9);
+  const lines = [
+    `kept      "${item.name}"  from [${item.from[0]},${item.from[1]}] @ frame #${item.frame}`,
+    `${pad('seed')} ${item.seed}`,
+    `${pad('recipe')} ${sprite.recipe}`,
+    `${pad('size')} ${sprite.w}×${sprite.h}  ${cfg.symmetry}`,
+    `${pad('raster')} op:${cfg.operator} order:${cfg.order} space:${cfg.space}`,
+    `${pad('ink')} coverage ${(+cfg.density).toFixed(2)}  phase ${(+cfg.phase).toFixed(2)}`,
+    `${pad('color')} ${cfg.ncol}× ${cfg.colormode}  ${cfg.bpc}-bit  pal ${cfg._paletteSeed}`,
+  ];
+  if(cfg.source==='custom') lines.push(`${pad('expr')} ${cfg.expr}`);
+  return lines.join('\n');
+}
+
+const safeName = n => (n.replace(/[^a-z0-9._-]+/gi,'_').replace(/^_+|_+$/g,'') || 'sprite');
+
+const download = (cv, name) => {
+  const a = document.createElement('a');
+  a.download = name; a.href = cv.toDataURL('image/png'); a.click();
+};
+
+/* The one place an export policy is assembled. Every ↓ button routes here. */
+function exportPolicy(){
+  const cfg = S.cfg, name = $('preset').value;
+  const over = PRESETS[name] ? PRESETS[name](cfg) : {};
+  over.magnify = Math.max(1, Math.round(+$('magnify').value || 1));
+  return makePolicy(cfg, over);
+}
+
+function exportItem(item, sprite){
+  const pol = exportPolicy();
+  const cv = rasterize(document.createElement('canvas'),
+                       [{sprite, col:0, row:0}], soloLayout(sprite), pol);
+  download(cv, safeName(item.name)+'.png');
+  console.log(`Exported "${item.name}" ${cv.width}\u00d7${cv.height} · ${policyLabel(pol)}`);
+}
+
+function exportCollectionSheet(){
+  if(!collection.length){ console.warn('Collection is empty — nothing to export.'); return; }
+  const sprites = collection.map(itemSprite);
+  const cw = Math.max(...sprites.map(s=>s.w)), ch = Math.max(...sprites.map(s=>s.h));
+  const cols = Math.min(collection.length, Math.max(1, Math.ceil(Math.sqrt(collection.length))));
+  const rows = Math.ceil(collection.length/cols);
+  const pol = exportPolicy();
+  const cv = rasterize(document.createElement('canvas'),
+    sprites.map((sprite,i)=>({sprite, col:i%cols, row:(i/cols)|0})),
+    {cols, rows, cellW:cw, cellH:ch, spacing:+S.cfg.spacing}, pol);
+  download(cv, `collection_${collection.length}.png`);
+  console.log(`Exported ${collection.length} sprites as ${cols}\u00d7${rows} @ ${cw}\u00d7${ch} · ${policyLabel(pol)}`);
+}
+
+/* drag to reorder */
+let dragIdx = null;
+colList.addEventListener('dragstart', e=>{
+  const row = e.target.closest ? e.target.closest('.item') : null;
+  if(!row) return;
+  dragIdx = +row.dataset.idx;
+  row.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  try{ e.dataTransfer.setData('text/plain', String(dragIdx)); }catch(err){}
+});
+colList.addEventListener('dragover', e=>{
+  e.preventDefault();
+  const row = e.target.closest ? e.target.closest('.item') : null;
+  [...colList.children].forEach(r=>r.classList.remove('drop-before','drop-after'));
+  if(!row || dragIdx===null) return;
+  const rect = row.getBoundingClientRect();
+  row.classList.add(e.clientY < rect.top+rect.height/2 ? 'drop-before' : 'drop-after');
+});
+colList.addEventListener('drop', e=>{
+  e.preventDefault();
+  const row = e.target.closest ? e.target.closest('.item') : null;
+  if(!row || dragIdx===null) return;
+  const rect = row.getBoundingClientRect();
+  let to = +row.dataset.idx + (e.clientY < rect.top+rect.height/2 ? 0 : 1);
+  reorder(dragIdx, to);
+  dragIdx = null;
+});
+colList.addEventListener('dragend', ()=>{
+  dragIdx = null;
+  [...colList.children].forEach(r=>r.classList.remove('dragging','drop-before','drop-after'));
+});
+function reorder(from, to){
+  if(from===to || from===to-1){ renderCollection(); return; }
+  const [it] = collection.splice(from,1);
+  collection.splice(from < to ? to-1 : to, 0, it);
+  renderCollection();
+}
+
+$('keep-sel').addEventListener('click', keepSelected);
+$('lock-sel').addEventListener('click', ()=>{ if(sel) toggleLock(sel.r, sel.c); });
+$('col-sheet').addEventListener('click', exportCollectionSheet);
+$('col-toggle').addEventListener('click', ()=>{
+  const c = $('collection');
+  c.classList.toggle('collapsed');
+  $('col-toggle').textContent = c.classList.contains('collapsed') ? '◀' : '▶';
+  resizeMain(); draw();
+});
+
+strip.addEventListener('click', e=>{
+  const f = e.target.closest('.frame');
+  if(f) goTo(+f.dataset.i);
+});
+
+/* ======================================================= selftest harness (NG §8) */
+function runSelfTest(){
+  const T = [];
+  const t = (name, pass, detail='') => T.push({name, pass, detail});
+  const near = (a,b,e=1e-9) => Math.abs(a-b)<e;
+
+  /* K1 — Seam premultiplied colour == B(1-f) + A f^2 */
+  {
+    const A=[255,0,102], Bc=[0,204,255], f=0.5, p=4.5;
+    const g=(x,y)=> y!==0 ? null : (x===0?A : x===1?Bc : null);
+    const r=raster(g,2,1,{scale:p, W:9, H:5, op:'over'});
+    const i=4;
+    const okC = near(r.R[i], Bc[0]*(1-f)+A[0]*f*f, 1e-9) && near(r.B[i], Bc[2]*(1-f)+A[2]*f*f, 1e-9);
+    t('K1 seam premultiplied colour == B(1-f) + A f^2', okC, `f = ${f}`);
+    t('K1b seam alpha == 1 - f + f^2 = 0.75', near(r.A[i], 1-f+f*f), r.A[i].toFixed(6));
+  }
+  /* K2 — Corner ladder 27/36/48/64/256 and alpha 175/256 */
+  {
+    const cols=[[255,0,0],[0,255,0],[0,0,255],[0,0,0]];
+    const g=(x,y)=>cols[y*2+x];
+    const r=raster(g,2,2,{scale:4.5, W:9, H:9, op:'over', order:'rowMajor'});
+    const k=4*9+4;
+    t('K2 corner alpha == 175/256', near(r.A[k], 175/256), r.A[k].toFixed(6));
+    t('K2b corner weight ladder == 27, 36, 48 (/256), ratio 3/4',
+      near(r.R[k]/255, 27/256) && near(r.G[k]/255, 36/256) && near(r.B[k]/255, 48/256),
+      `${(r.R[k]/255*256).toFixed(3)}, ${(r.G[k]/255*256).toFixed(3)}, ${(r.B[k]/255*256).toFixed(3)} /256`);
+  }
+  /* K3 — 'add' is order-independent */
+  {
+    const g=(x,y)=>[(x*61)%256,(y*97)%256,((x*y+7)*43)%256];
+    const a=raster(g,6,6,{scale:4.25,W:26,H:26,op:'add',order:'rowMajor'});
+    const b=raster(g,6,6,{scale:4.25,W:26,H:26,op:'add',order:'serpentine'});
+    const c=raster(g,6,6,{scale:4.25,W:26,H:26,op:'over',order:'rowMajor'});
+    const d=raster(g,6,6,{scale:4.25,W:26,H:26,op:'over',order:'serpentine'});
+    const same=(u,v)=>u.R.every((x,i)=>near(x,v.R[i],1e-9));
+    t('K3 add: traversal order does not change the raster', same(a,b));
+    t('K3b over: traversal order does change the raster', !same(c,d), 'light direction is real');
+  }
+  /* K4 — linear-light path carries more luminance */
+  {
+    const A=[255,0,102], Bc=[0,204,255];
+    const g=(x,y)=> y!==0 ? null : (x===0?A : x===1?Bc : null);
+    const s=raster(g,2,1,{scale:4.5,W:9,H:5,op:'over',matte:[11,15,20]});
+    const l=raster(g,2,1,{scale:4.5,W:9,H:5,op:'over',matte:[11,15,20],linear:true});
+    const Y=(r,i)=>0.2126*r.R[i]+0.7152*r.G[i]+0.0722*r.B[i];
+    t('K4 linear-light seam carries more luminance than sRGB blend',
+      Y(l,4) > Y(s,4), `Y ${(Y(s,4)/255).toFixed(3)} -> ${(Y(l,4)/255).toFixed(3)} (x${(Y(l,4)/Y(s,4)).toFixed(2)})`);
+  }
+  /* K5 — matte flattens partial alpha */
+  {
+    const g=(x,y)=> (x+y)%2 ? [220,60,90] : [40,160,220];
+    const m=raster(g,6,6,{scale:4.25,W:26,H:26,op:'over',matte:[11,15,20]});
+    const n=raster(g,6,6,{scale:4.25,W:26,H:26,op:'over'});
+    const partial = u => Array.from(u.A).filter(a=>a>1e-9 && a<1-1e-9).length;
+    t('K5 matte flattens all partial alpha', partial(m)===0 && partial(n)>0, `${partial(n)} translucent px -> 0`);
+  }
+  /* K6 — byField ordering produces distinct raster */
+  {
+    const fld=(x,y)=>((x*x+y*y)%7);
+    const g=(x,y)=>[(x*37)%256,(y*53)%256,((x+y)*29)%256];
+    const a=raster(g,8,8,{scale:4.25,W:35,H:35,op:'over',order:'rowMajor'});
+    const b=raster(g,8,8,{scale:4.25,W:35,H:35,op:'over',order:'byField',field:fld});
+    const diff=Array.from(a.R).filter((x,i)=>Math.abs(x-b.R[i])>0.5).length;
+    t('K6 field-ordered traversal produces distinct field-coherent bias', diff>0, `${diff} px differ from row-major`);
+  }
+  /* N2 — UI Reachable Assertion: add with q|w is mirror symmetric */
+  {
+    const genCfg = {w:16, h:16, sym:'horizontal', coverage:0.5, ncol:4, useCA:false,
+                    source:'field', formulaId:'circle', modulus:17, vary:false, stride:1, phase:0,
+                    colorMode:'bands', maskId:'none', maskScale:1, maskInvert:false, outline:false,
+                    sortLum:true, palette:paletteFor(12345, 3)};
+    const sprite = generateSprite(999, genCfg);
+    const pol = {scale:4.25, seamphase:'local', matte:null, magnify:1, operator:'add', order:'rowMajor', space:'srgb'};
+    const layout = soloLayout(sprite);
+    const cv = rasterize(document.createElement('canvas'), [{sprite, col:0, row:0}], layout, pol);
+    const ctx = cv.getContext('2d');
+    const img = ctx.getImageData(0,0,cv.width,cv.height);
+
+    let isMirror = true;
+    for(let y=0; y<img.height; y++){
+      for(let x=0; x<Math.floor(img.width/2); x++){
+        const i1 = (y*img.width + x)*4;
+        const i2 = (y*img.width + (img.width - 1 - x))*4;
+        if(Math.abs(img.data[i1] - img.data[i2]) > 1 || Math.abs(img.data[i1+1] - img.data[i2+1]) > 1 ||
+           Math.abs(img.data[i1+2] - img.data[i2+2]) > 1 || Math.abs(img.data[i1+3] - img.data[i2+3]) > 1){
+          isMirror = false; break;
+        }
+      }
+      if(!isMirror) break;
+    }
+    t('N2 UI reachable symmetry: add @ q|w yields mirror-symmetric raster', isMirror, `w=${sprite.w}, p=4.25 (q=4|16)`);
+  }
+  /* Conformance Harness — Software Kernel vs Canvas2D */
+  {
+    const genCfg = {w:8, h:8, sym:'horizontal', coverage:0.5, ncol:4, useCA:false,
+                    source:'field', formulaId:'circle', modulus:17, vary:false, stride:1, phase:0,
+                    colorMode:'bands', maskId:'none', maskScale:1, maskInvert:false, outline:false,
+                    sortLum:true, palette:paletteFor(54321, 3)};
+    const sprite = generateSprite(888, genCfg);
+    const pInteger = {scale:4, seamphase:'local', matte:null, magnify:1, operator:'over', order:'rowMajor', space:'srgb'};
+    const pFrac = {scale:4.25, seamphase:'local', matte:null, magnify:1, operator:'over', order:'rowMajor', space:'srgb'};
+
+    const divInt = measureDivergence(sprite, pInteger);
+    const divFrac = measureDivergence(sprite, pFrac);
+
+    t('Conformance: Kernel and Canvas2D agree byte-exact at integer scale', divInt.diffCount === 0 && divInt.maxDelta === 0,
+      `scale=4 -> ${divInt.diffCount} px differ, max Δ${divInt.maxDelta}`);
+    t('Conformance: Divergence measured and reported at fractional scale', divFrac.diffCount >= 0,
+      `scale=4.25 -> ${divFrac.percentDiff.toFixed(1)}% px differ (max Δ${divFrac.maxDelta})`);
+  }
+
+  let passCount = 0;
+  console.log('--- MoSprites NG Conformance Suite ---');
+  for(const res of T){
+    if(res.pass) passCount++;
+    console.log(`${res.pass?'\u2713':'\u2717'} ${res.name}` + (res.detail ? `\n    ${res.detail}` : ''));
+  }
+  console.log(`\nResult: ${passCount}/${T.length} passing.`);
+
+  if(window.location.search.includes('selftest')){
+    const banner = document.createElement('div');
+    banner.id = 'selftest-banner';
+    banner.innerHTML = `<b>MoSprites NG Conformance:</b> ${passCount}/${T.length} Passed` +
+                       (passCount === T.length ? ' ✓' : ' ✗');
+    banner.style.borderColor = passCount === T.length ? '#2ea043' : '#ef4444';
+    document.body.appendChild(banner);
+  }
+}
+
+/* ============================================================== wiring */
+fillSelects();
+S = defaultState();
+writeUI();
+
+for(const k of CFG_KEYS){
+  const el = $(k);
+  if(!el) continue;
+  const handler = ()=>{ readUI(); syncVisibility(); syncReadouts(); commit('cfg:'+k); };
+  el.addEventListener('input', handler);
+  if(el.tagName==='SELECT' || el.type==='checkbox') el.addEventListener('change', handler);
+}
+$('regen').addEventListener('click', ()=>{
+  const {rows,cols,list}=S.cells;
+  S.cells = {rows,cols,list:list.map(c=>c.locked?c:{seed:rand32(),locked:false,lockCfg:null})};
+  S.paletteSeed = rand32();
+  commit('cells:regen', 'regenerate sheet');
+});
+$('repal').addEventListener('click', ()=>{ S.paletteSeed = rand32(); commit('pal', 'shuffle palette'); });
+
+$('export').addEventListener('click', ()=>{
+  const name = `sprites_${String(playhead+1).padStart(3,'0')}.png`;
+  if($('preset').value === 'screen'){
+    download(canvas, name);
+    console.log(`Exported viewport ${canvas.width}\u00d7${canvas.height} @ zoom ${view.s.toFixed(2)}.`);
+    return;
+  }
+  const pol = exportPolicy();
+  const cols = S.cells.cols;
+  const cv = rasterize(document.createElement('canvas'),
+    lastSprites.map((sprite,i)=>({sprite, col:i%cols, row:(i/cols)|0})),
+    sheetLayout(S.cfg), pol);
+  download(cv, name);
+  console.log(`Exported sheet ${cv.width}\u00d7${cv.height} · ${policyLabel(pol)}`);
+});
+
+/* NG session loader & saver format version 1 */
+$('save').addEventListener('click', ()=>{
+  const pool = [], seen = new Map();
+  const data = {
+    format:'mosprites-ng', version:1, playhead, cellPool: pool,
+    collection: collection.map(i=>({...i})),
+    entries: timeline.map(e=>{
+      let ci = seen.get(e.state.cells);
+      if(ci===undefined){ ci = pool.length; seen.set(e.state.cells, ci); pool.push(e.state.cells); }
+      return {key:e.key, label:e.label, ts:e.ts, bookmark:e.bookmark,
+              cfg:e.state.cfg, paletteSeed:e.state.paletteSeed, cells:ci};
+    }),
+  };
+  const blob = new Blob([JSON.stringify(data)], {type:'application/json'});
+  const a=document.createElement('a');
+  a.download='mosprites_ng_session.json'; a.href=URL.createObjectURL(blob); a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+});
+$('load').addEventListener('click', ()=>$('file').click());
+$('file').addEventListener('change', e=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    try{
+      const d = JSON.parse(rd.result);
+      if(d.format!=='mosprites-ng' || d.version!==1) {
+        throw new Error('Incompatible format. Expected mosprites-ng version 1.');
+      }
+      timeline = d.entries.map(x=>({
+        key:x.key, label:x.label, ts:x.ts, bookmark:x.bookmark, thumb:null, from:-1,
+        state: {cfg:x.cfg, cells:d.cellPool[x.cells], paletteSeed:x.paletteSeed},
+      }));
+      stripBuilt = -1;
+      timeline.forEach(en=>{ S = cloneState(en.state); render(); makeThumb(en); });
+      collection = (d.collection||[]).map(i=>({...i}));
+      colSeq = collection.reduce((m,i)=>Math.max(m,i.id||0), 0);
+      colSel = null; sel = null;
+      renderCollection();
+      playhead = Math.min(d.playhead ?? timeline.length-1, timeline.length-1);
+      S = cloneState(timeline[playhead].state);
+      writeUI(); render(); refreshStrip(); center();
+      console.log(`Loaded ${timeline.length} NG timeline entries.`);
+    }catch(err){ console.error('Load failed:', err.message); }
+    e.target.value='';
+  };
+  rd.readAsText(f);
+});
+
+$('tl-first').addEventListener('click', ()=>goTo(0));
+$('tl-prev').addEventListener('click', ()=>goTo(playhead-1));
+$('tl-next').addEventListener('click', ()=>goTo(playhead+1));
+$('tl-last').addEventListener('click', ()=>goTo(timeline.length-1));
+$('tl-play').addEventListener('click', togglePlay);
+$('tl-mark').addEventListener('click', ()=>{
+  const e = timeline[playhead];
+  if(!e) return;
+  e.bookmark = !e.bookmark; refreshStrip();
+});
+
+$('zin').addEventListener('click', ()=>zoom(view.s*1.5));
+$('zout').addEventListener('click', ()=>zoom(view.s/1.5));
+$('zreset').addEventListener('click', ()=>{ view.s=1; center(); });
+
+window.addEventListener('keydown', e=>{
+  const t=e.target.tagName;
+  if(t==='INPUT'||t==='TEXTAREA'||t==='SELECT') return;
+  switch(e.key){
+    case 'ArrowLeft':  goTo(playhead-1); e.preventDefault(); break;
+    case 'ArrowRight': goTo(playhead+1); e.preventDefault(); break;
+    case 'Home': goTo(0); e.preventDefault(); break;
+    case 'End':  goTo(timeline.length-1); e.preventDefault(); break;
+    case ' ': togglePlay(); e.preventDefault(); break;
+    case 'b': case 'B': $('tl-mark').click(); break;
+    case 'r': case 'R': $('regen').click(); break;
+    case 'c': case 'C': copyRecipe(); break;
+    case 'k': case 'K': keepSelected(); break;
+  }
+});
+window.addEventListener('resize', ()=>{ resizeMain(); draw(); });
+
+function refreshSelection(){
+  if(sel && (sel.r>=S.cells.rows || sel.c>=S.cells.cols)) sel = null;
+  const has = !!sel;
+  $('keep-sel').disabled = !has;
+  $('lock-sel').disabled = !has;
+  if(has){
+    const cell = cellAt(sel.r, sel.c), sp = lastSprites[sel.r*S.cells.cols+sel.c];
+    $('lock-sel').classList.toggle('on', !!cell.locked);
+    if(sp) showRecipe(sel.r, sel.c, cell, sp);
+  } else {
+    $('lock-sel').classList.remove('on');
+  }
+}
+
+renderCollection();
+commit('init', 'session start');
+runSelfTest();
+requestAnimationFrame(()=>{ resizeMain(); center(); });
+</script>
+</body>
+</html>
