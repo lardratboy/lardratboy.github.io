@@ -357,7 +357,7 @@
   <div class="hint">click = select · ctrl-click = lock · alt-click = keep<br>
     shift-click = reroll · drag = pan · right-drag = orbit · wheel = zoom<br>
     1–4 = camera · 0 = frame · X = scene · E = elevation · [ ] = perspective<br>
-    V = renderer · J = kernel · S = texel snap · F = filter<br>
+    V = renderer · J = kernel · W = wireframe · S = snap · F = filter<br>
     , . = elevation / stack window (shift = spacing)<br>
     R = regenerate · K = keep · C = copy · B = bookmark<br>
     ← → = scrub · space = play</div>
@@ -1224,7 +1224,17 @@ const GL = {
     this.mat.uniforms.uSize.value.set(off.width, off.height);
     this.mat.uniforms.uScale.value = S.cfg.scale;
     this.mat.uniforms.uKernel.value = ({none:0, box:1, over:2})[S.cfg.kernel||'over'];
+    Wire.sync(this.scene, this.liveMeshes());
     this.renderer.render(this.scene, this.syncCamera());
+  },
+  /* Whatever the current scene mode actually put in front of the camera. */
+  liveMeshes(){
+    const out = [];
+    if(sceneMode === 'quad' && this.mesh) out.push(this.mesh);
+    if(Cards.mesh) out.push(Cards.mesh);
+    if(Vox.mesh)   out.push(Vox.mesh);
+    if(Stack.mesh) out.push(Stack.mesh);
+    return out;
   },
 };
 
@@ -1703,6 +1713,98 @@ const Vox = {
     this.mesh = mesh;
     this.dirty = false;
     //console.log(`Rv: ${k} voxels · depth ${this.depth} · ${this.mode}${only?' (selected cell only)':''}`);
+  },
+};
+
+/* ================================================================ Wire · mesh view
+ * Show the geometry that is actually being submitted, not a stylised idea of it.
+ * `W` cycles solid -> solid+wireframe -> wireframe only, over whichever mesh is
+ * currently in the scene (quad, cards, stack or voxels).
+ *
+ * The overlay is a COMPANION mesh rather than `material.wireframe = true` on the
+ * original, for two reasons. The card and stack materials discard below
+ * alphaTest, so wireframing them in place would punch most of the lines out
+ * wherever the sprite is transparent — you would see the triangulation only
+ * where it is least interesting. And the voxel material is lit, so its
+ * wireframe would be shaded by the lights and vanish on the dark faces.
+ *
+ * The companion shares the source geometry AND its instanceMatrix buffer — no
+ * copy, no second 12 MB of matrices for a 200k-voxel extrusion — so it tracks
+ * the source for free and only has to be rebuilt when the source's identity
+ * changes. polygonOffset on the solid in overlay mode keeps the lines off the
+ * faces they belong to instead of z-fighting them.
+ *
+ * Worth knowing what you are looking at: three.js dedupes wireframe edges per
+ * triangle pair, so a voxel box shows its 12 edges PLUS 6 face diagonals. Every
+ * voxel is a complete 12-triangle box with every face present, including the
+ * interior ones buried against its neighbours. That is honest — this is an
+ * extrusion, not a greedy mesher — and it is the clearest possible argument for
+ * face culling if this ever needs to get bigger. */
+const Wire = {
+  MODES:['off','over','only'],
+  LABEL:{off:'off', over:'solid + wireframe', only:'wireframe only'},
+  mode:'off', MAX_INSTANCES:60000,
+  pairs:new Map(),          /* source mesh -> companion */
+  make(src){
+    const mat = new THREE.MeshBasicMaterial({
+      color:0x8ce6ff, wireframe:true, transparent:true, opacity:0.5,
+      depthTest:true, depthWrite:false });
+    let w;
+    if(src.isInstancedMesh){
+      w = new THREE.InstancedMesh(src.geometry, mat, src.count);
+      w.instanceMatrix = src.instanceMatrix;      /* shared, not copied */
+    } else {
+      w = new THREE.Mesh(src.geometry, mat);
+    }
+    w.frustumCulled = false;
+    w.renderOrder = 10;
+    return w;
+  },
+  drop(src){
+    const w = this.pairs.get(src);
+    if(!w) return;
+    w.parent && w.parent.remove(w);
+    w.material.dispose();                          /* geometry is the source's */
+    this.pairs.delete(src);
+  },
+  clear(){ for(const src of Array.from(this.pairs.keys())) this.drop(src); },
+  sync(scene, live){
+    for(const src of Array.from(this.pairs.keys()))
+      if(live.indexOf(src) < 0) this.drop(src);
+    for(const src of live){
+      const solid = (this.mode !== 'only');
+      src.visible = solid;
+      if(src.material){
+        src.material.polygonOffset = (this.mode === 'over');
+        src.material.polygonOffsetFactor = 1;
+        src.material.polygonOffsetUnits = 1;
+      }
+      if(this.mode === 'off'){ this.drop(src); continue; }
+      if(src.isInstancedMesh && src.count > this.MAX_INSTANCES){ this.drop(src); continue; }
+      let w = this.pairs.get(src);
+      if(w && (w.geometry !== src.geometry ||
+               (src.isInstancedMesh && w.instanceMatrix !== src.instanceMatrix))){
+        this.drop(src); w = null;
+      }
+      if(!w){ w = this.make(src); this.pairs.set(src, w); scene.add(w); }
+      if(src.isInstancedMesh) w.count = src.count;
+      w.visible = true;
+    }
+  },
+  /* The point of the feature is the numbers as much as the picture. */
+  report(live){
+    if(this.mode === 'off'){ console.log('wireframe: off'); return; }
+    let tris = 0, inst = 0, over = false;
+    for(const src of live){
+      const idx = src.geometry.index;
+      const per = idx ? idx.count/3 : src.geometry.attributes.position.count/3;
+      const n = src.isInstancedMesh ? src.count : 1;
+      if(src.isInstancedMesh && n > this.MAX_INSTANCES) over = true;
+      tris += per*n; inst += n;
+    }
+    console.log(`wireframe: ${this.LABEL[this.mode]} · ${inst.toLocaleString()} instances · ` +
+                `${tris.toLocaleString()} triangles submitted` +
+                (over ? ` — over the ${this.MAX_INSTANCES.toLocaleString()} budget, overlay skipped` : ''));
   },
 };
 
@@ -2347,8 +2449,9 @@ function updateHUD(){
       '°  pitch ' + deg(Cam.pitch).toFixed(1) + '°  ' + proj + '\n' +
     '<b>' + sceneMode + '</b>' + extra + '  zoom ' + camScale().toFixed(2) + 'x  ' +
       (GL.on ? 'GL' : '2D') + '/' + (S.cfg.kernel||'over') +
-      (Snap.on ? '  <b>snap</b>' : '') + (Quality.mips && GL.isWebGL2 ? '  mip' : '') + '\n' +
-    '<i>1-4 camera · 0 frame · X scene · E elev · [ ] persp · S snap · F filter · V/J raster</i>';
+      (Snap.on ? '  <b>snap</b>' : '') + (Quality.mips && GL.isWebGL2 ? '  mip' : '') +
+      (Wire.mode !== 'off' ? '  <b>wire:' + Wire.mode + '</b>' : '') + '\n' +
+    '<i>1-4 camera · 0 frame · X scene · E elev · W wire · S snap · F filter · V/J raster</i>';
   const btn = {top:'v-top', dimetric:'v-dim', trueIso:'v-iso', free:'v-per'};
   for(const k in btn) $(btn[k]).classList.toggle('on', presetName === k);
   $('v-scene').textContent = sceneMode.charAt(0).toUpperCase()+sceneMode.slice(1);
@@ -2631,6 +2734,13 @@ window.addEventListener('keydown', e=>{
   }
   if(e.key==='e'||e.key==='E') cycleElev(e.shiftKey ? -1 : 1);
   if(e.key==='s'||e.key==='S') toggleSnap();
+  if(e.key==='w'||e.key==='W'){
+    Wire.mode = Wire.MODES[(Wire.MODES.indexOf(Wire.mode) + (e.shiftKey?2:1)) % 3];
+    if(Wire.mode !== 'off' && !ensureGL()) { Wire.mode = 'off'; console.warn('wireframe needs the GL renderer'); }
+    if(GL.ok) Wire.report(GL.liveMeshes());
+    else console.log('wireframe:', Wire.LABEL[Wire.mode]);
+    draw();
+  }
   if(e.key==='f'||e.key==='F'){
     Quality.mips = !Quality.mips;
     applyTexQuality();
