@@ -357,7 +357,8 @@
   <div class="hint">click = select · ctrl-click = lock · alt-click = keep<br>
     shift-click = reroll · drag = pan · right-drag = orbit · wheel = zoom<br>
     1–4 = camera · 0 = frame · X = scene · E = elevation · [ ] = perspective<br>
-    V = renderer · J = kernel · , . = lift/depth<br>
+    V = renderer · J = kernel · S = texel snap · F = filter<br>
+    , . = elevation / stack window (shift = spacing)<br>
     R = regenerate · K = keep · C = copy · B = bookmark<br>
     ← → = scrub · space = play</div>
 </div>
@@ -787,28 +788,32 @@ function argbOf(hex){
   }
   return v;
 }
-function render(){
-  const cfg = S.cfg, {rows,cols,list} = S.cells;
-  const w=cfg.sw, h=cfg.sh, sp=cfg.spacing;
-  const gen = toGen(cfg, S.paletteSeed);
-  const outerW=w+sp, outerH=h+sp;            /* 1:1 — no cfg.scale here */
-
-  const AW = Math.max(1, cols*outerW), AH = Math.max(1, rows*outerH);
-  off.width = AW; off.height = AH;
-  offCtx.imageSmoothingEnabled = false;
-  const img = offCtx.createImageData(AW, AH);
-  const px32 = new Uint32Array(img.data.buffer);
-  lastSprites = new Array(rows*cols);
-
+/* Atlas geometry of ANY state, not just the live one — the Z-stack (§5 mode B,
+ * "the timeline becomes a Z-stack") needs to size and pack layers before it
+ * paints them, and every timeline entry may have been committed under a
+ * different cols/rows/sprite size. */
+function sheetDims(state){
+  const cfg = state.cfg, {rows, cols} = state.cells;
+  return { rows, cols, cfg,
+           aw: Math.max(1, cols*(cfg.sw+cfg.spacing)),
+           ah: Math.max(1, rows*(cfg.sh+cfg.spacing)) };
+}
+/* The sheet painter, lifted out of render() so it can target a sub-rect of an
+ * arbitrary buffer. Still 1:1 — cfg.scale left the generation path at R1 — and
+ * still writes NOTHING that is not sprite ink (§10.1). */
+function paintSheet(state, px32, bufW, X0, Y0, sprites){
+  const cfg = state.cfg, {rows, cols, list} = state.cells;
+  const gen = toGen(cfg, state.paletteSeed);
+  const outerW = cfg.sw+cfg.spacing, outerH = cfg.sh+cfg.spacing;
   for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
     const cell = list[r*cols+c];
     const g = (cell.locked && cell.lockCfg)
       ? toGen(cell.lockCfg, cell.lockCfg._paletteSeed) : gen;
     const sprite = generateSprite(cell.seed, g);
-    lastSprites[r*cols+c] = sprite;
-    const X0=c*outerW, Y0=r*outerH;
+    if(sprites) sprites[r*cols+c] = sprite;
+    const bx = X0 + c*outerW, by = Y0 + r*outerH;
     for(let y=0;y<sprite.h;y++){
-      const row = sprite.grid[y], base = (Y0+y)*AW + X0;
+      const row = sprite.grid[y], base = (by+y)*bufW + bx;
       for(let x=0;x<sprite.w;x++){
         const v = row[x];
         if(!v) continue;
@@ -816,6 +821,15 @@ function render(){
       }
     }
   }
+}
+function render(){
+  const {rows, cols} = S.cells;
+  const d = sheetDims(S);
+  off.width = d.aw; off.height = d.ah;
+  offCtx.imageSmoothingEnabled = false;
+  const img = offCtx.createImageData(d.aw, d.ah);
+  lastSprites = new Array(rows*cols);
+  paintSheet(S, new Uint32Array(img.data.buffer), d.aw, 0, 0, lastSprites);
   offCtx.putImageData(img, 0, 0);
   atlasDirty = true; atlasVersion++;
   resizeMain(); draw();
@@ -954,6 +968,7 @@ function zoomAt(dLog, sx, sy){
   }
   clampRig();
   syncCamFromRig();
+  snapCamera();
   scheduleDraw();
 }
 function zoom(s, fx, fy){ zoomAt(Math.log(s) - Cam.logZoom, fx, fy); }  /* legacy shim */
@@ -989,7 +1004,7 @@ const rasterH = () => off.height * S.cfg.scale;
  * used to re-upload the whole atlas every single frame of an orbit. A monotonic
  * counter compared against a per-texture watermark fixes that, and gives Cards
  * and Vox a cheap rebuild trigger for free. */
-let atlasVersion = 0, colVersion = 0;
+let atlasVersion = 0, colVersion = 0, tlVersion = 0;
 let atlasDirty = true, offR = document.createElement('canvas'), offRKey = '';
 function coverage1D(srcN, s){
   const W = Math.ceil(srcN*s - 1e-9), out = new Array(W);
@@ -1049,7 +1064,7 @@ function buildResampled(){
  * SHADER rather than baked into the texture (§7.5). That keeps the atlas binary-
  * alpha, makes `scale` a live uniform with no regeneration, and carries the
  * colourisation into every camera angle R2 adds. */
-const SCENE_MODES = ['quad','cards','voxels'];
+const SCENE_MODES = ['quad','cards','voxels','stack'];
 let sceneMode = 'quad';
 const GL = {
   on:false, ok:false, canvas:null, renderer:null, scene:null, cam:null,
@@ -1070,14 +1085,15 @@ const GL = {
     }catch(err){ this.failed = true; console.warn('R1: WebGL unavailable, staying on the 2D renderer', err); return false; }
     this.renderer.setClearColor(0x000000, 0);
     this.canvas = c;
+    this.maxTex   = this.renderer.capabilities.maxTextureSize || 4096;
+    this.isWebGL2 = !!this.renderer.capabilities.isWebGL2;
+    this.maxAniso = this.renderer.capabilities.getMaxAnisotropy();
     this.scene = new THREE.Scene();
     this.cam  = new THREE.OrthographicCamera(-1,1,1,-1, 1, 1e5);
     this.camP = new THREE.PerspectiveCamera(50, 1, 1, 1e5);
     this.cam.up.set(0,0,-1); this.camP.up.set(0,0,-1);
     this.tex = new THREE.CanvasTexture(off);
-    this.tex.magFilter = THREE.NearestFilter;
-    this.tex.minFilter = THREE.NearestFilter;   /* mipmaps arrive with R2's oblique views */
-    this.tex.generateMipmaps = false;
+    applyTexQuality();                          /* §7.7.1–2, see Quality below */
     this.mat = new THREE.ShaderMaterial({
       transparent:true, depthWrite:false, side:THREE.DoubleSide,
       uniforms:{ uAtlas:{value:this.tex}, uSize:{value:new THREE.Vector2(1,1)},
@@ -1129,7 +1145,20 @@ const GL = {
   },
   resize(){
     if(!this.ok) return;
-    this.renderer.setPixelRatio(window.devicePixelRatio||1);
+    this._pr = 0;                 /* force a re-apply on the next frame */
+    this.applyPixelRatio();
+  },
+  /* §7.7.4 — supersample the oblique modes. Top-down is (or can be) pixel-exact
+   * and must not be resampled; everything else is a rotated raster and gains
+   * from fill rate we are nowhere near spending. Scenes here are 2500 instanced
+   * quads, so this is free in practice. */
+  applyPixelRatio(){
+    if(this.renderer.getRenderTarget()) return;    /* export owns the size */
+    const boost = (Quality.ss && !isTopDown()) ? 1.6 : 1;
+    const pr = Math.min(3, (window.devicePixelRatio||1)*boost);
+    if(Math.abs(pr - (this._pr||0)) < 1e-4) return;
+    this._pr = pr;
+    this.renderer.setPixelRatio(pr);
     this.renderer.setSize(stage.clientWidth, stage.clientHeight, false);
   },
   geom(){
@@ -1157,7 +1186,7 @@ const GL = {
     const halfH = halfHOf(), halfW = halfH*(Cam.vw/Cam.vh);
     /* elevation pushes geometry off the ground plane now, so the depth range
      * has to cover the tallest card / voxel stack as well as the sheet. */
-    const lift = Math.max(Cards.reach(), Vox.reach());
+    const lift = Math.max(Cards.reach(), Vox.reach(), Stack.reach());
     const extent = Math.max(rasterW(), rasterH()) + halfH*2 + lift*2;
     let c;
     if(th === 0){
@@ -1179,15 +1208,18 @@ const GL = {
   },
   render(){
     if(!this.ok) return;
+    this.applyPixelRatio();
     this.geom();
     if(this.texVersion !== atlasVersion){
       this.tex.needsUpdate = true; this.texVersion = atlasVersion;
-      Vox.dirty = true; Cards.dirty = true;
+      Vox.dirty = true; Cards.dirty = true; Stack.dirty = true;
     }
     if(sceneMode !== 'voxels') Vox.dispose();
     if(sceneMode !== 'cards')  Cards.dispose();
+    if(sceneMode !== 'stack')  Stack.dispose();
     if(sceneMode === 'voxels' && (Vox.dirty || !Vox.mesh)) Vox.build(this.scene);
     if(sceneMode === 'cards')  Cards.sync(this.scene);
+    if(sceneMode === 'stack')  Stack.sync(this.scene);
     this.mesh.visible = (sceneMode === 'quad');
     this.mat.uniforms.uSize.value.set(off.width, off.height);
     this.mat.uniforms.uScale.value = S.cfg.scale;
@@ -1239,6 +1271,72 @@ function spriteMetrics(sp){
   return sp._met;
 }
 
+/* One material, two consumers (cards and the Z-stack). The per-instance vec4
+ * carries the atlas sub-rect — origin in .xy, span in .zw — rather than a
+ * uniform span, because Z-stack layers were committed under different sprite
+ * sizes and have to coexist in one draw call. `aFade` is a depth cue applied as
+ * AERIAL PERSPECTIVE (mix toward the background) rather than alpha: alphaTest
+ * is what makes this material order-independent, and fading by alpha would
+ * throw that away for thirteen stacked layers, which is exactly the case that
+ * cannot afford it. */
+function makeSheetMaterial(){
+  return new THREE.ShaderMaterial({
+    /* alphaTest 0.5 rather than transparent sorting: sprite alpha is binary
+     * except at fractional scale, so discarding below half is order-independent
+     * AND keeps depthWrite honest between lifted cards. (§5 mode B. The soft
+     * resample fringe is the price; it is one texel.) */
+    transparent:true, depthWrite:true, depthTest:true, side:THREE.FrontSide,
+    uniforms:{ uAtlas:{value:null}, uSize:{value:new THREE.Vector2(1,1)},
+               uScale:{value:1}, uKernel:{value:2},
+               uFog:{value:new THREE.Color(0x0b0f14)} },
+    vertexShader:`
+      attribute vec4 aRect; attribute float aFade;
+      varying vec2 vUv; varying vec4 vRect; varying float vFade;
+      void main(){
+        vUv = uv; vRect = aRect; vFade = aFade;
+        gl_Position = projectionMatrix*modelViewMatrix*instanceMatrix*vec4(position,1.0);
+      }`,
+    fragmentShader:`
+      precision highp float;
+      uniform sampler2D uAtlas; uniform vec2 uSize;
+      uniform float uScale; uniform int uKernel; uniform vec3 uFog;
+      varying vec2 vUv; varying vec4 vRect; varying float vFade;
+      vec4 texel(float ix, float iy){
+        return texture2D(uAtlas, (vRect.xy + vec2(ix,iy) + 0.5)/uSize);
+      }
+      void main(){
+        vec2 span = vRect.zw;
+        vec2 raster = vUv*span*uScale;
+        vec2 j = floor(raster);
+        float s = uScale;
+        vec2 i0 = floor(j/s);
+        vec2 i1 = min(floor((j+1.0-1e-4)/s), span-1.0);
+        vec2 c0 = min((i0+1.0)*s, j+1.0) - max(i0*s, j);
+        vec2 c1 = max(vec2(0.0), min((i1+1.0)*s, j+1.0) - max(i1*s, j));
+        c1 *= step(0.5, i1-i0);
+        if(uKernel == 0){
+          vec4 t = texel(floor(raster.x/s), floor(raster.y/s));
+          if(t.a < 0.5) discard;
+          gl_FragColor = vec4(mix(uFog, t.rgb, vFade), t.a);
+          return;
+        }
+        float cw[4]; vec4 cc[4];
+        cc[0]=texel(i0.x,i0.y); cw[0]=c0.x*c0.y;
+        cc[1]=texel(i1.x,i0.y); cw[1]=c1.x*c0.y;
+        cc[2]=texel(i0.x,i1.y); cw[2]=c0.x*c1.y;
+        cc[3]=texel(i1.x,i1.y); cw[3]=c1.x*c1.y;
+        vec3 P = vec3(0.0); float A = 0.0;
+        for(int k=0;k<4;k++){
+          float a = cw[k]*cc[k].a;
+          if(uKernel == 1){ P += cc[k].rgb*a; A += a; }
+          else { P = cc[k].rgb*a + P*(1.0-a); A = a + A*(1.0-a); }
+        }
+        if(A < 0.5) discard;
+        gl_FragColor = vec4(mix(uFog, P/A, vFade), min(A,1.0));
+      }`,
+  });
+}
+
 const Cards = {
   mesh:null, dirty:true, key:'', channel:'flat', liftMul:1.0,
   LOCK_LIFT:0.30, KEEP_LIFT:0.62,          /* in sprite-heights */
@@ -1265,59 +1363,7 @@ const Cards = {
     return this.elevOf(i, this._kept || (this._kept = this.keptSeeds()));
   },
   material(){
-    if(this._mat) return this._mat;
-    this._mat = new THREE.ShaderMaterial({
-      /* alphaTest 0.5 rather than transparent sorting: sprite alpha is binary
-       * except at fractional scale, so discarding below half is
-       * order-independent AND keeps depthWrite honest between lifted cards.
-       * (§5 mode B. The soft resample fringe is the price; it is one texel.) */
-      transparent:true, depthWrite:true, depthTest:true, side:THREE.FrontSide,
-      uniforms:{ uAtlas:{value:null}, uSize:{value:new THREE.Vector2(1,1)},
-                 uSpan:{value:new THREE.Vector2(1,1)}, uScale:{value:1}, uKernel:{value:2} },
-      vertexShader:`
-        attribute vec2 aCell;
-        varying vec2 vUv; varying vec2 vCell;
-        void main(){
-          vUv = uv; vCell = aCell;
-          gl_Position = projectionMatrix*modelViewMatrix*instanceMatrix*vec4(position,1.0);
-        }`,
-      fragmentShader:`
-        precision highp float;
-        uniform sampler2D uAtlas; uniform vec2 uSize; uniform vec2 uSpan;
-        uniform float uScale; uniform int uKernel;
-        varying vec2 vUv; varying vec2 vCell;
-        vec4 texel(float ix, float iy){
-          return texture2D(uAtlas, (vCell + vec2(ix,iy) + 0.5)/uSize);
-        }
-        void main(){
-          vec2 raster = vUv*uSpan*uScale;
-          vec2 j = floor(raster);
-          float s = uScale;
-          vec2 i0 = floor(j/s);
-          vec2 i1 = min(floor((j+1.0-1e-4)/s), uSpan-1.0);
-          vec2 c0 = min((i0+1.0)*s, j+1.0) - max(i0*s, j);
-          vec2 c1 = max(vec2(0.0), min((i1+1.0)*s, j+1.0) - max(i1*s, j));
-          c1 *= step(0.5, i1-i0);
-          if(uKernel == 0){
-            gl_FragColor = texel(floor(raster.x/s), floor(raster.y/s));
-            if(gl_FragColor.a < 0.5) discard;
-            return;
-          }
-          float cw[4]; vec4 cc[4];
-          cc[0]=texel(i0.x,i0.y); cw[0]=c0.x*c0.y;
-          cc[1]=texel(i1.x,i0.y); cw[1]=c1.x*c0.y;
-          cc[2]=texel(i0.x,i1.y); cw[2]=c0.x*c1.y;
-          cc[3]=texel(i1.x,i1.y); cw[3]=c1.x*c1.y;
-          vec3 P = vec3(0.0); float A = 0.0;
-          for(int k=0;k<4;k++){
-            float a = cw[k]*cc[k].a;
-            if(uKernel == 1){ P += cc[k].rgb*a; A += a; }
-            else { P = cc[k].rgb*a + P*(1.0-a); A = a + A*(1.0-a); }
-          }
-          if(A < 0.5) discard;
-          gl_FragColor = vec4(P/A, min(A,1.0));
-        }`,
-    });
+    if(!this._mat) this._mat = makeSheetMaterial();
     return this._mat;
   },
   dispose(){
@@ -1351,12 +1397,13 @@ const Cards = {
       const g = new THREE.PlaneGeometry(1,1);
       g.rotateX(-Math.PI/2);          /* into XZ, normal +Y */
       g.translate(0.5, 0, 0.5);       /* origin at the (-x,-z) corner */
-      g.setAttribute('aCell', new THREE.InstancedBufferAttribute(new Float32Array(n*2), 2));
+      g.setAttribute('aRect', new THREE.InstancedBufferAttribute(new Float32Array(n*4), 4));
+      g.setAttribute('aFade', new THREE.InstancedBufferAttribute(new Float32Array(n).fill(1), 1));
       this.mesh = new THREE.InstancedMesh(g, this.material(), n);
       this.mesh.frustumCulled = false;
       scene.add(this.mesh);
     }
-    const mesh = this.mesh, cell = mesh.geometry.attributes.aCell;
+    const mesh = this.mesh, rect = mesh.geometry.attributes.aRect;
     const m = new THREE.Matrix4();
     const AH = off.height;
     let maxY = 0;
@@ -1367,20 +1414,205 @@ const Cards = {
       m.makeScale(sw, 1, sh);
       m.setPosition(c*ow, y, r*oh);
       mesh.setMatrixAt(i, m);
-      cell.array[i*2]   = c*(cfg.sw+cfg.spacing);
-      cell.array[i*2+1] = AH - r*(cfg.sh+cfg.spacing) - cfg.sh;
+      rect.array[i*4]   = c*(cfg.sw+cfg.spacing);
+      rect.array[i*4+1] = AH - r*(cfg.sh+cfg.spacing) - cfg.sh;
+      rect.array[i*4+2] = cfg.sw;
+      rect.array[i*4+3] = cfg.sh;
     }
     mesh.instanceMatrix.needsUpdate = true;
-    cell.needsUpdate = true;
+    rect.needsUpdate = true;
     const u = this.material().uniforms;
     u.uAtlas.value = GL.tex;
     u.uSize.value.set(off.width, off.height);
-    u.uSpan.value.set(cfg.sw, cfg.sh);
     u.uScale.value = px;
     u.uKernel.value = ({none:0, box:1, over:2})[cfg.kernel||'over'];
     mesh.userData.maxY = maxY;
     this.key = key || this.signature();
     this.dirty = false;
+  },
+};
+
+/* ================================================ R5 · the timeline as a Z-stack
+ * "Each committed entry is a layer at y = k·age; orbiting shows the exploration
+ * history as a solid, and the playhead is a highlighted slice." The timeline
+ * already stores STATES and a sprite is a pure function of (seed, cfg), so every
+ * layer is reconstructible exactly — this rung is bought entirely with the
+ * architecture that was already there.
+ *
+ * §11 asked whether this is a mode or a separate view, and the answer fell out
+ * of the arithmetic: 400 entries is 400x the instances and 400 sheet
+ * regenerations, so it has to be a bounded window around the playhead. That
+ * makes it a distinct view — the sheet you are editing is one slice of it, not
+ * the whole thing.
+ *
+ * Three constraints the naive version misses:
+ *  · Layers were committed under DIFFERENT cols/rows/sprite sizes, so the atlas
+ *    is a packed grid of variable-size slots and the sub-rect has to travel
+ *    per-instance (hence aRect).
+ *  · Layer footprints are centred on the live sheet's centre rather than
+ *    corner-aligned, so a change in cols/rows reads as growth from the middle
+ *    instead of a lurch.
+ *  · Depth cueing is aerial perspective, not alpha — see makeSheetMaterial().
+ *
+ * Clicking a cell in a non-playhead layer scrubs the timeline to it. That is
+ * the whole point: the stack is a navigable history, not a picture of one. */
+const Stack = {
+  mesh:null, tex:null, canvas:null, dirty:true, key:'',
+  span:5, gap:1.15, index:[], layers:[], CELL_BUDGET:4000,
+  _mat:null, _cache:new Map(), _bytes:0, CACHE_BYTES:48<<20,
+  material(){ if(!this._mat) this._mat = makeSheetMaterial(); return this._mat; },
+  gapWorld(){ return this.gap * S.cfg.sh * S.cfg.scale; },
+  reach(){ return this.layers.length ? this.span*this.gapWorld() : 0; },
+  signature(){
+    return [playhead, timeline.length, tlVersion, this.span, this.gap,
+            S.cfg.scale, S.cfg.kernel||'over'].join('|');
+  },
+  dispose(){
+    if(this.mesh){
+      this.mesh.parent && this.mesh.parent.remove(this.mesh);
+      this.mesh.geometry.dispose();
+      this.mesh = null;
+    }
+    if(this.tex){ this.tex.dispose(); this.tex = null; }
+    this.index = []; this.layers = []; this.key = '';
+  },
+  sync(scene){
+    const key = this.signature();
+    if(this.mesh && key === this.key && !this.dirty) return;
+    this.build(scene, key);
+  },
+  /* Choose the layer window: start from playhead +/- span, then drop the
+   * furthest entries until the packed atlas fits MAX_TEXTURE_SIZE in both
+   * dimensions AND the total cell count stays inside the regeneration budget.
+   * Dropping from the outside keeps the window centred on the playhead, which
+   * is the only ordering that does not make scrubbing jump. */
+  window(){
+    if(!timeline.length) return [];
+    const lo = Math.max(0, playhead-this.span), hi = Math.min(timeline.length-1, playhead+this.span);
+    const order = [];
+    for(let i=lo;i<=hi;i++) order.push(i);
+    order.sort((a,b)=> Math.abs(a-playhead) - Math.abs(b-playhead) || a-b);
+    const MAX = GL.maxTex || 4096;
+    let keep = order.slice();
+    while(keep.length > 1){
+      const ds = keep.map(i=>sheetDims(timeline[i].state));
+      const LW = Math.max.apply(null, ds.map(d=>d.aw));
+      const LH = Math.max.apply(null, ds.map(d=>d.ah));
+      const gc = Math.max(1, Math.floor(MAX/LW)), gr = Math.ceil(keep.length/gc);
+      const cells = ds.reduce((t,d)=>t + d.rows*d.cols, 0);
+      if(gr*LH <= MAX && cells <= this.CELL_BUDGET) break;
+      keep.pop();
+    }
+    keep.sort((a,b)=>a-b);
+    return keep;
+  },
+  /* Painting eleven sheets on every commit would make a slider drag unusable
+   * while the stack is open. Timeline states are IMMUTABLE — commit() replaces
+   * `entry.state` rather than mutating it, including on coalesce — so identity
+   * is a sound cache key and only the layer that actually changed repaints.
+   * Budgeted in bytes because a 50x50 sheet of 64x64 sprites is 42 MB a layer. */
+  layerBuf(entry){
+    const hit = this._cache.get(entry);
+    if(hit && hit.state === entry.state) return hit;
+    if(hit){ this._bytes -= hit.buf.length*4; this._cache.delete(entry); }
+    const d = sheetDims(entry.state);
+    const buf = new Uint32Array(d.aw*d.ah);
+    paintSheet(entry.state, buf, d.aw, 0, 0, null);
+    const rec = {state:entry.state, aw:d.aw, ah:d.ah, buf};
+    this._cache.set(entry, rec); this._bytes += buf.length*4;
+    while(this._bytes > this.CACHE_BYTES && this._cache.size > 1){
+      const k = this._cache.keys().next().value;
+      if(k === entry) break;
+      this._bytes -= this._cache.get(k).buf.length*4;
+      this._cache.delete(k);
+    }
+    return rec;
+  },
+  build(scene, key){
+    this.dispose();
+    const keep = this.window();
+    if(!keep.length) return;
+    const ds = keep.map(i=>sheetDims(timeline[i].state));
+    const LW = Math.max.apply(null, ds.map(d=>d.aw));
+    const LH = Math.max.apply(null, ds.map(d=>d.ah));
+    const MAX = GL.maxTex || 4096;
+    const gc = Math.max(1, Math.min(keep.length, Math.floor(MAX/LW)));
+    const gr = Math.ceil(keep.length/gc);
+    const SW = gc*LW, SH = gr*LH;
+
+    if(!this.canvas) this.canvas = document.createElement('canvas');
+    const cv = this.canvas;
+    cv.width = SW; cv.height = SH;
+    const g = cv.getContext('2d');
+    const img = g.createImageData(SW, SH);
+    const px32 = new Uint32Array(img.data.buffer);
+    let n = 0;
+    for(let k=0;k<keep.length;k++){
+      const slotX = (k % gc)*LW, slotY = ((k/gc)|0)*LH;
+      const L = this.layerBuf(timeline[keep[k]]);
+      for(let y=0;y<L.ah;y++)
+        px32.set(L.buf.subarray(y*L.aw, (y+1)*L.aw), (slotY+y)*SW + slotX);
+      ds[k].slotX = slotX; ds[k].slotY = slotY;
+      n += ds[k].rows*ds[k].cols;
+    }
+    g.putImageData(img, 0, 0);
+
+    this.tex = new THREE.CanvasTexture(cv);
+    this.tex.magFilter = THREE.NearestFilter;
+    this.tex.minFilter = THREE.NearestFilter;
+    this.tex.generateMipmaps = false;
+
+    const geo = new THREE.PlaneGeometry(1,1);
+    geo.rotateX(-Math.PI/2); geo.translate(0.5, 0, 0.5);
+    geo.setAttribute('aRect', new THREE.InstancedBufferAttribute(new Float32Array(n*4), 4));
+    geo.setAttribute('aFade', new THREE.InstancedBufferAttribute(new Float32Array(n), 1));
+    const mesh = new THREE.InstancedMesh(geo, this.material(), n);
+    mesh.frustumCulled = false;
+    const rect = geo.attributes.aRect, fade = geo.attributes.aFade;
+    const m = new THREE.Matrix4();
+    const px = S.cfg.scale, gapW = this.gapWorld();
+    const cx = rasterW()/2, cz = rasterH()/2;
+    const idx = [];
+    let q = 0;
+    for(let k=0;k<keep.length;k++){
+      const i = keep[k], d = ds[k], cfg = d.cfg;
+      const ow = (cfg.sw+cfg.spacing), oh = (cfg.sh+cfg.spacing);
+      const fw = d.cols*ow*px, fh = d.rows*oh*px;
+      const ox = cx - fw/2, oz = cz - fh/2;
+      const y = (i - playhead)*gapW;
+      const dist = Math.abs(i - playhead);
+      const f = dist === 0 ? 1 : Math.max(0.16, 1 - dist/(this.span+1)*0.95);
+      for(let r=0;r<d.rows;r++) for(let c=0;c<d.cols;c++){
+        m.makeScale(cfg.sw*px, 1, cfg.sh*px);
+        m.setPosition(ox + c*ow*px, y, oz + r*oh*px);
+        mesh.setMatrixAt(q, m);
+        rect.array[q*4]   = d.slotX + c*ow;
+        rect.array[q*4+1] = SH - (d.slotY + r*oh) - cfg.sh;   /* CanvasTexture.flipY */
+        rect.array[q*4+2] = cfg.sw;
+        rect.array[q*4+3] = cfg.sh;
+        fade.array[q] = f;
+        idx.push(i*65536 + r*256 + c);          /* instanceId -> (entry, r, c) */
+        q++;
+      }
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    rect.needsUpdate = true; fade.needsUpdate = true;
+    const u = this.material().uniforms;
+    u.uAtlas.value = this.tex;
+    u.uSize.value.set(SW, SH);
+    u.uScale.value = px;
+    u.uKernel.value = ({none:0, box:1, over:2})[S.cfg.kernel||'over'];
+    scene.add(mesh);
+    this.mesh = mesh; this.index = idx; this.layers = keep;
+    this.key = key || this.signature();
+    this.dirty = false;
+    console.log(`R5: stack ${keep.length} layers (${keep[0]}..${keep[keep.length-1]}) · ` +
+                `${n} cards · atlas ${SW}x${SH}`);
+  },
+  at(instanceId){
+    const v = this.index[instanceId];
+    if(v === undefined) return null;
+    return { i: (v/65536)|0, r: ((v>>8) & 0xff), c: (v & 0xff) };
   },
 };
 
@@ -1473,6 +1705,80 @@ const Vox = {
     //console.log(`Rv: ${k} voxels · depth ${this.depth} · ${this.mode}${only?' (selected cell only)':''}`);
   },
 };
+
+/* ============================================================ §7.7 · crispness
+ * Three of the four points, worth doing only now that oblique views exist to
+ * need them. (The fourth, magFilter = Nearest, has been non-negotiable since R1
+ * — it is the whole aesthetic and it is what the resample shader samples
+ * THROUGH.) */
+const Quality = { mips:true, ss:true };
+
+/* 7.7.2 — minification. NearestFilter on minification turns a zoomed-out sheet
+ * into crawling noise the instant the camera moves, and iso/perspective produce
+ * grazing angles by construction, which is what anisotropy is for. NPOT mipmaps
+ * need WebGL2, so this is capability-gated rather than assumed.
+ *
+ * It is a toggle, and honestly so: the shader indexes texels through a floor(),
+ * so the derivative the GPU uses to pick a LOD is a staircase. When genuinely
+ * minifying that staircase approximates the true rate well; near 1:1 it
+ * alternates between 0 and 1 texel and the LOD dithers. There is no substitute
+ * for looking at it on real hardware, hence `F`. */
+function applyTexQuality(){
+  if(!GL.tex) return;
+  const t = GL.tex, want = Quality.mips && GL.isWebGL2;
+  t.magFilter = THREE.NearestFilter;
+  t.minFilter = want ? THREE.NearestMipmapLinearFilter : THREE.NearestFilter;
+  t.generateMipmaps = want;
+  t.anisotropy = want ? Math.min(16, GL.maxAniso||1) : 1;
+  t.needsUpdate = true;
+}
+/* The Z-stack atlas deliberately stays unfiltered: it is a PACKED GRID of
+ * variable-size slots, so mip level N averages 2^N texels straight across slot
+ * boundaries and bleeds one timeline entry into its neighbour. */
+
+/* 7.7.3 — texel snapping. Only where it is both possible and expected: exact
+ * top-down ortho. Zoom goes to an integer texel:pixel ratio (or an integer
+ * pixel:texel one below 1:1), then the pivot goes to whatever sub-unit offset
+ * puts texel boundaries on integer screen pixels.
+ *
+ * Snapping and the fractional resample are MUTUALLY EXCLUSIVE BY CONSTRUCTION:
+ * one exists to put texel edges on pixel boundaries, the other exists to blend
+ * across them. So the toggle forces `kernel = none` and says so rather than
+ * letting the two quietly cancel. This is also what makes §10.4's byte-identity
+ * assertion reachable from the live camera instead of only from the export's
+ * own exact framing. */
+const Snap = { on:false, prevKernel:null };
+function snapCamera(force){
+  if(!Snap.on || !rigOK || !isTopDown()) return;
+  const px = S.cfg.scale;                  /* world units per texel */
+  const s  = camScale()*px;                /* screen pixels per texel */
+  const t  = s >= 1 ? Math.round(s) : 1/Math.max(1, Math.round(1/s));
+  const want = t/px;
+  /* threshold, not continuous: a wheel tick that clearly means "much bigger"
+   * should not be dragged back to the nearest integer, and a pan that snapped
+   * every frame would feel notchy. */
+  if(force || Math.abs(Math.log(want/camScale())) < 0.14){ applyScale(want); syncCamFromRig(); }
+  const sc = camScale();
+  const align = (v, half) => (half - Math.round(half - v*sc))/sc;
+  const nx = align(Cam.target.x, Cam.vw/2), nz = align(Cam.target.z, Cam.vh/2);
+  translateRig(nx - Cam.target.x, nz - Cam.target.z);
+  syncCamFromRig();
+}
+function toggleSnap(){
+  Snap.on = !Snap.on;
+  if(Snap.on){
+    Snap.prevKernel = S.cfg.kernel || 'over';
+    S.cfg.kernel = 'none';
+    console.log('texel snap: ON — kernel forced to `none`; snapping and the fractional resample cannot both be true (§7.7.3)');
+    atlasDirty = true; Cards.dirty = Stack.dirty = true;
+    snapCamera(true);
+  } else {
+    S.cfg.kernel = Snap.prevKernel || 'over';
+    console.log('texel snap: off — kernel restored to `' + S.cfg.kernel + '`');
+    atlasDirty = true; Cards.dirty = Stack.dirty = true;
+  }
+  draw();
+}
 
 /* ================================================================ R4 · export (§10)
  * Two paths, one invariant. The invariant is that SPRITE ALPHA IS BINARY: a
@@ -2005,6 +2311,7 @@ function initRig(){
   }
   controls.addEventListener('change', ()=>{ clampRig(); syncCamFromRig(); scheduleDraw(); });
   controls.addEventListener('start',  ()=>{ cancelTween(); });
+  controls.addEventListener('end',    ()=>{ snapCamera(); scheduleDraw(); });
   rigOK = true;
   applyScale(1); syncCamFromRig();
   return true;
@@ -2032,13 +2339,16 @@ function updateHUD(){
   const proj = Cam.persp <= 0 ? 'ortho' : 'persp ' + Cam.persp.toFixed(2);
   const extra = sceneMode === 'cards'
       ? '  elev ' + ELEV_LABEL[Cards.channel] + (Cards.channel==='flat' ? '' : ' x'+Cards.liftMul.toFixed(2))
-      : sceneMode === 'voxels' ? '  depth ' + Vox.depth + ' · ' + Vox.mode : '';
+      : sceneMode === 'voxels' ? '  depth ' + Vox.depth + ' · ' + Vox.mode
+      : sceneMode === 'stack' ? '  ±' + Stack.span + ' → ' + Stack.layers.length + ' layers @ ' +
+          (playhead+1) + '/' + timeline.length : '';
   el.innerHTML =
     '<b>' + (PRESET_LABEL[presetName]||presetName) + '</b>  yaw ' + yaw.toFixed(1) +
       '°  pitch ' + deg(Cam.pitch).toFixed(1) + '°  ' + proj + '\n' +
     '<b>' + sceneMode + '</b>' + extra + '  zoom ' + camScale().toFixed(2) + 'x  ' +
-      (GL.on ? 'GL' : '2D') + '/' + (S.cfg.kernel||'over') + '\n' +
-    '<i>1-4 camera · 0 frame · X scene · E elevation · [ ] persp · V renderer · J kernel</i>';
+      (GL.on ? 'GL' : '2D') + '/' + (S.cfg.kernel||'over') +
+      (Snap.on ? '  <b>snap</b>' : '') + (Quality.mips && GL.isWebGL2 ? '  mip' : '') + '\n' +
+    '<i>1-4 camera · 0 frame · X scene · E elev · [ ] persp · S snap · F filter · V/J raster</i>';
   const btn = {top:'v-top', dimetric:'v-dim', trueIso:'v-iso', free:'v-per'};
   for(const k in btn) $(btn[k]).classList.toggle('on', presetName === k);
   $('v-scene').textContent = sceneMode.charAt(0).toUpperCase()+sceneMode.slice(1);
@@ -2139,6 +2449,7 @@ function goTo(i){
 
 let stripBuilt = 0;
 function refreshStrip(){
+  tlVersion++; Stack.dirty = true;
   /* rebuild only when the entry count changed; otherwise just restyle */
   if(stripBuilt !== timeline.length){
     strip.textContent = '';
@@ -2256,6 +2567,20 @@ window.addEventListener('pointerup', e=>{
  *    which is a pipeline stall for a problem this small. */
 function pickCell(sx, sy){
   const cfg = S.cfg, {rows, cols} = S.cells;
+  /* In the Z-stack a click is first a NAVIGATION: hitting a layer that is not
+   * the playhead scrubs the timeline to it, and only a hit on the playhead
+   * slice falls through to ordinary cell selection. */
+  if(sceneMode === 'stack' && GL.on && GL.ok && Stack.mesh && _rc){
+    _ndc.set(sx/Cam.vw*2 - 1, -(sy/Cam.vh*2 - 1));
+    _rc.setFromCamera(_ndc, GL.syncCamera());
+    const h = _rc.intersectObject(Stack.mesh, false)[0];
+    if(!h || h.instanceId === undefined || h.instanceId === null) return null;
+    const hit = Stack.at(h.instanceId);
+    if(!hit) return null;
+    if(hit.i !== playhead){ goTo(hit.i); return null; }
+    if(hit.r >= S.cells.rows || hit.c >= S.cells.cols) return null;
+    return {r:hit.r, c:hit.c};
+  }
   if(sceneMode === 'cards' && GL.on && GL.ok && Cards.mesh && _rc){
     _ndc.set(sx/Cam.vw*2 - 1, -(sy/Cam.vh*2 - 1));
     _rc.setFromCamera(_ndc, GL.syncCamera());
@@ -2305,6 +2630,16 @@ window.addEventListener('keydown', e=>{
     setScene(SCENE_MODES[(SCENE_MODES.indexOf(sceneMode)+1) % SCENE_MODES.length]);
   }
   if(e.key==='e'||e.key==='E') cycleElev(e.shiftKey ? -1 : 1);
+  if(e.key==='s'||e.key==='S') toggleSnap();
+  if(e.key==='f'||e.key==='F'){
+    Quality.mips = !Quality.mips;
+    applyTexQuality();
+    console.log('minification:', !GL.ok ? '(no GL yet)'
+      : Quality.mips ? (GL.isWebGL2 ? 'mipmaps + anisotropy ' + Math.min(16, GL.maxAniso||1) + 'x'
+                                    : 'requested, but this context is WebGL1 — NPOT mipmaps unavailable, staying nearest')
+                     : 'nearest (crawls when minified, exact when not)');
+    draw();
+  }
   if(e.key===','||e.key==='.'){
     const d = (e.key==='.' ? 1 : -1);
     if(sceneMode==='voxels'){
@@ -2313,6 +2648,15 @@ window.addEventListener('keydown', e=>{
     } else if(sceneMode==='cards'){
       Cards.liftMul = Math.max(0, Math.min(8, +(Cards.liftMul + d*0.25).toFixed(2)));
       Cards.dirty = true; console.log('card lift:', Cards.liftMul); draw();
+    } else if(sceneMode==='stack'){
+      if(e.shiftKey){
+        Stack.gap = Math.max(0.2, Math.min(6, +(Stack.gap + d*0.15).toFixed(2)));
+        console.log('stack spacing:', Stack.gap);
+      } else {
+        Stack.span = Math.max(1, Math.min(24, Stack.span + d));
+        console.log('stack window: playhead ±' + Stack.span);
+      }
+      Stack.dirty = true; draw();
     }
   }
   if(sceneMode==='voxels' && (e.key==='m'||e.key==='M')){
