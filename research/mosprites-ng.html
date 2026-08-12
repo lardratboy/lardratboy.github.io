@@ -186,6 +186,30 @@
     position:absolute; right:2px; top:1px; font-size:11px; line-height:1; color:var(--mark);
     text-shadow:0 0 3px #000;
   }
+  .frame.keyd{border-color:var(--mark)}
+  .frame.keyd.cur{border-color:var(--accent)}
+  .frame .del{
+    position:absolute; right:1px; bottom:1px; width:16px; height:16px; padding:0;
+    font:11px/1 system-ui,sans-serif; color:#e6edf3; background:rgba(180,40,40,.9);
+    border:none; border-radius:3px; cursor:pointer; opacity:0; transition:opacity .12s;
+  }
+  .frame:hover .del{opacity:1}
+  .frame .del:hover{background:#ef4444}
+
+  #tl-rec{font-family:ui-monospace,monospace; letter-spacing:.5px}
+  #tl-rec.on{background:#7d1d1d; color:#ffd7d7}
+  #tl-rec.on::before{content:'\25CF '; color:#ff5f56}
+  #tl-rec:not(.on)::before{content:'\25CB '; color:#8b949e}
+  #tl-dirty{color:var(--mark); font-weight:600}
+  #tl-prune-row{
+    display:flex; align-items:center; gap:10px; padding:6px 10px;
+    border-bottom:1px solid #21262d; background:var(--sunk); font-size:12px;
+  }
+  #tl-prune-row label{display:flex; align-items:center; gap:6px; color:var(--dim)}
+  #tl-prune-row input[type=range]{width:150px}
+  #prune-stat{font-family:ui-monospace,monospace; font-size:11.5px; color:#adbac7; flex:1 1 auto}
+  #tl-prune-row button{background:#30363d; padding:3px 9px; font-size:12px; width:auto}
+  #tl-prune-row button.prim{background:#7d1d1d; color:#ffd7d7}
 
   /* selftest overlay banner */
   #selftest-banner{
@@ -385,8 +409,8 @@
   <input type="file" id="file" accept="application/json" class="hidden">
   <div class="hint">click = select · ctrl-click = lock · alt-click = keep<br>
     shift-click = reroll · drag = pan · wheel = zoom<br>
-    R = regenerate · K = keep · C = copy · B = bookmark<br>
-    ← → = scrub · space = play</div>
+    R = regenerate · K = keep · C = copy · B = keyframe<br>
+    ← → = scrub · space = play · del = remove frame</div>
 </div>
 
 <div id="main">
@@ -404,9 +428,21 @@
       <button id="tl-play" title="Replay exploration (Space)">▶</button>
       <button id="tl-next" title="Forward (→)">▶|</button>
       <button id="tl-last" title="Latest (End)">⏭</button>
-      <button id="tl-mark" title="Bookmark this state (B)">☆</button>
+      <button id="tl-rec" class="on" title="Store every edit. Off: edit freely, punch in keyframes with ◆">REC</button>
+      <button id="tl-mark" title="Keyframe this state (B)">◇</button>
+      <button id="tl-keys" title="Show keyframes only">◆ only</button>
+      <button id="tl-prune" title="Prune near-duplicate frames">✂</button>
       <span id="tl-pos">0 / 0</span>
       <span id="tl-label"></span>
+    </div>
+    <div id="tl-prune-row" class="hidden">
+      <label>similarity
+        <input type="range" id="prune-thr" min="0" max="24" step="1" value="4">
+        <span id="prune-thr-v">4</span>
+      </label>
+      <span id="prune-stat"></span>
+      <button id="prune-apply" class="prim">Remove</button>
+      <button id="prune-cancel">Close</button>
     </div>
     <div id="tl-strip"></div>
   </div>
@@ -969,8 +1005,23 @@ const LABELS = {
 };
 
 let S = null;                 // {cfg, cells, paletteSeed}
-let timeline = [];            // append-only log
+let timeline = [];            // the take: every captured state, in capture order
 let playhead = -1;
+
+/* ---------------------------------------------------------- take vs keyframes
+   The timeline stopped being an undo stack and became a take you curate. Two
+   pieces of state on top of the existing log:
+
+     recording — REC. On (default) is exactly the old behaviour: every commit()
+                 appends. Off lets you edit live without laying down frames, and
+                 ◆ punches the current state in as a keyframe.
+     keysOnly  — a strip filter, not a deletion. Hides non-keyframes from view.
+
+   `bookmark` was already the "this one matters" flag, so it IS the keyframe
+   flag — no parallel concept, and old sessions load with their keys intact. */
+let recording = true;
+let keysOnly  = false;
+let dirty     = false;        // edits exist that no timeline entry holds
 const MAX_ENTRIES = 400;
 
 const newCell = () => ({seed:rand32(), locked:false, lockCfg:null});
@@ -1350,6 +1401,7 @@ function makeThumb(entry){
   g.imageSmoothingEnabled = true;
   g.drawImage(off, (THUMB_W-dw)/2, (THUMB_H-dh)/2, dw, dh);
   entry.thumb = c;
+  entry.hash = null;              /* the hash is derived from this pixel data */
 }
 
 function diffLabel(prev, next){
@@ -1366,10 +1418,45 @@ function diffLabel(prev, next){
   }).join(' · ');
 }
 
+/* Removing entries has to fix up `from`, which holds INDICES into this array.
+   Everything that shortens the timeline goes through here: the ✕ on a frame,
+   the pruner, and the MAX_ENTRIES evictor — which never remapped `from` at all
+   before, so branch arrows silently pointed at the wrong frame after the 401st
+   edit. A dropped ancestor is replaced by its nearest surviving ancestor. */
+function dropEntries(drop){
+  if(!drop || !drop.size) return 0;
+  if(drop.size >= timeline.length) drop.delete(timeline.length-1);   // never empty
+  const n = timeline.length, map = new Array(n);
+  let k = 0;
+  for(let i=0;i<n;i++) map[i] = drop.has(i) ? -1 : k++;
+  const resolve = i => {
+    for(let guard=0; i>=0 && guard<=n; guard++){
+      if(map[i]>=0) return map[i];
+      i = timeline[i].from;
+    }
+    return -1;
+  };
+  const kept = [];
+  for(let i=0;i<n;i++){
+    if(map[i]<0) continue;
+    timeline[i].from = resolve(timeline[i].from);
+    kept.push(timeline[i]);
+  }
+  let ph = map[playhead];
+  if(ph < 0){ let j = playhead; while(j>=0 && map[j]<0) j--; ph = j<0 ? 0 : map[j]; }
+  timeline = kept;
+  playhead = Math.min(Math.max(0, ph), timeline.length-1);
+  stripSig = '';
+  return n - timeline.length;
+}
+
 /* Append-only: rewinding moves the playhead; editing from the past appends
    a new entry at the end rather than truncating the future.               */
 function commit(key, explicitLabel){
   reconcileCells();
+  /* REC off: the canvas still follows every edit, the log just doesn't grow.
+     Nothing below this line changes when REC is on. */
+  if(!recording){ dirty = true; render(); refreshStrip(); return; }
   const snap = cloneState(S);
   const prev = timeline[timeline.length-1];
   const label = explicitLabel || diffLabel(prev ? prev.state : null, snap);
@@ -1389,8 +1476,15 @@ function commit(key, explicitLabel){
     const entry = {key, label, ts:now, state:snap, thumb:null, bookmark:false, from:playhead};
     makeThumb(entry);
     timeline.push(entry);
-    if(timeline.length > MAX_ENTRIES){ timeline.shift(); stripBuilt = -1; }
+    if(timeline.length > MAX_ENTRIES){
+      /* evict the oldest DISPOSABLE frame — a curated keyframe surviving to
+         entry 401 is the whole point of curating it */
+      let victim = timeline.findIndex(e => !e.bookmark);
+      if(victim < 0) victim = 0;
+      dropEntries(new Set([victim]));
+    }
   }
+  dirty = false;
   playhead = timeline.length-1;
   refreshStrip();
 }
@@ -1398,50 +1492,120 @@ function commit(key, explicitLabel){
 function goTo(i){
   if(i<0||i>=timeline.length||i===playhead) return;
   playhead = i;
-  S = cloneState(timeline[i].state);
+  syncToPlayhead();
+}
+/* used by goTo and by anything that changes WHICH entry the playhead names */
+function syncToPlayhead(){
+  const e = timeline[playhead];
+  if(!e) return;
+  dirty = false;                    /* unrecorded edits do not survive a jump */
+  S = cloneState(e.state);
   writeUI();
   render();
   refreshSelection();
   refreshStrip();
 }
 
-let stripBuilt = 0;
+/* ------------------------------------------------------------ frame identity
+   "Hundreds of entries that look very similar" is a perceptual problem, so the
+   pruner answers it perceptually rather than by diffing config: an 8x8 average
+   hash of the thumbnail the strip already renders. Two frames whose Hamming
+   distance is under the threshold are the same frame as far as the eye scanning
+   the strip is concerned. Keyframes are never candidates. */
+const HASH_N = 8;
+let hashCv = null;
+function frameHash(entry){
+  if(entry.hash) return entry.hash;
+  if(!entry.thumb) return null;
+  if(!hashCv){ hashCv = document.createElement('canvas'); hashCv.width=HASH_N; hashCv.height=HASH_N; }
+  const g = hashCv.getContext('2d', {willReadFrequently:true});
+  g.imageSmoothingEnabled = true;
+  g.clearRect(0,0,HASH_N,HASH_N);
+  g.drawImage(entry.thumb, 0,0, HASH_N, HASH_N);
+  const d = g.getImageData(0,0,HASH_N,HASH_N).data;
+  const y = new Float64Array(HASH_N*HASH_N);
+  let mean = 0;
+  for(let i=0;i<y.length;i++){
+    y[i] = 0.2126*d[i*4] + 0.7152*d[i*4+1] + 0.0722*d[i*4+2];
+    mean += y[i];
+  }
+  mean /= y.length;
+  let lo=0, hi=0;
+  for(let i=0;i<32;i++)  if(y[i]    > mean) lo |= (1<<i);
+  for(let i=32;i<64;i++) if(y[i]    > mean) hi |= (1<<(i-32));
+  return (entry.hash = [lo>>>0, hi>>>0]);
+}
+const hamming = (a,b) => popcount(a[0]^b[0]) + popcount(a[1]^b[1]);
+
+/* Walk forward holding an anchor: a frame is dropped when it is
+   indistinguishable from the last frame we decided to keep, so a long drag
+   collapses to its endpoints rather than to a pile of adjacent pairs. */
+function prunePlan(thr){
+  const drop = new Set();
+  let anchor = null;
+  for(let i=0;i<timeline.length;i++){
+    const e = timeline[i];
+    const h = frameHash(e);
+    const pinned = e.bookmark || i===0 || i===playhead || i===timeline.length-1;
+    if(pinned || !h || !anchor || hamming(h, anchor) > thr){ anchor = h || anchor; continue; }
+    drop.add(i);
+  }
+  return drop;
+}
+
+let stripSig = '';
 function refreshStrip(){
-  /* rebuild only when the entry count changed; otherwise just restyle */
-  if(stripBuilt !== timeline.length){
+  /* which entries are on screen. The filter hides, it never deletes — and the
+     playhead is always visible so "cur" can never be off-strip. */
+  const vis = [];
+  for(let i=0;i<timeline.length;i++)
+    if(!keysOnly || timeline[i].bookmark || i===playhead) vis.push(i);
+
+  const sig = vis.join(',') + '|' + timeline.length;
+  if(stripSig !== sig){
     strip.textContent = '';
-    timeline.forEach((e,i)=>{
+    for(const i of vis){
+      const e = timeline[i];
       const f = document.createElement('div');
       f.className='frame'; f.dataset.i=i;
-      f.appendChild(e.thumb);
+      if(e.thumb) f.appendChild(e.thumb);
       const idx = document.createElement('span');
       idx.className='idx'; idx.textContent = '#'+(i+1);
       f.appendChild(idx);
       const st = document.createElement('span');
-      st.className='star'; st.textContent = e.bookmark ? '★' : '';
+      st.className='star';
       f.appendChild(st);
+      const del = document.createElement('button');
+      del.className='del'; del.textContent='\u2715'; del.title='Remove this frame';
+      f.appendChild(del);
       strip.appendChild(f);
-    });
-    stripBuilt = timeline.length;
+    }
+    stripSig = sig;
   }
-  [...strip.children].forEach((f,i)=>{
+  for(const f of strip.children){
+    const i = +f.dataset.i, en = timeline[i];
+    if(!en) continue;
     f.classList.toggle('cur', i===playhead);
-    const en = timeline[i];
+    f.classList.toggle('keyd', !!en.bookmark);
     f.title = `#${i+1} · ${en.label}` +
       (en.from>=0 && en.from!==i-1 ? `  (branched from #${en.from+1})` : '');
-    f.lastChild.textContent = timeline[i].bookmark ? '★' : '';
-  });
-  const cur = strip.children[playhead];
-  if(cur) cur.scrollIntoView({block:'nearest', inline:'nearest'});
-  $('tl-pos').textContent = `${playhead+1} / ${timeline.length}`;
+    f.querySelector('.star').textContent = en.bookmark ? '\u25C6' : '';
+  }
+
+  const keys = timeline.reduce((n,e)=>n+(e.bookmark?1:0), 0);
+  $('tl-pos').textContent = `${playhead+1} / ${timeline.length}` + (keys ? ` · ${keys}\u25C6` : '');
   const e = timeline[playhead];
+  const tail = dirty ? ` — <span id="tl-dirty">\u25CF unrecorded</span>, \u25C6 to keep` : '';
   $('tl-label').innerHTML = e
     ? (playhead < timeline.length-1
-        ? `<span id="tl-past">◂ rewound</span> — <b>${escapeHtml(e.label)}</b> · edits append at #${timeline.length+1}`
-        : `<b>${escapeHtml(e.label)}</b>`)
+        ? `<span id="tl-past">\u25C2 rewound</span> — <b>${escapeHtml(e.label)}</b> · edits append at #${timeline.length+1}${tail}`
+        : `<b>${escapeHtml(e.label)}</b>${tail}`)
     : '';
-  $('tl-mark').textContent = e && e.bookmark ? '★' : '☆';
+  $('tl-mark').textContent = e && e.bookmark ? '\u25C6' : '\u25C7';
   $('tl-mark').classList.toggle('on', !!(e && e.bookmark));
+  if(!$('tl-prune-row').classList.contains('hidden')) refreshPruneStat();
+  const cur = strip.querySelector('.frame.cur');
+  if(cur) cur.scrollIntoView({block:'nearest', inline:'nearest'});
 }
 const escapeHtml = s => String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
@@ -1890,7 +2054,10 @@ $('col-toggle').addEventListener('click', ()=>{
 
 strip.addEventListener('click', e=>{
   const f = e.target.closest('.frame');
-  if(f) goTo(+f.dataset.i);
+  if(!f) return;
+  const i = +f.dataset.i;
+  if(e.target.closest('.del')){ e.stopPropagation(); deleteFrame(i); return; }
+  goTo(i);
 });
 
 /* ======================================================= selftest harness (NG §8) */
@@ -2179,6 +2346,65 @@ function runSelfTest(){
       nd > 0, `${nd} px differ`);
   }
 
+  /* ---- T-series: timeline curation. `from` holds INDICES, so anything that
+     shortens the array can silently corrupt the branch graph. These run against
+     a synthetic timeline and restore the real one. */
+  {
+    const save = {tl:timeline, ph:playhead, sig:stripSig};
+    const mk = (n, keys, hashes) => Array.from({length:n},(_,i)=>({
+      key:'cfg:x', label:'e'+i, ts:i, state:save.tl[0] ? save.tl[0].state : {},
+      thumb:null, bookmark:(keys||[]).indexOf(i)>=0, from:i-1,
+      hash:[hashes ? hashes[i] : i, 0]}));
+    try{
+      timeline = mk(4); playhead = 3;
+      const n1 = dropEntries(new Set([1,2]));
+      t('T1 removal remaps branch pointers past dropped ancestors',
+        n1===2 && timeline.length===2 && timeline[1].from===0,
+        `removed ${n1}, from=${timeline[1].from} (want 0)`);
+
+      timeline = mk(6); playhead = 3;
+      dropEntries(new Set([2,3,4]));
+      const t2a = playhead===1 && timeline[playhead].label==='e1';
+      timeline = mk(5); playhead = 4;
+      dropEntries(new Set([0,1,2,3,4]));
+      t('T2 playhead survives removal; the timeline never empties',
+        t2a && timeline.length===1 && playhead===0,
+        `fallback ok=${t2a}, empty-guard len=${timeline.length}`);
+
+      timeline = mk(20); playhead = 19;
+      dropEntries(new Set([3,4,5,11,12]));
+      t('T3 every surviving `from` points strictly backwards and in range',
+        timeline.every((e,i)=>e.from<i && e.from>=-1),
+        timeline.map(e=>e.from).join(','));
+
+      timeline = mk(8, [], [0,0,0,15,15,15,255,255]); playhead = 0;
+      const d1 = [...prunePlan(0)].sort((a,b)=>a-b).join(',');
+      timeline = mk(6, [3], [0,0,0,0,0,0]); playhead = 0;
+      const d2 = prunePlan(0);
+      t('T4 pruner keeps run heads and never touches a keyframe',
+        d1==='1,2,4,5' && !d2.has(3) && !d2.has(0) && !d2.has(5),
+        `runs -> [${d1}]; with key@3 -> [${[...d2].sort((a,b)=>a-b).join(',')}]`);
+
+      /* each step is 2 bits from its predecessor: pairwise comparison at
+         threshold 3 erases the whole ramp, anchoring on the last KEPT frame
+         does not. This is the difference between "similar" and "identical". */
+      timeline = mk(6, [], [0,3,15,63,255,1023]); playhead = 0;
+      const drift = prunePlan(3);
+      t('T5 pruner anchors on the last kept frame, so slow drift survives',
+        drift.size < 4, `${drift.size} of 6 dropped (pairwise would drop 4)`);
+
+      timeline = mk(6, [0,1]); playhead = 5;
+      const victim = timeline.findIndex(e=>!e.bookmark);
+      dropEntries(new Set([victim]));
+      t('T6 evictor targets the oldest disposable frame, not index 0',
+        victim===2 && timeline[0].label==='e0' && timeline[1].label==='e1',
+        `victim=#${victim+1}, survivors ${timeline.map(e=>e.label).join(',')}`);
+    } finally {
+      timeline = save.tl; playhead = save.ph; stripSig = save.sig;
+      refreshStrip();
+    }
+  }
+
   let passCount = 0;
   console.log('--- MoSprites NG Conformance Suite ---');
   for(const res of T){
@@ -2266,7 +2492,7 @@ $('file').addEventListener('change', e=>{
         key:x.key, label:x.label, ts:x.ts, bookmark:x.bookmark, thumb:null, from:-1,
         state: {cfg:x.cfg, cells:d.cellPool[x.cells], paletteSeed:x.paletteSeed},
       }));
-      stripBuilt = -1;
+      stripSig = "";
       timeline.forEach(en=>{ S = cloneState(en.state); render(); makeThumb(en); });
       collection = (d.collection||[]).map(i=>({...i}));
       colSeq = collection.reduce((m,i)=>Math.max(m,i.id||0), 0);
@@ -2287,11 +2513,78 @@ $('tl-prev').addEventListener('click', ()=>goTo(playhead-1));
 $('tl-next').addEventListener('click', ()=>goTo(playhead+1));
 $('tl-last').addEventListener('click', ()=>goTo(timeline.length-1));
 $('tl-play').addEventListener('click', togglePlay);
-$('tl-mark').addEventListener('click', ()=>{
+
+/* REC — the only control over whether the log grows. On by default, and when
+   it is on nothing about capture differs from before. */
+$('tl-rec').addEventListener('click', ()=>{
+  recording = !recording;
+  $('tl-rec').classList.toggle('on', recording);
+  if(recording && dirty) commit('rec', 'resumed recording');
+  refreshStrip();
+});
+
+/* ◆ — toggles the keyframe flag, EXCEPT when there are unrecorded edits, in
+   which case it is the punch-in: the live state becomes a new keyframe. */
+function captureKey(){
+  if(dirty){
+    const was = recording;
+    recording = true;
+    commit('key', 'keyframe');
+    recording = was;
+    timeline[timeline.length-1].bookmark = true;
+    refreshStrip();
+    return;
+  }
   const e = timeline[playhead];
   if(!e) return;
-  e.bookmark = !e.bookmark; refreshStrip();
+  e.bookmark = !e.bookmark;
+  refreshStrip();
+}
+$('tl-mark').addEventListener('click', captureKey);
+
+$('tl-keys').addEventListener('click', ()=>{
+  keysOnly = !keysOnly;
+  $('tl-keys').classList.toggle('on', keysOnly);
+  refreshStrip();
 });
+
+/* ---------------------------------------------------------------- the pruner */
+function refreshPruneStat(){
+  const thr = +$('prune-thr').value;
+  const n = prunePlan(thr).size;
+  const keys = timeline.reduce((k,e)=>k+(e.bookmark?1:0), 0);
+  $('prune-thr-v').textContent = thr;
+  $('prune-stat').textContent =
+    `removes ${n} of ${timeline.length} \u2192 ${timeline.length-n} remain` +
+    (keys ? ` · ${keys} keyframe${keys>1?'s':''} protected` : '') +
+    (thr===0 ? ' · exact duplicates only' : '');
+  $('prune-apply').disabled = n===0;
+}
+$('tl-prune').addEventListener('click', ()=>{
+  const row = $('tl-prune-row');
+  const show = row.classList.contains('hidden');
+  row.classList.toggle('hidden', !show);
+  $('tl-prune').classList.toggle('on', show);
+  if(show) refreshPruneStat();
+});
+$('prune-thr').addEventListener('input', refreshPruneStat);
+$('prune-cancel').addEventListener('click', ()=>{
+  $('tl-prune-row').classList.add('hidden');
+  $('tl-prune').classList.remove('on');
+});
+$('prune-apply').addEventListener('click', ()=>{
+  const thr = +$('prune-thr').value;
+  const removed = dropEntries(prunePlan(thr));
+  console.log(`Pruned ${removed} near-duplicate frames at threshold ${thr}; ${timeline.length} remain.`);
+  syncToPlayhead();
+  refreshPruneStat();
+});
+
+function deleteFrame(i){
+  if(timeline.length <= 1) return;
+  const removed = dropEntries(new Set([i]));
+  if(removed) syncToPlayhead();
+}
 
 $('zin').addEventListener('click', ()=>zoom(view.s*1.5));
 $('zout').addEventListener('click', ()=>zoom(view.s/1.5));
@@ -2307,6 +2600,7 @@ window.addEventListener('keydown', e=>{
     case 'End':  goTo(timeline.length-1); e.preventDefault(); break;
     case ' ': togglePlay(); e.preventDefault(); break;
     case 'b': case 'B': $('tl-mark').click(); break;
+    case 'Delete': case 'Backspace': deleteFrame(playhead); e.preventDefault(); break;
     case 'r': case 'R': $('regen').click(); break;
     case 'c': case 'C': copyRecipe(); break;
     case 'k': case 'K': keepSelected(); break;
