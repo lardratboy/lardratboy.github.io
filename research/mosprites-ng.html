@@ -479,22 +479,151 @@ const OPS = {
   mul:  (d,a_d, s,a) => [d*(1-a) + (d*s/255)*a, a + a_d*(1-a)],
 };
 
+/* ------------------------------------------------------- operator, kernel form
+   OPS above is the DECLARATIVE reference: one channel in, [colour, alpha] out.
+   It is what the algebra means, and A1 still tests it. But it allocates a
+   two-element array per channel per pixel and discards two of the three alpha
+   results, which made it the single largest cost in the raster.
+
+   OPS_K is the same algebra written to mutate the planes in place. It is not a
+   second definition — K7 asserts the two agree bit for bit over a randomised
+   matrix, so adding an operator means adding it to both and the suite proves
+   they match. `opaque` declares that the operator collapses to a plain write at
+   a === 1, which is true of `over` (s*1 + d*0) and false of `mul`. */
+const OPS_K = {
+  over: { opaque:true, f(R,G,B,A,k, r,g,b, a){
+    const ad=A[k], ia=1-a;
+    R[k] = r*a + R[k]*ia;
+    G[k] = g*a + G[k]*ia;
+    B[k] = b*a + B[k]*ia;
+    A[k] = a + ad*ia;
+  }},
+  add:  { opaque:false, f(R,G,B,A,k, r,g,b, a){
+    const ad=A[k];
+    R[k] = R[k] + r*a;
+    G[k] = G[k] + g*a;
+    B[k] = B[k] + b*a;
+    A[k] = Math.min(1, ad + a);
+  }},
+  mul:  { opaque:false, f(R,G,B,A,k, r,g,b, a){
+    const ad=A[k], ia=1-a;
+    R[k] = R[k]*ia + (R[k]*r/255)*a;
+    G[k] = G[k]*ia + (G[k]*g/255)*a;
+    B[k] = B[k]*ia + (B[k]*b/255)*a;
+    A[k] = a + ad*ia;
+  }},
+};
+
+/* A shared identity so `byField` with no field is one cache key, not a fresh
+   closure per item. */
+const ZERO_FIELD = () => 0;
+
+/* Schwartzian: identical comparator VALUES, evaluated once per cell instead of
+   O(n log n) times. Array.prototype.sort is stable, so the permutation is
+   unchanged — this is a cost change, not a behaviour change. */
+const byKey = (pairs, key) => {
+  const k = pairs.map(key), idx = pairs.map((_,i)=>i);
+  idx.sort((a,b)=>k[a]-k[b]);
+  return idx.map(i=>pairs[i]);
+};
+
 const ORDERS = {
   rowMajor:  (w,h) => { const o=[]; for(let y=0;y<h;y++) for(let x=0;x<w;x++) o.push([x,y]); return o; },
   colMajor:  (w,h) => { const o=[]; for(let x=0;x<w;x++) for(let y=0;y<h;y++) o.push([x,y]); return o; },
   serpentine:(w,h) => { const o=[]; for(let y=0;y<h;y++){ for(let i=0;i<w;i++) o.push([y%2?w-1-i:i, y]); } return o; },
-  radial:    (w,h) => ORDERS.rowMajor(w,h).sort((a,b)=>
-                Math.hypot(a[0]-(w-1)/2,a[1]-(h-1)/2) - Math.hypot(b[0]-(w-1)/2,b[1]-(h-1)/2)),
-  morton:    (w,h) => ORDERS.rowMajor(w,h).sort((a,b)=>mortonKey(a)-mortonKey(b)),
+  radial:    (w,h) => byKey(ORDERS.rowMajor(w,h), a=>Math.hypot(a[0]-(w-1)/2, a[1]-(h-1)/2)),
+  morton:    (w,h) => byKey(ORDERS.rowMajor(w,h), mortonKey),
   /* paint in order of field value, so apparent light direction is generated
      by the same modulo field as the form */
-  byField:   (w,h,field) => ORDERS.rowMajor(w,h).sort((a,b)=>(field?field(a[0],a[1]):0)-(field?field(b[0],b[1]):0)),
+  byField:   (w,h,field) => byKey(ORDERS.rowMajor(w,h), a=>field?field(a[0],a[1]):0),
 };
+
+/* A traversal is a pure function of (order, w, h, field), so it is cached and
+   flattened to Int32Array [x0,y0,x1,y1,...] — the [x,y] pair array was
+   reallocated, and re-sorted, once per item per render. */
+const SEQ_CACHE = new Map();
+const FIELD_SEQ = new WeakMap();
+function orderSeq(order, w, h, field){
+  const fn = ORDERS[order] || ORDERS.rowMajor;
+  const key = order + '|' + w + '|' + h;
+  let store = SEQ_CACHE;
+  if(order === 'byField'){
+    const ff = field || ZERO_FIELD;
+    store = FIELD_SEQ.get(ff);
+    if(!store){ store = new Map(); FIELD_SEQ.set(ff, store); }
+  }
+  const hit = store.get(key);
+  if(hit) return hit;
+  const pairs = fn(w, h, field);
+  const flat = new Int32Array(pairs.length*2);
+  for(let i=0;i<pairs.length;i++){ flat[i*2]=pairs[i][0]; flat[i*2+1]=pairs[i][1]; }
+  store.set(key, flat);
+  return flat;
+}
 
 const srgb2lin = c => { c/=255; return (c<=0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4))*255; };
 const lin2srgb = c => { c/=255; return (c<=0.0031308 ? c*12.92 : 1.055*Math.pow(c,1/2.4)-0.055)*255; };
 
 const span = (a0,a1,b0,b1) => Math.max(0, Math.min(a1,b1)-Math.max(a0,b0));
+
+/* ------------------------------------------------------------ coverage plans
+   Coverage is separable, and a cell's footprint on one axis depends only on
+   (index, base, p) — not on the other axis, and not on which cells are lit.
+   The loop as written recomputed fx once per scanline of every lit cell, so a
+   single fx value was recomputed ceil(p) x (lit cells in that column) times.
+   One plan per axis per item replaces O(lit . ceil(p)^2) span() calls with
+   O((w+h) . ceil(p)), computed before the traversal starts.
+
+   Each entry is trimmed to its non-zero run — coverage is a trapezoid, so zeros
+   can only appear at the ends (K8 asserts this), which removes the `if(fx<=0)`
+   branch from the inner loop. [f0,f1) is the sub-run at exactly 1: the cell's
+   interior, where an `opaque` operator is a plain write. */
+function axisPlan(n, base, p, limit){
+  const plan = new Array(n);
+  for(let t=0;t<n;t++){
+    const t0 = base + t*p, t1 = t0 + p;
+    const lo = Math.max(0, Math.floor(t0)), hi = Math.min(limit, Math.ceil(t1));
+    const raw = [];
+    for(let i=lo;i<hi;i++) raw.push(span(t0,t1,i,i+1));
+    let a=0, b=raw.length;
+    while(a<b && raw[a]<=0) a++;
+    while(b>a && raw[b-1]<=0) b--;
+    const cov = Float64Array.from(raw.slice(a,b));
+    let f0=-1, f1=-1;
+    for(let i=0;i<cov.length;i++) if(cov[i]===1){ if(f0<0) f0=i; f1=i+1; }
+    if(f0<0){ f0=0; f1=0; }
+    plan[t] = { lo: lo+a, cov, f0, f1 };
+  }
+  return plan;
+}
+
+/* THE hot loop — one kernel, both callers (raster() and rasterize()).
+   colorAt(x,y) returns an encoded [r,g,b] already in the working space, or a
+   falsy value for an unpainted cell. */
+function blit(P, W, seq, colorAt, xs, ys, opk){
+  const R=P.R, G=P.G, B=P.B, A=P.A, f=opk.f, OPQ=opk.opaque;
+  for(let t=0; t<seq.length; t+=2){
+    const c = colorAt(seq[t], seq[t+1]); if(!c) continue;
+    const r=c[0], g=c[1], b=c[2];
+    const px = xs[seq[t]], py = ys[seq[t+1]];
+    const xc = px.cov, yc = py.cov, nx = xc.length, ny = yc.length;
+    if(!nx || !ny) continue;
+    const xlo = px.lo, xf0 = px.f0, xf1 = px.f1;
+    for(let jj=0; jj<ny; jj++){
+      const fy = yc[jj], row = (py.lo + jj)*W + xlo;
+      if(OPQ && fy === 1){
+        /* fx*fy === 1, so the general form is already r + d*0 — skip the flops,
+           not the semantics. */
+        let ii=0;
+        for(; ii<xf0; ii++) f(R,G,B,A, row+ii, r,g,b, xc[ii]);
+        for(; ii<xf1; ii++){ const k=row+ii; R[k]=r; G[k]=g; B[k]=b; A[k]=1; }
+        for(; ii<nx;  ii++) f(R,G,B,A, row+ii, r,g,b, xc[ii]);
+      } else {
+        for(let ii=0; ii<nx; ii++) f(R,G,B,A, row+ii, r,g,b, xc[ii]*fy);
+      }
+    }
+  }
+}
 
 /* ---------------------------------------------------------- output contract
    The kernel accumulates PREMULTIPLIED colour in the WORKING space (linear or
@@ -510,13 +639,39 @@ const span = (a0,a1,b0,b1) => Math.max(0, Math.min(a1,b1)-Math.max(a0,b0));
    seam field is made of, which is the one place it would be mistaken for
    browser divergence rather than a defect. See ng §4. */
 function resolve(R,G,B,A,W,H,linear){
-  const out = new Uint8ClampedArray(W*H*4);          /* clamps on assignment */
-  for(let k=0;k<W*H;k++){
-    const a=A[k], i=k*4;
-    if(a<=1e-9){ out[i]=out[i+1]=out[i+2]=out[i+3]=0; continue; }
-    let r=R[k]/a, g=G[k]/a, b=B[k]/a;                /* 1. unpremultiply */
-    if(linear){ r=lin2srgb(r); g=lin2srgb(g); b=lin2srgb(b); }   /* 2. curve */
-    out[i]=Math.round(r); out[i+1]=Math.round(g); out[i+2]=Math.round(b);
+  const N = W*H;
+  const out = new Uint8ClampedArray(N*4);            /* zero-filled; clamps on assignment */
+  if(!linear){
+    for(let k=0;k<N;k++){
+      const a=A[k]; if(a<=1e-9) continue;            /* already zero */
+      const i=k*4;
+      out[i]=Math.round(R[k]/a); out[i+1]=Math.round(G[k]/a);   /* 1. unpremultiply */
+      out[i+2]=Math.round(B[k]/a); out[i+3]=Math.round(a*255);
+    }
+    return out;
+  }
+  /* Linear space pays three Math.pow per pixel, which is what made resolve()
+     the dominant cost once the raster loop stopped being it. Opaque pixels are
+     the sprite's interior: they repeat the palette's few linear values over and
+     over, so memoise those. Seam values are nearly all distinct — caching them
+     would only grow the map, so they go straight through. Division by exactly 1
+     is exact in IEEE, so the opaque path is the general path with the divide
+     removed, not an approximation of it. */
+  const memo = new Map();
+  const T = v => { let u = memo.get(v);
+    if(u === undefined){ u = lin2srgb(v); if(memo.size < 4096) memo.set(v,u); }
+    return u; };
+  for(let k=0;k<N;k++){
+    const a=A[k]; if(a<=1e-9) continue;
+    const i=k*4;
+    if(a===1){
+      out[i]=Math.round(T(R[k])); out[i+1]=Math.round(T(G[k]));
+      out[i+2]=Math.round(T(B[k])); out[i+3]=255;
+      continue;
+    }
+    out[i]=Math.round(lin2srgb(R[k]/a));             /* 1. unpremultiply */
+    out[i+1]=Math.round(lin2srgb(G[k]/a));           /* 2. transfer curve   */
+    out[i+2]=Math.round(lin2srgb(B[k]/a));
     out[i+3]=Math.round(a*255);
   }
   return out;
@@ -526,26 +681,17 @@ function resolve(R,G,B,A,W,H,linear){
 function raster(grid, w, h, opts){
   const { scale:p, origin=[0,0], W, H,
           op='over', order='rowMajor', linear=false, matte=null, field=null } = opts;
-  const f = OPS[op] || OPS.over, seq = (ORDERS[order] || ORDERS.rowMajor)(w, h, field);
+  const opk = OPS_K[op] || OPS_K.over, seq = orderSeq(order, w, h, field);
   const R=new Float64Array(W*H), G=new Float64Array(W*H),
         B=new Float64Array(W*H), A=new Float64Array(W*H);
   const enc = linear ? srgb2lin : (c=>c);
   if(matte){ const m = matte.map(enc);
     for(let k=0;k<W*H;k++){ R[k]=m[0]; G[k]=m[1]; B[k]=m[2]; A[k]=1; } }
-  for(const [x,y] of seq){
-    const c = grid(x,y); if(!c) continue;
-    const [r,g,b] = c.map(enc);
-    const x0=origin[0]+x*p, y0=origin[1]+y*p;
-    for(let j=Math.max(0,Math.floor(y0)); j<Math.min(H,Math.ceil(y0+p)); j++){
-      const fy = span(y0,y0+p,j,j+1); if(fy<=0) continue;
-      for(let i=Math.max(0,Math.floor(x0)); i<Math.min(W,Math.ceil(x0+p)); i++){
-        const fx = span(x0,x0+p,i,i+1); if(fx<=0) continue;
-        const a = fx*fy, k=j*W+i, ad=A[k];                 /* coverage is separable */
-        [R[k]] = f(R[k],ad,r,a); [G[k]] = f(G[k],ad,g,a);
-        let na; [B[k],na] = f(B[k],ad,b,a); A[k]=na;
-      }
-    }
-  }
+  const xs = axisPlan(w, origin[0], p, W), ys = axisPlan(h, origin[1], p, H);
+  const scratch = [0,0,0];                                 /* consumed immediately by blit */
+  const colorAt = (x,y) => { const c = grid(x,y); if(!c) return null;
+    scratch[0]=enc(c[0]); scratch[1]=enc(c[1]); scratch[2]=enc(c[2]); return scratch; };
+  blit({R,G,B,A}, W, seq, colorAt, xs, ys, opk);
   /* premultiplied, working space — see the output contract above. Callers
      that need pixels use resolve(); callers that check closed forms do not. */
   return {R,G,B,A,W,H,linear};
@@ -959,12 +1105,13 @@ function rasterize(cv, items, layout, policy){
 
   const linear = (policy.space === 'linear');
   const enc = linear ? srgb2lin : (c=>c);
-  const f = OPS[policy.operator] || OPS.over;
+  const opk = OPS_K[policy.operator] || OPS_K.over;
 
   if(matteRGB){
     const m = matteRGB.map(enc);
     for(let k=0;k<W*H;k++){ R[k]=m[0]; G[k]=m[1]; B[k]=m[2]; A[k]=1.0; }
   }
+  const P = {R,G,B,A};
 
   /* Process item by item according to order and local coordinates */
   for(const it of items){
@@ -977,24 +1124,19 @@ function rasterize(cv, items, layout, policy){
        publishes the closure (ng §2.2); reconstructing it from sprite fields
        silently fell back to a default circle field, so the apparent light was
        never actually generated by the sprite's own field. */
-    const seq = (ORDERS[policy.order] || ORDERS.rowMajor)(s.w, s.h, s.field || (()=>0));
+    const seq = orderSeq(policy.order, s.w, s.h, s.field || ZERO_FIELD);
+    const xs = axisPlan(s.w, X0, p, W), ys = axisPlan(s.h, Y0, p, H);
 
-    for(const [x, y] of seq){
-      const v = s.grid[y][x]; if(!v) continue;
-      const hex = s.colors[v-1] || '#ffffff';
-      const [r, g, b] = hexRgb(hex).map(enc);
-      const x0 = X0 + x*p, y0 = Y0 + y*p;
-
-      for(let j=Math.max(0,Math.floor(y0)); j<Math.min(H,Math.ceil(y0+p)); j++){
-        const fy = span(y0,y0+p,j,j+1); if(fy<=0) continue;
-        for(let i=Math.max(0,Math.floor(x0)); i<Math.min(W,Math.ceil(x0+p)); i++){
-          const fx = span(x0,x0+p,i,i+1); if(fx<=0) continue;
-          const a = fx*fy, k=j*W+i, ad=A[k];
-          [R[k]] = f(R[k],ad,r,a); [G[k]] = f(G[k],ad,g,a);
-          let na; [B[k],na] = f(B[k],ad,b,a); A[k]=na;
-        }
-      }
-    }
+    /* The encoded palette is a per-item constant. hexRgb() re-parsed a string —
+       and, in linear space, ran three Math.pow calls — once per LIT CELL. */
+    const lut = [];
+    const colorAt = (x,y) => {
+      const v = s.grid[y][x]; if(!v) return null;
+      let c = lut[v];
+      if(!c) c = lut[v] = hexRgb(s.colors[v-1] || '#ffffff').map(enc);
+      return c;
+    };
+    blit(P, W, seq, colorAt, xs, ys, opk);
   }
 
   /* single boundary step: unpremultiply, then transfer curve */
@@ -1039,6 +1181,60 @@ function rasterizeCanvas2D(cv, items, layout, policy){
     }
   }
   return cv;
+}
+
+/* ------------------------------------------ naive reference (conformance only)
+   The kernel as it read before the coverage-plan rewrite: no plans, no LUT, no
+   cached traversal, and the DECLARATIVE OPS rather than OPS_K. It is slow on
+   purpose — it is the thing K9 measures the fast kernel against, byte for byte,
+   so "faster" can never quietly become "different". Never called by the app. */
+function resolveNaive(R,G,B,A,W,H,linear){
+  const out = new Uint8ClampedArray(W*H*4);
+  for(let k=0;k<W*H;k++){
+    const a=A[k], i=k*4;
+    if(a<=1e-9){ out[i]=out[i+1]=out[i+2]=out[i+3]=0; continue; }
+    let r=R[k]/a, g=G[k]/a, b=B[k]/a;
+    if(linear){ r=lin2srgb(r); g=lin2srgb(g); b=lin2srgb(b); }
+    out[i]=Math.round(r); out[i+1]=Math.round(g); out[i+2]=Math.round(b);
+    out[i+3]=Math.round(a*255);
+  }
+  return out;
+}
+
+function rasterizeNaivePlanes(items, layout, policy){
+  const p = policy.scale, sp = layout.spacing;
+  const outerW = (layout.cellW + sp) * p, outerH = (layout.cellH + sp) * p;
+  const W = Math.max(1, Math.ceil(layout.cols * outerW));
+  const H = Math.max(1, Math.ceil(layout.rows * outerH));
+  const R=new Float64Array(W*H), G=new Float64Array(W*H),
+        B=new Float64Array(W*H), A=new Float64Array(W*H);
+  const linear = (policy.space === 'linear');
+  const enc = linear ? srgb2lin : (c=>c);
+  const f = OPS[policy.operator] || OPS.over;
+  if(policy.matte){ const m = hexRgb(policy.matte).map(enc);
+    for(let k=0;k<W*H;k++){ R[k]=m[0]; G[k]=m[1]; B[k]=m[2]; A[k]=1.0; } }
+  for(const it of items){
+    const s = it.sprite;
+    let X0 = it.col*outerW + Math.floor((layout.cellW - s.w)/2)*p;
+    let Y0 = it.row*outerH + Math.floor((layout.cellH - s.h)/2)*p;
+    if(policy.seamphase === 'local'){ X0 = Math.round(X0); Y0 = Math.round(Y0); }
+    const seq = (ORDERS[policy.order] || ORDERS.rowMajor)(s.w, s.h, s.field || ZERO_FIELD);
+    for(const [x, y] of seq){
+      const v = s.grid[y][x]; if(!v) continue;
+      const [r,g,b] = hexRgb(s.colors[v-1] || '#ffffff').map(enc);
+      const x0 = X0 + x*p, y0 = Y0 + y*p;
+      for(let j=Math.max(0,Math.floor(y0)); j<Math.min(H,Math.ceil(y0+p)); j++){
+        const fy = span(y0,y0+p,j,j+1); if(fy<=0) continue;
+        for(let i=Math.max(0,Math.floor(x0)); i<Math.min(W,Math.ceil(x0+p)); i++){
+          const fx = span(x0,x0+p,i,i+1); if(fx<=0) continue;
+          const a = fx*fy, k=j*W+i, ad=A[k];
+          [R[k]] = f(R[k],ad,r,a); [G[k]] = f(G[k],ad,g,a);
+          let na; [B[k],na] = f(B[k],ad,b,a); A[k]=na;
+        }
+      }
+    }
+  }
+  return {R,G,B,A,W,H,linear};
 }
 
 /* ======================================================= divergence & conformance (NG) */
@@ -1823,6 +2019,110 @@ function runSelfTest(){
       divFrac.translucent.maxDelta <= 8,
       `scale=4.25 -> ${divFrac.translucent.total} translucent px, ` +
       `${divFrac.translucent.diff} differ, max Δ${divFrac.translucent.maxDelta} (bound 8)`);
+  }
+
+  /* ---- K-series, kernel rewrite: the fast path must be the SAME path.
+     Speed is only allowed to be free; if any of these fail, it was not. */
+
+  /* K7 — OPS_K is OPS, bit for bit, including the alpha channel */
+  {
+    let worst = null, n = 0;
+    const rnd = mulberry32(0xC0FFEE);
+    for(const name of Object.keys(OPS)){
+      for(let i=0;i<4000 && !worst;i++){
+        const d=[rnd()*255, rnd()*255, rnd()*255], ad=rnd();
+        const s=[rnd()*255, rnd()*255, rnd()*255];
+        const a=[0, 1, rnd(), 0.5, 0.25][i%5];
+        const R=Float64Array.of(d[0]), G=Float64Array.of(d[1]),
+              B=Float64Array.of(d[2]), A=Float64Array.of(ad);
+        OPS_K[name].f(R,G,B,A,0, s[0],s[1],s[2], a);
+        const [er]=OPS[name](d[0],ad,s[0],a), [eg]=OPS[name](d[1],ad,s[1],a);
+        const [eb,ea]=OPS[name](d[2],ad,s[2],a);
+        n++;
+        if(!Object.is(R[0],er)||!Object.is(G[0],eg)||!Object.is(B[0],eb)||!Object.is(A[0],ea))
+          worst = `${name} at a=${a}`;
+      }
+    }
+    t('K7 OPS_K (kernel form) == OPS (declarative) bit for bit', !worst,
+      worst || `${n} randomised triples across ${Object.keys(OPS).length} operators`);
+  }
+
+  /* K8 — the structural claims axisPlan's inner loop relies on */
+  {
+    let zeros = 0, broken = 0, badSum = 0, plans = 0;
+    for(const p of [1, 2, 0.5, 4.25, 4.2, 5/3, 7.125, 12.8, 24]){
+      for(const base of [0, 0.5, -2.4, 3.75]){
+        const limit = Math.ceil(12*p) + 8;
+        for(const s of axisPlan(12, base, p, limit)){
+          plans++;
+          for(let i=0;i<s.cov.length;i++) if(s.cov[i] <= 0) zeros++;
+          let seen=false, done=false;
+          for(let i=0;i<s.cov.length;i++){
+            if(s.cov[i]===1){ if(done) broken++; seen=true; } else if(seen) done=true;
+          }
+          if(base >= 0){ let sum=0; for(const v of s.cov) sum+=v;
+            if(Math.abs(sum - p) > 1e-9) badSum++; }
+        }
+      }
+    }
+    t('K8 coverage plan: no interior zeros, full run contiguous, sum == p',
+      zeros===0 && broken===0 && badSum===0,
+      `${plans} plans; ${zeros} stray zeros, ${broken} split runs, ${badSum} bad sums`);
+  }
+
+  /* K9 — the whole rewrite, end to end, against the pre-rewrite loop */
+  {
+    const genCfg = {w:12, h:12, sym:'horizontal', coverage:0.5, ncol:4, useCA:false,
+      source:'field', formulaId:'skew', modulus:17, vary:false, stride:1, phase:0,
+      colorMode:'bands', maskId:'none', maskScale:1, maskInvert:false, outline:false,
+      sortLum:true, palette:paletteFor(31337, 3)};
+    const sprites = [generateSprite(7, genCfg), generateSprite(8, genCfg)];
+    const layout = {cols:2, rows:1, cellW:12, cellH:12, spacing:1};
+    const items = [{sprite:sprites[0],col:0,row:0},{sprite:sprites[1],col:1,row:0}];
+    let cases=0, bad=[];
+    for(const scale of [4, 4.25, 4.2, 5/3, 7.125])
+    for(const operator of ['over','add','mul'])
+    for(const order of ['rowMajor','serpentine','radial','morton','byField'])
+    for(const space of ['srgb','linear'])
+    for(const seamphase of ['global','local'])
+    for(const matte of [null, STAGE_BG]){
+      const pol = {scale, seamphase, matte, magnify:1, operator, order, space};
+      const ref = rasterizeNaivePlanes(items, layout, pol);
+      const cv = rasterize(document.createElement('canvas'), items, layout, pol);
+      const got = cv.getContext('2d').getImageData(0,0,cv.width,cv.height).data;
+      /* naive resolve on the naive planes: neither half of the rewrite is
+         allowed to grade its own homework. */
+      const want = resolveNaive(ref.R, ref.G, ref.B, ref.A, ref.W, ref.H, ref.linear);
+      cases++;
+      if(got.length !== want.length){ bad.push(`${scale}/${operator}/${order}: size`); continue; }
+      for(let i=0;i<want.length;i++) if(got[i] !== want[i]){
+        bad.push(`${scale}/${operator}/${order}/${space}/${seamphase} @${i} ${got[i]}!=${want[i]}`); break;
+      }
+    }
+    t('K9 fast kernel == pre-rewrite reference kernel, byte for byte',
+      bad.length===0, `${cases} policy combinations; ${bad.length} divergent` +
+      (bad.length ? `\n    first: ${bad[0]}` : ''));
+  }
+
+  /* K11 — the boundary step, on alphas chosen to sit on its branches */
+  {
+    const rnd = mulberry32(0xBEEF);
+    const N = 40000;
+    const R=new Float64Array(N), G=new Float64Array(N), B=new Float64Array(N), A=new Float64Array(N);
+    const edge = [0, 1e-12, 1e-9, 1e-9+1e-15, 1, 1-1e-16, 0.5, 2/255];
+    for(let k=0;k<N;k++){
+      const a = (k%9===0) ? edge[k%edge.length] : rnd();
+      A[k]=a; R[k]=rnd()*255*a; G[k]=rnd()*255*a; B[k]=rnd()*255*a;
+    }
+    let bad = null;
+    for(const linear of [false,true]){
+      const got  = resolve(R,G,B,A,N,1,linear);
+      const want = resolveNaive(R,G,B,A,N,1,linear);
+      for(let i=0;i<want.length && !bad;i++)
+        if(got[i]!==want[i]) bad = `linear=${linear} px${(i/4)|0} ch${i%4}: ${got[i]}!=${want[i]} (a=${A[(i/4)|0]})`;
+    }
+    t('K11 resolve() == resolveNaive() on branch-boundary alphas', !bad,
+      bad || `${N} pixels x both spaces, including a=0, 1e-9, 1, 1-1e-16`);
   }
 
   /* ---- A-series: regressions that the original build shipped. Each of these
