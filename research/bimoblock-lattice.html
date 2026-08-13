@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bimoblock lattice — 27 shapes, 27 local colour spaces</title>
+<style>
+  html,body{ height:100%; margin:0; background:#000; overflow:hidden; }
+  canvas{ display:block; width:100%; height:100%; }
+  #fps{
+    position:fixed; right:10px; bottom:8px;
+    font:10px/1 ui-monospace, Menlo, Consolas, monospace;
+    color:#5a5a66; letter-spacing:.08em; user-select:none;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="fps"></div>
+
+<script>
+"use strict";
+
+const VERT = `#version 300 es
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+precision highp int;
+uniform vec3 iResolution;
+uniform float iTime;
+out vec4 fragColor;
+
+#define AA 2                 // supersample factor; hard edges need it
+#define PITCH 2.6            // lattice spacing (shapes are 2 units across)
+#define RATE  2.5            // mask changes per second
+
+// ---- mask source ------------------------------------------------------------
+// 32-bit integer avalanche. Every one of the 27 bits gets uniform weight, and
+// adjacent sites decorrelate. The fractional site term staggers *when* each
+// cell reshuffles, so the lattice doesn't tick in lockstep.
+uint shapeMask(uint site, float time){
+  uint step = uint(max(time, 0.0) * RATE + float(site) * 0.61);
+  uint h = site * 0x9e3779b9u ^ step * 0x85ebca6bu;
+  h ^= h >> 16; h *= 0x7feb352du;
+  h ^= h >> 15; h *= 0x846ca68bu;
+  h ^= h >> 16;
+  return h & 0x7ffffffu;                 // 27 bits
+}
+
+// ---- occupancy --------------------------------------------------------------
+// unsigned compare rejects negative indices in one test
+bool occ(ivec3 c, uint m){
+  if (any(greaterThanEqual(uvec3(c), uvec3(3u)))) return false;
+  return ((m >> uint(c.x + 3 * c.y + 9 * c.z)) & 1u) != 0u;
+}
+
+// ---- one shape: 9 plane tests ----------------------------------------------
+// Every surface in the 3^3 family lies on one of 4 planes per axis; sign(rd)
+// prunes one, leaving 3. A plane hit is a surface iff the entered cell is
+// occupied and the exited cell is not. Fully independent tests, min-reduced,
+// cost independent of how many cells are filled.
+void traceShape(vec3 rl, vec3 rd, vec3 inv, uint mask, inout float m, inout vec3 p){
+  for (int a = 0; a < 3; ++a){
+    bool pos  = rd[a] > 0.0;
+    int  base = pos ? 0 : 1;
+
+    for (int k = 0; k < 3; ++k){
+      int   q = base + k;                                // plane 0..3
+      float t = (-1.0 + float(q) * (2.0 / 3.0) - rl[a]) * inv[a];
+      if (t <= 0.0 || t >= m) continue;
+
+      vec3  h  = rl + t * rd;
+      ivec3 ci = ivec3(floor(h * 1.5 + 1.5));            // transverse from floor
+      ivec3 ce = ci;
+      ci[a] = pos ? q     : q - 1;                       // axial is exact
+      ce[a] = pos ? q - 1 : q;
+
+      if (occ(ci, mask) && !occ(ce, mask)){
+        m = t;
+        p = h;                                           // already local — free
+      }
+    }
+  }
+}
+
+// ---- keep reciprocals finite, branchless ------------------------------------
+vec3 safeDir(vec3 d){
+  vec3 s = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(d, vec3(0.0)));
+  return s * max(abs(d), vec3(1e-6));
+}
+
+vec3 render(vec2 v, float time){
+  float t = time * 0.4;
+  vec3 o = 8.5 * vec3(sin(t), 0.7 + 0.3 * sin(t * 0.6), cos(t));
+  vec3 w = normalize(-o);
+  vec3 u = normalize(cross(w, vec3(0, 1, 0)));
+  vec3 d = safeDir(normalize(v.x * u + v.y * cross(u, w) + 1.8 * w));
+  vec3 inv = 1.0 / d;
+
+  // octant order: reverse each axis the ray runs backward along. This is a
+  // valid topological sort of the occlusion relation on a uniform grid, so the
+  // first site tested is the nearest one and m tightens immediately.
+  vec3 flip = step(d, vec3(0.0));
+
+  float m = 1e9;
+  vec3 p = vec3(0.0);
+  bool hit = false;
+
+  for (int j = 0; j < 27; ++j){
+    vec3 g = vec3(j % 3, (j / 3) % 3, j / 9);
+    g = mix(g, 2.0 - g, flip);
+    vec3 pL = (g - 1.0) * PITCH;
+
+    // slab test on the shape's bounding box (half-extent exactly 1)
+    vec3 rc = (pL - o) * inv, e = abs(inv);
+    vec3 t1 = rc - e, t2 = rc + e;
+    float tN = max(max(t1.x, t1.y), t1.z);
+    float tF = min(min(t2.x, t2.y), t2.z);
+    if (tN >= tF || tF < 0.0 || tN >= m) continue;
+
+    uint site = uint(g.x) + 3u * uint(g.y) + 9u * uint(g.z);
+    uint mask = shapeMask(site, time);
+    if (mask == 0u) continue;
+
+    float before = m;
+    traceShape(o - pL, d, inv, mask, m, p);
+    if (m < before) hit = true;
+  }
+
+  // local biunit -> unit: each shape carries the full RGB gamut
+  return hit ? p * 0.5 + 0.5 : vec3(0.0);
+}
+
+void mainImage(out vec4 O, in vec2 F){
+  vec3 acc = vec3(0.0);
+  for (int j = 0; j < AA; ++j)
+    for (int i = 0; i < AA; ++i){
+      vec2 off = (vec2(float(i), float(j)) + 0.5) / float(AA);
+      vec2 v = ((F + off - 0.5) * 2.0 - iResolution.xy) / iResolution.y;
+      acc += render(v, iTime);
+    }
+  O = vec4(acc / float(AA * AA), 1.0);
+}
+
+void main(){ mainImage(fragColor, gl_FragCoord.xy); }`;
+
+/* ------------------------------------ host ------------------------------- */
+
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, depth: false });
+
+function compile(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(sh));
+    console.error(src.split("\n").map((l, i) => (i + 1) + "| " + l).join("\n"));
+    return null;
+  }
+  return sh;
+}
+
+function main() {
+  const vs = compile(gl.VERTEX_SHADER, VERT);
+  const fs = compile(gl.FRAGMENT_SHADER, FRAG);
+  if (!vs || !fs) return;
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    return;
+  }
+  gl.useProgram(prog);
+  gl.bindVertexArray(gl.createVertexArray());
+
+  const uRes = gl.getUniformLocation(prog, "iResolution");
+  const uTime = gl.getUniformLocation(prog, "iTime");
+  const fpsEl = document.getElementById("fps");
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    const w = Math.round(canvas.clientWidth * dpr);
+    const h = Math.round(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w; canvas.height = h;
+      gl.viewport(0, 0, w, h);
+      gl.uniform3f(uRes, w, h, 1);
+    }
+  }
+
+  const t0 = performance.now();
+  let last = t0, acc = 0, frames = 0;
+
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+
+    resize();
+    gl.uniform1f(uTime, (now - t0) / 1000);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    acc += dt; frames++;
+    if (acc >= 0.5) { fpsEl.textContent = Math.round(frames / acc) + " fps"; acc = 0; frames = 0; }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  console.log("bimoblock lattice — 9 plane tests per shape, octant-ordered, pure albedo");
+}
+
+if (gl) {
+  main();
+} else {
+  console.error("WebGL2 unavailable.");
+  document.getElementById("fps").textContent = "needs WebGL2";
+}
+</script>
+</body>
+</html>
