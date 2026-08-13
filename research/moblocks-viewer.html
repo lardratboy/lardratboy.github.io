@@ -136,6 +136,7 @@
       <option value="material" selected>material</option>
       <option value="anisotropy">anisotropy (FA)</option>
       <option value="lod">lod state</option>
+      <option value="position">position &mdash; xyz as rgb</option>
     </select>
 
     <label class="check"><input type="checkbox" id="fash" checked> FA drives roughness</label>
@@ -2034,21 +2035,109 @@ scene.add(new THREE.HemisphereLight(0xd8e4ff, 0x30262e, 0.35));
    point of storing FA: roughness must vary PER CUBE, from the fine geometry
    that cube swallowed. Bucketing into a few materials would have worked and
    would have banded the transition. */
+/* The shader patch. Three injection points, all of them standard chunk
+   tokens — if a Three upgrade renames one, the replace silently does nothing
+   and the feature dies quietly, so V8 in the harness asserts every
+   replacement actually landed.
+
+     begin_vertex        vRough, and the instance-space position
+     roughnessmap_...    per-instance roughness (FA-driven)
+     color_fragment      position-as-RGB override, AFTER instanceColor has
+                         been folded into diffuseColor, so it wins cleanly
+
+   uPosMode is a uniform rather than a second material: toggling it costs no
+   recompile and no mesh swap. */
+const SHADER_PATCH = (sh) => {
+  sh.uniforms.uPosMode   = { value: 0 };
+  sh.uniforms.uPosCenter = { value: new THREE.Vector3(0,0,0) };
+  sh.uniforms.uPosScale  = { value: new THREE.Vector3(1,1,1) };
+  sh.vertexShader =
+    'attribute float aRough;\nvarying float vRough;\nvarying vec3 vMbPos;\n' +
+    sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n' +
+      '  vRough = aRough;\n' +
+      '  #ifdef USE_INSTANCING\n' +
+      '    vMbPos = ( instanceMatrix * vec4( transformed, 1.0 ) ).xyz;\n' +
+      '  #else\n' +
+      '    vMbPos = transformed;\n' +
+      '  #endif');
+  sh.fragmentShader =
+    'uniform float uPosMode;\nuniform vec3 uPosCenter;\nuniform vec3 uPosScale;\n' +
+    'varying float vRough;\nvarying vec3 vMbPos;\n' +
+    sh.fragmentShader
+      .replace('#include <roughnessmap_fragment>',
+        '#include <roughnessmap_fragment>\n  roughnessFactor = clamp(vRough, 0.02, 1.0);')
+      /* normalised against the bounding box of the OCCUPIED GEOMETRY, per
+         axis and with a centre offset — not against the voxel grid. For a
+         sphere inscribed in a cube grid the two coincide (the sphere touches
+         all six faces), but a planar-`and` solid or any mask that stops short
+         of the faces would otherwise never reach the ends of the range. */
+      .replace('#include <color_fragment>',
+        '#include <color_fragment>\n' +
+        '  vec3 mbPosRGB = clamp( ( vMbPos - uPosCenter ) / uPosScale, -1.0, 1.0 )\n' +
+        '                  * 0.5 + 0.5;')
+      /* UNLIT, and after encodings_fragment on purpose. Lighting multiplies
+         the colour, so a lit positional readout goes near-black on the shaded
+         side and stops being a readout at all. Writing after the encoding
+         chunk means the pixel carries the coordinate EXACTLY, with no
+         transfer curve applied on the way out.
+         To make it lit instead: drop this replace and assign mbPosRGB to
+         diffuseColor.rgb in the chunk above. */
+      .replace('#include <encodings_fragment>',
+        '#include <encodings_fragment>\n' +
+        '  if( uPosMode > 0.5 ) gl_FragColor = vec4( mbPosRGB, 1.0 );');
+  return sh;
+};
+
 function makeMaterial(){
   const m = new THREE.MeshPhysicalMaterial({
     color: 0xffffff, metalness: 0.0, roughness: 0.35,
     clearcoat: 0.85, clearcoatRoughness: 0.22,
     envMapIntensity: 1.15,
   });
-  m.onBeforeCompile = (sh) => {
-    sh.vertexShader = 'attribute float aRough;\nvarying float vRough;\n' +
-      sh.vertexShader.replace('#include <begin_vertex>',
-        '#include <begin_vertex>\n  vRough = aRough;');
-    sh.fragmentShader = 'varying float vRough;\n' +
-      sh.fragmentShader.replace('#include <roughnessmap_fragment>',
-        '#include <roughnessmap_fragment>\n  roughnessFactor = clamp(vRough, 0.02, 1.0);');
-  };
+  m.onBeforeCompile = (sh) => { m.userData.shader = SHADER_PATCH(sh); };
   return m;
+}
+/* uPosMode lives on the compiled shader, which does not exist until the
+   first frame is drawn — so writes are funnelled through here and reapplied
+   after each rebuild rather than set once. */
+function syncShaderUniforms(){
+  const sh = material.userData && material.userData.shader;
+  if(!sh || !S.bounds) return;
+  sh.uniforms.uPosMode.value = (S.shade === 'position') ? 1 : 0;
+  sh.uniforms.uPosCenter.value.set(S.bounds.center[0], S.bounds.center[1], S.bounds.center[2]);
+  sh.uniforms.uPosScale.value.set(S.bounds.half[0], S.bounds.half[1], S.bounds.half[2]);
+}
+
+/* Bounding box of the occupied voxels, in the same world frame instances are
+   placed in. Each cube is a unit box centred on its voxel, so the box is
+   grown by half a cell — that way the OUTERMOST FACES land exactly on 0 and
+   1 rather than the outermost voxel centres.
+
+   Computed from the voxels rather than from the emitted instances, so the
+   colours do not shift when detail is toggled between voxels and mips.
+
+   Per axis, so a flat or elongated model still uses the whole colour cube.
+   For an isotropic readout instead — equal distances giving equal colour
+   deltas regardless of axis — set all three half extents to their max. */
+function computeBounds(){
+  const [W,H,D] = S.vol.dims, v = S.vol.vox;
+  const cx = (W-1)/2, cy = (H-1)/2, cz = (D-1)/2;
+  let lo = [Infinity,Infinity,Infinity], hi = [-Infinity,-Infinity,-Infinity], n = 0;
+  for(let z=0;z<D;z++) for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    if(!v[x + W*(y + H*z)]) continue;
+    n++;
+    const p = [x-cx, y-cy, z-cz];
+    for(let a=0;a<3;a++){ if(p[a] < lo[a]) lo[a] = p[a]; if(p[a] > hi[a]) hi[a] = p[a]; }
+  }
+  if(!n){ lo = [-0.5,-0.5,-0.5]; hi = [0.5,0.5,0.5]; }
+  const center = [0,0,0], half = [1,1,1];
+  for(let a=0;a<3;a++){
+    lo[a] -= 0.5; hi[a] += 0.5;              /* cube half-width */
+    center[a] = (lo[a] + hi[a]) / 2;
+    half[a] = Math.max(0.5, (hi[a] - lo[a]) / 2);
+  }
+  return { lo, hi, center, half, solid:n };
 }
 
 const geo = new THREE.BoxBufferGeometry(1,1,1);
@@ -2130,6 +2219,8 @@ function rebuildModel(){
     cell._fa = MB.tensorFA(cell.tensor);
     cell._rgba = cell.mip ? MB.mipResolve(cell.mip) : [0,0,0,0];
   }
+  S.bounds = computeBounds();
+  syncShaderUniforms();
   fitCamera();
   dirty = true;
   updateHud();
@@ -2189,11 +2280,12 @@ function buildInstances(){
         _p.set(ax-cx, ay-cy, az-cz);
         _m.compose(_p, _q, _s);
         mesh.setMatrixAt(i, _m);
-        if(S.shade === 'lod') _c.setHex(0x66c8ff).convertSRGBToLinear();
+        if(S.shade === 'position') _c.setRGB(1,1,1);
+        else if(S.shade === 'lod') _c.setHex(0x66c8ff).convertSRGBToLinear();
         else if(S.shade === 'anisotropy') _c.setHex(0x888888).convertSRGBToLinear();
         else _c.set(S.palette[(vv-1) % S.palette.length]).convertSRGBToLinear();
-        const ao = S.ao[idx] || 1;
-        _c.multiplyScalar(ao);
+        /* AO would tint a positional readout, so it is skipped there */
+        if(S.shade !== 'position') _c.multiplyScalar(S.ao[idx] || 1);
         mesh.setColorAt(i, _c);
         /* a resolved voxel is a flat-faced cube: glossy, not derived */
         roughAttr.array[i] = S.faShading ? 0.20 : 0.35;
@@ -2210,7 +2302,8 @@ function buildInstances(){
       mesh.setMatrixAt(i, _m);
       _s.set(1,1,1);
       const fa = cell._fa;
-      if(S.shade === 'lod') _c.setHex(0xff9a5c).convertSRGBToLinear();
+      if(S.shade === 'position') _c.setRGB(1,1,1);
+      else if(S.shade === 'lod') _c.setHex(0xff9a5c).convertSRGBToLinear();
       else if(S.shade === 'anisotropy') _c.setHSL((1-Math.min(1,fa))*0.62, 0.75, 0.5).convertSRGBToLinear();
       else _c.setRGB(rgba[0]/255, rgba[1]/255, rgba[2]/255).convertSRGBToLinear();
       mesh.setColorAt(i, _c);
@@ -2218,6 +2311,7 @@ function buildInstances(){
       i++;
     }
   }
+  syncShaderUniforms();
   mesh.count = i;
   mesh.instanceMatrix.needsUpdate = true;
   if(mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
@@ -2285,6 +2379,13 @@ function updateHud(){
       ` <span style="color:#9a91a6">(XY/YZ/ZX recovery)</span><br>` : '') +
     `<span class=k>FA</span> med ${fa.med.toFixed(3)} · p05 ${fa.p05.toFixed(3)} · ` +
     `p95 ${fa.p95.toFixed(3)} · sd ${fa.sd.toFixed(3)}<br>` +
+    (S.shade === 'position' && S.bounds
+      ? `<span class=k>bounds</span> ` +
+        S.bounds.half.map((h,i)=>(h*2).toFixed(0)).join(' \u00d7 ') +
+        ` of ${S.vol.dims.join(' \u00d7 ')} grid ` +
+        `<span style="color:#9a91a6">(${(S.bounds.half.reduce((a,b)=>a*b,1)*8 /
+          (S.vol.dims[0]*S.vol.dims[1]*S.vol.dims[2])*100).toFixed(0)}% of it)</span><br>`
+      : '') +
     `<span class=k>built</span> ${S.buildMs.toFixed(0)} ms`;
 }
 
@@ -2326,7 +2427,7 @@ bind('symz',  el => { S.symZ = el.value; rebuildModel(); });
 bind('size',  el => { S.size = +el.value; rebuildModel(); });
 bind('op',    el => { S.op = el.value; rebuildModel(); });
 bind('order', el => { S.order = el.value; rebuildModel(); });
-bind('shade', el => { S.shade = el.value; dirty = true; });
+bind('shade', el => { S.shade = el.value; syncShaderUniforms(); dirty = true; updateHud(); });
 bind('fash',  el => { S.faShading = el.checked; dirty = true; });
 bind('spin',  el => { S.autoSpin = el.checked; });
 bind('detail', el => { S.detail = el.value; dirty = true; });
@@ -2378,6 +2479,10 @@ rebuildModel();
 tick();
 console.log('moblocks viewer ready. MOBLOCKS core exposed as window.MOBLOCKS; state as window.S.');
 window.S = S;
+/* exposed for the headless harness (V8) and for poking in the console */
+window.SHADER_PATCH = SHADER_PATCH;
+window.syncShaderUniforms = syncShaderUniforms;
+window.computeBounds = computeBounds;
 </script>
 </body>
 </html>
