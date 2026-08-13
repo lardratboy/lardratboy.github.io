@@ -1,0 +1,2099 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>moblocks · multi-resolution voxel sprites</title>
+<style>
+  :root{
+    --bg:#221e28; --panel:#2b2632; --line:#3d3646; --ink:#e8e3ec;
+    --dim:#9a91a6; --accent:#ffb066; --accent2:#7fd6ff;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font:13px/1.5 ui-monospace,"SF Mono",Menlo,Consolas,monospace;overflow:hidden}
+  #wrap{display:flex;height:100%}
+  #panel{width:250px;flex:0 0 250px;background:var(--panel);
+    border-right:1px solid var(--line);padding:14px;overflow-y:auto}
+  #stage{flex:1;position:relative;min-width:0}
+  #stage canvas{display:block;width:100%;height:100%}
+  h1{font-size:14px;margin:0 0 2px;letter-spacing:.06em}
+  .sub{color:var(--dim);font-size:11px;margin:0 0 16px;line-height:1.45}
+  label{display:block;margin:11px 0 3px;font-size:11px;color:var(--dim);
+    text-transform:uppercase;letter-spacing:.07em}
+  select,input[type=text]{width:100%;background:#221d29;color:var(--ink);
+    border:1px solid var(--line);border-radius:4px;padding:5px 7px;font:inherit;font-size:12px}
+  select:focus,input:focus{outline:none;border-color:var(--accent)}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .row{display:flex;gap:7px}.row>*{flex:1;min-width:0}
+  .check{display:flex;align-items:center;gap:7px;margin:9px 0;
+    font-size:12px;color:var(--ink);text-transform:none;letter-spacing:0}
+  .check input{accent-color:var(--accent);margin:0}
+  button{width:100%;background:#3a3345;color:var(--ink);border:1px solid var(--line);
+    border-radius:4px;padding:7px;font:inherit;font-size:12px;cursor:pointer;margin-top:9px}
+  button:hover{background:#463d54;border-color:var(--accent)}
+  #hud{position:absolute;left:14px;bottom:14px;background:rgba(28,24,34,.86);
+    border:1px solid var(--line);border-radius:6px;padding:9px 12px;
+    font-size:11px;line-height:1.7;pointer-events:none;backdrop-filter:blur(6px)}
+  #hud b{color:var(--accent)}
+  .k{display:inline-block;width:64px;color:var(--dim)}
+  .hint{margin-top:16px;padding-top:12px;border-top:1px solid var(--line);
+    color:var(--dim);font-size:10.5px;line-height:1.6}
+  .hint b{color:var(--accent2);font-weight:normal}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="panel">
+    <h1>moblocks</h1>
+    <p class="sub">A mosprites-ng recipe, lifted to a multi-resolution voxel
+      model. Collapsed blocks are lit with roughness derived from the fine
+      geometry they swallowed.</p>
+
+    <label for="field">field</label>
+    <select id="field"></select>
+
+    <div class="row">
+      <div>
+        <label for="sym">symmetry</label>
+        <select id="sym">
+          <option>none</option><option>horizontal</option><option>vertical</option>
+          <option selected>quadrant</option><option>rot180</option>
+          <option>diagonal</option><option>rot90</option>
+        </select>
+      </div>
+      <div>
+        <label for="symz">z</label>
+        <select id="symz"><option selected>mirror</option><option>none</option></select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="size">size</label>
+        <select id="size">
+          <option>32</option><option selected>48</option><option>64</option><option>80</option>
+        </select>
+      </div>
+      <div>
+        <label for="op">mip op</label>
+        <select id="op">
+          <option selected>add</option><option>mul</option><option>over</option>
+        </select>
+      </div>
+    </div>
+
+    <label for="order">traversal order</label>
+    <select id="order">
+      <option selected>rowMajor</option><option>byField</option>
+      <option>morton</option><option>radial</option><option>serpentine</option>
+    </select>
+
+    <label for="lod">resolve above <span id="lodv"></span> px</label>
+    <input type="range" id="lod" min="2" max="60" step="1" value="14">
+
+    <label for="shade">colour by</label>
+    <select id="shade">
+      <option value="material" selected>material</option>
+      <option value="anisotropy">anisotropy (FA)</option>
+      <option value="lod">lod state</option>
+    </select>
+
+    <label class="check"><input type="checkbox" id="fash" checked> FA drives roughness</label>
+    <label class="check"><input type="checkbox" id="spin" checked> auto-orbit</label>
+
+    <label for="seed">seed</label>
+    <input type="text" id="seed" spellcheck="false">
+    <button id="reseed">new seed &nbsp;<span style="color:#9a91a6">R</span></button>
+    <button id="dump">download model json</button>
+
+    <div class="hint">
+      drag orbit · shift-drag pan · wheel zoom · space toggles spin<br><br>
+      <b>watch the LOD slider.</b> The transition is an integration, not a
+      decision — a block does not pop, it fuses.<br><br>
+      <b>try order = byField with op = over.</b> Traversal order is a light
+      direction, and this one is generated by the congruence that made the
+      form.
+    </div>
+  </div>
+  <div id="stage"><div id="hud"></div></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* ====================================================================
+   moblocks · core
+   --------------------------------------------------------------------
+   Session one, steps 1-2. Headless-testable, browser-safe: no DOM, no
+   imports, IIFE with a global assignment and a module guard, so this file
+   inlines verbatim into a single-file HTML tool later without edits.
+
+   Step 1  FIELDS3  · the 2D FIELDS table lifted to three variables
+   Step 2  buildVolume · occupancy volume + symmetry fold
+
+   Both are gated by tests that compare against the REAL generator
+   (mosprites-ng.html lines 466-987, loaded unmodified as ref.js) rather
+   than against a transcription of it.
+   ==================================================================== */
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  root.MOBLOCKS = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+'use strict';
+
+/* ---------------------------------------------------------------- utils
+   Reproduced rather than imported: the core must stand alone in a browser
+   script tag. K-tests assert these against ref.js, so drift is caught. */
+function popcount(n){ n = n>>>0; n = n - ((n>>>1)&0x55555555);
+  n = (n&0x33333333) + ((n>>>2)&0x33333333);
+  return ((n + (n>>>4) & 0x0f0f0f0f) * 0x01010101) >>> 24; }
+function digitSum(n){ n = Math.abs(n|0); let s=0; while(n>0){ s += n%10; n=(n/10)|0; } return s; }
+
+/* Trinomial (Pascal-tetrahedron) coefficient mod m: T(i,j,k) = (i+j+k)!/(i!j!k!).
+   Built by the 3D Pascal recurrence, memoised per modulus. T(i,j,0) = C(i+j,i),
+   which is exactly the 2D `pascal` field — the anchor holds by construction. */
+const triCache = new Map();
+function trinomMod(i, j, k, m){
+  if(i<0 || j<0 || k<0) return 0;
+  if(i+j+k > 60) return binomMod(i+j, i, m);          /* guard, matches ref cap */
+  let tab = triCache.get(m);
+  if(!tab){ tab = new Map(); triCache.set(m, tab); }
+  const key = i + ',' + j + ',' + k;
+  const hit = tab.get(key);
+  if(hit !== undefined) return hit;
+  const v = (i===0 && j===0 && k===0) ? 1
+          : (trinomMod(i-1,j,k,m) + trinomMod(i,j-1,k,m) + trinomMod(i,j,k-1,m)) % m;
+  tab.set(key, v);
+  return v;
+}
+const binCache = new Map();
+function binomMod(n,k,m){
+  if(k<0||n<0||k>n) return 0;
+  if(n>180) n%=181;
+  if(k>n) k=n;
+  let tri = binCache.get(m);
+  if(!tri){ tri=[[1]]; binCache.set(m,tri); }
+  while(tri.length<=n){
+    const prev=tri[tri.length-1], row=[1];
+    for(let i=1;i<prev.length;i++) row.push((prev[i-1]+prev[i])%m);
+    row.push(1); tri.push(row);
+  }
+  return tri[n][k];
+}
+
+/* ================================================================ STEP 1
+   FIELDS3 — the lift.
+
+   THE ANCHOR: f3(u,v,0) must equal f2(u,v) exactly, for every field. That
+   is what makes the voxel model the user's tuned sprite in three
+   dimensions rather than a different object that resembles it.
+
+   The lift splits into two classes and neither rule covers both.
+
+   SYMMETRIC (17).  Append-the-variable is WRONG for the multiplicative
+     forms. `u*v` is the elementary symmetric polynomial e2; appending w to
+     the monomial raises the INDEX to e3, and e3(u,v,0) = 0 — the field
+     collapses to a constant on the anchor plane. Keep the index and widen
+     the function instead:  e2(u,v) = uv  ->  e2(u,v,w) = uv + vw + wu.
+     By the specialisation identity e_k(x1..x_{n-1}, 0) = e_k(x1..x_{n-1}),
+     every elementary symmetric polynomial survives the slice, as does
+     every power sum p_k. The Boolean case follows the same rule: a&b lifts
+     to the Boolean e2, (a&b)|(b&c)|(c&a) — the majority function.
+
+   NON-SYMMETRIC (3: hyper, trefoil, shift).  No symmetric rule applies and
+     none is needed — the added term vanishes at w=0 by construction. Here
+     the anchor UNDER-constrains: u^2-v^2+w^2 and u^2-v^2-w^2 both slice
+     correctly. The signature is a free aesthetic choice, so it is declared
+     explicitly below rather than left to whichever sign got typed first. */
+
+const e1 = (u,v,w) => u + v + w;
+const e2 = (u,v,w) => u*v + v*w + w*u;
+
+/* Declared signatures for the three under-constrained lifts. Changing these
+   changes the model and does NOT break the anchor — that is the point of
+   naming them. +1 = the added term reinforces; -1 = it opposes. */
+const SIGNATURE = { hyper: +1, trefoil: -1, shift: +1 };
+
+const FIELDS3 = {
+  /* --- power sums: p_k(x, 0) = p_k(x) --- */
+  circle:  (u,v,w,p) => u*u + v*v + w*w,
+  cubic:   (u,v,w,p) => u*u*u + v*v*v + w*w*w,
+  quartic: (u,v,w,p) => u*u*u*u + v*v*v*v + w*w*w*w,
+  diamond: (u,v,w,p) => Math.abs(u) + Math.abs(v) + Math.abs(w),
+  cheby:   (u,v,w,p) => Math.max(Math.abs(u), Math.abs(v), Math.abs(w)),
+  popsum:  (u,v,w,p) => popcount(Math.abs(u*u + v*v + w*w)),
+  digsum:  (u,v,w,p) => digitSum(u*u + v*v + w*w),
+
+  /* --- elementary symmetric: index held, function widened --- */
+  product: (u,v,w,p) => e2(u,v,w),
+  mixmul:  (u,v,w,p) => e2(u,v,w) * e1(u,v,w),          /* 2D form is e2*e1 */
+  popcnt:  (u,v,w,p) => popcount(Math.abs(e2(u,v,w))),
+  skew:    (u,v,w,p) => u*u + v*v + w*w + e2(u,v,w),    /* p2 + e2 */
+
+  /* --- bitwise: XOR and OR are already associative-symmetric; AND is not,
+         and needs the Boolean e2 (majority) for the same reason as product */
+  xor:     (u,v,w,p) => Math.abs(u) ^ Math.abs(v) ^ Math.abs(w),
+  or:      (u,v,w,p) => Math.abs(u) | Math.abs(v) | Math.abs(w),
+  and:     (u,v,w,p) => { const a=Math.abs(u), b=Math.abs(v), c=Math.abs(w);
+                          return (a&b) | (b&c) | (c&a); },
+  ringxor: (u,v,w,p) => (u*u + v*v + w*w) *
+                        ((Math.abs(u) ^ Math.abs(v) ^ Math.abs(w)) + 1),
+
+  /* --- trinomial: T(i,j,0) = C(i+j,i), the 2D binomial --- */
+  pascal:  (u,v,w,p) => trinomMod(Math.abs(u), Math.abs(v), Math.abs(w), p.M),
+
+  /* --- conic carries its own coefficients; w reuses the u^2 coefficient so
+         the quadric stays a quadric and the slice is untouched --- */
+  conic:   (u,v,w,p) => p.a*u*u + p.b*u*v + p.c*v*v + p.d*u + p.e*v + p.a*w*w,
+
+  /* --- non-symmetric: signature is a declared choice (see SIGNATURE) --- */
+  hyper:   (u,v,w,p) => u*u - v*v + SIGNATURE.hyper * w*w,
+  trefoil: (u,v,w,p) => u*u*u - 3*u*v*v + SIGNATURE.trefoil * 3*u*w*w,
+  shift:   (u,v,w,p) => (Math.abs(u)<<3) ^ (v*v) ^ (SIGNATURE.shift>0 ? (w*w) : -(w*w)),
+};
+
+const NON_SYMMETRIC = ['hyper','trefoil','shift'];
+
+/* ================================================================ STEP 2
+   Volume build + symmetry.
+
+   The occupancy predicate is generateSprite's, unchanged, with one extra
+   variable. Nothing here may differ from the 2D generator except w. */
+
+/* The 2D fold, reproduced. Modes name SUBGROUPS of D4 under which the sprite
+   is invariant; seedDims gives the fundamental domain. */
+function seedDims(w,h,mode){
+  const hw = Math.ceil(w/2), hh = Math.ceil(h/2);
+  switch(mode){
+    case 'horizontal': return [hw,h];
+    case 'vertical': case 'rot180': return [w,hh];
+    case 'quadrant': case 'diagonal': case 'rot90': return [hw,hh];
+    default: return [w,h];
+  }
+}
+function fold(x,y,w,h,mode){
+  const hw = Math.ceil(w/2), hh = Math.ceil(h/2);
+  let sx=x, sy=y;
+  switch(mode){
+    case 'horizontal': if(sx>=hw) sx=w-1-sx; break;
+    case 'vertical':   if(sy>=hh) sy=h-1-sy; break;
+    case 'quadrant':   if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy; break;
+    case 'rot180':     if(sy>=hh){ sy=h-1-sy; sx=w-1-sx; } break;
+    case 'diagonal': {
+      if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy;
+      if(hw===hh && sx>sy){ const t=sx; sx=sy; sy=t; }
+      break;
+    }
+    case 'rot90': {
+      if(w!==h){ if(sx>=hw) sx=w-1-sx; if(sy>=hh) sy=h-1-sy; break; }
+      let g=0;
+      while((sx>=hw || sy>=hh) && g++<4){ const nx=h-1-sy, ny=sx; sx=nx; sy=ny; }
+      break;
+    }
+  }
+  return [sx,sy];
+}
+
+/* ------------------------------------------- the reference fold's defect
+   fold() above is mosprites-ng's, reproduced exactly — including a bug, on
+   purpose. For ODD w=h, hh = ceil(h/2) puts the middle ROW inside the seed
+   region, and under rot180 that row's partner is itself with x flipped, also
+   inside. The guard `if(sy>=hh)` never fires there, so the two halves of the
+   middle row are generated independently and the sprite is NOT rot180-
+   invariant. rot90 loses its boundary row and column the same way. Measured:
+   30 cells at 31x31, 32 cells at 33x33; even sizes are clean; the mirror
+   modes are clean at every size.
+
+   moblocks reproduces it because the ANCHOR outranks it: the z=cz slice must
+   equal what generateSprite actually produces, bug and all, or the voxel
+   model is not the sprite the user tuned. Gate V6 pins the defect so that
+   fixing mosprites-ng turns this suite red instead of silently desyncing it.
+
+   The general fix, for when that happens, is below — and it is the same idea
+   as step 3's orbit canonicalisation, one dimension down: send each cell to
+   the lexicographic minimum of its orbit under the subgroup. That is correct
+   for every mode at every parity by construction, because it never asks
+   whether a coordinate is "past the middle" — it asks which orbit it is in. */
+const FOLD_GENERATORS = {
+  horizontal: (w,h) => [p => [w-1-p[0], p[1]]],
+  vertical:   (w,h) => [p => [p[0], h-1-p[1]]],
+  quadrant:   (w,h) => [p => [w-1-p[0], p[1]], p => [p[0], h-1-p[1]]],
+  rot180:     (w,h) => [p => [w-1-p[0], h-1-p[1]]],
+  rot90:      (w,h) => [p => [h-1-p[1], p[0]]],
+  diagonal:   (w,h) => [p => [w-1-p[0], p[1]], p => [p[0], h-1-p[1]], p => [p[1], p[0]]],
+};
+function orbitFold(x, y, w, h, mode){
+  const gen = FOLD_GENERATORS[mode];
+  if(!gen) return [x,y];
+  const g = gen(w,h);
+  let orbit = [[x,y]];
+  const seen = new Set([x+','+y]);
+  for(let i=0; i<orbit.length; i++){
+    for(const f of g){
+      const q = f(orbit[i]);
+      if(q[0]<0 || q[1]<0 || q[0]>=w || q[1]>=h) continue;
+      const k = q[0]+','+q[1];
+      if(!seen.has(k)){ seen.add(k); orbit.push(q); }
+    }
+  }
+  let best = orbit[0];
+  for(const q of orbit) if(q[1] < best[1] || (q[1] === best[1] && q[0] < best[0])) best = q;
+  return best;
+}
+
+/* --------------------------------------------------------- z symmetry
+   Two mirrors are available and the choice is NOT cosmetic — it is worth a
+   measured factor of two in the store, for a reason that only shows up once
+   nodes are 8-aligned.
+
+   'mirror'      z -> D-1-z. The half-integer plane, which is exactly the
+                 convention mosprites' own 2D fold uses (h-1-y). A bijection
+                 at any parity. When D is a multiple of NODE_N it maps node
+                 layer k onto node layer (D/N - 1 - k) EXACTLY, so the mirror
+                 survives into the node grid and the two halves canonicalise
+                 into the same orbits.
+
+   'mirrorCell'  z -> 2*cz - z. Mirrors about the anchor CELL, so the sprite
+                 plane is the true equator rather than sitting one layer off.
+                 Prettier, and unusable for a store: it is a bijection only at
+                 odd D, an odd D must be padded up to a whole node, and the
+                 pad is an air slab on one side that its mirror partner does
+                 not have. The top and bottom node layers then differ, fall
+                 into different orbits, and stop sharing. Measured cost: the
+                 4.6x symmetry compression collapses to 2.4x.
+
+                 The obstruction is structural, not a tuning failure: NODE_N
+                 is EVEN, so an 8-cube has no centre cell and no cell-centred
+                 plane can ever align with the node grid.
+
+   'mirror' is therefore the default. It also happens to be the consistent
+   choice — it matches the reference generator's own mirror convention rather
+   than inventing a second one — and the anchor is untouched either way,
+   because cz stays inside the seed region under both. */
+function depthFor(d, symZ){
+  if(symZ !== 'mirrorCell') return d;
+  return (d % 2 === 1) ? d : d - 1;          /* cell mirror needs odd D */
+}
+function foldZ(z, d, symZ){
+  if(symZ === 'mirror'){
+    const hd = Math.ceil(d/2);
+    return z >= hd ? (d-1-z) : z;
+  }
+  if(symZ === 'mirrorCell'){
+    const cz = (d-1)/2;
+    return z > cz ? (2*cz - z) : z;
+  }
+  return z;
+}
+
+/* g mirrors generateSprite's flat config, plus:
+     d      depth in cells (forced odd when sym3.z === 'mirror')
+     sym3   { xy: <2D fold mode>, z: 'none' | 'mirror' }
+     mask3  'none' | 'sphere'
+     foldFn 'reference' (default, anchor-exact) | 'orbit' (correct at all parities)
+   Returns { vox: Uint8Array (0/1), dims, p, cz, seedDims }.
+   Colour is deliberately absent: step 2 settles OCCUPANCY only, so the slice
+   gate compares silhouettes and cannot be fooled by a palette coincidence. */
+function buildVolume(seed, g){
+  const rndSeed = seed >>> 0;
+  const rnd = mulberry32(rndSeed);
+  const W = g.w, H = g.h, D = depthFor(g.d, (g.sym3 && g.sym3.z) || 'none');
+  const symXY = (g.sym3 && g.sym3.xy) || 'none';
+  const symZ  = (g.sym3 && g.sym3.z)  || 'none';
+  const FOLD  = (g.foldFn === 'orbit') ? orbitFold : fold;
+
+  /* the p-bag, drawn in generateSprite's exact order so a shared seed gives
+     shared offsets; oz is appended (not interleaved) to keep that true */
+  const p = {
+    M: g.modulus,
+    ox: ((rnd()*17)|0) - 8,
+    oy: ((rnd()*17)|0) - 8,
+    a: ((rnd()*7)|0)-3 || 1, b: ((rnd()*7)|0)-3,
+    c: ((rnd()*7)|0)-3 || 1, d: ((rnd()*11)|0)-5, e: ((rnd()*11)|0)-5,
+    oz: 0,                      /* 0 so that z = cz gives w = 0: the anchor */
+  };
+
+  const cx = Math.floor((W-1)/2), cy = Math.floor((H-1)/2), cz = Math.floor((D-1)/2);
+  const cxf = (W-1)/2, cyf = (H-1)/2, czf = (D-1)/2;
+  const f3 = FIELDS3[g.formulaId] || FIELDS3.circle;
+  const M = g.modulus, st = g.stride, cov = g.coverage, phase = g.phase;
+  const colorMode = g.colorMode || 'solid';
+  const nc = Math.max(1, g.ncol || 1);
+  const vox = new Uint8Array(W*H*D);
+
+  for(let z=0; z<D; z++) for(let y=0; y<H; y++) for(let x=0; x<W; x++){
+    /* fold into the fundamental domain first, exactly as generateSprite
+       generates the seed region and then unfolds it */
+    const [sx, sy] = FOLD(x, y, W, H, symXY);
+    const sz = foldZ(z, D, symZ);
+
+    if(g.mask3 === 'sphere'){
+      const nx=(x-cxf)/(W/2), ny=(y-cyf)/(H/2), nz=(z-czf)/(D/2);
+      if(nx*nx + ny*ny + nz*nz > 1) continue;
+    }
+    const u = (sx-cx)*st + p.ox, v = (sy-cy)*st + p.oy, ww = (sz-cz)*st + p.oz;
+    let n;
+    try { n = f3(u, v, ww, p); } catch(e){ n = u*u + v*v + ww*ww; }
+    if(!Number.isFinite(n)) n = 0;
+    n = Math.round(n);
+    const vm = ((n % M) + M) % M;
+    const t = (vm/M + phase) % 1;
+    if(t >= cov) continue;
+    /* Colour is not a second channel. generateSprite derives the palette
+       index from the SAME congruence value that decided occupancy —
+       1 + (vm % nc) — so it lifts with the field at no extra cost, and the
+       anchor strengthens from silhouette to exact index (V1). Default
+       'solid' reproduces the occupancy-only behaviour of steps 2-6 exactly,
+       so every earlier gate keeps its meaning. */
+    vox[x + W*(y + H*z)] =
+        colorMode === 'solid' ? 1
+      : colorMode === 'cycle' ? 1 + (vm % nc)
+      : 1 + Math.min(nc-1, ((t/cov)*nc)|0);
+  }
+
+  const [sw, sh] = seedDims(W, H, symXY);
+  const sd = (symZ === 'mirror') ? (cz + 1) : D;
+  /* Publish the generating FUNCTION, not its output — ng section 2.2, lifted.
+     Defined over full volume coordinates so order:'byField' paints in field
+     order across the whole model rather than per block. */
+  const fieldFn = (x, y, z) => {
+    const [sx, sy] = FOLD(x, y, W, H, symXY);
+    const sz = foldZ(z, D, symZ);
+    const u = (sx-cx)*st + p.ox, v = (sy-cy)*st + p.oy, ww = (sz-cz)*st + p.oz;
+    let n; try { n = f3(u, v, ww, p); } catch(e){ n = u*u + v*v + ww*ww; }
+    return Number.isFinite(n) ? n : 0;
+  };
+  return { vox, dims:[W,H,D], p, cz, seedDims:[sw,sh,sd], colorMode, nc, field: fieldFn };
+}
+
+/* ================================================================ STEP 3
+   Orbit canonicalisation.
+
+   WHY. intern() in blocks-all-the-way-down hashes raw content, so a mirrored
+   node is not an identical node — its bytes differ — and plain content
+   addressing is structurally BLIND to symmetry. Measured: ~1.08x sharing no
+   matter how symmetric the sprite is. Canonicalising by orbit recovers
+   4.6x (horizontal) to 12.1x (diagonal). This is the only compression
+   mechanism with real leverage, so it is the one piece of genuinely new code
+   in session one.
+
+   WHAT. Send each node to the lexicographic minimum over its 48 B_3
+   transforms, and store the orientation that recovers the original. A ref is
+   then {h, o} exactly as in blocks: six bits of orientation over a canonical
+   hash, and rotating a subtree is changing six bits.
+
+   Note this is the same idea as orbitFold() above, one dimension up — the
+   2D fold's parity defect and the 3D store's blindness to symmetry have the
+   same fix, which is why orbitFold is written the way it is. */
+
+const NODE_N = 8;
+const NODE_CELLS = NODE_N * NODE_N * NODE_N;
+
+/* ---- the octahedral group in six bits, ported from blocks ---- */
+const PERMS = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+const PERM_IDX = new Map(PERMS.map((p,n)=>[p.join(''), n]));
+const O_ID = 0;
+const O_COUNT = 48;
+
+function oDesc(code){
+  const p = PERMS[(code>>3)|0];
+  return { p, s: [ (code&1)?-1:1, (code&2)?-1:1, (code&4)?-1:1 ] };
+}
+function oCode(g){
+  return PERM_IDX.get(g.p.join(''))*8
+       + ((g.s[0]<0)?1:0) + ((g.s[1]<0)?2:0) + ((g.s[2]<0)?4:0);
+}
+function oApply(code, x, y, z, n){
+  const N = n || NODE_N;
+  const g = oDesc(code), v = [x,y,z], w = [0,0,0];
+  for(let a=0; a<3; a++) w[a] = g.s[a] < 0 ? (N-1 - v[g.p[a]]) : v[g.p[a]];
+  return w;
+}
+/* (a o b): apply b, then a */
+function oCompose(ca, cb){
+  const a = oDesc(ca), b = oDesc(cb);
+  const p = [0,0,0], s = [1,1,1];
+  for(let i=0;i<3;i++){ p[i] = b.p[a.p[i]]; s[i] = a.s[i]*b.s[a.p[i]]; }
+  return oCode({p, s});
+}
+function oInv(code){
+  const g = oDesc(code);
+  const p = [0,0,0], s = [1,1,1];
+  for(let a=0; a<3; a++){ p[g.p[a]] = a; s[g.p[a]] = g.s[a]; }
+  return oCode({p, s});
+}
+
+/* ---- index tables -------------------------------------------------------
+   DST[o][i]  destination of source cell i   (place(): dst[DST[o][i]] = src[i])
+   SRC[o][j]  source of destination cell j   (the inverse; lets the canonical
+              search read transformed bytes WITHOUT materialising an array,
+              which is what makes the early-out comparison possible)        */
+const DST = [], SRC = [];
+for(let o=0; o<O_COUNT; o++){
+  const d = new Int32Array(NODE_CELLS), r = new Int32Array(NODE_CELLS);
+  for(let z=0;z<NODE_N;z++) for(let y=0;y<NODE_N;y++) for(let x=0;x<NODE_N;x++){
+    const i = x + NODE_N*(y + NODE_N*z);
+    const w = oApply(o, x, y, z);
+    const j = w[0] + NODE_N*(w[1] + NODE_N*w[2]);
+    d[i] = j; r[j] = i;
+  }
+  DST.push(d); SRC.push(r);
+}
+
+/* place(node, o) — the transform blocks' materialize() performs:
+   dst[oApply(o, p)] = node[p]. */
+function place(node, o, out){
+  const dst = DST[o], res = out || new Uint8Array(NODE_CELLS);
+  for(let i=0;i<NODE_CELLS;i++) res[dst[i]] = node[i];
+  return res;
+}
+
+function hashNodeBytes(b){
+  let a = 0x811c9dc5>>>0, c = 0xcbf29ce4>>>0;
+  for(let i=0;i<b.length;i++){
+    a = Math.imul(a ^ b[i], 0x01000193)>>>0;
+    c = Math.imul(c ^ b[i], 0x85ebca6b)>>>0;
+  }
+  return a.toString(16).padStart(8,'0') + c.toString(16).padStart(8,'0');
+}
+
+/* ---- reference canonicaliser: materialise all 48, hash, take the min ----
+   Obviously correct, quadratically wasteful. Kept as the correctness bridge
+   for canonicalize(), in the same spirit as ng's K9. */
+function canonicalizeRef(node){
+  let bestO = -1, bestBytes = null;
+  const scratch = new Uint8Array(NODE_CELLS);
+  for(let o=0;o<O_COUNT;o++){
+    place(node, o, scratch);
+    if(bestBytes === null){ bestBytes = Uint8Array.from(scratch); bestO = o; continue; }
+    let cmp = 0;
+    for(let i=0;i<NODE_CELLS;i++){ if(scratch[i] !== bestBytes[i]){ cmp = scratch[i] - bestBytes[i]; break; } }
+    if(cmp < 0){ bestBytes.set(scratch); bestO = o; }
+  }
+  /* stabiliser: how many group elements fix this node exactly */
+  let stab = 0;
+  for(let o=0;o<O_COUNT;o++){
+    place(node, o, scratch);
+    let same = true;
+    for(let i=0;i<NODE_CELLS;i++) if(scratch[i] !== node[i]){ same = false; break; }
+    if(same) stab++;
+  }
+  return { node: bestBytes, hash: hashNodeBytes(bestBytes), o: oInv(bestO),
+           found: bestO, stabilizer: stab, orbit: O_COUNT/stab };
+}
+
+/* ---- fast canonicaliser -------------------------------------------------
+   Never materialises a candidate. Byte j of transform o is node[SRC[o][j]],
+   so two transforms are compared in place with an early-out on the first
+   differing byte. Ties (a node fixed by part of the group) are broken by the
+   smallest orientation code, which is what makes the result deterministic
+   and therefore usable as a content address. */
+function canonicalize(node){
+  let best = 0, stab = 1;
+  const s0 = SRC;
+  for(let o=1;o<O_COUNT;o++){
+    const a = s0[o], b = s0[best];
+    let cmp = 0;
+    for(let j=0;j<NODE_CELLS;j++){
+      const u = node[a[j]], v = node[b[j]];
+      if(u !== v){ cmp = u - v; break; }
+    }
+    if(cmp < 0){ best = o; stab = 1; }
+    else if(cmp === 0) stab++;
+  }
+  const src = s0[best], bytes = new Uint8Array(NODE_CELLS);
+  for(let j=0;j<NODE_CELLS;j++) bytes[j] = node[src[j]];
+  return { node: bytes, hash: hashNodeBytes(bytes), o: oInv(best),
+           found: best, stabilizer: stab, orbit: O_COUNT/stab };
+}
+
+/* Extract one 8^3 node from a volume at block origin (bx,by,bz).
+   Reads out of range as AIR, so a volume whose dims are not multiples of 8
+   partitions cleanly with an air margin. That margin is not waste: it interns
+   to the all-air canonical node, the single cheapest entry in the store, and
+   it is what lets the z mirror keep an odd depth (V3) without giving up
+   8-aligned nodes. Padding is what an octree over a bounded form does anyway. */
+function nodeAt(vol, bx, by, bz){
+  const [W,H,D] = vol.dims, out = new Uint8Array(NODE_CELLS);
+  for(let z=0;z<NODE_N;z++){
+    const az = bz+z; if(az < 0 || az >= D) continue;
+    for(let y=0;y<NODE_N;y++){
+      const ay = by+y; if(ay < 0 || ay >= H) continue;
+      for(let x=0;x<NODE_N;x++){
+        const ax = bx+x; if(ax < 0 || ax >= W) continue;
+        out[x + NODE_N*(y + NODE_N*z)] = vol.vox[ax + W*(ay + H*az)];
+      }
+    }
+  }
+  return out;
+}
+/* Block origins covering a volume, padded up to whole nodes. */
+function blocksOf(vol){
+  const [W,H,D] = vol.dims, out = [];
+  for(let z=0; z<D; z+=NODE_N) for(let y=0; y<H; y+=NODE_N) for(let x=0; x<W; x+=NODE_N)
+    out.push([x,y,z]);
+  return out;
+}
+
+/* ================================================================ STEP 4
+   intern3 — the node store, keyed on the canonical hash.
+
+   A node is the frozen content of one 8^3 interior: its vox plus a map
+   cell -> ref. A ref is {h, o}: which node, held at which of the 48
+   orientations. Nodes are interned by CANONICAL content, so a subtree and
+   every rotation and reflection of it are one entry (step 3), reached
+   through six different bits.
+
+   The new problem over step 3 is that transforming a node with children is
+   not just a permutation of bytes. The cell each child sits in moves, AND
+   the child's own orientation composes with the parent's:
+
+       vox'[DST[o][i]]  = vox[i]
+       kids'[DST[o][i]] = { h: kid.h, o: oCompose(o, kid.o) }
+
+   which is exactly what blocks' materialize() does when it bakes one level.
+   Canonicalisation therefore minimises over vox AND the transformed kid set.
+
+   Orbit-invariance survives the nesting, and provably rather than
+   empirically: for Y = place(X, g),
+       canon(Y) = min_o key(place(X, o o g))
+   and as o runs over the group so does (o o g), so the two minima are equal.
+   B3 asserts it anyway, over every element, at depth. */
+
+function placeContent(vox, kids, o){
+  const dst = DST[o];
+  const v = new Uint8Array(NODE_CELLS);
+  for(let i=0;i<NODE_CELLS;i++) v[dst[i]] = vox[i];
+  const k = new Map();
+  for(const [ii, r] of kids) k.set(dst[ii], { h: r.h, o: oCompose(o, r.o) });
+  return { vox: v, kids: k };
+}
+
+/* ------------------------------------------------- REF ORIENTATION IS A COSET
+   A node with a nontrivial stabiliser has AMBIGUOUS reference orientations.
+   If S = { s : place(K,s) = K } then for any s in S
+
+       place(K, o o s) = place(place(K,s), o) = place(K, o)
+
+   so the whole right coset o.S materialises the identical child, and "which
+   orientation recovers this child" has |S| equally correct answers.
+
+   Harmless for the node itself — expandRef gives the same tree either way.
+   NOT harmless one level up: the parent's content embeds the child's o, so
+   two parents that differ only by a rotation get kid sets that are not each
+   other's transform, and the parent's canonical search cannot reconcile them.
+   Orbit-invariance then fails at depth 2 while every depth-1 test passes.
+
+   The fix is to make the ref itself canonical: pick the smallest code in the
+   coset. That requires the stabiliser SET, not merely its order, so the store
+   keeps it. blocks-all-the-way-down never meets this because it does not
+   canonicalise at all — every orientation is a distinct node there. */
+function stabilizerOf(vox, kids){
+  const set = [];
+  const baseK = kids.size ? kidsKey(kids, O_ID, null) : '';
+  for(let s=0;s<O_COUNT;s++){
+    const src = SRC[s];
+    let same = true;
+    for(let j=0;j<NODE_CELLS;j++) if(vox[src[j]] !== vox[j]){ same = false; break; }
+    if(same && kids.size) same = (kidsKey(kids, s, null) === baseK);
+    if(same) set.push(s);
+  }
+  return set;
+}
+function normalizeO(o, stab){
+  if(!stab || stab.length <= 1) return o;
+  let best = oCompose(o, stab[0]);
+  for(let i=1;i<stab.length;i++){
+    const c = oCompose(o, stab[i]);
+    if(c < best) best = c;
+  }
+  return best;
+}
+
+/* Comparison key for the kid set of one candidate orientation. Sorted by
+   cell so the key is a function of content, not of Map insertion order, and
+   each kid's orientation is reduced to its coset minimum (see above).
+   stabOf(h) -> stabiliser set, or null to skip normalisation. */
+function kidsKey(kids, o, stabOf){
+  if(kids.size === 0) return '';
+  const dst = DST[o], parts = [];
+  for(const [ii, r] of kids){
+    const oc = oCompose(o, r.o);
+    parts.push([dst[ii], r.h, stabOf ? normalizeO(oc, stabOf(r.h)) : oc]);
+  }
+  parts.sort((a,b)=>a[0]-b[0]);
+  return parts.map(p=>p[0]+':'+p[1]+':'+p[2]).join('|');
+}
+
+function hashContent(vox, kids){
+  let a = 0x811c9dc5>>>0, c = 0xcbf29ce4>>>0;
+  const mix = x => { a = Math.imul(a ^ x, 0x01000193)>>>0;
+                     c = Math.imul(c ^ x, 0x85ebca6b)>>>0; };
+  for(let i=0;i<vox.length;i++) mix(vox[i]);
+  const ks = [...kids.entries()].sort((p,q)=>p[0]-q[0]);
+  for(const [ii, r] of ks){
+    mix(0xC1); mix(ii);
+    for(let j=0;j<r.h.length;j++) mix(r.h.charCodeAt(j));
+    mix(r.o);
+  }
+  return a.toString(16).padStart(8,'0') + c.toString(16).padStart(8,'0');
+}
+
+/* Canonicalise content. For a leaf (kids.size === 0) this is exactly step 3's
+   canonicalize(): vox compared through SRC with an early-out, ties broken by
+   the smallest orientation code. Kids only ever REFINE a tie, so leaf
+   behaviour is unchanged and C3-C8 keep their meaning. */
+function canonicalizeContent(vox, kids, stabOf){
+  const K = o => kidsKey(kids, o, stabOf);
+  let best = 0, bestKids = kids.size ? K(0) : '', ties = 1;
+  for(let o=1;o<O_COUNT;o++){
+    const a = SRC[o], b = SRC[best];
+    let cmp = 0;
+    for(let j=0;j<NODE_CELLS;j++){
+      const u = vox[a[j]], v = vox[b[j]];
+      if(u !== v){ cmp = u - v; break; }
+    }
+    if(cmp === 0 && kids.size){
+      const ka = K(o);
+      cmp = ka < bestKids ? -1 : (ka > bestKids ? 1 : 0);
+      if(cmp < 0){ best = o; bestKids = ka; ties = 1; continue; }
+    }
+    if(cmp < 0){ best = o; bestKids = kids.size ? K(o) : ''; ties = 1; }
+    else if(cmp === 0) ties++;
+  }
+  const placed = placeContent(vox, kids, best);
+  /* rewrite the canonical kid orientations to their coset minima, so the
+     stored content is itself canonical and not merely canonically ordered */
+  if(stabOf) for(const [ii, r] of placed.kids)
+    placed.kids.set(ii, { h: r.h, o: normalizeO(r.o, stabOf(r.h)) });
+  const stabSet = stabilizerOf(placed.vox, placed.kids);
+  return { vox: placed.vox, kids: placed.kids, o: oInv(best),
+           found: best, stabilizer: stabSet.length, stabSet,
+           orbit: O_COUNT/stabSet.length, ties };
+}
+
+/* ---- the store ----------------------------------------------------------
+   A factory rather than a module global, so tests get a fresh store and the
+   eventual tool can hold more than one. */
+function makeStore(){
+  const map = new Map();
+  let hits = 0, canonHits = 0;
+
+  /* intern takes OWNERSHIP of vox and kids. Returns a REF {h, o}: the
+     canonical hash plus the orientation that recovers what was handed in.
+     Callers store the ref, never the raw hash — that is what makes a
+     rotation six bits instead of a copy. */
+  const stabOf = h => { const n = map.get(h); return n ? n.meta.stabSet : [O_ID]; };
+
+  function intern(vox, kids){
+    const c = canonicalizeContent(vox, kids || new Map(), stabOf);
+    const h = hashContent(c.vox, c.kids);
+    const hit = map.get(h);
+    if(hit){ hits++; if(c.found !== O_ID) canonHits++;
+             return { h, o: normalizeO(c.o, hit.meta.stabSet) }; }
+    let worlds = 1, depth = 1;
+    for(const r of c.kids.values()){
+      const m = map.get(r.h);
+      if(!m) throw new Error('intern: child ' + r.h + ' not in store');
+      worlds += m.meta.worlds;
+      depth = Math.max(depth, 1 + m.meta.depth);
+    }
+    map.set(h, { hash:h, vox:c.vox, kids:c.kids,
+                 meta:{ worlds, depth, stabilizer:c.stabilizer,
+                        stabSet:c.stabSet, orbit:c.orbit } });
+    if(c.found !== O_ID) canonHits++;
+    return { h, o: normalizeO(c.o, c.stabSet) };
+  }
+
+  const get = h => map.get(h);
+  const meta = ref => map.get(ref.h).meta;
+
+  /* expandRef — the EAGER bridge. Materialises a reference into a plain
+     nested tree with the orientation applied all the way down. Deliberately
+     slow and obviously correct: it is what the lazy path is judged against
+     (blocks' expandRef / xformNode / nodeEq idiom). */
+  function expandRef(ref, depth){
+    const d = (depth === undefined) ? 12 : depth;
+    const node = map.get(ref.h);
+    if(!node) throw new Error('expandRef: unknown hash ' + ref.h);
+    const dst = DST[ref.o];
+    const vox = new Uint8Array(NODE_CELLS);
+    for(let i=0;i<NODE_CELLS;i++) vox[dst[i]] = node.vox[i];
+    const kids = new Map();
+    if(d > 0) for(const [ii, kr] of node.kids)
+      kids.set(dst[ii], expandRef({ h:kr.h, o:oCompose(ref.o, kr.o) }, d-1));
+    return { vox, kids };
+  }
+
+  /* direct insert for deserialisation: the stored content is already
+     canonical, so re-interning would be correct but wasteful. */
+  function _put(h, vox, kids, meta){ map.set(h, { hash:h, vox, kids, meta }); }
+
+  return { intern, get, meta, expandRef, _put,
+           get size(){ return map.size; },
+           get hits(){ return hits; },
+           get canonHits(){ return canonHits; },
+           keys: () => [...map.keys()] };
+}
+
+/* ---- eager tree helpers, for the bridge only --------------------------- */
+/* A legacy tree is { vox, kids: Map(cell -> tree) } — no hashes, no
+   orientations, nothing shared. */
+function xformNode(node, o){
+  const dst = DST[o];
+  const vox = new Uint8Array(NODE_CELLS);
+  for(let i=0;i<NODE_CELLS;i++) vox[dst[i]] = node.vox[i];
+  const kids = new Map();
+  for(const [ii, kid] of node.kids) kids.set(dst[ii], xformNode(kid, o));
+  return { vox, kids };
+}
+function nodeEq(a, b){
+  if(!a || !b) return a === b;
+  for(let i=0;i<NODE_CELLS;i++) if(a.vox[i] !== b.vox[i]) return false;
+  if(a.kids.size !== b.kids.size) return false;
+  for(const [ii, ka] of a.kids){
+    const kb = b.kids.get(ii);
+    if(!kb || !nodeEq(ka, kb)) return false;
+  }
+  return true;
+}
+/* Intern a whole eager tree, children first. */
+function internTree(store, node){
+  const kids = new Map();
+  for(const [ii, kid] of node.kids) kids.set(ii, internTree(store, kid));
+  return store.intern(Uint8Array.from(node.vox), kids);
+}
+/* Count nodes / depth the slow way, to judge meta against. */
+function countTree(node){
+  let worlds = 1, depth = 1;
+  for(const kid of node.kids.values()){
+    const c = countTree(kid);
+    worlds += c.worlds;
+    depth = Math.max(depth, 1 + c.depth);
+  }
+  return { worlds, depth };
+}
+
+/* ================================================================ STEP 5
+   tensor3 — the shading payload.
+
+   WHAT IS STORED. Not a normal. The mean face normal over a content-addressed
+   node is IDENTICALLY ZERO by the discrete divergence theorem: a node under
+   content addressing is a closed surface ("outside is unknown, therefore
+   exposed"), and every 1D run of solid cells contributes exactly one +axis
+   end and one -axis end. Measured over 2000 random patterns: worst L1 error
+   zero. Any first moment over a closed node dies the same way. G1 keeps that
+   trap live as a test rather than a memory.
+
+   The SECOND moment survives, because it is a sum of outer products with
+   nothing to cancel. So each placement carries the structure tensor of the
+   occupancy gradient:
+
+       g = central difference of occupancy at each boundary cell
+       S = sum g g^T          symmetric 3x3, kept as [xx,yy,zz,xy,xz,yz]
+
+   UN-NORMALISED, with the count alongside. Normalising destroys additivity;
+   FA is derived at read time. This is the same discipline as ng's output
+   contract — accumulate raw, convert once at the boundary.
+
+   Occupancy is read as 0/1, never as a material id, so the geometry tensor is
+   exact integer arithmetic and independent of the palette. "Composes exactly"
+   is then literal integer equality, not a tolerance.
+
+   WHY THE GRADIENT AND NOT FACE NORMALS. Voxel face normals are all +-e_i, so
+   their second moment is DIAGONAL by construction and a plane at 45 degrees
+   to every axis reads as perfectly isotropic — a staircase of alternating
+   +-x and +-y faces. Measured: diagonal wedge 0.000 under face normals,
+   0.804 under the gradient. It would have silently flattened every chamfer. */
+
+const TENSOR_ZERO = () => ({ m: new Int32Array(6), count: 0 });
+
+/* Structure tensor over a box, reading occupancy through `read`.
+   read(x,y,z) supplies the CONTEXT: pass the enclosing volume's reader to get
+   the exact tensor, or a box-clipped reader to get the closed (pure) one. */
+function tensorOver(read, x0, y0, z0, sx, sy, sz){
+  let xx=0, yy=0, zz=0, xy=0, xz=0, yz=0, count=0;
+  for(let z=z0; z<z0+sz; z++) for(let y=y0; y<y0+sy; y++) for(let x=x0; x<x0+sx; x++){
+    const gx = read(x+1,y,z) - read(x-1,y,z);
+    const gy = read(x,y+1,z) - read(x,y-1,z);
+    const gz = read(x,y,z+1) - read(x,y,z-1);
+    if(!(gx || gy || gz)) continue;
+    xx += gx*gx; yy += gy*gy; zz += gz*gz;
+    xy += gx*gy; xz += gx*gz; yz += gy*gz;
+    count++;
+  }
+  return { m: Int32Array.from([xx,yy,zz,xy,xz,yz]), count };
+}
+function tensorAdd(a, b){
+  const m = new Int32Array(6);
+  for(let i=0;i<6;i++) m[i] = a.m[i] + b.m[i];
+  return { m, count: a.count + b.count };
+}
+function tensorEq(a, b){
+  if(a.count !== b.count) return false;
+  for(let i=0;i<6;i++) if(a.m[i] !== b.m[i]) return false;
+  return true;
+}
+/* Occupancy reader over a volume; out of range is air. */
+function readerOf(vol){
+  const [W,H,D] = vol.dims, v = vol.vox;
+  return (x,y,z) => (x<0||y<0||z<0||x>=W||y>=H||z>=D) ? 0 : (v[x + W*(y + H*z)] ? 1 : 0);
+}
+/* Reader clipped to one box: everything outside reads as air. The CLOSED
+   stencil. Kept for T4, which pins how wrong it is to compose with. */
+function clippedReader(vol, x0, y0, z0, n){
+  const base = readerOf(vol);
+  return (x,y,z) => (x<x0||y<y0||z<z0||x>=x0+n||y>=y0+n||z>=z0+n) ? 0 : base(x,y,z);
+}
+
+/* Conjugation. Under orientation o the gradient transforms as
+   g'[a] = s[a] * g[p[a]], so S'[a][b] = s[a] s[b] S[p[a]][p[b]]. Exact
+   integer moves — no arithmetic, just permutation and sign. */
+const TIDX = [[0,3,4],[3,1,5],[4,5,2]];
+function tensorConjugate(S, o){
+  const g = oDesc(o), m = new Int32Array(6);
+  const at = (a,b) => S.m[TIDX[a][b]];
+  for(let a=0;a<3;a++) for(let b=a;b<3;b++)
+    m[TIDX[a][b]] = g.s[a]*g.s[b] * at(g.p[a], g.p[b]);
+  return { m, count: S.count };
+}
+
+/* ---- read-time derivation: eigenvalues and fractional anisotropy -------- */
+function tensorEig(S){
+  if(!S.count) return [0,0,0];
+  const c = S.count;
+  const a = S.m[0]/c, b = S.m[1]/c, d = S.m[2]/c,
+        p = S.m[3]/c, q = S.m[4]/c, r = S.m[5]/c;
+  const p1 = p*p + q*q + r*r;
+  if(p1 === 0) return [a,b,d].sort((x,y)=>y-x);
+  const tr = (a+b+d)/3;
+  const p2 = (a-tr)**2 + (b-tr)**2 + (d-tr)**2 + 2*p1;
+  const pp = Math.sqrt(p2/6);
+  const B = [(a-tr)/pp, (b-tr)/pp, (d-tr)/pp, p/pp, q/pp, r/pp];
+  const det = B[0]*(B[1]*B[2]-B[5]*B[5]) - B[3]*(B[3]*B[2]-B[5]*B[4]) + B[4]*(B[3]*B[5]-B[1]*B[4]);
+  const phi = Math.acos(Math.max(-1, Math.min(1, det/2)))/3;
+  const e1 = tr + 2*pp*Math.cos(phi);
+  const e3 = tr + 2*pp*Math.cos(phi + 2*Math.PI/3);
+  return [e1, 3*tr - e1 - e3, e3].sort((x,y)=>y-x);
+}
+/* FA in [0,1]: 1 = rank-one (a plane, tight highlight), 0 = isotropic
+   (a knot of pods, no coherent highlight). This is the roughness term. */
+function tensorFA(S){
+  const lam = tensorEig(S);
+  const sum = lam[0]+lam[1]+lam[2];
+  if(sum <= 1e-12) return 0;
+  const l = lam.map(v=>v/sum), t = 1/3;
+  return Math.sqrt(1.5) * Math.hypot(l[0]-t, l[1]-t, l[2]-t) / Math.hypot(l[0], l[1], l[2]);
+}
+
+/* ---- the bottom-up sweep ------------------------------------------------
+   Level 0 tensors are computed over each 8^3 block WITH REAL NEIGHBOURS from
+   the enclosing volume. Every higher level is the plain SUM of its children.
+   That is exact, not approximate: every leaf cell belongs to exactly one
+   block, and with real neighbours its gradient is the same one the whole-
+   volume tensor computes. Un-normalised tensors are additive over any
+   partition. T1 and T2 assert it as integer equality.
+
+   Returns { levels: [ [ {origin, size, tensor} ... ] ... ] }, level 0 finest. */
+function buildTensorTree(vol){
+  const read = readerOf(vol);
+  const [W,H,D] = vol.dims;
+  const n0 = NODE_N;
+  const nx = Math.ceil(W/n0), ny = Math.ceil(H/n0), nz = Math.ceil(D/n0);
+
+  const level0 = [];
+  for(let k=0;k<nz;k++) for(let j=0;j<ny;j++) for(let i=0;i<nx;i++)
+    level0.push({ origin:[i*n0, j*n0, k*n0], size:n0, cells:[i,j,k],
+                  tensor: tensorOver(read, i*n0, j*n0, k*n0, n0, n0, n0) });
+
+  const levels = [level0];
+  let dims = [nx, ny, nz], cur = level0, size = n0;
+  while(dims[0] > 1 || dims[1] > 1 || dims[2] > 1){
+    const px = Math.ceil(dims[0]/n0), py = Math.ceil(dims[1]/n0), pz = Math.ceil(dims[2]/n0);
+    const next = [];
+    const idx = (i,j,k) => i + dims[0]*(j + dims[1]*k);
+    for(let k=0;k<pz;k++) for(let j=0;j<py;j++) for(let i=0;i<px;i++){
+      let acc = TENSOR_ZERO();
+      for(let c=k*n0; c<Math.min((k+1)*n0, dims[2]); c++)
+        for(let b=j*n0; b<Math.min((j+1)*n0, dims[1]); b++)
+          for(let a=i*n0; a<Math.min((i+1)*n0, dims[0]); a++)
+            acc = tensorAdd(acc, cur[idx(a,b,c)].tensor);
+      next.push({ origin:[i*n0*size, j*n0*size, k*n0*size], size:size*n0,
+                  cells:[i,j,k], tensor: acc });
+    }
+    levels.push(next);
+    cur = next; dims = [px,py,pz]; size *= n0;
+  }
+  return { levels, dims: vol.dims };
+}
+
+/* The coarse alternative, kept only so T3 can reject it: the tensor of the
+   node's own DOWNSAMPLED occupancy. It describes the coarse SHAPE and is
+   uncorrelated (r ~ 0.06-0.21) with the fine surface it would be standing in
+   for. Anyone reaching for the cheap version gets a plausible number that
+   means nothing. */
+function tensorCoarse(vol, x0, y0, z0, span){
+  const read = readerOf(vol);
+  const n = NODE_N, step = span/n;
+  const small = new Uint8Array(n*n*n);
+  for(let k=0;k<n;k++) for(let j=0;j<n;j++) for(let i=0;i<n;i++){
+    let solid = 0;
+    for(let z=0;z<step;z++) for(let y=0;y<step;y++) for(let x=0;x<step;x++)
+      solid += read(x0+i*step+x, y0+j*step+y, z0+k*step+z);
+    small[i + n*(j + n*k)] = (solid*2 >= step*step*step) ? 1 : 0;
+  }
+  const sr = (x,y,z) => (x<0||y<0||z<0||x>=n||y>=n||z>=n) ? 0 : small[x+n*(y+n*z)];
+  return tensorOver(sr, 0,0,0, n,n,n);
+}
+
+/* ================================================================ STEP 6
+   raster3 — the kernel, extended rather than rewritten.
+
+   Three things carry over from mosprites-ng UNCHANGED, and that is the point:
+
+     axisPlan(n, base, p, limit)  is already dimension-agnostic. It knows an
+       index, an origin, a scale and a clip limit — nothing about WHICH axis.
+       Used three times, byte-identical to the 2D version. R3 gates it against
+       ref.axisPlan so the two cannot drift.
+
+     resolve(R,G,B,A,W,H,linear)  is untouched, literally. It only ever uses
+       N = W*H as a linear scan, so a W x H x D buffer resolves by calling it
+       with (W, H*D). The output contract — accumulate premultiplied in the
+       working space, unpremultiply and apply the transfer curve exactly once
+       at the boundary, in that order — lifts to 3D for free. R5 asserts a
+       whole-volume resolve equals a per-slice resolve.
+
+     OPS_K  the same algebra, reproduced here only so this file stands alone
+       in a browser script tag. R0 gates it against ref.
+
+   blit gains ONE loop and one term. The `opaque` fast path, which declares
+   that an operator collapses to a plain write at a === 1, now needs fy AND fz
+   to be 1 as well — a cell's interior in 3D is the intersection of three
+   interiors. R6 gates the fast path against the general path.
+
+   THE DEGENERATE CASE. With d === 1 and D === 1 there is no z extent to
+   cover, so the z plan is the unit plan rather than axisPlan's — otherwise a
+   p < 1 raster would scale alpha by p a third time and a flat image would
+   fade. In that mode raster3 must reproduce ref.raster BYTE FOR BYTE, which
+   is a far stronger statement than "the 2D suite still passes": it proves the
+   3D kernel literally contains the 2D one rather than merely coexisting. */
+
+const OPS_K3 = {
+  over: { opaque:true, f(R,G,B,A,k, r,g,b, a){
+    const ad=A[k], ia=1-a;
+    R[k] = r*a + R[k]*ia; G[k] = g*a + G[k]*ia; B[k] = b*a + B[k]*ia;
+    A[k] = a + ad*ia;
+  }},
+  add:  { opaque:false, f(R,G,B,A,k, r,g,b, a){
+    const ad=A[k];
+    R[k] = R[k] + r*a; G[k] = G[k] + g*a; B[k] = B[k] + b*a;
+    A[k] = Math.min(1, ad + a);
+  }},
+  mul:  { opaque:false, f(R,G,B,A,k, r,g,b, a){
+    const ad=A[k], ia=1-a;
+    R[k] = R[k]*ia + (R[k]*r/255)*a;
+    G[k] = G[k]*ia + (G[k]*g/255)*a;
+    B[k] = B[k]*ia + (B[k]*b/255)*a;
+    A[k] = a + ad*ia;
+  }},
+};
+
+const span3 = (a0,a1,b0,b1) => Math.max(0, Math.min(a1,b1) - Math.max(a0,b0));
+
+/* axisPlan, reproduced verbatim from mosprites-ng. Not re-derived. */
+function axisPlan(n, base, p, limit){
+  const plan = new Array(n);
+  for(let t=0;t<n;t++){
+    const t0 = base + t*p, t1 = t0 + p;
+    const lo = Math.max(0, Math.floor(t0)), hi = Math.min(limit, Math.ceil(t1));
+    const raw = [];
+    for(let i=lo;i<hi;i++) raw.push(span3(t0,t1,i,i+1));
+    let a=0, b=raw.length;
+    while(a<b && raw[a]<=0) a++;
+    while(b>a && raw[b-1]<=0) b--;
+    const cov = Float64Array.from(raw.slice(a,b));
+    let f0=-1, f1=-1;
+    for(let i=0;i<cov.length;i++) if(cov[i]===1){ if(f0<0) f0=i; f1=i+1; }
+    if(f0<0){ f0=0; f1=0; }
+    plan[t] = { lo: lo+a, cov, f0, f1 };
+  }
+  return plan;
+}
+/* The z plan for a flat raster: one slab of coverage exactly 1. */
+const UNIT_PLAN = () => [{ lo:0, cov:Float64Array.from([1]), f0:0, f1:1 }];
+
+/* ---- traversal orders, lifted -----------------------------------------
+   byKey and the cache are dimension-agnostic; only the generators needed a d.
+   `byField` is the interesting one: it paints in order of the same modulo
+   field that generated the form, so under a NON-commutative operator the
+   apparent light direction is produced by the volume's own congruence
+   structure — and being camera-independent it stays cacheable by hash. */
+const byKey3 = (triples, key) => {
+  const k = triples.map(key), idx = triples.map((_,i)=>i);
+  idx.sort((a,b)=>k[a]-k[b]);
+  return idx.map(i=>triples[i]);
+};
+function morton3Key(a){
+  const part = v => { let r=0; for(let b=0;b<10;b++) r |= ((v>>b)&1) << (3*b); return r; };
+  return part(a[0]) | (part(a[1])<<1) | (part(a[2])<<2);
+}
+const ORDERS3 = {
+  rowMajor: (w,h,d) => { const o=[]; for(let z=0;z<d;z++) for(let y=0;y<h;y++) for(let x=0;x<w;x++) o.push([x,y,z]); return o; },
+  colMajor: (w,h,d) => { const o=[]; for(let x=0;x<w;x++) for(let y=0;y<h;y++) for(let z=0;z<d;z++) o.push([x,y,z]); return o; },
+  depthFirst:(w,h,d)=> { const o=[]; for(let y=0;y<h;y++) for(let x=0;x<w;x++) for(let z=0;z<d;z++) o.push([x,y,z]); return o; },
+  serpentine:(w,h,d)=> { const o=[]; for(let z=0;z<d;z++) for(let y=0;y<h;y++){
+    for(let i=0;i<w;i++) o.push([ (y+z)%2 ? w-1-i : i, y, z ]); } return o; },
+  radial:   (w,h,d) => byKey3(ORDERS3.rowMajor(w,h,d),
+    a=>Math.hypot(a[0]-(w-1)/2, a[1]-(h-1)/2, a[2]-(d-1)/2)),
+  morton:   (w,h,d) => byKey3(ORDERS3.rowMajor(w,h,d), morton3Key),
+  byField:  (w,h,d,field) => byKey3(ORDERS3.rowMajor(w,h,d), a=>field?field(a[0],a[1],a[2]):0),
+};
+const ZERO_FIELD3 = () => 0;
+const SEQ_CACHE3 = new Map();
+const FIELD_SEQ3 = new WeakMap();
+function orderSeq3(order, w, h, d, field){
+  const fn = ORDERS3[order] || ORDERS3.rowMajor;
+  const key = order + '|' + w + '|' + h + '|' + d;
+  let store = SEQ_CACHE3;
+  if(order === 'byField'){
+    const ff = field || ZERO_FIELD3;
+    store = FIELD_SEQ3.get(ff);
+    if(!store){ store = new Map(); FIELD_SEQ3.set(ff, store); }
+  }
+  const hit = store.get(key);
+  if(hit) return hit;
+  const tri = fn(w, h, d, field);
+  const flat = new Int32Array(tri.length*3);
+  for(let i=0;i<tri.length;i++){ flat[i*3]=tri[i][0]; flat[i*3+1]=tri[i][1]; flat[i*3+2]=tri[i][2]; }
+  store.set(key, flat);
+  return flat;
+}
+
+/* THE hot loop, with one more nest. `force` disables the opaque fast path,
+   so R6 can run the general path over identical input and compare. */
+function blit3(P, W, H, seq, colorAt, xs, ys, zs, opk, force){
+  const R=P.R, G=P.G, B=P.B, A=P.A, f=opk.f, OPQ = opk.opaque && !force;
+  const WH = W*H;
+  for(let t=0; t<seq.length; t+=3){
+    const c = colorAt(seq[t], seq[t+1], seq[t+2]); if(!c) continue;
+    const r=c[0], g=c[1], b=c[2];
+    const px = xs[seq[t]], py = ys[seq[t+1]], pz = zs[seq[t+2]];
+    const xc = px.cov, yc = py.cov, zc = pz.cov;
+    const nx = xc.length, ny = yc.length, nz = zc.length;
+    if(!nx || !ny || !nz) continue;
+    const xlo = px.lo, xf0 = px.f0, xf1 = px.f1;
+    for(let kk=0; kk<nz; kk++){
+      const fz = zc[kk], plane = (pz.lo + kk)*WH;
+      for(let jj=0; jj<ny; jj++){
+        const fy = yc[jj], row = plane + (py.lo + jj)*W + xlo;
+        if(OPQ && fy === 1 && fz === 1){
+          /* fx*fy*fz === 1 on [f0,f1): the cell's interior in all three axes,
+             where an opaque operator is a plain write. Skip the flops, not
+             the semantics. */
+          let ii=0;
+          for(; ii<xf0; ii++) f(R,G,B,A, row+ii, r,g,b, xc[ii]);
+          for(; ii<xf1; ii++){ const k=row+ii; R[k]=r; G[k]=g; B[k]=b; A[k]=1; }
+          for(; ii<nx;  ii++) f(R,G,B,A, row+ii, r,g,b, xc[ii]);
+        } else {
+          const fyz = fy*fz;
+          for(let ii=0; ii<nx; ii++) f(R,G,B,A, row+ii, r,g,b, xc[ii]*fyz);
+        }
+      }
+    }
+  }
+}
+
+/* grid3: (x,y,z) -> [r,g,b] | null. Returns premultiplied Float64 planes in
+   the working space — the same contract as raster(), unconverted. */
+function raster3(grid3, w, h, d, opts){
+  const { scale:p, origin=[0,0,0], W, H, D=1,
+          op='over', order='rowMajor', linear=false, matte=null, field=null,
+          force=false } = opts;
+  const opk = OPS_K3[op] || OPS_K3.over;
+  const seq = orderSeq3(order, w, h, d, field);
+  const N = W*H*D;
+  const R=new Float64Array(N), G=new Float64Array(N), B=new Float64Array(N), A=new Float64Array(N);
+  const enc = linear ? srgb2lin : (c=>c);
+  if(matte){ const m = matte.map(enc);
+    for(let k=0;k<N;k++){ R[k]=m[0]; G[k]=m[1]; B[k]=m[2]; A[k]=1; } }
+  const xs = axisPlan(w, origin[0], p, W);
+  const ys = axisPlan(h, origin[1], p, H);
+  /* no z extent to cover when both source and output are one deep */
+  const zs = (d === 1 && D === 1) ? UNIT_PLAN() : axisPlan(d, origin[2], p, D);
+  const scratch = [0,0,0];
+  const colorAt = (x,y,z) => { const c = grid3(x,y,z); if(!c) return null;
+    scratch[0]=enc(c[0]); scratch[1]=enc(c[1]); scratch[2]=enc(c[2]); return scratch; };
+  blit3({R,G,B,A}, W, H, seq, colorAt, xs, ys, zs, opk, force);
+  return {R,G,B,A,W,H,D,linear};
+}
+
+const srgb2lin = c => { c/=255; return (c<=0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4))*255; };
+const lin2srgb = c => { c/=255; return (c<=0.0031308 ? c*12.92 : 1.055*Math.pow(c,1/2.4)-0.055)*255; };
+
+/* resolve — reproduced verbatim, NOT re-derived, and never called with a
+   depth argument. A W x H x D buffer resolves as (W, H*D). */
+function resolve(R,G,B,A,W,H,linear){
+  const N = W*H;
+  const out = new Uint8ClampedArray(N*4);
+  if(!linear){
+    for(let k=0;k<N;k++){
+      const a=A[k]; if(a<=1e-9) continue;
+      const i=k*4;
+      out[i]=Math.round(R[k]/a); out[i+1]=Math.round(G[k]/a);
+      out[i+2]=Math.round(B[k]/a); out[i+3]=Math.round(a*255);
+    }
+    return out;
+  }
+  const memo = new Map();
+  const T = v => { let u = memo.get(v);
+    if(u === undefined){ u = lin2srgb(v); if(memo.size < 4096) memo.set(v,u); }
+    return u; };
+  for(let k=0;k<N;k++){
+    const a=A[k]; if(a<=1e-9) continue;
+    const i=k*4;
+    if(a===1){
+      out[i]=Math.round(T(R[k])); out[i+1]=Math.round(T(G[k]));
+      out[i+2]=Math.round(T(B[k])); out[i+3]=255;
+      continue;
+    }
+    out[i]=Math.round(lin2srgb(R[k]/a)); out[i+1]=Math.round(lin2srgb(G[k]/a));
+    out[i+2]=Math.round(lin2srgb(B[k]/a)); out[i+3]=Math.round(a*255);
+  }
+  return out;
+}
+
+/* ================================================================ STEP 7
+   mip3 — the RGBA reduction, folded into step 5's sweep.
+
+   THE CLAIM FROM SECTION 1, MADE EXECUTABLE. The mip of an 8^3 node is
+   raster3 at p = 1/8 into a 1x1x1 buffer. Not "analogous to" — the same
+   function, the same coverage plans, the same operator algebra. Each cell
+   covers exactly 1/8 on each axis, so its weight is 1/512, and the result is
+   the coverage-weighted mean of the lit cells. M1 asserts the identity.
+
+   STORED UN-NORMALISED, exactly as the tensor is, and for the same reason:
+   premultiplied sums are additive over a partition and means are not. A leaf
+   mip is raster3's output scaled back up by the cell count; a parent is the
+   plain sum of its children; resolve() divides once at the boundary. This is
+   ng's output contract a third time — accumulate raw, convert at the edge.
+
+   OPERATOR CHOICE IS THE SHADING MODEL. `add` and `mul` are order-independent
+   so their mips are cacheable by content; `over` is not, and that is the
+   feature — traversal order IS a light direction. M2 pins all three.
+
+   THE TRAP. A commutativity test on a MULTIPLICATIVE operator passes
+   vacuously against a zero accumulator: `mul` never leaves zero, every order
+   agrees on nothing, and the gate goes green having tested nothing. M2 runs
+   every operator against a non-zero matte for exactly this reason. */
+
+/* mosprites palettes are hex strings; the kernel wants numeric triples.
+   Accepts '#rgb', '#rrggbb', or an existing [r,g,b] and passes it through. */
+function hexToRgb(c){
+  if(Array.isArray(c)) return c;
+  let h = String(c).replace('#','');
+  if(h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  const n = parseInt(h, 16);
+  return [ (n>>16)&255, (n>>8)&255, n&255 ];
+}
+
+const MIP_ZERO = () => ({ R:0, G:0, B:0, A:0, w:0 });
+function mipAdd(a, b){
+  return { R:a.R+b.R, G:a.G+b.G, B:a.B+b.B, A:a.A+b.A, w:a.w+b.w };
+}
+/* Read-time conversion: unpremultiply, then the transfer curve, in that
+   order — the only place either happens. */
+function mipResolve(mip, linear){
+  if(!mip.w) return [0,0,0,0];
+  const a = mip.A/mip.w;
+  if(a <= 1e-9) return [0,0,0,0];
+  const R = mip.R/mip.w, G = mip.G/mip.w, B = mip.B/mip.w;
+  const out = resolve(Float64Array.of(R), Float64Array.of(G), Float64Array.of(B),
+                      Float64Array.of(a), 1, 1, !!linear);
+  return [out[0], out[1], out[2], out[3]];
+}
+
+/* The mip of one 8^3 block, through the real kernel. colorOf(index) -> [r,g,b]
+   maps a palette index to colour; index 0 is air. */
+function mipOfBlock(vol, bx, by, bz, colorOf, opts){
+  const o = opts || {};
+  const [W,H,D] = vol.dims, n = NODE_N;
+  const grid3 = (x,y,z) => {
+    const ax=bx+x, ay=by+y, az=bz+z;
+    if(ax<0||ay<0||az<0||ax>=W||ay>=H||az>=D) return null;
+    const v = vol.vox[ax + W*(ay + H*az)];
+    return v ? hexToRgb(colorOf(v)) : null;
+  };
+  /* byField means "in the order of the generating field over the WHOLE
+     volume", not over each block's local frame — otherwise every block would
+     be painted in the same local order and the light direction would tile.
+     The wrapper is per-block, so orderSeq3's WeakMap gets one cached sequence
+     per block, which is the intended cost. */
+  const field = o.field ? ((x,y,z) => o.field(bx+x, by+y, bz+z)) : null;
+  const out = raster3(grid3, n, n, n, {
+    scale: 1/n, origin:[0,0,0], W:1, H:1, D:1,
+    op: o.op || 'add', order: o.order || 'rowMajor',
+    linear: !!o.linear, matte: o.matte || null, field });
+  const cells = n*n*n;
+  /* scale back up so the record is a SUM over cells, not a mean */
+  return { R: out.R[0]*cells, G: out.G[0]*cells, B: out.B[0]*cells,
+           A: out.A[0]*cells, w: cells };
+}
+
+/* buildTensorTree with the mip folded in — one sweep, both payloads.
+   Pass colorOf to get mips; omit it and this is exactly step 5. */
+function buildPayloadTree(vol, colorOf, opts){
+  const tree = buildTensorTree(vol);
+  if(!colorOf) return tree;
+  const n0 = NODE_N;
+  for(const cell of tree.levels[0]){
+    const [bx,by,bz] = cell.origin;
+    cell.mip = mipOfBlock(vol, bx, by, bz, colorOf, opts);
+  }
+  /* every higher level is the plain sum of its children, same law as the
+     tensor and for the same reason */
+  const [W,H,D] = vol.dims;
+  let dims = [Math.ceil(W/n0), Math.ceil(H/n0), Math.ceil(D/n0)];
+  for(let L=1; L<tree.levels.length; L++){
+    const px = Math.ceil(dims[0]/n0), py = Math.ceil(dims[1]/n0), pz = Math.ceil(dims[2]/n0);
+    const prev = tree.levels[L-1];
+    const idx = (i,j,k) => i + dims[0]*(j + dims[1]*k);
+    let m = 0;
+    for(let k=0;k<pz;k++) for(let j=0;j<py;j++) for(let i=0;i<px;i++){
+      let acc = MIP_ZERO();
+      for(let c=k*n0; c<Math.min((k+1)*n0, dims[2]); c++)
+        for(let b=j*n0; b<Math.min((j+1)*n0, dims[1]); b++)
+          for(let a=i*n0; a<Math.min((i+1)*n0, dims[0]); a++)
+            acc = mipAdd(acc, prev[idx(a,b,c)].mip);
+      tree.levels[L][m++].mip = acc;
+    }
+    dims = [px,py,pz];
+  }
+  return tree;
+}
+
+/* ================================================================ STEP 8
+   buildModel, serialise, report — the session-one deliverable.
+
+   Everything before this built a piece. This assembles them into the shape
+   the brief asked for: a mosprites-ng recipe in, an orbit-canonical node
+   store with a bottom-up payload out, serialised.
+
+   THE HIERARCHY IS REAL HERE. Steps 3-4 built ref nesting and tested it on
+   synthetic trees; the pipeline only ever interned level 0. buildModel now
+   folds upward the way blocks does — a level-1 node's `vox` is the coarse
+   MATERIAL of each child block and its `kids` are refs to the level-0 nodes,
+   so a collapsed child renders as the parent's cube with its own tint, and
+   a resolved one descends. That is what makes B1-B8's machinery load-bearing
+   rather than decorative. */
+
+/* Dominant non-air palette index in a block — the coarse material a cell
+   shows when its child is collapsed. Ties go to the lowest index so the
+   choice is deterministic and therefore content-addressable. */
+function dominantIndex(vol, bx, by, bz, span){
+  const [W,H,D] = vol.dims;
+  const tally = new Map();
+  for(let z=0;z<span;z++) for(let y=0;y<span;y++) for(let x=0;x<span;x++){
+    const ax=bx+x, ay=by+y, az=bz+z;
+    if(ax<0||ay<0||az<0||ax>=W||ay>=H||az>=D) continue;
+    const v = vol.vox[ax + W*(ay + H*az)];
+    if(v) tally.set(v, (tally.get(v)||0) + 1);
+  }
+  let best = 0, bc = 0;
+  for(const [v,c] of tally) if(c > bc || (c === bc && v < best)){ best = v; bc = c; }
+  return best;
+}
+
+/* Recipe -> model. opts: { op, order, linear, matte, field } for the mip. */
+function buildModel(seed, g, opts){
+  const o = opts || {};
+  const vol = buildVolume(seed, g);
+  const [W,H,D] = vol.dims;
+  const pal = g.palette || null;
+  const colorOf = pal ? (i => pal[(i-1) % pal.length]) : (() => [255,255,255]);
+  const tree = buildPayloadTree(vol, colorOf, o);
+  const store = makeStore();
+
+  /* level 0: intern each 8^3 block */
+  const levels = [];
+  const n0 = NODE_N;
+  let dims = [Math.ceil(W/n0), Math.ceil(H/n0), Math.ceil(D/n0)];
+  const L0 = tree.levels[0].map((cell, i) => {
+    const [bx,by,bz] = cell.origin;
+    const ref = store.intern(nodeAt(vol, bx, by, bz), new Map());
+    return { origin: cell.origin, size: n0, ref, tensor: cell.tensor, mip: cell.mip };
+  });
+  levels.push(L0);
+
+  /* every level above: vox = coarse material per cell, kids = refs below */
+  let span = n0;
+  for(let L=1; L<tree.levels.length; L++){
+    const prev = levels[L-1], prevDims = dims;
+    const px = Math.ceil(prevDims[0]/n0), py = Math.ceil(prevDims[1]/n0), pz = Math.ceil(prevDims[2]/n0);
+    const idx = (i,j,k) => i + prevDims[0]*(j + prevDims[1]*k);
+    const cur = [];
+    let m = 0;
+    for(let k=0;k<pz;k++) for(let j=0;j<py;j++) for(let i=0;i<px;i++){
+      const vox = new Uint8Array(NODE_CELLS);
+      const kids = new Map();
+      for(let c=0;c<n0;c++) for(let b=0;b<n0;b++) for(let a=0;a<n0;a++){
+        const ci = i*n0+a, cj = j*n0+b, ck = k*n0+c;
+        if(ci>=prevDims[0] || cj>=prevDims[1] || ck>=prevDims[2]) continue;
+        const child = prev[idx(ci,cj,ck)];
+        const mat = dominantIndex(vol, child.origin[0], child.origin[1], child.origin[2], span);
+        const cell = a + n0*(b + n0*c);
+        vox[cell] = mat;
+        /* an all-air child needs no ref: reconstruction fills it from vox */
+        if(mat) kids.set(cell, child.ref);
+      }
+      const cellTree = tree.levels[L][m];
+      cur.push({ origin: cellTree.origin, size: span*n0,
+                 ref: store.intern(vox, kids),
+                 tensor: cellTree.tensor, mip: cellTree.mip });
+      m++;
+    }
+    levels.push(cur);
+    dims = [px,py,pz]; span *= n0;
+  }
+
+  return { seed, recipe:g, dims:[W,H,D], levels, store,
+           root: levels[levels.length-1][0].ref, nodeN: n0 };
+}
+
+/* Rebuild the occupancy volume from the store alone. The completeness proof
+   for the serialisation: if this reproduces the original, the dump lost
+   nothing that matters. */
+function reconstructVolume(store, ref, dims, span){
+  const [W,H,D] = dims;
+  const vox = new Uint8Array(W*H*D);
+  const n0 = NODE_N;
+  (function walk(r, x0, y0, z0, cellSpan){
+    const node = store.get(r.h);
+    const dst = DST[r.o];
+    for(let c=0;c<n0;c++) for(let b=0;b<n0;b++) for(let a=0;a<n0;a++){
+      const src = a + n0*(b + n0*c);
+      const j = dst[src];
+      const ax = j % n0, ay = ((j/n0)|0) % n0, az = (j/(n0*n0))|0;
+      const X = x0 + ax*cellSpan, Y = y0 + ay*cellSpan, Z = z0 + az*cellSpan;
+      const kid = node.kids.get(src);
+      if(kid && cellSpan > 1){
+        walk({ h:kid.h, o:oCompose(r.o, kid.o) }, X, Y, Z, cellSpan/n0);
+      } else {
+        const v = node.vox[src];
+        if(!v) continue;
+        for(let z=0;z<cellSpan;z++) for(let y=0;y<cellSpan;y++) for(let x=0;x<cellSpan;x++){
+          const px=X+x, py=Y+y, pz=Z+z;
+          if(px<0||py<0||pz<0||px>=W||py>=H||pz>=D) continue;
+          vox[px + W*(py + H*pz)] = v;
+        }
+      }
+    }
+  })(ref, 0, 0, 0, span / n0);
+  return { vox, dims };
+}
+
+/* ---- serialisation ------------------------------------------------------
+   Run-length encoded vox, because a node's cells are palette indices drawn
+   from a handful of values and the runs are long. Tensors are integers;
+   mips are the raw premultiplied sums. Nothing is normalised on the way out
+   — that would be the same mistake G6 and M5 pin. */
+function rleEncode(vox){
+  const out = [];
+  let v = vox[0], n = 1;
+  for(let i=1;i<vox.length;i++){
+    if(vox[i] === v){ n++; continue; }
+    out.push(v, n); v = vox[i]; n = 1;
+  }
+  out.push(v, n);
+  return out;
+}
+function rleDecode(rle, len){
+  const vox = new Uint8Array(len);
+  let k = 0;
+  for(let i=0;i<rle.length;i+=2) for(let n=0;n<rle[i+1];n++) vox[k++] = rle[i];
+  return vox;
+}
+
+const MODEL_FORMAT = 'moblocks/1';
+function serializeModel(model){
+  const nodes = [];
+  for(const h of model.store.keys()){
+    const nd = model.store.get(h);
+    nodes.push({ h, v: rleEncode(nd.vox),
+                 k: [...nd.kids.entries()].sort((a,b)=>a[0]-b[0]).map(([c,r])=>[c, r.h, r.o]),
+                 m: [nd.meta.worlds, nd.meta.depth, nd.meta.stabilizer],
+                 s: nd.meta.stabSet });
+  }
+  nodes.sort((a,b)=> a.h < b.h ? -1 : a.h > b.h ? 1 : 0);   /* deterministic order */
+  return JSON.stringify({
+    format: MODEL_FORMAT,
+    seed: model.seed, recipe: model.recipe, dims: model.dims, nodeN: model.nodeN,
+    root: [model.root.h, model.root.o],
+    nodes,
+    levels: model.levels.map(L => L.map(c => ({
+      o: c.origin, z: c.size, r: [c.ref.h, c.ref.o],
+      t: [...c.tensor.m], tc: c.tensor.count,
+      p: c.mip ? [c.mip.R, c.mip.G, c.mip.B, c.mip.A, c.mip.w] : null,
+    }))),
+  });
+}
+function parseModel(json){
+  const d = JSON.parse(json);
+  if(d.format !== MODEL_FORMAT) throw new Error('bad format: ' + d.format);
+  const store = makeStore();
+  /* rebuild the map directly: the content is already canonical, so
+     re-interning would be correct but wasteful */
+  for(const n of d.nodes){
+    const kids = new Map();
+    for(const [c,h,o] of n.k) kids.set(c, {h, o});
+    store._put(n.h, rleDecode(n.v, NODE_CELLS), kids,
+               { worlds:n.m[0], depth:n.m[1], stabilizer:n.m[2],
+                 stabSet:n.s, orbit: O_COUNT/n.m[2] });
+  }
+  return {
+    seed:d.seed, recipe:d.recipe, dims:d.dims, nodeN:d.nodeN, store,
+    root:{h:d.root[0], o:d.root[1]},
+    levels: d.levels.map(L => L.map(c => ({
+      origin:c.o, size:c.z, ref:{h:c.r[0], o:c.r[1]},
+      tensor:{ m:Int32Array.from(c.t), count:c.tc },
+      mip: c.p ? { R:c.p[0], G:c.p[1], B:c.p[2], A:c.p[3], w:c.p[4] } : null,
+    }))),
+  };
+}
+
+/* ---- instrumentation ---------------------------------------------------- */
+function modelReport(model){
+  const placements = model.levels.reduce((a,L)=>a+L.length, 0);
+  const raw = new Set();
+  for(const L of model.levels) for(const c of L) raw.add(c.ref.h);
+  const L0 = model.levels[0];
+  const fa = [], stab = [];
+  let shell = 0, homogeneous = 0;
+  for(const c of L0){
+    const nd = model.store.get(c.ref.h);
+    let solid = 0;
+    for(let i=0;i<nd.vox.length;i++) if(nd.vox[i]) solid++;
+    if(solid === 0 || solid === NODE_CELLS) homogeneous++;
+    else { shell++; if(c.tensor.count) fa.push(tensorFA(c.tensor)); }
+    stab.push(nd.meta.stabilizer);
+  }
+  fa.sort((a,b)=>a-b);
+  const q = t => fa.length ? fa[Math.min(fa.length-1, Math.floor(t*fa.length))] : 0;
+  const mean = fa.length ? fa.reduce((a,b)=>a+b,0)/fa.length : 0;
+  const sd = fa.length ? Math.sqrt(fa.reduce((a,b)=>a+(b-mean)**2,0)/fa.length) : 0;
+  const bins = new Array(10).fill(0);
+  for(const v of fa) bins[Math.min(9, Math.floor(v*10))]++;
+  const stabCount = new Map();
+  for(const s of stab) stabCount.set(s, (stabCount.get(s)||0)+1);
+  return {
+    placements, nodes: model.store.size, sharing: placements/model.store.size,
+    canonHits: model.store.canonHits,
+    levels: model.levels.map(L=>L.length),
+    shell, homogeneous,
+    fa: { n:fa.length, p05:q(0.05), p25:q(0.25), med:q(0.5), p75:q(0.75), p95:q(0.95),
+          mean, sd, bins },
+    stabilizers: [...stabCount.entries()].sort((a,b)=>a[0]-b[0]),
+  };
+}
+
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function sliceAt(vol, z){
+  const [W,H] = vol.dims, out = [];
+  for(let y=0;y<H;y++){
+    const row = new Uint8Array(W);
+    for(let x=0;x<W;x++) row[x] = vol.vox[x + W*(y + H*z)];
+    out.push(row);
+  }
+  return out;
+}
+
+return { FIELDS3, SIGNATURE, NON_SYMMETRIC, trinomMod, binomMod, popcount, digitSum,
+         e1, e2, seedDims, fold, orbitFold, FOLD_GENERATORS, depthFor,
+         NODE_N, NODE_CELLS, PERMS, O_ID, O_COUNT, oDesc, oCode, oApply, oCompose, oInv,
+         DST, SRC, place, hashNodeBytes, canonicalize, canonicalizeRef, nodeAt, blocksOf,
+         placeContent, kidsKey, hashContent, canonicalizeContent, stabilizerOf, normalizeO, makeStore,
+         xformNode, nodeEq, internTree, countTree,
+         TENSOR_ZERO, tensorOver, tensorAdd, tensorEq, tensorConjugate, tensorEig,
+         tensorFA, readerOf, clippedReader, buildTensorTree, tensorCoarse,
+         OPS_K3, axisPlan, UNIT_PLAN, ORDERS3, orderSeq3, blit3, raster3, resolve,
+         srgb2lin, lin2srgb,
+         hexToRgb, MIP_ZERO, mipAdd, mipResolve, mipOfBlock, buildPayloadTree,
+         dominantIndex, buildModel, reconstructVolume, rleEncode, rleDecode,
+         MODEL_FORMAT, serializeModel, parseModel, modelReport, foldZ, buildVolume, sliceAt, mulberry32 };
+});
+</script>
+<script>
+/* ====================================================================
+   moblocks · session two — the viewer
+   --------------------------------------------------------------------
+   Three r128 UMD, no bundler, no OrbitControls (absent from the UMD
+   build, so the orbit camera is hand-rolled below).
+
+   What this is FOR: session one proved the model is correct. This is the
+   first time it can be looked at, and the specific claims it exists to
+   test are
+
+     1. that FA is a shading term and not a statistic — a collapsed
+        subtree lit with roughness derived from the fine geometry it
+        swallowed should read as MATTE AND ROUNDED, not flat-shaded;
+     2. that the LOD transition is invisible, because the mip is an
+        integration rather than a decision;
+     3. that byField x over is beautiful and not merely clever.
+   ==================================================================== */
+'use strict';
+
+const MB = window.MOBLOCKS;
+
+/* ------------------------------------------------------ ref.js fragments
+   Only what a recipe needs. Reproduced rather than imported so the file
+   stands alone, exactly as the core does. */
+const ODDS = [3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,37,41,47,53];
+const rgbHex = (r,g,b) => '#' + [r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('');
+const palCache = new Map();
+function paletteFor(seed, bpc){
+  const key = seed+'/'+bpc;
+  if(palCache.has(key)) return palCache.get(key);
+  const rnd = MB.mulberry32(seed ^ 0x5bf03635);
+  const levels = 1<<bpc, step = 255/(levels-1);
+  let out = [];
+  for(let r=0;r<levels;r++) for(let g=0;g<levels;g++) for(let b=0;b<levels;b++)
+    out.push(rgbHex(Math.round(r*step),Math.round(g*step),Math.round(b*step)));
+  for(let i=out.length-1;i>0;i--){ const j=(rnd()*(i+1))|0; [out[i],out[j]]=[out[j],out[i]]; }
+  if(palCache.size>64) palCache.clear();
+  palCache.set(key,out);
+  return out;
+}
+
+/* ------------------------------------------------------------- state */
+const S = {
+  seed: 0xC0FFEE,
+  field: 'skew',
+  sym: 'quadrant',
+  symZ: 'mirror',
+  size: 48,
+  op: 'add',
+  order: 'rowMajor',
+  cellPx: 14,          /* resolve a block when it projects wider than this */
+  faShading: true,
+  shade: 'material',   /* material | anisotropy | lod */
+  autoSpin: true,
+  model: null, vol: null, palette: null, report: null,
+};
+
+/* --------------------------------------------------------- three setup */
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a2530);
+const camera = new THREE.PerspectiveCamera(38, 1, 0.05, 4000);
+
+/* A procedural studio environment. This is doing more work for the look
+   than any light: the reference images read as PLASTIC because of broad
+   soft specular reflection, which needs an environment map, not lamps. */
+function makeEnv(){
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 256;
+  const g = c.getContext('2d');
+  const grad = g.createLinearGradient(0,0,0,256);
+  grad.addColorStop(0.00, '#f4f1ee');
+  grad.addColorStop(0.42, '#c9c4cc');
+  grad.addColorStop(0.52, '#6d6675');
+  grad.addColorStop(1.00, '#211d26');
+  g.fillStyle = grad; g.fillRect(0,0,512,256);
+  /* two soft key patches — the highlights that sell a glossy surface */
+  const blob = (x,y,r,a) => {
+    const rg = g.createRadialGradient(x,y,0,x,y,r);
+    rg.addColorStop(0, 'rgba(255,255,255,'+a+')');
+    rg.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = rg; g.fillRect(x-r,y-r,r*2,r*2);
+  };
+  blob(150, 60, 95, 0.95);
+  blob(380, 95, 130, 0.38);
+  const tex = new THREE.CanvasTexture(c);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.encoding = THREE.sRGBEncoding;
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+  const env = pmrem.fromEquirectangular(tex).texture;
+  pmrem.dispose(); tex.dispose();
+  return env;
+}
+scene.environment = makeEnv();
+
+const key = new THREE.DirectionalLight(0xfff4e8, 1.5);
+key.position.set(2.2, 3.4, 2.0);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xbcd0ff, 0.45);
+fill.position.set(-2.6, -0.6, -1.7);
+scene.add(fill);
+scene.add(new THREE.HemisphereLight(0xd8e4ff, 0x30262e, 0.35));
+
+/* ---------------------------------------------------- per-instance roughness
+   InstancedMesh has instanceColor but no instanceRoughness, so the standard
+   material is patched to read an instanced attribute. This is the whole
+   point of storing FA: roughness must vary PER CUBE, from the fine geometry
+   that cube swallowed. Bucketing into a few materials would have worked and
+   would have banded the transition. */
+function makeMaterial(){
+  const m = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff, metalness: 0.0, roughness: 0.35,
+    clearcoat: 0.85, clearcoatRoughness: 0.22,
+    envMapIntensity: 1.15,
+  });
+  m.onBeforeCompile = (sh) => {
+    sh.vertexShader = 'attribute float aRough;\nvarying float vRough;\n' +
+      sh.vertexShader.replace('#include <begin_vertex>',
+        '#include <begin_vertex>\n  vRough = aRough;');
+    sh.fragmentShader = 'varying float vRough;\n' +
+      sh.fragmentShader.replace('#include <roughnessmap_fragment>',
+        '#include <roughnessmap_fragment>\n  roughnessFactor = clamp(vRough, 0.02, 1.0);');
+  };
+  return m;
+}
+
+const geo = new THREE.BoxBufferGeometry(1,1,1);
+const material = makeMaterial();
+let mesh = null, roughAttr = null, capacity = 0;
+
+function ensureCapacity(n){
+  if(mesh && capacity >= n) return;
+  if(mesh){ scene.remove(mesh); mesh.geometry.dispose(); mesh.dispose(); }
+  capacity = Math.max(1024, Math.ceil(n*1.3));
+  const g = geo.clone();
+  roughAttr = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
+  roughAttr.setUsage(THREE.DynamicDrawUsage);
+  g.setAttribute('aRough', roughAttr);
+  mesh = new THREE.InstancedMesh(g, material, capacity);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+}
+
+/* ------------------------------------------------------------- model */
+function rebuildModel(){
+  const rr = MB.mulberry32(S.seed >>> 0);
+  S.palette = paletteFor(1,3).slice(0, 5);
+  const recipe = {
+    w:S.size, h:S.size, d:S.size,
+    coverage: 0.32 + rr()*0.30,
+    formulaId: S.field,
+    modulus: ODDS[(rr()*ODDS.length)|0],
+    stride: 1 + ((rr()*3)|0),
+    phase: rr()*0.4,
+    sym3: { xy: S.sym, z: S.symZ },
+    mask3: 'sphere',
+    colorMode: 'cycle', ncol: 5,
+    palette: S.palette,
+  };
+  S.vol = MB.buildVolume(S.seed >>> 0, recipe);
+  const opts = { op: S.op, order: S.order };
+  if(S.order === 'byField') opts.field = S.vol.field;
+  const t0 = performance.now();
+  S.model = MB.buildModel(S.seed >>> 0, recipe, opts);
+  S.buildMs = performance.now() - t0;
+  S.report = MB.modelReport(S.model);
+  S.recipe = recipe;
+
+  /* precompute per-voxel ambient occlusion from the 6-neighbourhood. The
+     occupancy grid gives this for free — no baking, no rays — and crevice
+     darkening is most of what makes a voxel mass read as solid. */
+  const [W,H,D] = S.vol.dims, v = S.vol.vox;
+  S.ao = new Float32Array(W*H*D);
+  const at = (x,y,z) => (x<0||y<0||z<0||x>=W||y>=H||z>=D) ? 0 : (v[x+W*(y+H*z)] ? 1 : 0);
+  for(let z=0;z<D;z++) for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const i = x+W*(y+H*z);
+    if(!v[i]) continue;
+    let n = at(x+1,y,z)+at(x-1,y,z)+at(x,y+1,z)+at(x,y-1,z)+at(x,y,z+1)+at(x,y,z-1);
+    S.ao[i] = 1 - 0.115*n;
+  }
+  /* per-block constants, computed once. buildInstances runs on every camera
+     change, so anything invariant under camera motion must not live there. */
+  const N = MB.NODE_N;
+  for(const cell of S.model.levels[0]){
+    const [bx,by,bz] = cell.origin;
+    let solid = 0;
+    for(let z=0;z<N;z++) for(let y=0;y<N;y++) for(let x=0;x<N;x++){
+      const ax=bx+x, ay=by+y, az=bz+z;
+      if(ax>=W||ay>=H||az>=D) continue;
+      if(v[ax + W*(ay + H*az)]) solid++;
+    }
+    cell._solid = solid;
+    cell._fa = MB.tensorFA(cell.tensor);
+    cell._rgba = cell.mip ? MB.mipResolve(cell.mip) : [0,0,0,0];
+  }
+  resolved.clear();
+  lastSig = '';
+  fitCamera();
+  dirty = true;
+  updateHud();
+}
+
+function fitCamera(){
+  const s = Math.max(...S.vol.dims);
+  orbit.target.set(0,0,0);
+  orbit.radius = s * 2.0;
+  orbit.minR = s * 0.35;
+  orbit.maxR = s * 6.0;
+}
+
+/* ----------------------------------------------------------- the walk
+   blocks-all-the-way-down's LOD decision, with its hysteresis. The
+   difference is what happens BELOW the threshold: blocks throws the
+   subtree away and paints a flat material tint; moblocks composites it
+   under the operator algebra and lights it with the tensor. That
+   substitution is the whole project. */
+const resolved = new Set();
+function projPx(worldSize, dist){
+  const vh = renderer.domElement.clientHeight || 1;
+  const f = vh / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov)/2));
+  return worldSize / Math.max(1e-4, dist) * f;
+}
+
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(),
+      _p = new THREE.Vector3(), _s = new THREE.Vector3(), _c = new THREE.Color();
+
+const faRoughness = fa => S.faShading ? (0.62 - 0.50*Math.min(1, fa)) : 0.35;
+
+/* The LOD decision. Cheap, camera-dependent, run every frame. Returns a
+   signature so the expensive rebuild only happens when the SET changes —
+   instance positions do not depend on the camera, only on which blocks are
+   resolved, so an orbit that changes nothing rebuilds nothing. */
+let lastSig = '';
+function decideLod(){
+  const [W,H,D] = S.vol.dims;
+  const cx = (W-1)/2, cy = (H-1)/2, cz = (D-1)/2;
+  const N = MB.NODE_N;
+  let sig = 0, k = 1;
+  for(const cell of S.model.levels[0]){
+    const [bx,by,bz] = cell.origin;
+    _p.set(bx + N/2 - cx, by + N/2 - cy, bz + N/2 - cz);
+    const px = projPx(N, camera.position.distanceTo(_p));
+    const was = resolved.has(cell);
+    /* hysteresis: once resolved, hold it until clearly below, so a block
+       does not flicker between two representations on a slow orbit */
+    const res = px >= (was ? S.cellPx * 0.72 : S.cellPx);
+    if(res){ resolved.add(cell); sig = (sig + k) | 0; }
+    else resolved.delete(cell);
+    k = (k * 31 + 7) | 0;
+  }
+  return sig + ':' + resolved.size;
+}
+
+function buildInstances(){
+  const [W,H,D] = S.vol.dims;
+  const cx = (W-1)/2, cy = (H-1)/2, cz = (D-1)/2;
+  const L0 = S.model.levels[0];
+  const N = MB.NODE_N;
+  let n = 0, nResolved = 0, nCollapsed = 0;
+  const plan = [];
+  for(const cell of L0){
+    if(resolved.has(cell)){ n += cell._solid; nResolved++; plan.push({cell, res:true}); }
+    else if(cell.mip && cell.mip.A > 0){ n++; nCollapsed++; plan.push({cell, res:false}); }
+  }
+  ensureCapacity(n);
+
+  let i = 0;
+  _q.identity(); _s.set(1,1,1);
+  for(const item of plan){
+    const cell = item.cell, [bx,by,bz] = cell.origin;
+    if(item.res){
+      for(let z=0;z<N;z++) for(let y=0;y<N;y++) for(let x=0;x<N;x++){
+        const ax=bx+x, ay=by+y, az=bz+z;
+        if(ax>=W||ay>=H||az>=D) continue;
+        const idx = ax + W*(ay + H*az);
+        const vv = S.vol.vox[idx];
+        if(!vv) continue;
+        _p.set(ax-cx, ay-cy, az-cz);
+        _m.compose(_p, _q, _s);
+        mesh.setMatrixAt(i, _m);
+        if(S.shade === 'lod') _c.setHex(0x66c8ff).convertSRGBToLinear();
+        else if(S.shade === 'anisotropy') _c.setHex(0x888888).convertSRGBToLinear();
+        else _c.set(S.palette[(vv-1) % S.palette.length]).convertSRGBToLinear();
+        const ao = S.ao[idx] || 1;
+        _c.multiplyScalar(ao);
+        mesh.setColorAt(i, _c);
+        /* a resolved voxel is a flat-faced cube: glossy, not derived */
+        roughAttr.array[i] = S.faShading ? 0.20 : 0.35;
+        i++;
+      }
+    } else {
+      const rgba = cell._rgba;
+      _p.set(bx + N/2 - cx - 0.5, by + N/2 - cy - 0.5, bz + N/2 - cz - 0.5);
+      /* scale by the coverage the mip reports: a half-full block should not
+         read as a solid cube of its average colour */
+      const fill = Math.cbrt(Math.max(0.02, rgba[3]/255));
+      _s.set(N*fill, N*fill, N*fill);
+      _m.compose(_p, _q, _s);
+      mesh.setMatrixAt(i, _m);
+      _s.set(1,1,1);
+      const fa = cell._fa;
+      if(S.shade === 'lod') _c.setHex(0xff9a5c).convertSRGBToLinear();
+      else if(S.shade === 'anisotropy') _c.setHSL((1-Math.min(1,fa))*0.62, 0.75, 0.5).convertSRGBToLinear();
+      else _c.setRGB(rgba[0]/255, rgba[1]/255, rgba[2]/255).convertSRGBToLinear();
+      mesh.setColorAt(i, _c);
+      roughAttr.array[i] = faRoughness(fa);
+      i++;
+    }
+  }
+  mesh.count = i;
+  mesh.instanceMatrix.needsUpdate = true;
+  if(mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  roughAttr.needsUpdate = true;
+  S.live = { instances:i, resolved:nResolved, collapsed:nCollapsed, blocks:L0.length };
+}
+
+/* ------------------------------------------------- hand-rolled orbit camera
+   OrbitControls is not in the r128 UMD build. */
+const orbit = { theta: 0.7, phi: 1.05, radius: 90, target: new THREE.Vector3(),
+                minR: 5, maxR: 600 };
+function applyCamera(){
+  const sp = Math.sin(orbit.phi), cp = Math.cos(orbit.phi);
+  camera.position.set(
+    orbit.target.x + orbit.radius * sp * Math.sin(orbit.theta),
+    orbit.target.y + orbit.radius * cp,
+    orbit.target.z + orbit.radius * sp * Math.cos(orbit.theta));
+  camera.lookAt(orbit.target);
+}
+let drag = null;
+renderer.domElement.addEventListener('pointerdown', e => {
+  drag = { x:e.clientX, y:e.clientY, pan: e.shiftKey || e.button === 2 };
+  renderer.domElement.setPointerCapture(e.pointerId);
+  S.autoSpin = false; document.getElementById('spin').checked = false;
+});
+renderer.domElement.addEventListener('pointermove', e => {
+  if(!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if(drag.pan){
+    const rt = new THREE.Vector3().subVectors(camera.position, orbit.target).length() * 0.0016;
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+    orbit.target.addScaledVector(right, -dx*rt).addScaledVector(up, dy*rt);
+  } else {
+    orbit.theta -= dx * 0.006;
+    orbit.phi = Math.max(0.06, Math.min(Math.PI-0.06, orbit.phi - dy*0.006));
+  }
+  dirty = true;
+});
+addEventListener('pointerup', e => { drag = null; });
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+renderer.domElement.addEventListener('wheel', e => {
+  e.preventDefault();
+  orbit.radius = Math.max(orbit.minR, Math.min(orbit.maxR,
+    orbit.radius * Math.pow(1.0016, e.deltaY)));
+  dirty = true;
+}, {passive:false});
+
+/* ------------------------------------------------------------- HUD */
+function updateHud(){
+  const r = S.report, L = S.live || {instances:0,resolved:0,collapsed:0,blocks:0};
+  const fa = r.fa;
+  document.getElementById('hud').innerHTML =
+    `<b>${S.recipe.formulaId} % ${S.recipe.modulus}</b> · stride ${S.recipe.stride} · ` +
+    `${S.sym}${S.symZ==='mirror'?' + z':''} · ${S.vol.dims.join('\u00d7')}<br>` +
+    `<span class=k>store</span> ${r.placements} placements \u2192 ${r.nodes} nodes ` +
+    `(<b>${r.sharing.toFixed(2)}\u00d7</b>) · ${r.canonHits} via rotation<br>` +
+    `<span class=k>lod</span> ${L.resolved}/${L.blocks} blocks resolved · ` +
+    `${L.collapsed} mipped · <b>${L.instances.toLocaleString()}</b> cubes<br>` +
+    `<span class=k>FA</span> med ${fa.med.toFixed(3)} · p05 ${fa.p05.toFixed(3)} · ` +
+    `p95 ${fa.p95.toFixed(3)} · sd ${fa.sd.toFixed(3)}<br>` +
+    `<span class=k>built</span> ${S.buildMs.toFixed(0)} ms`;
+}
+
+/* ------------------------------------------------------------- loop */
+let dirty = true, frame = 0;
+function resize(){
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w/h; camera.updateProjectionMatrix();
+  dirty = true;
+}
+addEventListener('resize', resize);
+
+function tick(){
+  requestAnimationFrame(tick);
+  if(S.autoSpin){ orbit.theta += 0.0022; dirty = true; }
+  applyCamera();
+  const sig = decideLod();
+  if(dirty || sig !== lastSig){
+    buildInstances();
+    lastSig = sig; dirty = false;
+    if((frame++ % 4) === 0) updateHud();
+  }
+  renderer.render(scene, camera);
+}
+
+/* ------------------------------------------------------------- UI */
+function bind(id, fn){ const el = document.getElementById(id);
+  el.addEventListener('change', () => { fn(el); }); return el; }
+
+const fieldSel = document.getElementById('field');
+for(const id of Object.keys(MB.FIELDS3)){
+  const o = document.createElement('option'); o.value = id; o.textContent = id;
+  if(id === S.field) o.selected = true;
+  fieldSel.appendChild(o);
+}
+bind('field', el => { S.field = el.value; rebuildModel(); });
+bind('sym',   el => { S.sym = el.value; rebuildModel(); });
+bind('symz',  el => { S.symZ = el.value; rebuildModel(); });
+bind('size',  el => { S.size = +el.value; rebuildModel(); });
+bind('op',    el => { S.op = el.value; rebuildModel(); });
+bind('order', el => { S.order = el.value; rebuildModel(); });
+bind('shade', el => { S.shade = el.value; dirty = true; });
+bind('fash',  el => { S.faShading = el.checked; dirty = true; });
+bind('spin',  el => { S.autoSpin = el.checked; });
+const lodEl = document.getElementById('lod');
+lodEl.addEventListener('input', () => {
+  S.cellPx = +lodEl.value;
+  document.getElementById('lodv').textContent = S.cellPx;
+  resolved.clear(); dirty = true;
+});
+document.getElementById('reseed').addEventListener('click', () => {
+  S.seed = (Math.random()*0xffffffff)>>>0;
+  document.getElementById('seed').value = '0x'+S.seed.toString(16);
+  resolved.clear(); rebuildModel();
+});
+document.getElementById('seed').addEventListener('change', e => {
+  const v = e.target.value.trim();
+  const n = v.startsWith('0x') ? parseInt(v,16) : parseInt(v,10);
+  if(Number.isFinite(n)){ S.seed = n>>>0; resolved.clear(); rebuildModel(); }
+});
+document.getElementById('dump').addEventListener('click', () => {
+  const json = MB.serializeModel(S.model);
+  const blob = new Blob([json], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `moblocks-${S.field}-${S.seed.toString(16)}.json`;
+  a.click(); URL.revokeObjectURL(a.href);
+  console.log('moblocks: wrote', (json.length/1024).toFixed(1)+' KB', S.report);
+});
+addEventListener('keydown', e => {
+  if(e.key === ' '){ S.autoSpin = !S.autoSpin;
+    document.getElementById('spin').checked = S.autoSpin; e.preventDefault(); }
+  if(e.key === 'r' || e.key === 'R') document.getElementById('reseed').click();
+});
+
+document.getElementById('seed').value = '0x'+S.seed.toString(16);
+document.getElementById('lodv').textContent = S.cellPx;
+resize();
+rebuildModel();
+tick();
+console.log('moblocks viewer ready. MOBLOCKS core exposed as window.MOBLOCKS; state as window.S.');
+window.S = S;
+</script>
+</body>
+</html>
