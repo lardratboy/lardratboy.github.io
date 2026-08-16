@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>bimoblock lattice — 3D sprite generator (Rotational Pinwheels)</title>
+<title>bimoblock lattice — 3D procedural sprite generator</title>
 <style>
   html,body{ height:100%; margin:0; background:#000; overflow:hidden; }
   canvas{ display:block; width:100%; height:100%; }
@@ -47,15 +47,8 @@ precision highp float;
 precision highp int;
 
 uniform vec3  iResolution;
-uniform float uCamT;         // orbit clock
-uniform float uShellT;       // outer shell bounce clock
-uniform float uInnerT;       // inner billiard ball clock
-uniform float uTumbleT;      // clipping cube tumble clock
-uniform float uMaskT;        // bit-cycle clock
-
-// CSG Toggles
-uniform float uCarve;        // 0 = plain lattice, 1 = shell subtracted
-uniform float uClip;         // 0 = unbounded lattice, 1 = clipped to tumbling cube
+uniform float iTime;         // global camera orbit time
+uniform float uMaskT;        // bit-morph time accumulator
 
 // 3D Sprite Generator & Group 48 Uniforms
 uniform int   uGroup48;      // 0..47 discrete signed permutation of Oh
@@ -71,17 +64,7 @@ out vec4 fragColor;
 #define AA 2                 // supersample factor
 #define PITCH 2.0            // lattice spacing (shapes are 2 units across)
 #define RATE  2.5            // bit morph rate per second
-
-#define SPH_R     1.55       // outer radius
-#define SHELL_LO  0.22       // inner radius sweep, as a fraction of SPH_R
-#define SHELL_HI  0.60
-#define BREATHE   0.41       // rad/s of the inner-radius animation
-#define ORBIT     0.85       // billiard circle radius, fraction of SPH_R
-#define CHORD     0.42       // chords per second
-#define TURN      2.39996323 // golden angle: the path never closes
-#define TRAVEL    3.6        // half-extent of the outer centre's box (= lattice AABB)
-#define CUT_SHADE 0.45       // how much a curved cut darkens toward its rim
-#define CUBE_HALF 2.2        // half-extent of the tumbling clipping cube
+#define CUT_SHADE 0.45       // directional facet shading falloff
 
 // ---- Group 48 (Oh) signed coordinate permutation ----------------------------
 vec3 applyGroup48(vec3 v, int idx){
@@ -175,7 +158,7 @@ uint shapeMask(uint site, float time){
     int cy = (k / 3) % 3;
     int cz = k / 9;
     
-    // Global continuous coordinate in [-1, 1]^3
+    // Global normalized continuous coordinate in [-1, 1]^3
     int X = (gx - 1) * 3 + (cx - 1);
     int Y = (gy - 1) * 3 + (cy - 1);
     int Z = (gz - 1) * 3 + (cz - 1);
@@ -235,6 +218,7 @@ uint shapeMask(uint site, float time){
       val = float(cnt % 5u) / 4.0;
     }
     
+    // Density threshold
     if (val >= (1.0 - uDensity)){
       mask |= (1u << uint(k));
     }
@@ -248,69 +232,8 @@ bool occ(ivec3 c, uint m){
   return ((m >> uint(c.x + 3 * c.y + 9 * c.z)) & 1u) != 0u;
 }
 
-// ---- outer sphere: bouncing in the lattice's box ----------------------------
-float triWave(float x){ return abs(fract(x) * 4.0 - 2.0) - 1.0; }
-float dropWave(float x){ float f = fract(x) * 2.0 - 1.0; return 1.0 - 2.0 * f * f; }
-
-vec3 outerCentre(float t){
-  return TRAVEL * vec3(triWave(t * 0.117),
-                       dropWave(t * 0.230),
-                       triWave(t * 0.083 + 0.37));
-}
-
-// ---- inner sphere: a billiard inside the outer one --------------------------
-vec3 innerOffset(float t){
-  float u = t * CHORD;
-  float a0 = floor(u) * TURN, f = fract(u);
-  vec2 q = mix(vec2(cos(a0), sin(a0)),
-               vec2(cos(a0 + TURN), sin(a0 + TURN)), f) * (ORBIT * SPH_R);
-
-  float w   = t * 0.070;
-  float tau = 0.90 + 0.45 * sin(t * 0.053);
-  vec3 e1 = vec3(cos(w), 0.0, sin(w));
-  vec3 e2 = vec3(-sin(w) * sin(tau), cos(tau), cos(w) * sin(tau));
-  return q.x * e1 + q.y * e2;
-}
-
-float innerRadius(float t){
-  return SPH_R * mix(SHELL_LO, SHELL_HI, 0.5 - 0.5 * cos(t * BREATHE));
-}
-
-// ---- tumbling cube orientation matrix ---------------------------------------
-mat3 tumbleMatrix(float t){
-  float ax = t * 0.47, ay = t * 0.33, az = t * 0.59;
-  float cx = cos(ax), sx = sin(ax);
-  float cy = cos(ay), sy = sin(ay);
-  float cz = cos(az), sz = sin(az);
-  mat3 Rx = mat3(1.0, 0.0, 0.0,  0.0, cx, sx,   0.0, -sx, cx);
-  mat3 Ry = mat3(cy, 0.0, -sy,   0.0, 1.0, 0.0,  sy, 0.0, cy);
-  mat3 Rz = mat3(cz, sz, 0.0,   -sz, cz, 0.0,   0.0, 0.0, 1.0);
-  return Rz * Ry * Rx;
-}
-
-vec2 sphereRoots(vec3 oc, vec3 d, float r){
-  float b = dot(oc, d);
-  float h = b * b - (dot(oc, oc) - r * r);
-  if (h < 0.0) return vec2(-1.0);
-  h = sqrt(h);
-  return vec2(-b - h, -b + h);
-}
-
-// ---- point-in-solid ---------------------------------------------------------
-bool solidAt(vec3 P, float time, out vec3 local){
-  vec3 g = floor(P / PITCH + 0.5) + 1.0;
-  if (any(lessThan(g, vec3(0.0))) || any(greaterThan(g, vec3(2.0)))) return false;
-  local = P - (g - 1.0) * PITCH;
-  if (any(greaterThan(abs(local), vec3(1.0)))) return false;
-  ivec3 c = ivec3(floor(local * 1.5 + 1.5));
-  uint site = uint(g.x) + 3u * uint(g.y) + 9u * uint(g.z);
-  return occ(c, shapeMask(site, time));
-}
-
 // ---- one shape: 9 plane tests ----------------------------------------------
-void traceShape(vec3 rl, vec3 rd, vec3 inv, uint mask, vec3 cOL, vec3 cIL,
-                float r2in, float r2out, float tMinBound,
-                inout float m, inout vec3 p, inout vec3 norm){
+void traceShape(vec3 rl, vec3 rd, vec3 inv, uint mask, inout float m, inout vec3 p, inout vec3 norm){
   for (int a = 0; a < 3; ++a){
     bool pos  = rd[a] > 0.0;
     int  base = pos ? 0 : 1;
@@ -318,12 +241,9 @@ void traceShape(vec3 rl, vec3 rd, vec3 inv, uint mask, vec3 cOL, vec3 cIL,
     for (int k = 0; k < 3; ++k){
       int   q = base + k;
       float t = (-1.0 + float(q) * (2.0 / 3.0) - rl[a]) * inv[a];
-      if (t <= tMinBound || t >= m) continue;
+      if (t <= 0.0 || t >= m) continue;
 
       vec3 h  = rl + t * rd;
-      vec3 eo = h - cOL, ei = h - cIL;
-      if (dot(eo, eo) < r2out && dot(ei, ei) > r2in) continue;
-
       ivec3 ci = ivec3(floor(h * 1.5 + 1.5));
       ivec3 ce = ci;
       ci[a] = pos ? q     : q - 1;
@@ -339,19 +259,6 @@ void traceShape(vec3 rl, vec3 rd, vec3 inv, uint mask, vec3 cOL, vec3 cIL,
   }
 }
 
-// Shell candidate surface
-void shellFace(vec3 o, vec3 d, float t, vec3 ctr, float sgn, float time, float tMinBound,
-               inout float m, inout vec3 p, inout vec3 norm, inout bool hit, inout float shade){
-  if (t <= tMinBound || t >= m) return;
-  vec3 P = o + t * d, loc;
-  if (!solidAt(P + d * 1e-3, time, loc)) return;
-  m = t;
-  p = loc - d * 1e-3;
-  hit = true;
-  norm = normalize((P - ctr) * sgn);
-  shade = mix(1.0 - CUT_SHADE, 1.0, max(dot(norm, -d), 0.0));
-}
-
 vec3 safeDir(vec3 d){
   vec3 s = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(d, vec3(0.0)));
   return s * max(abs(d), vec3(1e-6));
@@ -362,7 +269,7 @@ vec3 colorize(vec3 p, vec3 worldP, vec3 norm, vec3 rd, float shade){
   vec3 col = p * 0.5 + 0.5; // Mode 0: The Canonical Biunit Gamut (Identity Domain)
   
   if (uPaletteMode == 1){ 
-    // Mode 1: Group-Orbit Invariant Gamut (matches rotational & reflective symmetries)
+    // Mode 1: Group-Orbit Invariant Gamut
     vec3 pFold = foldSymmetry(p, uSymMode);
     col = pFold * 0.5 + 0.5;
   } 
@@ -389,72 +296,19 @@ vec3 colorize(vec3 p, vec3 worldP, vec3 norm, vec3 rd, float shade){
 }
 
 vec3 render(vec2 v){
-  float t = uCamT * 0.4;
+  float t = iTime * 0.4;
   vec3 o = 8.5 * vec3(sin(t), 0.7 + 0.3 * sin(t * 0.6), cos(t));
   vec3 w = normalize(-o);
   vec3 u = normalize(cross(w, vec3(0, 1, 0)));
   vec3 d = safeDir(normalize(v.x * u + v.y * cross(u, w) + 1.8 * w));
   vec3 inv = 1.0 / d;
 
-  bool  carve = uCarve > 0.5;
-  bool  clip  = uClip > 0.5;
+  float m     = 1e9;
+  vec3  p     = vec3(0.0);
+  vec3  norm  = vec3(0.0);
+  bool  hit   = false;
 
-  vec3  cO    = outerCentre(uShellT);
-  vec3  cI    = cO + innerOffset(uInnerT);
-  float rIn   = innerRadius(uInnerT);
-  float r2out = carve ? SPH_R * SPH_R : -1.0;
-  float r2in  = rIn * rIn;
-
-  // Tumbling cube bounding box test in cube-local coordinates
-  mat3  Rrot   = tumbleMatrix(uTumbleT);
-  vec3  oBox   = transpose(Rrot) * (o - cO);
-  vec3  dBox   = safeDir(transpose(Rrot) * d);
-  vec3  invBox = 1.0 / dBox;
-  vec3  eBox   = abs(invBox) * CUBE_HALF;
-  vec3  cBox   = -oBox * invBox;
-  vec3  t1Box  = cBox - eBox;
-  vec3  t2Box  = cBox + eBox;
-  float tNBox  = max(max(t1Box.x, t1Box.y), t1Box.z);
-  float tFBox  = min(min(t2Box.x, t2Box.y), t2Box.z);
-
-  if (clip && (tNBox >= tFBox || tFBox < 0.0)) return vec3(0.0);
-
-  float tMinBound = clip ? max(tNBox, 0.0) : 0.0;
-  float m         = clip ? tFBox : 1e9;
-  vec3  p         = vec3(0.0);
-  vec3  norm      = vec3(0.0);
-  bool  hit       = false;
-  float shade     = 1.0;
-
-  // 1. Tumbling cube boundary face intersection
-  if (clip && tNBox > 0.0 && tNBox < m){
-    vec3 pCut = o + tNBox * d;
-    vec3 locBox;
-    vec3 eo = pCut - cO, ei = pCut - cI;
-    bool inRind = carve && (dot(eo, eo) < r2out && dot(ei, ei) > r2in);
-    if (!inRind && solidAt(pCut + d * 1e-3, uMaskT, locBox)){
-      m = tNBox;
-      p = locBox - d * 1e-3;
-      hit = true;
-      vec3 hLoc = oBox + tNBox * dBox;
-      vec3 aLoc = abs(hLoc);
-      vec3 nBoxLocal = sign(hLoc) * step(max(aLoc.yzx, aLoc.zxy) - 1e-4, aLoc);
-      norm = normalize(Rrot * nBoxLocal);
-      shade = mix(1.0 - CUT_SHADE, 1.0, max(dot(norm, -d), 0.0));
-    }
-  }
-
-  // 2. Spherical cavity / shell surfaces
-  if (carve){
-    vec2 ro = sphereRoots(o - cO, d, SPH_R);
-    vec2 ri = sphereRoots(o - cI, d, rIn);
-    if (ri.x > ro.x && ri.x < ro.y)
-      shellFace(o, d, ri.x, cI,  1.0, uMaskT, tMinBound, m, p, norm, hit, shade);
-    if (ro.y <= ri.x || ro.y >= ri.y)
-      shellFace(o, d, ro.y, cO, -1.0, uMaskT, tMinBound, m, p, norm, hit, shade);
-  }
-
-  // 3. Grid blocks: octant-sorted loop over 27 lattice sites
+  // octant order: reverse each axis the ray runs backward along
   vec3 flip = step(d, vec3(0.0));
 
   for (int j = 0; j < 27; ++j){
@@ -462,22 +316,25 @@ vec3 render(vec2 v){
     g = mix(g, 2.0 - g, flip);
     vec3 pL = (g - 1.0) * PITCH;
 
+    // slab test on shape's bounding box (half-extent 1.0)
     vec3 rc = (pL - o) * inv, e = abs(inv);
     vec3 t1 = rc - e, t2 = rc + e;
     float tN = max(max(t1.x, t1.y), t1.z);
     float tF = min(min(t2.x, t2.y), t2.z);
-    if (tN >= tF || tF < 0.0 || tN >= m || tF <= tMinBound) continue;
+    if (tN >= tF || tF < 0.0 || tN >= m) continue;
 
     uint site = uint(g.x) + 3u * uint(g.y) + 9u * uint(g.z);
     uint mask = shapeMask(site, uMaskT);
     if (mask == 0u) continue;
 
     float before = m;
-    traceShape(o - pL, d, inv, mask, cO - pL, cI - pL, r2in, r2out, tMinBound, m, p, norm);
-    if (m < before){ hit = true; shade = 1.0; }
+    traceShape(o - pL, d, inv, mask, m, p, norm);
+    if (m < before) hit = true;
   }
 
+  float shade = mix(1.0 - CUT_SHADE, 1.0, max(dot(norm, -d), 0.0));
   vec3 worldHit = (o + m * d) / 3.9;
+
   return hit ? colorize(p, worldHit, norm, d, shade) : vec3(0.0);
 }
 
@@ -536,8 +393,8 @@ function main() {
   gl.bindVertexArray(gl.createVertexArray());
 
   const uRes      = gl.getUniformLocation(prog, "iResolution");
-  const uCarve    = gl.getUniformLocation(prog, "uCarve");
-  const uClip     = gl.getUniformLocation(prog, "uClip");
+  const uTime     = gl.getUniformLocation(prog, "iTime");
+  const uMaskT    = gl.getUniformLocation(prog, "uMaskT");
   const uGroup48  = gl.getUniformLocation(prog, "uGroup48");
   const uSymMode  = gl.getUniformLocation(prog, "uSymMode");
   const uMaskMode = gl.getUniformLocation(prog, "uMaskMode");
@@ -547,23 +404,15 @@ function main() {
   const uPalMode  = gl.getUniformLocation(prog, "uPaletteMode");
   const hud       = document.getElementById("hud");
 
-  // Clocks
-  const clocks = [
-    { key: "r", name: "orbit",  t: 0, run: true, loc: gl.getUniformLocation(prog, "uCamT") },
-    { key: "b", name: "bounce", t: 0, run: true, loc: gl.getUniformLocation(prog, "uShellT") },
-    { key: "i", name: "inner",  t: 0, run: true, loc: gl.getUniformLocation(prog, "uInnerT") },
-    { key: "t", name: "tumble", t: 0, run: true, loc: gl.getUniformLocation(prog, "uTumbleT") },
-    { key: "m", name: "bits",   t: 0, run: true, loc: gl.getUniformLocation(prog, "uMaskT") }
-  ];
-
-  // Procedural Sprite Generator State
-  let carve = false;
-  let clip = false;
+  let iTime = 0;
+  let maskT = 0;
+  let running = true;
+  let morph = true;  // Toggle for bit-morph animation
   let g48Idx = 0;    // 0..47 Group 48 Permutation
   let symMode = 1;   // 1: Cs (Bilateral X)
   let maskMode = 0;  // 0: Starship
   let fieldMode = 0; // 0: XOR / Hash
-  let palMode = 0;   // 0: Biunit Gamut
+  let palMode = 0;   // 0: Biunit Gamut (Canonical)
   let seed = 42;
   const densities = [0.35, 0.45, 0.55, 0.65, 0.75];
   let densityIdx = 2; // 0.55
@@ -599,8 +448,6 @@ function main() {
   }
 
   function syncUniforms() {
-    gl.uniform1f(uCarve, carve ? 1 : 0);
-    gl.uniform1f(uClip, clip ? 1 : 0);
     gl.uniform1i(uGroup48, g48Idx);
     gl.uniform1i(uSymMode, symMode);
     gl.uniform1i(uMaskMode, maskMode);
@@ -802,7 +649,6 @@ function main() {
   }
 
   function extractSolidVoxels() {
-    const maskClock = clocks.find(c => c.key === "m").t;
     const grid = new Uint8Array(9 * 9 * 9);
     const voxelList = [];
 
@@ -810,7 +656,7 @@ function main() {
       for (let gy = 0; gy < 3; gy++) {
         for (let gx = 0; gx < 3; gx++) {
           const site = gx + 3 * gy + 9 * gz;
-          const mask = evalShapeMaskJS(site, maskClock, seed, g48Idx, symMode, maskMode, fieldMode, densities[densityIdx]);
+          const mask = evalShapeMaskJS(site, maskT, seed, g48Idx, symMode, maskMode, fieldMode, densities[densityIdx]);
 
           for (let cz = 0; cz < 3; cz++) {
             for (let cy = 0; cy < 3; cy++) {
@@ -821,62 +667,6 @@ function main() {
                 const X = gx * 3 + cx;
                 const Y = gy * 3 + cy;
                 const Z = gz * 3 + cz;
-
-                const worldX = (X - 4) * (2.0 / 3.0);
-                const worldY = (Y - 4) * (2.0 / 3.0);
-                const worldZ = (Z - 4) * (2.0 / 3.0);
-
-                if (carve) {
-                  const shellT = clocks.find(c => c.key === "b").t;
-                  const innerT = clocks.find(c => c.key === "i").t;
-                  const twX = Math.abs((((shellT * 0.117) % 1 + 1) % 1) * 4 - 2) - 1;
-                  const fY = (((shellT * 0.230) % 1 + 1) % 1) * 2 - 1;
-                  const twY = 1 - 2 * fY * fY;
-                  const twZ = Math.abs((((shellT * 0.083 + 0.37) % 1 + 1) % 1) * 4 - 2) - 1;
-                  const cOx = 3.6 * twX, cOy = 3.6 * twY, cOz = 3.6 * twZ;
-
-                  const u = innerT * 0.42;
-                  const a0 = Math.floor(u) * 2.39996323, f = u - Math.floor(u);
-                  const qx = ((1 - f) * Math.cos(a0) + f * Math.cos(a0 + 2.39996323)) * (0.85 * 1.55);
-                  const qy = ((1 - f) * Math.sin(a0) + f * Math.sin(a0 + 2.39996323)) * (0.85 * 1.55);
-                  const w = innerT * 0.070, tau = 0.90 + 0.45 * Math.sin(innerT * 0.053);
-                  const e1x = Math.cos(w), e1z = Math.sin(w);
-                  const e2x = -Math.sin(w) * Math.sin(tau), e2y = Math.cos(tau), e2z = Math.cos(w) * Math.sin(tau);
-                  const cIx = cOx + qx * e1x + qy * e2x;
-                  const cIy = cOy + qy * e2y;
-                  const cIz = cOz + qx * e1z + qy * e2z;
-                  const rIn = 1.55 * (0.22 + (0.60 - 0.22) * (0.5 - 0.5 * Math.cos(innerT * 0.41)));
-
-                  const dOx = worldX - cOx, dOy = worldY - cOy, dOz = worldZ - cOz;
-                  const dIx = worldX - cIx, dIy = worldY - cIy, dIz = worldZ - cIz;
-                  const dO2 = dOx * dOx + dOy * dOy + dOz * dOz;
-                  const dI2 = dIx * dIx + dIy * dIy + dIz * dIz;
-                  if (dO2 < 1.55 * 1.55 && dI2 > rIn * rIn) continue;
-                }
-
-                if (clip) {
-                  const shellT = clocks.find(c => c.key === "b").t;
-                  const tumbleT = clocks.find(c => c.key === "t").t;
-                  const twX = Math.abs((((shellT * 0.117) % 1 + 1) % 1) * 4 - 2) - 1;
-                  const fY = (((shellT * 0.230) % 1 + 1) % 1) * 2 - 1;
-                  const twY = 1 - 2 * fY * fY;
-                  const twZ = Math.abs((((shellT * 0.083 + 0.37) % 1 + 1) % 1) * 4 - 2) - 1;
-                  const cOx = 3.6 * twX, cOy = 3.6 * twY, cOz = 3.6 * twZ;
-
-                  const ax = tumbleT * 0.47, ay = tumbleT * 0.33, az = tumbleT * 0.59;
-                  const cx = Math.cos(ax), sx = Math.sin(ax);
-                  const cy = Math.cos(ay), sy = Math.sin(ay);
-                  const cz = Math.cos(az), sz = Math.sin(az);
-                  const r00 = cy*cz, r01 = -cy*sz, r02 = -sy;
-                  const r10 = -sx*sy*cz + cx*sz, r11 = sx*sy*sz + cx*cz, r12 = -sx*cy;
-                  const r20 = cx*sy*cz + sx*sz, r21 = -cx*sy*sz + sx*cz, r22 = cx*cy;
-
-                  const dx = worldX - cOx, dy = worldY - cOy, dz = worldZ - cOz;
-                  const bx = Math.abs(r00*dx + r10*dy + r20*dz);
-                  const by = Math.abs(r01*dx + r11*dy + r21*dz);
-                  const bz = Math.abs(r02*dx + r12*dy + r22*dz);
-                  if (bx > 2.2 || by > 2.2 || bz > 2.2) continue;
-                }
 
                 grid[X + 9 * Y + 81 * Z] = 1;
                 const localPx = (cx - 1.0) / 1.5;
@@ -987,7 +777,7 @@ function main() {
     const { grid } = extractSolidVoxels();
     const lines = [
       "# 3D Procedural Sprite Export",
-      `# Archetype: ${MASK_NAMES[maskMode]}, Group48: ${formatG48(g48Idx)}, Symmetry: ${SYM_NAMES[symMode]}, Palette: ${PAL_NAMES[palMode]}, Seed: ${seed}`,
+      `# Archetype: ${MASK_NAMES[maskMode]}, Group48: ${formatG48(g48Idx)}, Symmetry: ${SYM_NAMES[symMode]}, Domain: ${PAL_NAMES[palMode]}, Seed: ${seed}`,
       "# Format: Wavefront OBJ with RGB vertex colors (v X Y Z R G B) and outward normals (vn)",
       "",
       "# Normal vectors (6 cardinal directions)",
@@ -1071,14 +861,6 @@ function main() {
 
   function paintHud() {
     const rows = [];
-    rows.push("<span class='sec'>--- CLOCKS ---</span>");
-    for (const c of clocks) {
-      rows.push(c.name.padEnd(7) + (c.run ? "run " : "hold") + "   " + c.key);
-    }
-    rows.push("carve".padEnd(7) + (carve ? "on  " : "off ") + "   c");
-    rows.push("clip".padEnd(7)  + (clip  ? "on  " : "off ") + "   x");
-    rows.push("all".padEnd(7)   + "        space");
-    rows.push("");
     rows.push("<span class='sec'>--- 3D SPRITE ---</span>");
     rows.push("sym".padEnd(7)   + SYM_NAMES[symMode].padEnd(14) + "s");
     rows.push("g48".padEnd(7)   + formatG48(g48Idx).padEnd(16) + "g/h");
@@ -1087,16 +869,13 @@ function main() {
     rows.push("fill".padEnd(7)  + (Math.round(densities[densityIdx] * 100) + "%").padEnd(14) + "d");
     rows.push("domain".padEnd(7)+ PAL_NAMES[palMode].padEnd(14) + "k");
     rows.push("seed".padEnd(7)  + ("#" + seed).padEnd(14) + "n/p");
+    rows.push("morph".padEnd(7) + (morph ? "on" : "hold").padEnd(14) + "m");
+    rows.push("orbit".padEnd(7) + (running ? "run" : "hold").padEnd(14) + "space");
     rows.push("");
     rows.push("<span class='sec'>--- EXPORT ---</span>");
     rows.push(".vox (Magica)".padEnd(16) + "e");
     rows.push(".obj (Mesh)".padEnd(16) + "o");
     hud.innerHTML = rows.join("\n") + "\n\n<b>" + fps + " fps</b>";
-  }
-
-  function setAll(run) {
-    for (const c of clocks) c.run = run;
-    paintHud();
   }
 
   addEventListener("keydown", (ev) => {
@@ -1105,11 +884,11 @@ function main() {
 
     if (k === " " || ev.code === "Space") {
       ev.preventDefault();
-      setAll(!clocks.some(c => c.run));
+      running = !running;
+      paintHud();
       return;
     }
-    if (k === "c") { carve = !carve; syncUniforms(); paintHud(); return; }
-    if (k === "x") { clip  = !clip;  syncUniforms(); paintHud(); return; }
+    if (k === "m") { morph = !morph; paintHud(); return; }
     if (k === "s") { symMode = (symMode + 1) % SYM_NAMES.length; syncUniforms(); paintHud(); return; }
     if (k === "g") { g48Idx = (g48Idx + 1) % 48; syncUniforms(); paintHud(); return; }
     if (k === "h") { g48Idx = (g48Idx - 1 + 48) % 48; syncUniforms(); paintHud(); return; }
@@ -1121,12 +900,6 @@ function main() {
     if (k === "p") { seed = (seed - 1 + 0x10000) & 0xffff; syncUniforms(); paintHud(); return; }
     if (k === "e") { exportVOX(); return; }
     if (k === "o") { exportOBJ(); return; }
-
-    const c = clocks.find(c => c.key === k);
-    if (c) {
-      c.run = !c.run;
-      paintHud();
-    }
   });
 
   function resize() {
@@ -1148,10 +921,12 @@ function main() {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
 
-    for (const c of clocks) {
-      if (c.run) c.t += dt;
-      gl.uniform1f(c.loc, c.t);
+    if (running) {
+      iTime += dt;
+      if (morph) maskT += dt;
     }
+    gl.uniform1f(uTime, iTime);
+    gl.uniform1f(uMaskT, maskT);
 
     resize();
     gl.drawArrays(gl.TRIANGLES, 0, 3);
