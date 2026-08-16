@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>bimoblock lattice — 3D procedural sprite generator</title>
+<title>bimoblock lattice — 3D sprite generator (Group 48)</title>
 <style>
   html,body{ height:100%; margin:0; background:#000; overflow:hidden; }
   canvas{ display:block; width:100%; height:100%; }
@@ -57,8 +57,9 @@ uniform float uMaskT;        // bit-cycle clock
 uniform float uCarve;        // 0 = plain lattice, 1 = shell subtracted
 uniform float uClip;         // 0 = unbounded lattice, 1 = clipped to tumbling cube
 
-// 3D Sprite Generator Uniforms
-uniform int   uSymMode;      // 0=Bilateral X, 1=Quad 4-Fold, 2=Octahedral, 3=Free
+// 3D Sprite Generator & Group 48 Uniforms
+uniform int   uGroup48;      // 0..47 discrete signed permutation of Oh
+uniform int   uSymMode;      // Subgroup symmetry: 0=C1, 1=Cs, 2=C2v, 3=C4v, 4=Td, 5=Oh
 uniform int   uMaskMode;     // 0=Starship, 1=Mech, 2=Totem, 3=Crystal, 4=Orbiter, 5=Full
 uniform int   uFieldMode;    // 0=Hash/XOR, 1=Spherical, 2=Manhattan, 3=Popcount
 uniform float uDensity;      // Fill threshold (0.35 .. 0.75)
@@ -82,10 +83,34 @@ out vec4 fragColor;
 #define CUT_SHADE 0.45       // how much a curved cut darkens toward its rim
 #define CUBE_HALF 2.2        // half-extent of the tumbling clipping cube
 
+// ---- Group 48 (Oh) signed coordinate permutation ----------------------------
+// Maps any 3D vector through the specified signed permutation element (0..47):
+//   - 6 axis permutations (3!)
+//   - 8 sign flips (2^3)
+vec3 applyGroup48(vec3 v, int idx){
+  int p = idx / 8;
+  int s = idx % 8;
+  
+  vec3 vp = v;
+  if      (p == 1) vp = v.xzy;
+  else if (p == 2) vp = v.yxz;
+  else if (p == 3) vp = v.yzx;
+  else if (p == 4) vp = v.zxy;
+  else if (p == 5) vp = v.zyx;
+  
+  vec3 sgn = vec3(
+    ((s & 1) != 0) ? -1.0 : 1.0,
+    ((s & 2) != 0) ? -1.0 : 1.0,
+    ((s & 4) != 0) ? -1.0 : 1.0
+  );
+  
+  return vp * sgn;
+}
+
 // ---- 3D procedural sprite mask generator ------------------------------------
 // Evaluates the 27 bits for a macro site (gx, gy, gz) by computing the global
-// 9x9x9 coordinate, folding through the selected 3D symmetry plane, filtering
-// through the 3D envelope mask, and thresholding against the chosen 3D field.
+// 9x9x9 coordinate, applying the Group 48 permutation, folding through the
+// chosen symmetry subgroup, filtering with the envelope mask, and thresholding.
 uint shapeMask(uint site, float time){
   int gx = int(site % 3u);
   int gy = int((site / 3u) % 3u);
@@ -106,14 +131,26 @@ uint shapeMask(uint site, float time){
     int Z = (gz - 1) * 3 + (cz - 1);
     vec3 n = vec3(float(X), float(Y), float(Z)) * 0.25;
     
-    // 1. 3D Symmetry Folds
+    // 1. Apply Group 48 Discrete Signed Permutation
+    n = applyGroup48(n, uGroup48);
+    
+    // 2. Apply Subgroup Symmetry Folds of Oh
     vec3 s = n;
-    if (uSymMode == 0){ // Bilateral X (Classic Ship/Mech mirror)
+    if (uSymMode == 1){ // Cs: Bilateral X mirror (|X|)
       s.x = abs(s.x);
-    } else if (uSymMode == 1){ // Quad 4-fold around Y (Totem/Tower)
+    } else if (uSymMode == 2){ // C2v: Bi-axial mirror (|X|, |Z|)
+      s.x = abs(s.x);
+      s.z = abs(s.z);
+    } else if (uSymMode == 3){ // C4v: Quad 4-fold rotational prism with diagonal mirrors
       s.x = max(abs(n.x), abs(n.z));
       s.z = min(abs(n.x), abs(n.z));
-    } else if (uSymMode == 2){ // Octahedral / Cubic Core
+    } else if (uSymMode == 4){ // Td: Full Tetrahedral symmetry
+      vec3 a = abs(s);
+      if (a.x < a.y) a.xy = a.yx;
+      if (a.y < a.z) a.yz = a.zy;
+      if (a.x < a.y) a.xy = a.yx;
+      s = a;
+    } else if (uSymMode == 5){ // Oh: Full Octahedral / Cubic 48-fold fundamental wedge
       vec3 a = abs(s);
       float s1 = max(a.x, max(a.y, a.z));
       float s3 = min(a.x, min(a.y, a.z));
@@ -121,7 +158,7 @@ uint shapeMask(uint site, float time){
       s = vec3(s1, s2, s3);
     }
     
-    // 2. 3D Bounding Envelope Masks (Archetypes)
+    // 3. 3D Bounding Envelope Masks (Archetypes)
     bool inMask = true;
     if (uMaskMode == 0){ // Starship: forward nose cone, swept wings, cockpit
       float wings = 0.28 + 0.72 * (1.0 - (s.z + 1.0) * 0.5);
@@ -146,7 +183,7 @@ uint shapeMask(uint site, float time){
     
     if (!inMask) continue;
     
-    // 3. Mathematical Field Evaluation
+    // 4. Mathematical Field Evaluation
     ivec3 is = ivec3(round(s * 4.0));
     float val = 0.0;
     
@@ -470,6 +507,7 @@ function main() {
   const uRes      = gl.getUniformLocation(prog, "iResolution");
   const uCarve    = gl.getUniformLocation(prog, "uCarve");
   const uClip     = gl.getUniformLocation(prog, "uClip");
+  const uGroup48  = gl.getUniformLocation(prog, "uGroup48");
   const uSymMode  = gl.getUniformLocation(prog, "uSymMode");
   const uMaskMode = gl.getUniformLocation(prog, "uMaskMode");
   const uFieldMode= gl.getUniformLocation(prog, "uFieldMode");
@@ -488,9 +526,10 @@ function main() {
   ];
 
   // Procedural Sprite Generator State
-  let carve = false; // Start uncarved to showcase full sprite archetype
-  let clip = false;  // Start unclipped to showcase full sprite archetype
-  let symMode = 0;   // 0: Bilateral X
+  let carve = false;
+  let clip = false;
+  let g48Idx = 0;    // 0..47 Group 48 Permutation
+  let symMode = 1;   // 1: Cs (Bilateral X)
   let maskMode = 0;  // 0: Starship
   let fieldMode = 0; // 0: XOR / Hash
   let palMode = 0;   // 0: Gamut
@@ -499,14 +538,28 @@ function main() {
   let densityIdx = 2; // 0.55
   let fps = 0;
 
-  const SYM_NAMES   = ["bilat-X", "quad-4", "octa", "free"];
+  const SYM_NAMES   = ["C1:free", "Cs:bilat-X", "C2v:bi-axial", "C4v:quad-4", "Td:tetra", "Oh:octa-48"];
   const MASK_NAMES  = ["starship", "mech", "totem", "crystal", "orbiter", "full"];
   const FIELD_NAMES = ["xor/hash", "spheres", "diamond", "popcount"];
   const PAL_NAMES   = ["gamut", "cyber", "gold", "emerald", "mech"];
 
+  function formatG48(k) {
+    const p_idx = Math.floor(k / 8);
+    const s_idx = k % 8;
+    const p_names = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"];
+    const p_par = [1, -1, -1, 1, 1, -1];
+    const sign_count = ((s_idx & 1) ? 1 : 0) + ((s_idx & 2) ? 1 : 0) + ((s_idx & 4) ? 1 : 0);
+    const is_rot = (p_par[p_idx] * ((sign_count % 2 === 1) ? -1 : 1)) === 1;
+    const sx = (s_idx & 1) ? "-" : "+";
+    const sy = (s_idx & 2) ? "-" : "+";
+    const sz = (s_idx & 4) ? "-" : "+";
+    return `#${k < 10 ? '0' + k : k} ${is_rot ? 'rot' : 'ref'} ${p_names[p_idx]} ${sx}${sy}${sz}`;
+  }
+
   function syncUniforms() {
     gl.uniform1f(uCarve, carve ? 1 : 0);
     gl.uniform1f(uClip, clip ? 1 : 0);
+    gl.uniform1i(uGroup48, g48Idx);
     gl.uniform1i(uSymMode, symMode);
     gl.uniform1i(uMaskMode, maskMode);
     gl.uniform1i(uFieldMode, fieldMode);
@@ -516,7 +569,25 @@ function main() {
   }
 
   /* ---- Exporters: Voxel Grid Evaluator ---------------------------------- */
-  function evalShapeMaskJS(site, timeVal, seedVal, symVal, maskVal, fieldVal, densityVal) {
+  function applyGroup48JS(x, y, z, idx) {
+    const p = Math.floor(idx / 8);
+    const s = idx % 8;
+
+    let vx = x, vy = y, vz = z;
+    if      (p === 1) { vx = x; vy = z; vz = y; }
+    else if (p === 2) { vx = y; vy = x; vz = z; }
+    else if (p === 3) { vx = y; vy = z; vz = x; }
+    else if (p === 4) { vx = z; vy = x; vz = y; }
+    else if (p === 5) { vx = z; vy = y; vz = x; }
+
+    const sx = (s & 1) ? -1.0 : 1.0;
+    const sy = (s & 2) ? -1.0 : 1.0;
+    const sz = (s & 4) ? -1.0 : 1.0;
+
+    return [vx * sx, vy * sy, vz * sz];
+  }
+
+  function evalShapeMaskJS(site, timeVal, seedVal, g48Val, symVal, maskVal, fieldVal, densityVal) {
     const gx = site % 3;
     const gy = Math.floor(site / 3) % 3;
     const gz = Math.floor(site / 9);
@@ -535,17 +606,24 @@ function main() {
       const Y = (gy - 1) * 3 + (cy - 1);
       const Z = (gz - 1) * 3 + (cz - 1);
 
-      const nx = X * 0.25;
-      const ny = Y * 0.25;
-      const nz = Z * 0.25;
+      let [nx, ny, nz] = applyGroup48JS(X * 0.25, Y * 0.25, Z * 0.25, g48Val);
 
       let sx = nx, sy = ny, sz = nz;
-      if (symVal === 0) {
+      if (symVal === 1) {
         sx = Math.abs(sx);
-      } else if (symVal === 1) {
+      } else if (symVal === 2) {
+        sx = Math.abs(sx);
+        sz = Math.abs(sz);
+      } else if (symVal === 3) {
         sx = Math.max(Math.abs(nx), Math.abs(nz));
         sz = Math.min(Math.abs(nx), Math.abs(nz));
-      } else if (symVal === 2) {
+      } else if (symVal === 4) {
+        let ax = Math.abs(sx), ay = Math.abs(sy), az = Math.abs(sz);
+        if (ax < ay) { const tmp = ax; ax = ay; ay = tmp; }
+        if (ay < az) { const tmp = ay; ay = az; az = tmp; }
+        if (ax < ay) { const tmp = ax; ax = ay; ay = tmp; }
+        sx = ax; sy = ay; sz = az;
+      } else if (symVal === 5) {
         const ax = Math.abs(sx), ay = Math.abs(sy), az = Math.abs(sz);
         const s1 = Math.max(ax, Math.max(ay, az));
         const s3 = Math.min(ax, Math.min(ay, az));
@@ -651,7 +729,7 @@ function main() {
       for (let gy = 0; gy < 3; gy++) {
         for (let gx = 0; gx < 3; gx++) {
           const site = gx + 3 * gy + 9 * gz;
-          const mask = evalShapeMaskJS(site, maskClock, seed, symMode, maskMode, fieldMode, densities[densityIdx]);
+          const mask = evalShapeMaskJS(site, maskClock, seed, g48Idx, symMode, maskMode, fieldMode, densities[densityIdx]);
 
           for (let cz = 0; cz < 3; cz++) {
             for (let cy = 0; cy < 3; cy++) {
@@ -663,7 +741,6 @@ function main() {
                 const Y = gy * 3 + cy;
                 const Z = gz * 3 + cz;
 
-                // CSG carve/clip check if active
                 const worldX = (X - 4) * (2.0 / 3.0);
                 const worldY = (Y - 4) * (2.0 / 3.0);
                 const worldZ = (Z - 4) * (2.0 / 3.0);
@@ -746,7 +823,6 @@ function main() {
     URL.revokeObjectURL(url);
   }
 
-  // Export to MagicaVoxel .vox format
   function exportVOX() {
     const { voxelList } = extractSolidVoxels();
     if (voxelList.length === 0) { showToast("Voxel model is empty!"); return; }
@@ -773,14 +849,12 @@ function main() {
 
     while (palette.length < 256) palette.push([255, 255, 255, 255]);
 
-    // SIZE chunk
     const sizeChunk = new Uint8Array(12 + 12);
     const sView = new DataView(sizeChunk.buffer);
     sizeChunk.set([0x53, 0x49, 0x5a, 0x45]);
     sView.setUint32(4, 12, true); sView.setUint32(8, 0, true);
     sView.setUint32(12, 9, true); sView.setUint32(16, 9, true); sView.setUint32(20, 9, true);
 
-    // XYZI chunk
     const xyziContentSize = 4 + voxelsOut.length * 4;
     const xyziChunk = new Uint8Array(12 + xyziContentSize);
     const xView = new DataView(xyziChunk.buffer);
@@ -795,7 +869,6 @@ function main() {
       xyziChunk[off + 3] = voxelsOut[i].c;
     }
 
-    // RGBA chunk
     const rgbaChunk = new Uint8Array(12 + 1024);
     const rView = new DataView(rgbaChunk.buffer);
     rgbaChunk.set([0x52, 0x47, 0x42, 0x41]);
@@ -808,7 +881,6 @@ function main() {
       rgbaChunk[off + 3] = palette[i][3];
     }
 
-    // MAIN chunk
     const childrenSize = sizeChunk.length + xyziChunk.length + rgbaChunk.length;
     const mainChunk = new Uint8Array(12 + childrenSize);
     const mView = new DataView(mainChunk.buffer);
@@ -819,24 +891,22 @@ function main() {
     mainChunk.set(xyziChunk, curOff); curOff += xyziChunk.length;
     mainChunk.set(rgbaChunk, curOff);
 
-    // VOX Header (8 bytes) + MAIN
     const finalFile = new Uint8Array(8 + mainChunk.length);
     const fView = new DataView(finalFile.buffer);
     finalFile.set([0x56, 0x4f, 0x58, 0x20]);
     fView.setUint32(4, 150, true);
     finalFile.set(mainChunk, 8);
 
-    const name = `${MASK_NAMES[maskMode]}_${SYM_NAMES[symMode]}_#${seed}.vox`;
+    const name = `${MASK_NAMES[maskMode]}_g${g48Idx}_${SYM_NAMES[symMode]}_#${seed}.vox`;
     downloadBlob(new Blob([finalFile], { type: "application/octet-stream" }), name);
     showToast(`Exported ${name} (${voxelsOut.length} voxels)`);
   }
 
-  // Export to Wavefront .obj format with per-vertex coloring and exact normals
   function exportOBJ() {
     const { grid } = extractSolidVoxels();
     const lines = [
       "# 3D Procedural Sprite Export",
-      `# Archetype: ${MASK_NAMES[maskMode]}, Symmetry: ${SYM_NAMES[symMode]}, Palette: ${PAL_NAMES[palMode]}, Seed: ${seed}`,
+      `# Archetype: ${MASK_NAMES[maskMode]}, Group48: ${formatG48(g48Idx)}, Symmetry: ${SYM_NAMES[symMode]}, Palette: ${PAL_NAMES[palMode]}, Seed: ${seed}`,
       "# Format: Wavefront OBJ with RGB vertex colors (v X Y Z R G B) and outward normals (vn)",
       "",
       "# Normal vectors (6 cardinal directions)",
@@ -849,7 +919,6 @@ function main() {
       ""
     ];
 
-    // Counter-clockwise vertex winding for outward faces
     const cubeFaces = [
       { dir: [ 1, 0, 0], normIdx: 1, v: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
       { dir: [-1, 0, 0], normIdx: 2, v: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
@@ -879,7 +948,6 @@ function main() {
 
             if (exposed) {
               for (const vert of face.v) {
-                // Exact vertex corner position
                 const vx = x + vert[0];
                 const vy = y + vert[1];
                 const vz = z + vert[2];
@@ -888,7 +956,6 @@ function main() {
                 const py = ((vy - 4.5) * (2.0 / 3.0)).toFixed(4);
                 const pz = ((vz - 4.5) * (2.0 / 3.0)).toFixed(4);
 
-                // Per-vertex color evaluated at exact corner location
                 const localPx = (cx + vert[0]) / 1.5 - 1.0;
                 const localPy = (cy + vert[1]) / 1.5 - 1.0;
                 const localPz = (cz + vert[2]) / 1.5 - 1.0;
@@ -915,7 +982,7 @@ function main() {
 
     if (faceCount === 0) { showToast("Mesh is empty!"); return; }
 
-    const name = `${MASK_NAMES[maskMode]}_${SYM_NAMES[symMode]}_#${seed}.obj`;
+    const name = `${MASK_NAMES[maskMode]}_g${g48Idx}_${SYM_NAMES[symMode]}_#${seed}.obj`;
     downloadBlob(new Blob([lines.join("\n")], { type: "text/plain" }), name);
     showToast(`Exported ${name} (${faceCount} quads, vertex-colored)`);
   }
@@ -931,12 +998,13 @@ function main() {
     rows.push("all".padEnd(7)   + "        space");
     rows.push("");
     rows.push("<span class='sec'>--- 3D SPRITE ---</span>");
-    rows.push("sym".padEnd(7)   + SYM_NAMES[symMode].padEnd(9) + "s");
-    rows.push("arch".padEnd(7)  + MASK_NAMES[maskMode].padEnd(9) + "a");
-    rows.push("field".padEnd(7) + FIELD_NAMES[fieldMode].padEnd(9) + "f");
-    rows.push("fill".padEnd(7)  + (Math.round(densities[densityIdx] * 100) + "%").padEnd(9) + "d");
-    rows.push("pal".padEnd(7)   + PAL_NAMES[palMode].padEnd(9) + "k");
-    rows.push("seed".padEnd(7)  + ("#" + seed).padEnd(9) + "n/p");
+    rows.push("sym".padEnd(7)   + SYM_NAMES[symMode].padEnd(10) + "s");
+    rows.push("g48".padEnd(7)   + formatG48(g48Idx).padEnd(16) + "g/h");
+    rows.push("arch".padEnd(7)  + MASK_NAMES[maskMode].padEnd(10) + "a");
+    rows.push("field".padEnd(7) + FIELD_NAMES[fieldMode].padEnd(10) + "f");
+    rows.push("fill".padEnd(7)  + (Math.round(densities[densityIdx] * 100) + "%").padEnd(10) + "d");
+    rows.push("pal".padEnd(7)   + PAL_NAMES[palMode].padEnd(10) + "k");
+    rows.push("seed".padEnd(7)  + ("#" + seed).padEnd(10) + "n/p");
     rows.push("");
     rows.push("<span class='sec'>--- EXPORT ---</span>");
     rows.push(".vox (Magica)".padEnd(16) + "e");
@@ -961,6 +1029,8 @@ function main() {
     if (k === "c") { carve = !carve; syncUniforms(); paintHud(); return; }
     if (k === "x") { clip  = !clip;  syncUniforms(); paintHud(); return; }
     if (k === "s") { symMode = (symMode + 1) % SYM_NAMES.length; syncUniforms(); paintHud(); return; }
+    if (k === "g") { g48Idx = (g48Idx + 1) % 48; syncUniforms(); paintHud(); return; }
+    if (k === "h") { g48Idx = (g48Idx - 1 + 48) % 48; syncUniforms(); paintHud(); return; }
     if (k === "a") { maskMode = (maskMode + 1) % MASK_NAMES.length; syncUniforms(); paintHud(); return; }
     if (k === "f") { fieldMode = (fieldMode + 1) % FIELD_NAMES.length; syncUniforms(); paintHud(); return; }
     if (k === "d") { densityIdx = (densityIdx + 1) % densities.length; syncUniforms(); paintHud(); return; }
