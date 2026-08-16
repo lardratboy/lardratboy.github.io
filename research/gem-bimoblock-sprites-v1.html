@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>bimoblock lattice — 3D sprite generator (Group 48)</title>
+<title>bimoblock lattice — 3D sprite generator (Domain Color Fields)</title>
 <style>
   html,body{ height:100%; margin:0; background:#000; overflow:hidden; }
   canvas{ display:block; width:100%; height:100%; }
@@ -64,7 +64,7 @@ uniform int   uMaskMode;     // 0=Starship, 1=Mech, 2=Totem, 3=Crystal, 4=Orbite
 uniform int   uFieldMode;    // 0=Hash/XOR, 1=Spherical, 2=Manhattan, 3=Popcount
 uniform float uDensity;      // Fill threshold (0.35 .. 0.75)
 uniform int   uSeed;         // Sprite seed integer
-uniform int   uPaletteMode;  // 0=Gamut, 1=Cyberpunk, 2=Gold/Obsidian, 3=Emerald, 4=Mech
+uniform int   uPaletteMode;  // 0=Biunit Gamut, 1=Orbit-Symmetric Gamut, 2=Helical Spinor, 3=Core & Hull, 4=Cyber-Phase
 
 out vec4 fragColor;
 
@@ -84,9 +84,6 @@ out vec4 fragColor;
 #define CUBE_HALF 2.2        // half-extent of the tumbling clipping cube
 
 // ---- Group 48 (Oh) signed coordinate permutation ----------------------------
-// Maps any 3D vector through the specified signed permutation element (0..47):
-//   - 6 axis permutations (3!)
-//   - 8 sign flips (2^3)
 vec3 applyGroup48(vec3 v, int idx){
   int p = idx / 8;
   int s = idx % 8;
@@ -107,10 +104,34 @@ vec3 applyGroup48(vec3 v, int idx){
   return vp * sgn;
 }
 
+// Subgroup symmetry fold helper
+vec3 foldSymmetry(vec3 n, int sym){
+  vec3 s = n;
+  if (sym == 1){ // Cs: Bilateral X (|X|)
+    s.x = abs(s.x);
+  } else if (sym == 2){ // C2v: Bi-axial (|X|, |Z|)
+    s.x = abs(s.x);
+    s.z = abs(s.z);
+  } else if (sym == 3){ // C4v: Quad 4-fold
+    s.x = max(abs(n.x), abs(n.z));
+    s.z = min(abs(n.x), abs(n.z));
+  } else if (sym == 4){ // Td: Full Tetrahedral
+    vec3 a = abs(s);
+    if (a.x < a.y) a.xy = a.yx;
+    if (a.y < a.z) a.yz = a.zy;
+    if (a.x < a.y) a.xy = a.yx;
+    s = a;
+  } else if (sym == 5){ // Oh: Full 48-fold Octahedral wedge
+    vec3 a = abs(s);
+    float s1 = max(a.x, max(a.y, a.z));
+    float s3 = min(a.x, min(a.y, a.z));
+    float s2 = a.x + a.y + a.z - s1 - s3;
+    s = vec3(s1, s2, s3);
+  }
+  return s;
+}
+
 // ---- 3D procedural sprite mask generator ------------------------------------
-// Evaluates the 27 bits for a macro site (gx, gy, gz) by computing the global
-// 9x9x9 coordinate, applying the Group 48 permutation, folding through the
-// chosen symmetry subgroup, filtering with the envelope mask, and thresholding.
 uint shapeMask(uint site, float time){
   int gx = int(site % 3u);
   int gy = int((site / 3u) % 3u);
@@ -125,58 +146,37 @@ uint shapeMask(uint site, float time){
     int cy = (k / 3) % 3;
     int cz = k / 9;
     
-    // Global normalized continuous coordinate in [-1, 1]^3
+    // Global continuous coordinate in [-1, 1]^3
     int X = (gx - 1) * 3 + (cx - 1);
     int Y = (gy - 1) * 3 + (cy - 1);
     int Z = (gz - 1) * 3 + (cz - 1);
     vec3 n = vec3(float(X), float(Y), float(Z)) * 0.25;
     
-    // 1. Apply Group 48 Discrete Signed Permutation
+    // 1. Group 48 Permutation
     n = applyGroup48(n, uGroup48);
     
-    // 2. Apply Subgroup Symmetry Folds of Oh
-    vec3 s = n;
-    if (uSymMode == 1){ // Cs: Bilateral X mirror (|X|)
-      s.x = abs(s.x);
-    } else if (uSymMode == 2){ // C2v: Bi-axial mirror (|X|, |Z|)
-      s.x = abs(s.x);
-      s.z = abs(s.z);
-    } else if (uSymMode == 3){ // C4v: Quad 4-fold rotational prism with diagonal mirrors
-      s.x = max(abs(n.x), abs(n.z));
-      s.z = min(abs(n.x), abs(n.z));
-    } else if (uSymMode == 4){ // Td: Full Tetrahedral symmetry
-      vec3 a = abs(s);
-      if (a.x < a.y) a.xy = a.yx;
-      if (a.y < a.z) a.yz = a.zy;
-      if (a.x < a.y) a.xy = a.yx;
-      s = a;
-    } else if (uSymMode == 5){ // Oh: Full Octahedral / Cubic 48-fold fundamental wedge
-      vec3 a = abs(s);
-      float s1 = max(a.x, max(a.y, a.z));
-      float s3 = min(a.x, min(a.y, a.z));
-      float s2 = a.x + a.y + a.z - s1 - s3;
-      s = vec3(s1, s2, s3);
-    }
+    // 2. Symmetry Subgroup Fold
+    vec3 s = foldSymmetry(n, uSymMode);
     
     // 3. 3D Bounding Envelope Masks (Archetypes)
     bool inMask = true;
-    if (uMaskMode == 0){ // Starship: forward nose cone, swept wings, cockpit
+    if (uMaskMode == 0){ // Starship
       float wings = 0.28 + 0.72 * (1.0 - (s.z + 1.0) * 0.5);
       float thick = 0.35 + 0.65 * (1.0 - abs(s.z));
       inMask = (abs(s.x) <= wings) && (abs(s.y) <= thick);
-    } else if (uMaskMode == 1){ // Mech: head crest, broad torso & arms, legs
+    } else if (uMaskMode == 1){ // Mech
       if (s.y > 0.25)
         inMask = (abs(s.x) <= 0.35 && abs(s.z) <= 0.35);
       else if (s.y >= -0.25)
         inMask = (abs(s.x) <= 0.95 && abs(s.z) <= 0.65);
       else
         inMask = (abs(s.x) >= 0.15 && abs(s.x) <= 0.75 && abs(s.z) <= 0.55);
-    } else if (uMaskMode == 2){ // Totem: tiered vertical pillar with radial ridges
+    } else if (uMaskMode == 2){ // Totem
       float rTier = 0.45 + 0.38 * cos(s.y * 6.28318);
       inMask = (dot(s.xz, s.xz) <= rTier * rTier);
-    } else if (uMaskMode == 3){ // Crystal: faceted octahedron / diamond
+    } else if (uMaskMode == 3){ // Crystal
       inMask = (abs(s.x) + abs(s.y) + abs(s.z) <= 1.25);
-    } else if (uMaskMode == 4){ // Orbiter: toroidal ring with central reactor
+    } else if (uMaskMode == 4){ // Orbiter
       float rXZ = length(s.xz);
       inMask = (abs(rXZ - 0.62) <= 0.32 && abs(s.y) <= 0.45) || (rXZ <= 0.25 && abs(s.y) <= 0.75);
     }
@@ -206,7 +206,6 @@ uint shapeMask(uint site, float time){
       val = float(cnt % 5u) / 4.0;
     }
     
-    // Density threshold
     if (val >= (1.0 - uDensity)){
       mask |= (1u << uint(k));
     }
@@ -237,8 +236,8 @@ vec3 innerOffset(float t){
   vec2 q = mix(vec2(cos(a0), sin(a0)),
                vec2(cos(a0 + TURN), sin(a0 + TURN)), f) * (ORBIT * SPH_R);
 
-  float w   = t * 0.070;                             // plane spin
-  float tau = 0.90 + 0.45 * sin(t * 0.053);          // plane tilt
+  float w   = t * 0.070;
+  float tau = 0.90 + 0.45 * sin(t * 0.053);
   vec3 e1 = vec3(cos(w), 0.0, sin(w));
   vec3 e2 = vec3(-sin(w) * sin(tau), cos(tau), cos(w) * sin(tau));
   return q.x * e1 + q.y * e2;
@@ -329,27 +328,37 @@ vec3 safeDir(vec3 d){
   return s * max(abs(d), vec3(1e-6));
 }
 
-// ---- palette shader ---------------------------------------------------------
+// ---- Domain Color Fields Shader ---------------------------------------------
 vec3 colorize(vec3 p, vec3 worldP, vec3 norm, vec3 rd, float shade){
-  vec3 col = p * 0.5 + 0.5; // Default: Local RGB gamut
+  vec3 col = p * 0.5 + 0.5; // Mode 0: The Canonical Biunit Gamut (Identity Domain)
   
-  if (uPaletteMode == 1){ // Cyberpunk / Neon
-    float grad = sin(worldP.y * 3.14 + worldP.x * 2.0) * 0.5 + 0.5;
-    col = mix(vec3(0.08, 0.85, 0.95), vec3(0.98, 0.15, 0.65), grad);
-    col = mix(col, vec3(1.0, 0.85, 0.2), step(0.65, abs(worldP.x)));
-  } else if (uPaletteMode == 2){ // Gold & Obsidian
-    float edge = max(max(abs(p.x), abs(p.y)), abs(p.z));
-    vec3 gold = vec3(0.96, 0.78, 0.26);
-    vec3 obsidian = vec3(0.12, 0.13, 0.17);
-    col = mix(obsidian, gold, smoothstep(0.45, 0.85, edge));
-  } else if (uPaletteMode == 3){ // Emerald Core
+  if (uPaletteMode == 1){ 
+    // Mode 1: Group-Orbit Invariant Gamut
+    // Colors are evaluated in the fundamental symmetry domain, so symmetric wings/limbs
+    // share matching color gradients!
+    vec3 pFold = foldSymmetry(p, uSymMode);
+    col = pFold * 0.5 + 0.5;
+  } 
+  else if (uPaletteMode == 2){ 
+    // Mode 2: Helical Spinor Gamut (Screw Axis Winding)
+    // The RGB gamut rotates smoothly along the Y axis like a continuous vortex/helix
+    float theta = worldP.y * 3.14159 * 1.25;
+    float ct = cos(theta), st = sin(theta);
+    vec3 pSpin = vec3(p.x * ct - p.z * st, p.y, p.x * st + p.z * ct);
+    col = pSpin * 0.5 + 0.5;
+  } 
+  else if (uPaletteMode == 3){ 
+    // Mode 3: Core & Hull Domain
+    // Gamut on the exterior armor plates, glowing radiant energy core in the interior
     float r = length(worldP);
-    col = mix(vec3(0.1, 0.95, 0.6), vec3(0.05, 0.35, 0.75), clamp(r, 0.0, 1.0));
-    col += vec3(0.2, 0.7, 0.9) * pow(max(dot(norm, -rd), 0.0), 4.0);
-  } else if (uPaletteMode == 4){ // Mech Armor
-    float isWing = step(0.35, abs(worldP.x));
-    col = isWing > 0.5 ? vec3(0.92, 0.94, 0.96) : vec3(0.20, 0.22, 0.27);
-    if (abs(p.y) > 0.6) col = mix(col, vec3(0.95, 0.38, 0.1), 0.85);
+    vec3 coreCol = mix(vec3(1.0, 0.25, 0.05), vec3(0.1, 0.85, 1.0), sin(r * 12.0) * 0.5 + 0.5);
+    vec3 hullCol = p * 0.5 + 0.5;
+    col = mix(coreCol, hullCol, smoothstep(0.35, 0.75, r));
+  } 
+  else if (uPaletteMode == 4){ 
+    // Mode 4: Cyber-Phase Domain
+    // Trigonometric phase harmonics across the continuous 3D domain
+    col = sin(p * 3.14159 * 0.75 + worldP * 2.0) * 0.5 + 0.5;
   }
   
   return col * shade;
@@ -384,7 +393,6 @@ vec3 render(vec2 v){
   float tNBox  = max(max(t1Box.x, t1Box.y), t1Box.z);
   float tFBox  = min(min(t2Box.x, t2Box.y), t2Box.z);
 
-  // If clipping is active and the ray misses the bounding cube, early out
   if (clip && (tNBox >= tFBox || tFBox < 0.0)) return vec3(0.0);
 
   float tMinBound = clip ? max(tNBox, 0.0) : 0.0;
@@ -430,7 +438,6 @@ vec3 render(vec2 v){
     g = mix(g, 2.0 - g, flip);
     vec3 pL = (g - 1.0) * PITCH;
 
-    // slab test on shape's bounding box
     vec3 rc = (pL - o) * inv, e = abs(inv);
     vec3 t1 = rc - e, t2 = rc + e;
     float tN = max(max(t1.x, t1.y), t1.z);
@@ -532,7 +539,7 @@ function main() {
   let symMode = 1;   // 1: Cs (Bilateral X)
   let maskMode = 0;  // 0: Starship
   let fieldMode = 0; // 0: XOR / Hash
-  let palMode = 0;   // 0: Gamut
+  let palMode = 0;   // 0: Biunit Gamut (Canonical)
   let seed = 42;
   const densities = [0.35, 0.45, 0.55, 0.65, 0.75];
   let densityIdx = 2; // 0.55
@@ -541,7 +548,7 @@ function main() {
   const SYM_NAMES   = ["C1:free", "Cs:bilat-X", "C2v:bi-axial", "C4v:quad-4", "Td:tetra", "Oh:octa-48"];
   const MASK_NAMES  = ["starship", "mech", "totem", "crystal", "orbiter", "full"];
   const FIELD_NAMES = ["xor/hash", "spheres", "diamond", "popcount"];
-  const PAL_NAMES   = ["gamut", "cyber", "gold", "emerald", "mech"];
+  const PAL_NAMES   = ["gamut", "orbit-sym", "helical", "core/hull", "cyber-phase"];
 
   function formatG48(k) {
     const p_idx = Math.floor(k / 8);
@@ -587,6 +594,32 @@ function main() {
     return [vx * sx, vy * sy, vz * sz];
   }
 
+  function foldSymmetryJS(nx, ny, nz, sym) {
+    let sx = nx, sy = ny, sz = nz;
+    if (sym === 1) {
+      sx = Math.abs(sx);
+    } else if (sym === 2) {
+      sx = Math.abs(sx);
+      sz = Math.abs(sz);
+    } else if (sym === 3) {
+      sx = Math.max(Math.abs(nx), Math.abs(nz));
+      sz = Math.min(Math.abs(nx), Math.abs(nz));
+    } else if (sym === 4) {
+      let ax = Math.abs(sx), ay = Math.abs(sy), az = Math.abs(sz);
+      if (ax < ay) { const tmp = ax; ax = ay; ay = tmp; }
+      if (ay < az) { const tmp = ay; ay = az; az = tmp; }
+      if (ax < ay) { const tmp = ax; ax = ay; ay = tmp; }
+      sx = ax; sy = ay; sz = az;
+    } else if (sym === 5) {
+      const ax = Math.abs(sx), ay = Math.abs(sy), az = Math.abs(sz);
+      const s1 = Math.max(ax, Math.max(ay, az));
+      const s3 = Math.min(ax, Math.min(ay, az));
+      const s2 = ax + ay + az - s1 - s3;
+      sx = s1; sy = s2; sz = s3;
+    }
+    return [sx, sy, sz];
+  }
+
   function evalShapeMaskJS(site, timeVal, seedVal, g48Val, symVal, maskVal, fieldVal, densityVal) {
     const gx = site % 3;
     const gy = Math.floor(site / 3) % 3;
@@ -607,29 +640,7 @@ function main() {
       const Z = (gz - 1) * 3 + (cz - 1);
 
       let [nx, ny, nz] = applyGroup48JS(X * 0.25, Y * 0.25, Z * 0.25, g48Val);
-
-      let sx = nx, sy = ny, sz = nz;
-      if (symVal === 1) {
-        sx = Math.abs(sx);
-      } else if (symVal === 2) {
-        sx = Math.abs(sx);
-        sz = Math.abs(sz);
-      } else if (symVal === 3) {
-        sx = Math.max(Math.abs(nx), Math.abs(nz));
-        sz = Math.min(Math.abs(nx), Math.abs(nz));
-      } else if (symVal === 4) {
-        let ax = Math.abs(sx), ay = Math.abs(sy), az = Math.abs(sz);
-        if (ax < ay) { const tmp = ax; ax = ay; ay = tmp; }
-        if (ay < az) { const tmp = ay; ay = az; az = tmp; }
-        if (ax < ay) { const tmp = ax; ax = ay; ay = tmp; }
-        sx = ax; sy = ay; sz = az;
-      } else if (symVal === 5) {
-        const ax = Math.abs(sx), ay = Math.abs(sy), az = Math.abs(sz);
-        const s1 = Math.max(ax, Math.max(ay, az));
-        const s3 = Math.min(ax, Math.min(ay, az));
-        const s2 = ax + ay + az - s1 - s3;
-        sx = s1; sy = s2; sz = s3;
-      }
+      let [sx, sy, sz] = foldSymmetryJS(nx, ny, nz, symVal);
 
       let inMask = true;
       if (maskVal === 0) {
@@ -684,33 +695,40 @@ function main() {
     return mask >>> 0;
   }
 
+  // Exact matching color function for per-vertex OBJ and VOX
   function getVoxelColor(px, py, pz, worldX, worldY, worldZ) {
     let r = px * 0.5 + 0.5;
     let g = py * 0.5 + 0.5;
     let b = pz * 0.5 + 0.5;
 
-    if (palMode === 1) { // Cyberpunk
-      const grad = Math.sin(worldY * 3.14 + worldX * 2.0) * 0.5 + 0.5;
-      r = 0.08 * (1 - grad) + 0.98 * grad;
-      g = 0.85 * (1 - grad) + 0.15 * grad;
-      b = 0.95 * (1 - grad) + 0.65 * grad;
-      if (Math.abs(worldX) >= 0.65) { r = 1.0; g = 0.85; b = 0.2; }
-    } else if (palMode === 2) { // Gold / Obsidian
-      const edge = Math.max(Math.abs(px), Math.abs(py), Math.abs(pz));
-      const t = Math.max(0, Math.min(1, (edge - 0.45) / 0.4));
-      r = 0.12 * (1 - t) + 0.96 * t;
-      g = 0.13 * (1 - t) + 0.78 * t;
-      b = 0.17 * (1 - t) + 0.26 * t;
-    } else if (palMode === 3) { // Emerald Core
+    if (palMode === 1) { // Orbit-Symmetric Gamut
+      const [fx, fy, fz] = foldSymmetryJS(px, py, pz, symMode);
+      r = fx * 0.5 + 0.5;
+      g = fy * 0.5 + 0.5;
+      b = fz * 0.5 + 0.5;
+    } else if (palMode === 2) { // Helical Spinor
+      const theta = worldY * 3.14159 * 1.25;
+      const ct = Math.cos(theta), st = Math.sin(theta);
+      const spX = px * ct - pz * st;
+      const spZ = px * st + pz * ct;
+      r = spX * 0.5 + 0.5;
+      g = py * 0.5 + 0.5;
+      b = spZ * 0.5 + 0.5;
+    } else if (palMode === 3) { // Core & Hull Domain
       const rad = Math.min(1.0, Math.hypot(worldX, worldY, worldZ));
-      r = 0.10 * (1 - rad) + 0.05 * rad;
-      g = 0.95 * (1 - rad) + 0.35 * rad;
-      b = 0.60 * (1 - rad) + 0.75 * rad;
-    } else if (palMode === 4) { // Mech Armor
-      const isWing = Math.abs(worldX) >= 0.35;
-      if (isWing) { r = 0.92; g = 0.94; b = 0.96; }
-      else        { r = 0.20; g = 0.22; b = 0.27; }
-      if (Math.abs(py) > 0.6) { r = 0.95; g = 0.38; b = 0.10; }
+      const coreMix = Math.sin(rad * 12.0) * 0.5 + 0.5;
+      const cR = 1.0 * (1 - coreMix) + 0.1 * coreMix;
+      const cG = 0.25 * (1 - coreMix) + 0.85 * coreMix;
+      const cB = 0.05 * (1 - coreMix) + 1.0 * coreMix;
+      const hR = px * 0.5 + 0.5, hG = py * 0.5 + 0.5, hB = pz * 0.5 + 0.5;
+      const t = Math.max(0, Math.min(1, (rad - 0.35) / 0.40));
+      r = cR * (1 - t) + hR * t;
+      g = cG * (1 - t) + hG * t;
+      b = cB * (1 - t) + hB * t;
+    } else if (palMode === 4) { // Cyber-Phase
+      r = Math.sin(px * 3.14159 * 0.75 + worldX * 2.0) * 0.5 + 0.5;
+      g = Math.sin(py * 3.14159 * 0.75 + worldY * 2.0) * 0.5 + 0.5;
+      b = Math.sin(pz * 3.14159 * 0.75 + worldZ * 2.0) * 0.5 + 0.5;
     }
 
     return [
@@ -956,6 +974,7 @@ function main() {
                 const py = ((vy - 4.5) * (2.0 / 3.0)).toFixed(4);
                 const pz = ((vz - 4.5) * (2.0 / 3.0)).toFixed(4);
 
+                // Continuous per-vertex evaluation of the active domain color field
                 const localPx = (cx + vert[0]) / 1.5 - 1.0;
                 const localPy = (cy + vert[1]) / 1.5 - 1.0;
                 const localPz = (cz + vert[2]) / 1.5 - 1.0;
