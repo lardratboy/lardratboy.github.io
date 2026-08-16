@@ -19,11 +19,19 @@
   }
   #hud b{ color:#a0a0b2; font-weight:normal; }
   #hud .sec{ color:#424250; }
+  #toast{
+    position:fixed; left:50%; top:20px; transform:translateX(-50%);
+    background:rgba(20, 20, 28, 0.85); color:#c8c8dc;
+    border:1px solid rgba(255, 255, 255, 0.15);
+    padding:6px 14px; border-radius:4px; font:11px/1.4 ui-monospace, monospace;
+    letter-spacing:.06em; opacity:0; transition:opacity .25s ease; pointer-events:none;
+  }
 </style>
 </head>
 <body>
 <canvas id="gl"></canvas>
 <div id="hud"></div>
+<div id="toast"></div>
 
 <script>
 "use strict";
@@ -435,6 +443,14 @@ function compile(type, src) {
   return sh;
 }
 
+function showToast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.style.opacity = "1";
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.opacity = "0"; }, 1800);
+}
+
 function main() {
   const vs = compile(gl.VERTEX_SHADER, VERT);
   const fs = compile(gl.FRAGMENT_SHADER, FRAG);
@@ -473,7 +489,7 @@ function main() {
 
   // Procedural Sprite Generator State
   let carve = false; // Start uncarved to showcase full sprite archetype
-  let clip = false; // Start unclipped to showcase full sprite archetype
+  let clip = false;  // Start unclipped to showcase full sprite archetype
   let symMode = 0;   // 0: Bilateral X
   let maskMode = 0;  // 0: Starship
   let fieldMode = 0; // 0: XOR / Hash
@@ -499,6 +515,395 @@ function main() {
     gl.uniform1i(uPalMode, palMode);
   }
 
+  /* ---- Exporters: Voxel Grid Evaluator ---------------------------------- */
+  function evalShapeMaskJS(site, timeVal, seedVal, symVal, maskVal, fieldVal, densityVal) {
+    const gx = site % 3;
+    const gy = Math.floor(site / 3) % 3;
+    const gz = Math.floor(site / 9);
+
+    const stepVal = Math.floor(Math.max(timeVal, 0.0) * 2.5) >>> 0;
+    let effSeed = (seedVal >>> 0) ^ Math.imul(stepVal, 0x85ebca6b);
+    effSeed = effSeed >>> 0;
+
+    let mask = 0;
+    for (let k = 0; k < 27; k++) {
+      const cx = k % 3;
+      const cy = Math.floor(k / 3) % 3;
+      const cz = Math.floor(k / 9);
+
+      const X = (gx - 1) * 3 + (cx - 1);
+      const Y = (gy - 1) * 3 + (cy - 1);
+      const Z = (gz - 1) * 3 + (cz - 1);
+
+      const nx = X * 0.25;
+      const ny = Y * 0.25;
+      const nz = Z * 0.25;
+
+      let sx = nx, sy = ny, sz = nz;
+      if (symVal === 0) {
+        sx = Math.abs(sx);
+      } else if (symVal === 1) {
+        sx = Math.max(Math.abs(nx), Math.abs(nz));
+        sz = Math.min(Math.abs(nx), Math.abs(nz));
+      } else if (symVal === 2) {
+        const ax = Math.abs(sx), ay = Math.abs(sy), az = Math.abs(sz);
+        const s1 = Math.max(ax, Math.max(ay, az));
+        const s3 = Math.min(ax, Math.min(ay, az));
+        const s2 = ax + ay + az - s1 - s3;
+        sx = s1; sy = s2; sz = s3;
+      }
+
+      let inMask = true;
+      if (maskVal === 0) {
+        const wings = 0.28 + 0.72 * (1.0 - (sz + 1.0) * 0.5);
+        const thick = 0.35 + 0.65 * (1.0 - Math.abs(sz));
+        inMask = (Math.abs(sx) <= wings) && (Math.abs(sy) <= thick);
+      } else if (maskVal === 1) {
+        if (sy > 0.25) inMask = (Math.abs(sx) <= 0.35 && Math.abs(sz) <= 0.35);
+        else if (sy >= -0.25) inMask = (Math.abs(sx) <= 0.95 && Math.abs(sz) <= 0.65);
+        else inMask = (Math.abs(sx) >= 0.15 && Math.abs(sx) <= 0.75 && Math.abs(sz) <= 0.55);
+      } else if (maskVal === 2) {
+        const rTier = 0.45 + 0.38 * Math.cos(sy * 6.28318);
+        inMask = (sx * sx + sz * sz <= rTier * rTier);
+      } else if (maskVal === 3) {
+        inMask = (Math.abs(sx) + Math.abs(sy) + Math.abs(sz) <= 1.25);
+      } else if (maskVal === 4) {
+        const rXZ = Math.hypot(sx, sz);
+        inMask = (Math.abs(rXZ - 0.62) <= 0.32 && Math.abs(sy) <= 0.45) || (rXZ <= 0.25 && Math.abs(sy) <= 0.75);
+      }
+
+      if (!inMask) continue;
+
+      const isx = Math.round(sx * 4.0);
+      const isy = Math.round(sy * 4.0);
+      const isz = Math.round(sz * 4.0);
+      let val = 0.0;
+
+      if (fieldVal === 0) {
+        let h = ((Math.abs(isx) * 73856093) ^ (Math.abs(isy) * 19349663) ^ (Math.abs(isz) * 83492791) ^ Math.imul(effSeed, 0x9e3779b9)) >>> 0;
+        h ^= (h >>> 13);
+        h = Math.imul(h, 0x85ebca6b) >>> 0;
+        h ^= (h >>> 16);
+        val = (h & 0xffff) / 65535.0;
+      } else if (fieldVal === 1) {
+        const r = Math.hypot(sx, sy, sz);
+        val = Math.sin(r * 9.4248 + (effSeed & 0xff) * 0.1) * 0.5 + 0.5;
+      } else if (fieldVal === 2) {
+        const mDist = Math.abs(sx) + Math.abs(sy) + Math.abs(sz);
+        val = Math.sin(mDist * 8.0 + (effSeed & 0xff) * 0.15) * 0.5 + 0.5;
+      } else if (fieldVal === 3) {
+        let p = ((Math.abs(isx * isy) ^ Math.abs(isy * isz) ^ Math.abs(isz * isx)) ^ (effSeed & 0xff)) >>> 0;
+        p = p - ((p >>> 1) & 0x55555555);
+        p = (p & 0x33333333) + ((p >>> 2) & 0x33333333);
+        const cnt = (((p + (p >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
+        val = (cnt % 5) / 4.0;
+      }
+
+      if (val >= (1.0 - densityVal)) {
+        mask |= (1 << k);
+      }
+    }
+    return mask >>> 0;
+  }
+
+  function getVoxelColor(px, py, pz, worldX, worldY, worldZ) {
+    let r = px * 0.5 + 0.5;
+    let g = py * 0.5 + 0.5;
+    let b = pz * 0.5 + 0.5;
+
+    if (palMode === 1) { // Cyberpunk
+      const grad = Math.sin(worldY * 3.14 + worldX * 2.0) * 0.5 + 0.5;
+      r = 0.08 * (1 - grad) + 0.98 * grad;
+      g = 0.85 * (1 - grad) + 0.15 * grad;
+      b = 0.95 * (1 - grad) + 0.65 * grad;
+      if (Math.abs(worldX) >= 0.65) { r = 1.0; g = 0.85; b = 0.2; }
+    } else if (palMode === 2) { // Gold / Obsidian
+      const edge = Math.max(Math.abs(px), Math.abs(py), Math.abs(pz));
+      const t = Math.max(0, Math.min(1, (edge - 0.45) / 0.4));
+      r = 0.12 * (1 - t) + 0.96 * t;
+      g = 0.13 * (1 - t) + 0.78 * t;
+      b = 0.17 * (1 - t) + 0.26 * t;
+    } else if (palMode === 3) { // Emerald Core
+      const rad = Math.min(1.0, Math.hypot(worldX, worldY, worldZ));
+      r = 0.10 * (1 - rad) + 0.05 * rad;
+      g = 0.95 * (1 - rad) + 0.35 * rad;
+      b = 0.60 * (1 - rad) + 0.75 * rad;
+    } else if (palMode === 4) { // Mech Armor
+      const isWing = Math.abs(worldX) >= 0.35;
+      if (isWing) { r = 0.92; g = 0.94; b = 0.96; }
+      else        { r = 0.20; g = 0.22; b = 0.27; }
+      if (Math.abs(py) > 0.6) { r = 0.95; g = 0.38; b = 0.10; }
+    }
+
+    return [
+      Math.max(0, Math.min(255, Math.round(r * 255))),
+      Math.max(0, Math.min(255, Math.round(g * 255))),
+      Math.max(0, Math.min(255, Math.round(b * 255)))
+    ];
+  }
+
+  function extractSolidVoxels() {
+    const maskClock = clocks.find(c => c.key === "m").t;
+    const grid = new Uint8Array(9 * 9 * 9);
+    const voxelList = []; // {x, y, z, r, g, b, worldP, localP}
+
+    for (let gz = 0; gz < 3; gz++) {
+      for (let gy = 0; gy < 3; gy++) {
+        for (let gx = 0; gx < 3; gx++) {
+          const site = gx + 3 * gy + 9 * gz;
+          const mask = evalShapeMaskJS(site, maskClock, seed, symMode, maskMode, fieldMode, densities[densityIdx]);
+
+          for (let cz = 0; cz < 3; cz++) {
+            for (let cy = 0; cy < 3; cy++) {
+              for (let cx = 0; cx < 3; cx++) {
+                const bit = (mask >> (cx + 3 * cy + 9 * cz)) & 1;
+                if (bit === 0) continue;
+
+                const X = gx * 3 + cx;
+                const Y = gy * 3 + cy;
+                const Z = gz * 3 + cz;
+
+                // CSG carve/clip check if active
+                const worldX = (X - 4) * (2.0 / 3.0);
+                const worldY = (Y - 4) * (2.0 / 3.0);
+                const worldZ = (Z - 4) * (2.0 / 3.0);
+
+                if (carve) {
+                  // Shell hollow test
+                  const shellT = clocks.find(c => c.key === "b").t;
+                  const innerT = clocks.find(c => c.key === "i").t;
+                  // Outer sphere
+                  const twX = Math.abs((((shellT * 0.117) % 1 + 1) % 1) * 4 - 2) - 1;
+                  const fY = (((shellT * 0.230) % 1 + 1) % 1) * 2 - 1;
+                  const twY = 1 - 2 * fY * fY;
+                  const twZ = Math.abs((((shellT * 0.083 + 0.37) % 1 + 1) % 1) * 4 - 2) - 1;
+                  const cOx = 3.6 * twX, cOy = 3.6 * twY, cOz = 3.6 * twZ;
+
+                  const u = innerT * 0.42;
+                  const a0 = Math.floor(u) * 2.39996323, f = u - Math.floor(u);
+                  const qx = ((1 - f) * Math.cos(a0) + f * Math.cos(a0 + 2.39996323)) * (0.85 * 1.55);
+                  const qy = ((1 - f) * Math.sin(a0) + f * Math.sin(a0 + 2.39996323)) * (0.85 * 1.55);
+                  const w = innerT * 0.070, tau = 0.90 + 0.45 * Math.sin(innerT * 0.053);
+                  const e1x = Math.cos(w), e1z = Math.sin(w);
+                  const e2x = -Math.sin(w) * Math.sin(tau), e2y = Math.cos(tau), e2z = Math.cos(w) * Math.sin(tau);
+                  const cIx = cOx + qx * e1x + qy * e2x;
+                  const cIy = cOy + qy * e2y;
+                  const cIz = cOz + qx * e1z + qy * e2z;
+                  const rIn = 1.55 * (0.22 + (0.60 - 0.22) * (0.5 - 0.5 * Math.cos(innerT * 0.41)));
+
+                  const dOx = worldX - cOx, dOy = worldY - cOy, dOz = worldZ - cOz;
+                  const dIx = worldX - cIx, dIy = worldY - cIy, dIz = worldZ - cIz;
+                  const dO2 = dOx * dOx + dOy * dOy + dOz * dOz;
+                  const dI2 = dIx * dIx + dIy * dIy + dIz * dIz;
+                  if (dO2 < 1.55 * 1.55 && dI2 > rIn * rIn) continue; // carved out
+                }
+
+                if (clip) {
+                  // Tumbling cube test
+                  const shellT = clocks.find(c => c.key === "b").t;
+                  const tumbleT = clocks.find(c => c.key === "t").t;
+                  const twX = Math.abs((((shellT * 0.117) % 1 + 1) % 1) * 4 - 2) - 1;
+                  const fY = (((shellT * 0.230) % 1 + 1) % 1) * 2 - 1;
+                  const twY = 1 - 2 * fY * fY;
+                  const twZ = Math.abs((((shellT * 0.083 + 0.37) % 1 + 1) % 1) * 4 - 2) - 1;
+                  const cOx = 3.6 * twX, cOy = 3.6 * twY, cOz = 3.6 * twZ;
+
+                  const ax = tumbleT * 0.47, ay = tumbleT * 0.33, az = tumbleT * 0.59;
+                  const cx = Math.cos(ax), sx = Math.sin(ax);
+                  const cy = Math.cos(ay), sy = Math.sin(ay);
+                  const cz = Math.cos(az), sz = Math.sin(az);
+                  // Rx * Ry * Rz
+                  const r00 = cy*cz, r01 = -cy*sz, r02 = -sy;
+                  const r10 = -sx*sy*cz + cx*sz, r11 = sx*sy*sz + cx*cz, r12 = -sx*cy;
+                  const r20 = cx*sy*cz + sx*sz, r21 = -cx*sy*sz + sx*cz, r22 = cx*cy;
+
+                  const dx = worldX - cOx, dy = worldY - cOy, dz = worldZ - cOz;
+                  const bx = Math.abs(r00*dx + r10*dy + r20*dz);
+                  const by = Math.abs(r01*dx + r11*dy + r21*dz);
+                  const bz = Math.abs(r02*dx + r12*dy + r22*dz);
+                  if (bx > 2.2 || by > 2.2 || bz > 2.2) continue; // clipped out
+                }
+
+                grid[X + 9 * Y + 81 * Z] = 1;
+                const localPx = (cx - 1.0) / 1.5;
+                const localPy = (cy - 1.0) / 1.5;
+                const localPz = (cz - 1.0) / 1.5;
+                const rgb = getVoxelColor(localPx, localPy, localPz, (X - 4) / 4.0, (Y - 4) / 4.0, (Z - 4) / 4.0);
+                voxelList.push({ x: X, y: Y, z: Z, r: rgb[0], g: rgb[1], b: rgb[2] });
+              }
+            }
+          }
+        }
+      }
+    }
+    return { grid, voxelList };
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // Export to MagicaVoxel .vox format
+  function exportVOX() {
+    const { voxelList } = extractSolidVoxels();
+    if (voxelList.length === 0) { showToast("Voxel model is empty!"); return; }
+
+    // Build palette (256 entries)
+    const palette = [];
+    const colorMap = new Map();
+    let nextIdx = 1;
+
+    const voxelsOut = [];
+    for (const v of voxelList) {
+      const rgbKey = (v.r << 16) | (v.g << 8) | v.b;
+      let palIdx = colorMap.get(rgbKey);
+      if (!palIdx) {
+        if (nextIdx < 255) {
+          palIdx = nextIdx++;
+          colorMap.set(rgbKey, palIdx);
+          palette[palIdx - 1] = [v.r, v.g, v.b, 255];
+        } else {
+          palIdx = 254;
+        }
+      }
+      // MagicaVoxel coordinates: Z is UP, Y is DEPTH
+      voxelsOut.push({ x: v.x, y: v.z, z: v.y, c: palIdx });
+    }
+
+    // Fill remainder of 256 palette entries
+    while (palette.length < 256) palette.push([255, 255, 255, 255]);
+
+    // SIZE chunk
+    const sizeChunk = new Uint8Array(12 + 12);
+    const sView = new DataView(sizeChunk.buffer);
+    sizeChunk.set([0x53, 0x49, 0x5a, 0x45]); // 'SIZE'
+    sView.setUint32(4, 12, true); sView.setUint32(8, 0, true);
+    sView.setUint32(12, 9, true); sView.setUint32(16, 9, true); sView.setUint32(20, 9, true);
+
+    // XYZI chunk
+    const xyziContentSize = 4 + voxelsOut.length * 4;
+    const xyziChunk = new Uint8Array(12 + xyziContentSize);
+    const xView = new DataView(xyziChunk.buffer);
+    xyziChunk.set([0x58, 0x59, 0x5a, 0x49]); // 'XYZI'
+    xView.setUint32(4, xyziContentSize, true); xView.setUint32(8, 0, true);
+    xView.setUint32(12, voxelsOut.length, true);
+    for (let i = 0; i < voxelsOut.length; i++) {
+      const off = 16 + i * 4;
+      xyziChunk[off]     = voxelsOut[i].x;
+      xyziChunk[off + 1] = voxelsOut[i].y;
+      xyziChunk[off + 2] = voxelsOut[i].z;
+      xyziChunk[off + 3] = voxelsOut[i].c;
+    }
+
+    // RGBA chunk (palette)
+    const rgbaChunk = new Uint8Array(12 + 1024);
+    const rView = new DataView(rgbaChunk.buffer);
+    rgbaChunk.set([0x52, 0x47, 0x42, 0x41]); // 'RGBA'
+    rView.setUint32(4, 1024, true); rView.setUint32(8, 0, true);
+    for (let i = 0; i < 256; i++) {
+      const off = 12 + i * 4;
+      rgbaChunk[off]     = palette[i][0];
+      rgbaChunk[off + 1] = palette[i][1];
+      rgbaChunk[off + 2] = palette[i][2];
+      rgbaChunk[off + 3] = palette[i][3];
+    }
+
+    // MAIN chunk
+    const childrenSize = sizeChunk.length + xyziChunk.length + rgbaChunk.length;
+    const mainChunk = new Uint8Array(12 + childrenSize);
+    const mView = new DataView(mainChunk.buffer);
+    mainChunk.set([0x4d, 0x41, 0x49, 0x4e]); // 'MAIN'
+    mView.setUint32(4, 0, true); mView.setUint32(8, childrenSize, true);
+    let curOff = 12;
+    mainChunk.set(sizeChunk, curOff); curOff += sizeChunk.length;
+    mainChunk.set(xyziChunk, curOff); curOff += xyziChunk.length;
+    mainChunk.set(rgbaChunk, curOff);
+
+    // VOX Header (8 bytes) + MAIN
+    const finalFile = new Uint8Array(8 + mainChunk.length);
+    const fView = new DataView(finalFile.buffer);
+    finalFile.set([0x56, 0x4f, 0x58, 0x20]); // 'VOX '
+    fView.setUint32(4, 150, true);          // version 150
+    finalFile.set(mainChunk, 8);
+
+    const name = `${MASK_NAMES[maskMode]}_${SYM_NAMES[symMode]}_#${seed}.vox`;
+    downloadBlob(new Blob([finalFile], { type: "application/octet-stream" }), name);
+    showToast(`Exported ${name} (${voxelsOut.length} voxels)`);
+  }
+
+  // Export to Wavefront .obj format (with culling and vertex colors)
+  function exportOBJ() {
+    const { grid } = extractSolidVoxels();
+    const lines = [
+      "# 3D Procedural Sprite Export",
+      `# Archetype: ${MASK_NAMES[maskMode]}, Symmetry: ${SYM_NAMES[symMode]}, Seed: ${seed}`,
+      "# Format: Wavefront OBJ with RGB vertex colors (v X Y Z R G B)"
+    ];
+
+    const cubeFaces = [
+      { dir: [ 1, 0, 0], v: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
+      { dir: [-1, 0, 0], v: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
+      { dir: [ 0, 1, 0], v: [[0,1,0],[0,1,1],[1,1,1],[1,1,0]] },
+      { dir: [ 0,-1, 0], v: [[0,0,1],[0,0,0],[1,0,0],[1,0,1]] },
+      { dir: [ 0, 0, 1], v: [[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
+      { dir: [ 0, 0,-1], v: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]] }
+    ];
+
+    let vIdx = 1, faceCount = 0;
+
+    for (let z = 0; z < 9; z++) {
+      for (let y = 0; y < 9; y++) {
+        for (let x = 0; x < 9; x++) {
+          if (grid[x + 9 * y + 81 * z] === 0) continue;
+
+          const cx = x % 3, cy = y % 3, cz = z % 3;
+          const localPx = (cx - 1.0) / 1.5;
+          const localPy = (cy - 1.0) / 1.5;
+          const localPz = (cz - 1.0) / 1.5;
+          const [r255, g255, b255] = getVoxelColor(localPx, localPy, localPz, (x - 4) / 4.0, (y - 4) / 4.0, (z - 4) / 4.0);
+          const r = (r255 / 255).toFixed(3);
+          const g = (g255 / 255).toFixed(3);
+          const b = (b255 / 255).toFixed(3);
+
+          for (const face of cubeFaces) {
+            const nx = x + face.dir[0], ny = y + face.dir[1], nz = z + face.dir[2];
+            let exposed = false;
+            if (nx < 0 || nx >= 9 || ny < 0 || ny >= 9 || nz < 0 || nz >= 9) {
+              exposed = true;
+            } else if (grid[nx + 9 * ny + 81 * nz] === 0) {
+              exposed = true;
+            }
+
+            if (exposed) {
+              for (const vert of face.v) {
+                const px = ((x + vert[0] - 4.5) * (2.0 / 3.0)).toFixed(3);
+                const py = ((y + vert[1] - 4.5) * (2.0 / 3.0)).toFixed(3);
+                const pz = ((z + vert[2] - 4.5) * (2.0 / 3.0)).toFixed(3);
+                lines.push(`v ${px} ${py} ${pz} ${r} ${g} ${b}`);
+              }
+              lines.push(`f ${vIdx} ${vIdx + 1} ${vIdx + 2} ${vIdx + 3}`);
+              vIdx += 4;
+              faceCount++;
+            }
+          }
+        }
+      }
+    }
+
+    if (faceCount === 0) { showToast("Mesh is empty!"); return; }
+
+    const name = `${MASK_NAMES[maskMode]}_${SYM_NAMES[symMode]}_#${seed}.obj`;
+    downloadBlob(new Blob([lines.join("\n")], { type: "text/plain" }), name);
+    showToast(`Exported ${name} (${faceCount} quads)`);
+  }
+
   function paintHud() {
     const rows = [];
     rows.push("<span class='sec'>--- CLOCKS ---</span>");
@@ -516,6 +921,10 @@ function main() {
     rows.push("fill".padEnd(7)  + (Math.round(densities[densityIdx] * 100) + "%").padEnd(9) + "d");
     rows.push("pal".padEnd(7)   + PAL_NAMES[palMode].padEnd(9) + "k");
     rows.push("seed".padEnd(7)  + ("#" + seed).padEnd(9) + "n/p");
+    rows.push("");
+    rows.push("<span class='sec'>--- EXPORT ---</span>");
+    rows.push(".vox (Magica)".padEnd(16) + "e");
+    rows.push(".obj (Mesh)".padEnd(16) + "o");
     hud.innerHTML = rows.join("\n") + "\n\n<b>" + fps + " fps</b>";
   }
 
@@ -542,6 +951,8 @@ function main() {
     if (k === "k") { palMode = (palMode + 1) % PAL_NAMES.length; syncUniforms(); paintHud(); return; }
     if (k === "n") { seed = (seed + 1) & 0xffff; syncUniforms(); paintHud(); return; }
     if (k === "p") { seed = (seed - 1 + 0x10000) & 0xffff; syncUniforms(); paintHud(); return; }
+    if (k === "e") { exportVOX(); return; }
+    if (k === "o") { exportOBJ(); return; }
 
     const c = clocks.find(c => c.key === k);
     if (c) {
