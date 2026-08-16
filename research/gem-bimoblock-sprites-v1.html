@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>bimoblock lattice — 3D sprite generator (Domain Color Fields)</title>
+<title>bimoblock lattice — 3D sprite generator (Rotational Pinwheels)</title>
 <style>
   html,body{ height:100%; margin:0; background:#000; overflow:hidden; }
   canvas{ display:block; width:100%; height:100%; }
@@ -59,7 +59,7 @@ uniform float uClip;         // 0 = unbounded lattice, 1 = clipped to tumbling c
 
 // 3D Sprite Generator & Group 48 Uniforms
 uniform int   uGroup48;      // 0..47 discrete signed permutation of Oh
-uniform int   uSymMode;      // Subgroup symmetry: 0=C1, 1=Cs, 2=C2v, 3=C4v, 4=Td, 5=Oh
+uniform int   uSymMode;      // 0=C1, 1=Cs, 2=C2:rot180, 3=C2v, 4=C3:radial3, 5=C4:pinwheel, 6=C4v, 7=C6:radial6, 8=Td, 9=Oh
 uniform int   uMaskMode;     // 0=Starship, 1=Mech, 2=Totem, 3=Crystal, 4=Orbiter, 5=Full
 uniform int   uFieldMode;    // 0=Hash/XOR, 1=Spherical, 2=Manhattan, 3=Popcount
 uniform float uDensity;      // Fill threshold (0.35 .. 0.75)
@@ -104,24 +104,53 @@ vec3 applyGroup48(vec3 v, int idx){
   return vp * sgn;
 }
 
-// Subgroup symmetry fold helper
+// Subgroup symmetry fold helper (Reflective + Chiral Rotational Pinwheels)
 vec3 foldSymmetry(vec3 n, int sym){
   vec3 s = n;
-  if (sym == 1){ // Cs: Bilateral X (|X|)
+  if (sym == 1){ // Cs: Bilateral X mirror (|X|)
     s.x = abs(s.x);
-  } else if (sym == 2){ // C2v: Bi-axial (|X|, |Z|)
+  } else if (sym == 2){ // C2: Pure 180° Half-Turn around Y (Chiral)
+    if (s.x < 0.0 || (s.x == 0.0 && s.z < 0.0)) {
+      s.x = -s.x;
+      s.z = -s.z;
+    }
+  } else if (sym == 3){ // C2v: Bi-axial mirror (|X|, |Z|)
     s.x = abs(s.x);
     s.z = abs(s.z);
-  } else if (sym == 3){ // C4v: Quad 4-fold
+  } else if (sym == 4){ // C3: Pure 120° 3-Fold Radial Pinwheel (Chiral)
+    float r = length(s.xz);
+    if (r > 1e-5){
+      float th = atan(s.z, s.x);
+      float sec = 2.0943951; // 2*PI/3
+      float thFold = mod(th, sec);
+      if (thFold > sec * 0.5) thFold -= sec;
+      s.x = r * cos(thFold);
+      s.z = r * sin(thFold);
+    }
+  } else if (sym == 5){ // C4: Pure 90° 4-Quadrant Pinwheel (Chiral)
+    if (s.x < 0.0 && s.z >= 0.0)      { float t = s.x; s.x = s.z; s.z = -t; }
+    else if (s.x <= 0.0 && s.z < 0.0) { s.x = -s.x; s.z = -s.z; }
+    else if (s.x > 0.0 && s.z < 0.0)  { float t = s.x; s.x = -s.z; s.z = t; }
+  } else if (sym == 6){ // C4v: Quad 4-fold Dihedral (Mirrors + 90°)
     s.x = max(abs(n.x), abs(n.z));
     s.z = min(abs(n.x), abs(n.z));
-  } else if (sym == 4){ // Td: Full Tetrahedral
+  } else if (sym == 7){ // C6: Pure 60° 6-Fold Radial Pinwheel (Chiral)
+    float r = length(s.xz);
+    if (r > 1e-5){
+      float th = atan(s.z, s.x);
+      float sec = 1.04719755; // PI/3
+      float thFold = mod(th, sec);
+      if (thFold > sec * 0.5) thFold -= sec;
+      s.x = r * cos(thFold);
+      s.z = r * sin(thFold);
+    }
+  } else if (sym == 8){ // Td: Full Tetrahedral
     vec3 a = abs(s);
     if (a.x < a.y) a.xy = a.yx;
     if (a.y < a.z) a.yz = a.zy;
     if (a.x < a.y) a.xy = a.yx;
     s = a;
-  } else if (sym == 5){ // Oh: Full 48-fold Octahedral wedge
+  } else if (sym == 9){ // Oh: Full 48-fold Octahedral wedge
     vec3 a = abs(s);
     float s1 = max(a.x, max(a.y, a.z));
     float s3 = min(a.x, min(a.y, a.z));
@@ -155,7 +184,7 @@ uint shapeMask(uint site, float time){
     // 1. Group 48 Permutation
     n = applyGroup48(n, uGroup48);
     
-    // 2. Symmetry Subgroup Fold
+    // 2. Symmetry Fold
     vec3 s = foldSymmetry(n, uSymMode);
     
     // 3. 3D Bounding Envelope Masks (Archetypes)
@@ -333,15 +362,12 @@ vec3 colorize(vec3 p, vec3 worldP, vec3 norm, vec3 rd, float shade){
   vec3 col = p * 0.5 + 0.5; // Mode 0: The Canonical Biunit Gamut (Identity Domain)
   
   if (uPaletteMode == 1){ 
-    // Mode 1: Group-Orbit Invariant Gamut
-    // Colors are evaluated in the fundamental symmetry domain, so symmetric wings/limbs
-    // share matching color gradients!
+    // Mode 1: Group-Orbit Invariant Gamut (matches rotational & reflective symmetries)
     vec3 pFold = foldSymmetry(p, uSymMode);
     col = pFold * 0.5 + 0.5;
   } 
   else if (uPaletteMode == 2){ 
     // Mode 2: Helical Spinor Gamut (Screw Axis Winding)
-    // The RGB gamut rotates smoothly along the Y axis like a continuous vortex/helix
     float theta = worldP.y * 3.14159 * 1.25;
     float ct = cos(theta), st = sin(theta);
     vec3 pSpin = vec3(p.x * ct - p.z * st, p.y, p.x * st + p.z * ct);
@@ -349,7 +375,6 @@ vec3 colorize(vec3 p, vec3 worldP, vec3 norm, vec3 rd, float shade){
   } 
   else if (uPaletteMode == 3){ 
     // Mode 3: Core & Hull Domain
-    // Gamut on the exterior armor plates, glowing radiant energy core in the interior
     float r = length(worldP);
     vec3 coreCol = mix(vec3(1.0, 0.25, 0.05), vec3(0.1, 0.85, 1.0), sin(r * 12.0) * 0.5 + 0.5);
     vec3 hullCol = p * 0.5 + 0.5;
@@ -357,7 +382,6 @@ vec3 colorize(vec3 p, vec3 worldP, vec3 norm, vec3 rd, float shade){
   } 
   else if (uPaletteMode == 4){ 
     // Mode 4: Cyber-Phase Domain
-    // Trigonometric phase harmonics across the continuous 3D domain
     col = sin(p * 3.14159 * 0.75 + worldP * 2.0) * 0.5 + 0.5;
   }
   
@@ -539,13 +563,24 @@ function main() {
   let symMode = 1;   // 1: Cs (Bilateral X)
   let maskMode = 0;  // 0: Starship
   let fieldMode = 0; // 0: XOR / Hash
-  let palMode = 0;   // 0: Biunit Gamut (Canonical)
+  let palMode = 0;   // 0: Biunit Gamut
   let seed = 42;
   const densities = [0.35, 0.45, 0.55, 0.65, 0.75];
   let densityIdx = 2; // 0.55
   let fps = 0;
 
-  const SYM_NAMES   = ["C1:free", "Cs:bilat-X", "C2v:bi-axial", "C4v:quad-4", "Td:tetra", "Oh:octa-48"];
+  const SYM_NAMES = [
+    "C1:free",
+    "Cs:bilat-X",
+    "C2:rot180",
+    "C2v:bi-axial",
+    "C3:radial3",
+    "C4:pinwheel",
+    "C4v:quad-4",
+    "C6:radial6",
+    "Td:tetra",
+    "Oh:octa-48"
+  ];
   const MASK_NAMES  = ["starship", "mech", "totem", "crystal", "orbiter", "full"];
   const FIELD_NAMES = ["xor/hash", "spheres", "diamond", "popcount"];
   const PAL_NAMES   = ["gamut", "orbit-sym", "helical", "core/hull", "cyber-phase"];
@@ -596,21 +631,50 @@ function main() {
 
   function foldSymmetryJS(nx, ny, nz, sym) {
     let sx = nx, sy = ny, sz = nz;
-    if (sym === 1) {
+    if (sym === 1) { // Cs: Bilateral X (|X|)
       sx = Math.abs(sx);
-    } else if (sym === 2) {
+    } else if (sym === 2) { // C2: 180° Half-turn
+      if (sx < 0 || (sx === 0 && sz < 0)) {
+        sx = -sx;
+        sz = -sz;
+      }
+    } else if (sym === 3) { // C2v: Bi-axial (|X|, |Z|)
       sx = Math.abs(sx);
       sz = Math.abs(sz);
-    } else if (sym === 3) {
+    } else if (sym === 4) { // C3: 120° Radial Pinwheel
+      const r = Math.hypot(sx, sz);
+      if (r > 1e-5) {
+        let th = Math.atan2(sz, sx);
+        const sec = 2.0943951; // 2*PI/3
+        let thFold = ((th % sec) + sec) % sec;
+        if (thFold > sec * 0.5) thFold -= sec;
+        sx = r * Math.cos(thFold);
+        sz = r * Math.sin(thFold);
+      }
+    } else if (sym === 5) { // C4: 90° Pinwheel
+      if (sx < 0 && sz >= 0)      { const t = sx; sx = sz; sz = -t; }
+      else if (sx <= 0 && sz < 0) { sx = -sx; sz = -sz; }
+      else if (sx > 0 && sz < 0)  { const t = sx; sx = -sz; sz = t; }
+    } else if (sym === 6) { // C4v: Quad 4-fold Dihedral
       sx = Math.max(Math.abs(nx), Math.abs(nz));
       sz = Math.min(Math.abs(nx), Math.abs(nz));
-    } else if (sym === 4) {
+    } else if (sym === 7) { // C6: 60° Radial Pinwheel
+      const r = Math.hypot(sx, sz);
+      if (r > 1e-5) {
+        let th = Math.atan2(sz, sx);
+        const sec = 1.04719755; // PI/3
+        let thFold = ((th % sec) + sec) % sec;
+        if (thFold > sec * 0.5) thFold -= sec;
+        sx = r * Math.cos(thFold);
+        sz = r * Math.sin(thFold);
+      }
+    } else if (sym === 8) { // Td: Full Tetrahedral
       let ax = Math.abs(sx), ay = Math.abs(sy), az = Math.abs(sz);
       if (ax < ay) { const tmp = ax; ax = ay; ay = tmp; }
       if (ay < az) { const tmp = ay; ay = az; az = tmp; }
       if (ax < ay) { const tmp = ax; ax = ay; ay = tmp; }
       sx = ax; sy = ay; sz = az;
-    } else if (sym === 5) {
+    } else if (sym === 9) { // Oh: Full 48-fold Octahedral wedge
       const ax = Math.abs(sx), ay = Math.abs(sy), az = Math.abs(sz);
       const s1 = Math.max(ax, Math.max(ay, az));
       const s3 = Math.min(ax, Math.min(ay, az));
@@ -695,7 +759,6 @@ function main() {
     return mask >>> 0;
   }
 
-  // Exact matching color function for per-vertex OBJ and VOX
   function getVoxelColor(px, py, pz, worldX, worldY, worldZ) {
     let r = px * 0.5 + 0.5;
     let g = py * 0.5 + 0.5;
@@ -1017,13 +1080,13 @@ function main() {
     rows.push("all".padEnd(7)   + "        space");
     rows.push("");
     rows.push("<span class='sec'>--- 3D SPRITE ---</span>");
-    rows.push("sym".padEnd(7)   + SYM_NAMES[symMode].padEnd(10) + "s");
+    rows.push("sym".padEnd(7)   + SYM_NAMES[symMode].padEnd(14) + "s");
     rows.push("g48".padEnd(7)   + formatG48(g48Idx).padEnd(16) + "g/h");
-    rows.push("arch".padEnd(7)  + MASK_NAMES[maskMode].padEnd(10) + "a");
-    rows.push("field".padEnd(7) + FIELD_NAMES[fieldMode].padEnd(10) + "f");
-    rows.push("fill".padEnd(7)  + (Math.round(densities[densityIdx] * 100) + "%").padEnd(10) + "d");
-    rows.push("pal".padEnd(7)   + PAL_NAMES[palMode].padEnd(10) + "k");
-    rows.push("seed".padEnd(7)  + ("#" + seed).padEnd(10) + "n/p");
+    rows.push("arch".padEnd(7)  + MASK_NAMES[maskMode].padEnd(14) + "a");
+    rows.push("field".padEnd(7) + FIELD_NAMES[fieldMode].padEnd(14) + "f");
+    rows.push("fill".padEnd(7)  + (Math.round(densities[densityIdx] * 100) + "%").padEnd(14) + "d");
+    rows.push("domain".padEnd(7)+ PAL_NAMES[palMode].padEnd(14) + "k");
+    rows.push("seed".padEnd(7)  + ("#" + seed).padEnd(14) + "n/p");
     rows.push("");
     rows.push("<span class='sec'>--- EXPORT ---</span>");
     rows.push(".vox (Magica)".padEnd(16) + "e");
