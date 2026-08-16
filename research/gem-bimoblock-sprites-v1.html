@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bimoblock lattice — 3D procedural sprite generator</title>
+<style>
+  html,body{ height:100%; margin:0; background:#000; overflow:hidden; }
+  canvas{ display:block; width:100%; height:100%; }
+  #hud{
+    position:fixed; right:10px; bottom:8px;
+    font:10.5px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    color:#686878; letter-spacing:.05em; user-select:none; text-align:right;
+    white-space:pre; pointer-events:none;
+    background: rgba(0, 0, 0, 0.45);
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+  }
+  #hud b{ color:#a0a0b2; font-weight:normal; }
+  #hud .sec{ color:#424250; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hud"></div>
+
+<script>
+"use strict";
+
+const VERT = `#version 300 es
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+precision highp int;
+
+uniform vec3  iResolution;
+uniform float uCamT;         // orbit clock
+uniform float uShellT;       // outer shell bounce clock
+uniform float uInnerT;       // inner billiard ball clock
+uniform float uTumbleT;      // clipping cube tumble clock
+uniform float uMaskT;        // bit-cycle clock
+
+// CSG Toggles
+uniform float uCarve;        // 0 = plain lattice, 1 = shell subtracted
+uniform float uClip;         // 0 = unbounded lattice, 1 = clipped to tumbling cube
+
+// 3D Sprite Generator Uniforms
+uniform int   uSymMode;      // 0=Bilateral X, 1=Quad 4-Fold, 2=Octahedral, 3=Free
+uniform int   uMaskMode;     // 0=Starship, 1=Mech, 2=Totem, 3=Crystal, 4=Orbiter, 5=Full
+uniform int   uFieldMode;    // 0=Hash/XOR, 1=Spherical, 2=Manhattan, 3=Popcount
+uniform float uDensity;      // Fill threshold (0.35 .. 0.75)
+uniform int   uSeed;         // Sprite seed integer
+uniform int   uPaletteMode;  // 0=Gamut, 1=Cyberpunk, 2=Gold/Obsidian, 3=Emerald, 4=Mech
+
+out vec4 fragColor;
+
+#define AA 2                 // supersample factor
+#define PITCH 2.0            // lattice spacing (shapes are 2 units across)
+#define RATE  2.5            // bit morph rate per second
+
+#define SPH_R     1.55       // outer radius
+#define SHELL_LO  0.22       // inner radius sweep, as a fraction of SPH_R
+#define SHELL_HI  0.60
+#define BREATHE   0.41       // rad/s of the inner-radius animation
+#define ORBIT     0.85       // billiard circle radius, fraction of SPH_R
+#define CHORD     0.42       // chords per second
+#define TURN      2.39996323 // golden angle: the path never closes
+#define TRAVEL    3.6        // half-extent of the outer centre's box (= lattice AABB)
+#define CUT_SHADE 0.45       // how much a curved cut darkens toward its rim
+#define CUBE_HALF 2.2        // half-extent of the tumbling clipping cube
+
+// ---- 3D procedural sprite mask generator ------------------------------------
+// Evaluates the 27 bits for a macro site (gx, gy, gz) by computing the global
+// 9x9x9 coordinate, folding through the selected 3D symmetry plane, filtering
+// through the 3D envelope mask, and thresholding against the chosen 3D field.
+uint shapeMask(uint site, float time){
+  int gx = int(site % 3u);
+  int gy = int((site / 3u) % 3u);
+  int gz = int(site / 9u);
+  
+  uint stepVal = uint(max(time, 0.0) * RATE);
+  uint effSeed = uint(uSeed) ^ (stepVal * 0x85ebca6bu);
+  
+  uint mask = 0u;
+  for (int k = 0; k < 27; ++k){
+    int cx = k % 3;
+    int cy = (k / 3) % 3;
+    int cz = k / 9;
+    
+    // Global normalized continuous coordinate in [-1, 1]^3
+    int X = (gx - 1) * 3 + (cx - 1);
+    int Y = (gy - 1) * 3 + (cy - 1);
+    int Z = (gz - 1) * 3 + (cz - 1);
+    vec3 n = vec3(float(X), float(Y), float(Z)) * 0.25;
+    
+    // 1. 3D Symmetry Folds
+    vec3 s = n;
+    if (uSymMode == 0){ // Bilateral X (Classic Ship/Mech mirror)
+      s.x = abs(s.x);
+    } else if (uSymMode == 1){ // Quad 4-fold around Y (Totem/Tower)
+      s.x = max(abs(n.x), abs(n.z));
+      s.z = min(abs(n.x), abs(n.z));
+    } else if (uSymMode == 2){ // Octahedral / Cubic Core
+      vec3 a = abs(s);
+      float s1 = max(a.x, max(a.y, a.z));
+      float s3 = min(a.x, min(a.y, a.z));
+      float s2 = a.x + a.y + a.z - s1 - s3;
+      s = vec3(s1, s2, s3);
+    }
+    
+    // 2. 3D Bounding Envelope Masks (Archetypes)
+    bool inMask = true;
+    if (uMaskMode == 0){ // Starship: forward nose cone, swept wings, cockpit
+      float wings = 0.28 + 0.72 * (1.0 - (s.z + 1.0) * 0.5);
+      float thick = 0.35 + 0.65 * (1.0 - abs(s.z));
+      inMask = (abs(s.x) <= wings) && (abs(s.y) <= thick);
+    } else if (uMaskMode == 1){ // Mech: head crest, broad torso & arms, legs
+      if (s.y > 0.25)
+        inMask = (abs(s.x) <= 0.35 && abs(s.z) <= 0.35);
+      else if (s.y >= -0.25)
+        inMask = (abs(s.x) <= 0.95 && abs(s.z) <= 0.65);
+      else
+        inMask = (abs(s.x) >= 0.15 && abs(s.x) <= 0.75 && abs(s.z) <= 0.55);
+    } else if (uMaskMode == 2){ // Totem: tiered vertical pillar with radial ridges
+      float rTier = 0.45 + 0.38 * cos(s.y * 6.28318);
+      inMask = (dot(s.xz, s.xz) <= rTier * rTier);
+    } else if (uMaskMode == 3){ // Crystal: faceted octahedron / diamond
+      inMask = (abs(s.x) + abs(s.y) + abs(s.z) <= 1.25);
+    } else if (uMaskMode == 4){ // Orbiter: toroidal ring with central reactor
+      float rXZ = length(s.xz);
+      inMask = (abs(rXZ - 0.62) <= 0.32 && abs(s.y) <= 0.45) || (rXZ <= 0.25 && abs(s.y) <= 0.75);
+    }
+    
+    if (!inMask) continue;
+    
+    // 3. Mathematical Field Evaluation
+    ivec3 is = ivec3(round(s * 4.0));
+    float val = 0.0;
+    
+    if (uFieldMode == 0){ // Bit Hash / XOR Greebles
+      uint h = uint(abs(is.x)) * 73856093u ^ uint(abs(is.y)) * 19349663u ^ uint(abs(is.z)) * 83492791u ^ (effSeed * 0x9e3779b9u);
+      h ^= h >> 13; h *= 0x85ebca6bu;
+      h ^= h >> 16;
+      val = float(h & 0xffffu) / 65535.0;
+    } else if (uFieldMode == 1){ // Spherical Concentric Energy Shells
+      float r = length(s);
+      val = sin(r * 9.4248 + float(effSeed & 0xffu) * 0.1) * 0.5 + 0.5;
+    } else if (uFieldMode == 2){ // Manhattan Diamond Lattice
+      float mDist = abs(s.x) + abs(s.y) + abs(s.z);
+      val = sin(mDist * 8.0 + float(effSeed & 0xffu) * 0.15) * 0.5 + 0.5;
+    } else if (uFieldMode == 3){ // Popcount Bit-Products
+      uint p = uint(abs(is.x * is.y) ^ abs(is.y * is.z) ^ abs(is.z * is.x)) ^ (effSeed & 0xffu);
+      p = p - ((p >> 1u) & 0x55555555u);
+      p = (p & 0x33333333u) + ((p >> 2u) & 0x33333333u);
+      uint cnt = ((p + (p >> 4u) & 0x0f0f0f0fu) * 0x01010101u) >> 24u;
+      val = float(cnt % 5u) / 4.0;
+    }
+    
+    // Density threshold
+    if (val >= (1.0 - uDensity)){
+      mask |= (1u << uint(k));
+    }
+  }
+  return mask;
+}
+
+// ---- occupancy --------------------------------------------------------------
+bool occ(ivec3 c, uint m){
+  if (any(greaterThanEqual(uvec3(c), uvec3(3u)))) return false;
+  return ((m >> uint(c.x + 3 * c.y + 9 * c.z)) & 1u) != 0u;
+}
+
+// ---- outer sphere: bouncing in the lattice's box ----------------------------
+float triWave(float x){ return abs(fract(x) * 4.0 - 2.0) - 1.0; }
+float dropWave(float x){ float f = fract(x) * 2.0 - 1.0; return 1.0 - 2.0 * f * f; }
+
+vec3 outerCentre(float t){
+  return TRAVEL * vec3(triWave(t * 0.117),
+                       dropWave(t * 0.230),
+                       triWave(t * 0.083 + 0.37));
+}
+
+// ---- inner sphere: a billiard inside the outer one --------------------------
+vec3 innerOffset(float t){
+  float u = t * CHORD;
+  float a0 = floor(u) * TURN, f = fract(u);
+  vec2 q = mix(vec2(cos(a0), sin(a0)),
+               vec2(cos(a0 + TURN), sin(a0 + TURN)), f) * (ORBIT * SPH_R);
+
+  float w   = t * 0.070;                             // plane spin
+  float tau = 0.90 + 0.45 * sin(t * 0.053);          // plane tilt
+  vec3 e1 = vec3(cos(w), 0.0, sin(w));
+  vec3 e2 = vec3(-sin(w) * sin(tau), cos(tau), cos(w) * sin(tau));
+  return q.x * e1 + q.y * e2;
+}
+
+float innerRadius(float t){
+  return SPH_R * mix(SHELL_LO, SHELL_HI, 0.5 - 0.5 * cos(t * BREATHE));
+}
+
+// ---- tumbling cube orientation matrix ---------------------------------------
+mat3 tumbleMatrix(float t){
+  float ax = t * 0.47, ay = t * 0.33, az = t * 0.59;
+  float cx = cos(ax), sx = sin(ax);
+  float cy = cos(ay), sy = sin(ay);
+  float cz = cos(az), sz = sin(az);
+  mat3 Rx = mat3(1.0, 0.0, 0.0,  0.0, cx, sx,   0.0, -sx, cx);
+  mat3 Ry = mat3(cy, 0.0, -sy,   0.0, 1.0, 0.0,  sy, 0.0, cy);
+  mat3 Rz = mat3(cz, sz, 0.0,   -sz, cz, 0.0,   0.0, 0.0, 1.0);
+  return Rz * Ry * Rx;
+}
+
+vec2 sphereRoots(vec3 oc, vec3 d, float r){
+  float b = dot(oc, d);
+  float h = b * b - (dot(oc, oc) - r * r);
+  if (h < 0.0) return vec2(-1.0);
+  h = sqrt(h);
+  return vec2(-b - h, -b + h);
+}
+
+// ---- point-in-solid ---------------------------------------------------------
+bool solidAt(vec3 P, float time, out vec3 local){
+  vec3 g = floor(P / PITCH + 0.5) + 1.0;
+  if (any(lessThan(g, vec3(0.0))) || any(greaterThan(g, vec3(2.0)))) return false;
+  local = P - (g - 1.0) * PITCH;
+  if (any(greaterThan(abs(local), vec3(1.0)))) return false;
+  ivec3 c = ivec3(floor(local * 1.5 + 1.5));
+  uint site = uint(g.x) + 3u * uint(g.y) + 9u * uint(g.z);
+  return occ(c, shapeMask(site, time));
+}
+
+// ---- one shape: 9 plane tests ----------------------------------------------
+void traceShape(vec3 rl, vec3 rd, vec3 inv, uint mask, vec3 cOL, vec3 cIL,
+                float r2in, float r2out, float tMinBound,
+                inout float m, inout vec3 p, inout vec3 norm){
+  for (int a = 0; a < 3; ++a){
+    bool pos  = rd[a] > 0.0;
+    int  base = pos ? 0 : 1;
+
+    for (int k = 0; k < 3; ++k){
+      int   q = base + k;
+      float t = (-1.0 + float(q) * (2.0 / 3.0) - rl[a]) * inv[a];
+      if (t <= tMinBound || t >= m) continue;
+
+      vec3 h  = rl + t * rd;
+      vec3 eo = h - cOL, ei = h - cIL;
+      if (dot(eo, eo) < r2out && dot(ei, ei) > r2in) continue;
+
+      ivec3 ci = ivec3(floor(h * 1.5 + 1.5));
+      ivec3 ce = ci;
+      ci[a] = pos ? q     : q - 1;
+      ce[a] = pos ? q - 1 : q;
+
+      if (occ(ci, mask) && !occ(ce, mask)){
+        m = t;
+        p = h;
+        norm = vec3(0.0);
+        norm[a] = pos ? -1.0 : 1.0;
+      }
+    }
+  }
+}
+
+// Shell candidate surface
+void shellFace(vec3 o, vec3 d, float t, vec3 ctr, float sgn, float time, float tMinBound,
+               inout float m, inout vec3 p, inout vec3 norm, inout bool hit, inout float shade){
+  if (t <= tMinBound || t >= m) return;
+  vec3 P = o + t * d, loc;
+  if (!solidAt(P + d * 1e-3, time, loc)) return;
+  m = t;
+  p = loc - d * 1e-3;
+  hit = true;
+  norm = normalize((P - ctr) * sgn);
+  shade = mix(1.0 - CUT_SHADE, 1.0, max(dot(norm, -d), 0.0));
+}
+
+vec3 safeDir(vec3 d){
+  vec3 s = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(d, vec3(0.0)));
+  return s * max(abs(d), vec3(1e-6));
+}
+
+// ---- palette shader ---------------------------------------------------------
+vec3 colorize(vec3 p, vec3 worldP, vec3 norm, vec3 rd, float shade){
+  vec3 col = p * 0.5 + 0.5; // Default: Local RGB gamut
+  
+  if (uPaletteMode == 1){ // Cyberpunk / Neon
+    float grad = sin(worldP.y * 3.14 + worldP.x * 2.0) * 0.5 + 0.5;
+    col = mix(vec3(0.08, 0.85, 0.95), vec3(0.98, 0.15, 0.65), grad);
+    col = mix(col, vec3(1.0, 0.85, 0.2), step(0.65, abs(worldP.x)));
+  } else if (uPaletteMode == 2){ // Gold & Obsidian
+    float edge = max(max(abs(p.x), abs(p.y)), abs(p.z));
+    vec3 gold = vec3(0.96, 0.78, 0.26);
+    vec3 obsidian = vec3(0.12, 0.13, 0.17);
+    col = mix(obsidian, gold, smoothstep(0.45, 0.85, edge));
+  } else if (uPaletteMode == 3){ // Emerald Core
+    float r = length(worldP);
+    col = mix(vec3(0.1, 0.95, 0.6), vec3(0.05, 0.35, 0.75), clamp(r, 0.0, 1.0));
+    col += vec3(0.2, 0.7, 0.9) * pow(max(dot(norm, -rd), 0.0), 4.0);
+  } else if (uPaletteMode == 4){ // Mech Armor
+    float isWing = step(0.35, abs(worldP.x));
+    col = isWing > 0.5 ? vec3(0.92, 0.94, 0.96) : vec3(0.20, 0.22, 0.27);
+    if (abs(p.y) > 0.6) col = mix(col, vec3(0.95, 0.38, 0.1), 0.85);
+  }
+  
+  return col * shade;
+}
+
+vec3 render(vec2 v){
+  float t = uCamT * 0.4;
+  vec3 o = 8.5 * vec3(sin(t), 0.7 + 0.3 * sin(t * 0.6), cos(t));
+  vec3 w = normalize(-o);
+  vec3 u = normalize(cross(w, vec3(0, 1, 0)));
+  vec3 d = safeDir(normalize(v.x * u + v.y * cross(u, w) + 1.8 * w));
+  vec3 inv = 1.0 / d;
+
+  bool  carve = uCarve > 0.5;
+  bool  clip  = uClip > 0.5;
+
+  vec3  cO    = outerCentre(uShellT);
+  vec3  cI    = cO + innerOffset(uInnerT);
+  float rIn   = innerRadius(uInnerT);
+  float r2out = carve ? SPH_R * SPH_R : -1.0;
+  float r2in  = rIn * rIn;
+
+  // Tumbling cube bounding box test in cube-local coordinates
+  mat3  Rrot   = tumbleMatrix(uTumbleT);
+  vec3  oBox   = transpose(Rrot) * (o - cO);
+  vec3  dBox   = safeDir(transpose(Rrot) * d);
+  vec3  invBox = 1.0 / dBox;
+  vec3  eBox   = abs(invBox) * CUBE_HALF;
+  vec3  cBox   = -oBox * invBox;
+  vec3  t1Box  = cBox - eBox;
+  vec3  t2Box  = cBox + eBox;
+  float tNBox  = max(max(t1Box.x, t1Box.y), t1Box.z);
+  float tFBox  = min(min(t2Box.x, t2Box.y), t2Box.z);
+
+  // If clipping is active and the ray misses the bounding cube, early out
+  if (clip && (tNBox >= tFBox || tFBox < 0.0)) return vec3(0.0);
+
+  float tMinBound = clip ? max(tNBox, 0.0) : 0.0;
+  float m         = clip ? tFBox : 1e9;
+  vec3  p         = vec3(0.0);
+  vec3  norm      = vec3(0.0);
+  bool  hit       = false;
+  float shade     = 1.0;
+
+  // 1. Tumbling cube boundary face intersection
+  if (clip && tNBox > 0.0 && tNBox < m){
+    vec3 pCut = o + tNBox * d;
+    vec3 locBox;
+    vec3 eo = pCut - cO, ei = pCut - cI;
+    bool inRind = carve && (dot(eo, eo) < r2out && dot(ei, ei) > r2in);
+    if (!inRind && solidAt(pCut + d * 1e-3, uMaskT, locBox)){
+      m = tNBox;
+      p = locBox - d * 1e-3;
+      hit = true;
+      vec3 hLoc = oBox + tNBox * dBox;
+      vec3 aLoc = abs(hLoc);
+      vec3 nBoxLocal = sign(hLoc) * step(max(aLoc.yzx, aLoc.zxy) - 1e-4, aLoc);
+      norm = normalize(Rrot * nBoxLocal);
+      shade = mix(1.0 - CUT_SHADE, 1.0, max(dot(norm, -d), 0.0));
+    }
+  }
+
+  // 2. Spherical cavity / shell surfaces
+  if (carve){
+    vec2 ro = sphereRoots(o - cO, d, SPH_R);
+    vec2 ri = sphereRoots(o - cI, d, rIn);
+    if (ri.x > ro.x && ri.x < ro.y)
+      shellFace(o, d, ri.x, cI,  1.0, uMaskT, tMinBound, m, p, norm, hit, shade);
+    if (ro.y <= ri.x || ro.y >= ri.y)
+      shellFace(o, d, ro.y, cO, -1.0, uMaskT, tMinBound, m, p, norm, hit, shade);
+  }
+
+  // 3. Grid blocks: octant-sorted loop over 27 lattice sites
+  vec3 flip = step(d, vec3(0.0));
+
+  for (int j = 0; j < 27; ++j){
+    vec3 g = vec3(j % 3, (j / 3) % 3, j / 9);
+    g = mix(g, 2.0 - g, flip);
+    vec3 pL = (g - 1.0) * PITCH;
+
+    // slab test on shape's bounding box
+    vec3 rc = (pL - o) * inv, e = abs(inv);
+    vec3 t1 = rc - e, t2 = rc + e;
+    float tN = max(max(t1.x, t1.y), t1.z);
+    float tF = min(min(t2.x, t2.y), t2.z);
+    if (tN >= tF || tF < 0.0 || tN >= m || tF <= tMinBound) continue;
+
+    uint site = uint(g.x) + 3u * uint(g.y) + 9u * uint(g.z);
+    uint mask = shapeMask(site, uMaskT);
+    if (mask == 0u) continue;
+
+    float before = m;
+    traceShape(o - pL, d, inv, mask, cO - pL, cI - pL, r2in, r2out, tMinBound, m, p, norm);
+    if (m < before){ hit = true; shade = 1.0; }
+  }
+
+  vec3 worldHit = (o + m * d) / 3.9;
+  return hit ? colorize(p, worldHit, norm, d, shade) : vec3(0.0);
+}
+
+void mainImage(out vec4 O, in vec2 F){
+  vec3 acc = vec3(0.0);
+  for (int j = 0; j < AA; ++j)
+    for (int i = 0; i < AA; ++i){
+      vec2 off = (vec2(float(i), float(j)) + 0.5) / float(AA);
+      vec2 v = ((F + off - 0.5) * 2.0 - iResolution.xy) / iResolution.y;
+      acc += render(v);
+    }
+  O = vec4(acc / float(AA * AA), 1.0);
+}
+
+void main(){ mainImage(fragColor, gl_FragCoord.xy); }`;
+
+/* ------------------------------------ host ------------------------------- */
+
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, depth: false });
+
+function compile(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(sh));
+    console.error(src.split("\n").map((l, i) => (i + 1) + "| " + l).join("\n"));
+    return null;
+  }
+  return sh;
+}
+
+function main() {
+  const vs = compile(gl.VERTEX_SHADER, VERT);
+  const fs = compile(gl.FRAGMENT_SHADER, FRAG);
+  if (!vs || !fs) return;
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    return;
+  }
+  gl.useProgram(prog);
+  gl.bindVertexArray(gl.createVertexArray());
+
+  const uRes      = gl.getUniformLocation(prog, "iResolution");
+  const uCarve    = gl.getUniformLocation(prog, "uCarve");
+  const uClip     = gl.getUniformLocation(prog, "uClip");
+  const uSymMode  = gl.getUniformLocation(prog, "uSymMode");
+  const uMaskMode = gl.getUniformLocation(prog, "uMaskMode");
+  const uFieldMode= gl.getUniformLocation(prog, "uFieldMode");
+  const uDensity  = gl.getUniformLocation(prog, "uDensity");
+  const uSeed     = gl.getUniformLocation(prog, "uSeed");
+  const uPalMode  = gl.getUniformLocation(prog, "uPaletteMode");
+  const hud       = document.getElementById("hud");
+
+  // Clocks
+  const clocks = [
+    { key: "r", name: "orbit",  t: 0, run: true, loc: gl.getUniformLocation(prog, "uCamT") },
+    { key: "b", name: "bounce", t: 0, run: true, loc: gl.getUniformLocation(prog, "uShellT") },
+    { key: "i", name: "inner",  t: 0, run: true, loc: gl.getUniformLocation(prog, "uInnerT") },
+    { key: "t", name: "tumble", t: 0, run: true, loc: gl.getUniformLocation(prog, "uTumbleT") },
+    { key: "m", name: "bits",   t: 0, run: true, loc: gl.getUniformLocation(prog, "uMaskT") }
+  ];
+
+  // Procedural Sprite Generator State
+  let carve = false; // Start uncarved to showcase full sprite archetype
+  let clip = false; // Start unclipped to showcase full sprite archetype
+  let symMode = 0;   // 0: Bilateral X
+  let maskMode = 0;  // 0: Starship
+  let fieldMode = 0; // 0: XOR / Hash
+  let palMode = 0;   // 0: Gamut
+  let seed = 42;
+  const densities = [0.35, 0.45, 0.55, 0.65, 0.75];
+  let densityIdx = 2; // 0.55
+  let fps = 0;
+
+  const SYM_NAMES   = ["bilat-X", "quad-4", "octa", "free"];
+  const MASK_NAMES  = ["starship", "mech", "totem", "crystal", "orbiter", "full"];
+  const FIELD_NAMES = ["xor/hash", "spheres", "diamond", "popcount"];
+  const PAL_NAMES   = ["gamut", "cyber", "gold", "emerald", "mech"];
+
+  function syncUniforms() {
+    gl.uniform1f(uCarve, carve ? 1 : 0);
+    gl.uniform1f(uClip, clip ? 1 : 0);
+    gl.uniform1i(uSymMode, symMode);
+    gl.uniform1i(uMaskMode, maskMode);
+    gl.uniform1i(uFieldMode, fieldMode);
+    gl.uniform1f(uDensity, densities[densityIdx]);
+    gl.uniform1i(uSeed, seed);
+    gl.uniform1i(uPalMode, palMode);
+  }
+
+  function paintHud() {
+    const rows = [];
+    rows.push("<span class='sec'>--- CLOCKS ---</span>");
+    for (const c of clocks) {
+      rows.push(c.name.padEnd(7) + (c.run ? "run " : "hold") + "   " + c.key);
+    }
+    rows.push("carve".padEnd(7) + (carve ? "on  " : "off ") + "   c");
+    rows.push("clip".padEnd(7)  + (clip  ? "on  " : "off ") + "   x");
+    rows.push("all".padEnd(7)   + "        space");
+    rows.push("");
+    rows.push("<span class='sec'>--- 3D SPRITE ---</span>");
+    rows.push("sym".padEnd(7)   + SYM_NAMES[symMode].padEnd(9) + "s");
+    rows.push("arch".padEnd(7)  + MASK_NAMES[maskMode].padEnd(9) + "a");
+    rows.push("field".padEnd(7) + FIELD_NAMES[fieldMode].padEnd(9) + "f");
+    rows.push("fill".padEnd(7)  + (Math.round(densities[densityIdx] * 100) + "%").padEnd(9) + "d");
+    rows.push("pal".padEnd(7)   + PAL_NAMES[palMode].padEnd(9) + "k");
+    rows.push("seed".padEnd(7)  + ("#" + seed).padEnd(9) + "n/p");
+    hud.innerHTML = rows.join("\n") + "\n\n<b>" + fps + " fps</b>";
+  }
+
+  function setAll(run) {
+    for (const c of clocks) c.run = run;
+    paintHud();
+  }
+
+  addEventListener("keydown", (ev) => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.repeat) return;
+    const k = ev.key.toLowerCase();
+
+    if (k === " " || ev.code === "Space") {
+      ev.preventDefault();
+      setAll(!clocks.some(c => c.run));
+      return;
+    }
+    if (k === "c") { carve = !carve; syncUniforms(); paintHud(); return; }
+    if (k === "x") { clip  = !clip;  syncUniforms(); paintHud(); return; }
+    if (k === "s") { symMode = (symMode + 1) % SYM_NAMES.length; syncUniforms(); paintHud(); return; }
+    if (k === "a") { maskMode = (maskMode + 1) % MASK_NAMES.length; syncUniforms(); paintHud(); return; }
+    if (k === "f") { fieldMode = (fieldMode + 1) % FIELD_NAMES.length; syncUniforms(); paintHud(); return; }
+    if (k === "d") { densityIdx = (densityIdx + 1) % densities.length; syncUniforms(); paintHud(); return; }
+    if (k === "k") { palMode = (palMode + 1) % PAL_NAMES.length; syncUniforms(); paintHud(); return; }
+    if (k === "n") { seed = (seed + 1) & 0xffff; syncUniforms(); paintHud(); return; }
+    if (k === "p") { seed = (seed - 1 + 0x10000) & 0xffff; syncUniforms(); paintHud(); return; }
+
+    const c = clocks.find(c => c.key === k);
+    if (c) {
+      c.run = !c.run;
+      paintHud();
+    }
+  });
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    const w = Math.round(canvas.clientWidth * dpr);
+    const h = Math.round(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w; canvas.height = h;
+      gl.viewport(0, 0, w, h);
+      gl.uniform3f(uRes, w, h, 1);
+    }
+  }
+
+  syncUniforms();
+
+  let last = performance.now(), acc = 0, frames = 0;
+
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+
+    for (const c of clocks) {
+      if (c.run) c.t += dt;
+      gl.uniform1f(c.loc, c.t);
+    }
+
+    resize();
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    acc += dt; frames++;
+    if (acc >= 0.5) { fps = Math.round(frames / acc); acc = 0; frames = 0; paintHud(); }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  paintHud();
+}
+
+if (gl) {
+  main();
+} else {
+  console.error("WebGL2 unavailable.");
+  document.getElementById("hud").textContent = "needs WebGL2";
+}
+</script>
+</body>
+</html>
