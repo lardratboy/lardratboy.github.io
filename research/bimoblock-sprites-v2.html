@@ -361,8 +361,76 @@ function envelope(sx, sy, sz, arch){
    s is an exact multiple of 1/4 because every fold is a signed permutation,
    so u = s*4 + 4 is an exact integer in [0,8].
    -------------------------------------------------------------------------- */
-const FIELD_NAMES = ["xor/hash","shells","diamond","popcount"];
-function field(sx, sy, sz, mode, effSeed){
+const FIELD_NAMES = ["xor/hash","shells","diamond","popcount",
+                     "p:conic","p:cubic","p:trefoil","p:mixmul","p:xor±","p:product"];
+const NATIVE_FIELDS = 4;   // modes below this are native 3D and ignore the lift
+
+/* Planar donors from the 2D pixel-art table.  Only the low-symmetry ones are
+   here: measured stabilisers inside D4 are conic 1/8, cubic 2/8, trefoil 2/8,
+   mixmul 2/8, signed xor 2/8, product 4/8.  The 8/8 members of that table
+   (circle, diamond, cheby, popcount, pascal, ...) are deliberately excluded --
+   dropping a fully D4-symmetric field in here would re-impose mirrors on
+   "C1:free" exactly the way v1 did.  Arguments are signed lattice integers.  */
+const PLANAR = [
+  (u, v, p) => p.a*u*u + p.b*u*v + p.c*v*v + p.d*u + p.e*v,   // conic
+  (u, v)    => u*u*u + v*v*v,                                 // cubic
+  (u, v)    => u*u*u - 3*u*v*v,                               // trefoil, Re((u+iv)^3)
+  (u, v)    => u*v*(u + v),                                   // mixmul
+  (u, v)    => u ^ v,                                         // signed xor (no abs)
+  (u, v)    => u*v                                            // product
+];
+const LIFT_NAMES = ["weighted","extrude","nested"];
+const PHI = 1.6180339887498949;
+
+// conic coefficients ride the seed, so 'n'/'p' and the morph clock both move them
+function conicParams(seed){
+  let h = seed >>> 0;
+  const nxt = () => {
+    h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d) >>> 0;
+    h = Math.imul(h ^ (h >>> 12), 0x297a2d39) >>> 0;
+    return h;
+  };
+  const r = () => (nxt() % 7) - 3;
+  const p = { a:r(), b:r(), c:r(), d:r(), e:r() };
+  if (p.d === 0 && p.e === 0) p.d = 1;               // keep the linear term alive
+  if (p.a === 0 && p.b === 0 && p.c === 0) p.b = 1;
+  return p;
+}
+
+// per-base normalisation, so the tilt and the extrude ramp stay comparable in
+// magnitude to the field itself regardless of its natural range
+function planarScale(base, p){
+  let m = 0;
+  for (let v = -4; v <= 4; v++) for (let u = -4; u <= 4; u++) m = Math.max(m, Math.abs(base(u, v, p)));
+  return m || 1;
+}
+
+// wrap an intermediate value back onto [-4,4] so f can act as a binary
+// operation on the lattice for the nested lift
+const wrap9 = x => ((Math.round(x) % 9) + 13) % 9 - 4;
+
+/* Lift a planar field to 3D.  A naive symmetric triad f(x,y)+f(y,z)+f(z,x)
+   restores the full 48-element stabiliser on most donors; the weighted triad
+   still leaves all 8 sign flips.  The linear tilt is what actually frees it --
+   the same reason 'conic' was the only free member of the 2D table.          */
+function liftPlanar(ix, iy, iz, sx, sy, sz, baseIdx, lift, pars){
+  const f = PLANAR[baseIdx], p = pars.conic, s = pars.scale[baseIdx];
+  let F;
+  if (lift === 1){                       // extrude: a plane pushed along z
+    F = f(ix, iy, p) / s + 0.37 * (iz / 4);
+  } else if (lift === 2){                // nested: f as a binary lattice op
+    F = f(wrap9(f(ix, iy, p)), iz, p) / s;
+  } else {                               // weighted triad
+    F = (f(ix, iy, p) + PHI * f(iy, iz, p) + PHI * PHI * f(iz, ix, p)) / (s * (1 + PHI + PHI * PHI));
+  }
+  return F + 0.11 * sx - 0.07 * sy + 0.19 * sz;
+}
+
+function field(sx, sy, sz, mode, effSeed, lift, pars){
+  if (mode >= NATIVE_FIELDS){
+    return liftPlanar(Math.round(sx * 4), Math.round(sy * 4), Math.round(sz * 4),
+                      sx, sy, sz, mode - NATIVE_FIELDS, lift, pars);
+  }
   const ux = Math.round(sx * 4) + 4, uy = Math.round(sy * 4) + 4, uz = Math.round(sz * 4) + 4;
   if (mode === 0){
     let h = ((ux * 73856093) ^ (uy * 19349663) ^ (uz * 83492791) ^ Math.imul(effSeed, 0x9e3779b9)) >>> 0;
@@ -399,6 +467,13 @@ function buildMasks(P){
   const G = GROUPS[P.sym];
   const step = Math.floor(Math.max(P.t, 0) * RATE) >>> 0;
   const effSeed = ((P.seed >>> 0) ^ Math.imul(step, 0x85ebca6b)) >>> 0;
+  const lift = P.lift | 0;
+
+  // planar parameters are constant across the whole sprite, so they cannot
+  // break the symmetry no matter what the seed produces
+  const pars = { conic: conicParams(effSeed), scale: [] };
+  if (P.field >= NATIVE_FIELDS)
+    pars.scale[P.field - NATIVE_FIELDS] = planarScale(PLANAR[P.field - NATIVE_FIELDS], pars.conic);
 
   const site = [], cell = [], vals = [];
   for (let j = 0; j < 27; j++){
@@ -410,7 +485,7 @@ function buildMasks(P){
                         ((gz-1)*3 + (cz-1)) * 0.25], P.g48);
       const s = foldOrbit(n, G.els);
       if (!envelope(s[0], s[1], s[2], P.arch)) continue;
-      site.push(j); cell.push(k); vals.push(field(s[0], s[1], s[2], P.field, effSeed));
+      site.push(j); cell.push(k); vals.push(field(s[0], s[1], s[2], P.field, effSeed, lift, pars));
     }
   }
 
@@ -508,12 +583,12 @@ function main(){
 
   let iTime = 0, maskT = 0, lastStep = -1;
   let running = true, morph = true, ao = false;
-  let g48 = 0, sym = 1, arch = 0, fieldMode = 0, palMode = 0, seed = 42, densityIdx = 2;
+  let g48 = 0, sym = 1, arch = 0, fieldMode = 0, lift = 0, palMode = 0, seed = 42, densityIdx = 2;
   let fps = 0;
   let cur = null;   // { masks, filled, envelopeCells, aut }
 
   function params(){
-    return { t: maskT, seed, g48, sym, arch, field: fieldMode, density: DENSITIES[densityIdx] };
+    return { t: maskT, seed, g48, sym, arch, field: fieldMode, lift, density: DENSITIES[densityIdx] };
   }
 
   function rebuild(){
@@ -575,7 +650,8 @@ function main(){
   }
   function baseName(){
     return `${ARCH_NAMES[arch]}_${GROUPS[sym].name.split(":")[0]}_g${String(g48).padStart(2,"0")}` +
-           `_${FIELD_NAMES[fieldMode].replace("/","-")}_${PAL_NAMES[palMode]}_s${seed}`;
+           `_${FIELD_NAMES[fieldMode].replace("/","-").replace("±","pm")}` +
+           `${fieldMode >= NATIVE_FIELDS ? "-" + LIFT_NAMES[lift] : ""}_${PAL_NAMES[palMode]}_s${seed}`;
   }
 
   function solidVoxels(){
@@ -689,7 +765,8 @@ function main(){
       "# bimoblock lattice sprite v2",
       `# archetype=${ARCH_NAMES[arch]} group=${GROUPS[sym].name} |G|=${GROUPS[sym].order}` +
       ` g48=${formatG48(g48)} coset=${GROUPS[sym].cosetOf[g48]+1}/${GROUPS[sym].cosets}`,
-      `# field=${FIELD_NAMES[fieldMode]} density=${DENSITIES[densityIdx]} domain=${PAL_NAMES[palMode]} seed=${seed}`,
+      `# field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? " lift=" + LIFT_NAMES[lift] : ""}`
+      + ` density=${DENSITIES[densityIdx]} domain=${PAL_NAMES[palMode]} seed=${seed}`,
       `# measured stabiliser inside Oh: order ${cur.aut}/48`,
       "# v X Y Z R G B (vertex colours), outward vn",
       "",
@@ -744,6 +821,8 @@ function main(){
         g48, g48Label: formatG48(g48),
         coset: G.cosetOf[g48] + 1, cosetCount: G.cosets,
         archetype: ARCH_NAMES[arch], field: FIELD_NAMES[fieldMode],
+        lift: fieldMode >= NATIVE_FIELDS ? LIFT_NAMES[lift] : null,
+        conic: fieldMode === NATIVE_FIELDS ? conicParams((seed >>> 0) ^ Math.imul(Math.floor(maskT * RATE), 0x85ebca6b)) : null,
         density: DENSITIES[densityIdx], domain: PAL_NAMES[palMode],
         seed, morphStep: Math.floor(maskT * RATE)
       },
@@ -776,6 +855,7 @@ function main(){
     R.push("<span class='sec'>--- SPRITE ---</span>");
     R.push("arch".padEnd(8) + ARCH_NAMES[arch].padEnd(16) + "a");
     R.push("field".padEnd(8) + FIELD_NAMES[fieldMode].padEnd(16) + "f");
+    R.push("lift".padEnd(8) + (fieldMode >= NATIVE_FIELDS ? LIFT_NAMES[lift] : "<span class='sec'>n/a</span>").padEnd(16) + "x");
     R.push("density".padEnd(8) + (DENSITIES[densityIdx].toFixed(2)).padEnd(16) + "d");
     R.push("fill".padEnd(8) + (cur ? `${cur.filled}/729  ${(cur.filled/729*100).toFixed(1)}%` : "-").padEnd(16));
     R.push("domain".padEnd(8) + PAL_NAMES[palMode].padEnd(16) + "k");
@@ -807,6 +887,7 @@ function main(){
       case "h": g48 = (g48 + 47) % 48; rebuild(); return;
       case "a": arch = (arch + 1) % ARCH_NAMES.length; rebuild(); return;
       case "f": fieldMode = (fieldMode + 1) % FIELD_NAMES.length; rebuild(); return;
+      case "x": lift = (lift + 1) % LIFT_NAMES.length; rebuild(); return;
       case "d": densityIdx = (densityIdx + 1) % DENSITIES.length; rebuild(); return;
       case "k": palMode = (palMode + 1) % PAL_NAMES.length; gl.uniform1i(uPalMode, palMode); paintHud(); return;
       case "n": seed = (seed + 1) & 0xffff; rebuild(); return;
@@ -816,6 +897,7 @@ function main(){
         g48 = Math.floor(Math.random() * 48);
         arch = Math.floor(Math.random() * ARCH_NAMES.length);
         fieldMode = Math.floor(Math.random() * FIELD_NAMES.length);
+        lift = Math.floor(Math.random() * LIFT_NAMES.length);
         densityIdx = Math.floor(Math.random() * DENSITIES.length);
         seed = Math.floor(Math.random() * 0x10000);
         syncGroup(); rebuild(); return;
