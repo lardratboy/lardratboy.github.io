@@ -1,0 +1,1247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bimoblock contact sheet — symmetry group x archetype</title>
+<style>
+  html,body{ height:100%; margin:0; background:#07070a; overflow:hidden;
+    font:10px/1.4 ui-monospace, Menlo, Consolas, monospace; color:#6a6a7a; letter-spacing:.05em; }
+  canvas{ display:block; position:absolute; left:0; top:0; }
+  .lbl{ position:absolute; user-select:none; pointer-events:none; white-space:nowrap; }
+  .col{ color:#8a8a9e; }
+  .row{ color:#8a8a9e; text-align:right; }
+  #sel{ position:absolute; border:1px solid rgba(180,200,255,.75); pointer-events:none;
+        display:none; box-shadow:0 0 0 1px rgba(0,0,0,.6) inset; }
+  #hud{ position:fixed; right:10px; bottom:8px; text-align:right; white-space:pre;
+        background:rgba(0,0,0,.5); padding:8px 12px; border-radius:6px;
+        border:1px solid rgba(255,255,255,.07); pointer-events:none; }
+  #hud b{ color:#a0a0b2; font-weight:normal; }
+  #hud .sec{ color:#3e3e4c; }
+  #toast{ position:fixed; left:50%; top:16px; transform:translateX(-50%);
+    background:rgba(20,20,28,.88); color:#c8c8dc; border:1px solid rgba(255,255,255,.15);
+    padding:6px 14px; border-radius:4px; opacity:0; transition:opacity .25s ease; pointer-events:none; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="labels"></div>
+<div id="sel"></div>
+<div id="hud"></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+/* ===================== BIMOBLOCK CORE BEGIN =====================
+   Shared verbatim with bimoblock-contact-sheet.html.  The verifier compares
+   this region byte-for-byte between the two files; edit it in one place and
+   copy, never fork.
+   ================================================================= */
+const VERT = `#version 300 es
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+precision highp int;
+
+uniform vec3  iResolution;   // size of the viewport being drawn, not the canvas
+uniform vec2  uOrigin;       // window-space origin of that viewport
+uniform float iTime;
+uniform uint  uMasks[27];     // the whole sprite, uploaded from the CPU
+uniform int   uGroupEls[48];  // element indices of the active Oh subgroup
+uniform int   uGroupN;        // |G|
+uniform int   uPaletteMode;
+uniform int   uAO;
+
+out vec4 fragColor;
+
+#define AA 2
+#define PITCH 2.0
+#define WORLD 3.0            // lattice half-extent in world units
+#define CUT_SHADE 0.30
+
+// ---- signed permutations of Oh ---------------------------------------------
+// element e:  p = e>>3 (permutation), s = e&7 (sign bits)
+vec3 applyG(vec3 v, int e){
+  int p = e >> 3, s = e & 7;
+  vec3 vp = v;
+  if      (p == 1) vp = v.xzy;
+  else if (p == 2) vp = v.yxz;
+  else if (p == 3) vp = v.yzx;
+  else if (p == 4) vp = v.zxy;
+  else if (p == 5) vp = v.zyx;
+  return vp * vec3(((s & 1) != 0) ? -1.0 : 1.0,
+                   ((s & 2) != 0) ? -1.0 : 1.0,
+                   ((s & 4) != 0) ? -1.0 : 1.0);
+}
+
+// canonical representative = lexicographic minimum of the group orbit
+vec3 foldOrbit(vec3 v){
+  vec3 b = v;                       // uGroupEls[0] is always the identity
+  for (int i = 1; i < 48; ++i){
+    if (i >= uGroupN) break;
+    vec3 w = applyG(v, uGroupEls[i]);
+    if (w.x < b.x || (w.x == b.x && (w.y < b.y || (w.y == b.y && w.z < b.z)))) b = w;
+  }
+  return b;
+}
+
+// ---- occupancy --------------------------------------------------------------
+bool occ(ivec3 c, uint m){
+  if (any(greaterThanEqual(uvec3(c), uvec3(3u)))) return false;
+  return ((m >> uint(c.x + 3 * c.y + 9 * c.z)) & 1u) != 0u;
+}
+
+// global 9^3 lookup, used by the ambient occlusion term
+bool occG(ivec3 c){
+  if (any(lessThan(c, ivec3(0))) || any(greaterThan(c, ivec3(8)))) return false;
+  ivec3 b = c / 3, q = c - b * 3;
+  uint m = uMasks[b.x + 3 * b.y + 9 * b.z];
+  return ((m >> uint(q.x + 3 * q.y + 9 * q.z)) & 1u) != 0u;
+}
+
+// ---- one shape: 9 plane tests ----------------------------------------------
+void traceShape(vec3 rl, vec3 rd, vec3 inv, uint mask, inout float m, inout vec3 p, inout vec3 norm){
+  for (int a = 0; a < 3; ++a){
+    bool pos  = rd[a] > 0.0;
+    int  base = pos ? 0 : 1;
+    for (int k = 0; k < 3; ++k){
+      int   q = base + k;
+      float t = (-1.0 + float(q) * (2.0 / 3.0) - rl[a]) * inv[a];
+      if (t <= 0.0 || t >= m) continue;
+      vec3 h  = rl + t * rd;
+      ivec3 ci = ivec3(floor(h * 1.5 + 1.5));
+      ivec3 ce = ci;
+      ci[a] = pos ? q     : q - 1;
+      ce[a] = pos ? q - 1 : q;
+      if (occ(ci, mask) && !occ(ce, mask)){
+        m = t; p = h; norm = vec3(0.0); norm[a] = pos ? -1.0 : 1.0;
+      }
+    }
+  }
+}
+
+vec3 safeDir(vec3 d){
+  vec3 s = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(d, vec3(0.0)));
+  return s * max(abs(d), vec3(1e-6));
+}
+
+// ---- domain colour fields ---------------------------------------------------
+// p  : local surface point inside its block, in [-1,1]^3
+// w  : world position normalised by WORLD, in [-1,1]^3
+vec3 colorize(vec3 p, vec3 w){
+  if (uPaletteMode == 1){
+    return foldOrbit(p) * 0.5 + 0.5;
+  } else if (uPaletteMode == 2){
+    float th = w.y * 3.14159265 * 1.25, ct = cos(th), st = sin(th);
+    return vec3(p.x * ct - p.z * st, p.y, p.x * st + p.z * ct) * 0.5 + 0.5;
+  } else if (uPaletteMode == 3){
+    float r = length(w);
+    vec3 core = mix(vec3(1.0, 0.25, 0.05), vec3(0.1, 0.85, 1.0), sin(r * 12.0) * 0.5 + 0.5);
+    return mix(core, p * 0.5 + 0.5, smoothstep(0.35, 0.75, r));
+  } else if (uPaletteMode == 4){
+    return sin(p * 3.14159265 * 0.75 + w * 2.0) * 0.5 + 0.5;
+  }
+  return p * 0.5 + 0.5;
+}
+
+vec3 render(vec2 v){
+  float t = iTime * 0.4;
+  vec3 o = 8.5 * vec3(sin(t), 0.7 + 0.3 * sin(t * 0.6), cos(t));
+  vec3 w = normalize(-o);
+  vec3 u = normalize(cross(w, vec3(0, 1, 0)));
+  vec3 d = safeDir(normalize(v.x * u + v.y * cross(u, w) + 1.8 * w));
+  vec3 inv = 1.0 / d;
+
+  float m = 1e9;
+  vec3  p = vec3(0.0), norm = vec3(0.0);
+  bool  hit = false;
+
+  vec3 flip = step(d, vec3(0.0));
+  for (int j = 0; j < 27; ++j){
+    vec3 g = vec3(j % 3, (j / 3) % 3, j / 9);
+    g = mix(g, 2.0 - g, flip);
+    int site = int(g.x) + 3 * int(g.y) + 9 * int(g.z);
+    uint mask = uMasks[site];
+    if (mask == 0u) continue;
+
+    vec3 pL = (g - 1.0) * PITCH;
+    vec3 rc = (pL - o) * inv, e = abs(inv);
+    vec3 t1 = rc - e, t2 = rc + e;
+    if (max(max(t1.x, t1.y), t1.z) >= min(min(t2.x, t2.y), t2.z)) continue;
+    if (min(min(t2.x, t2.y), t2.z) < 0.0) continue;
+    if (max(max(t1.x, t1.y), t1.z) >= m) continue;
+
+    float before = m;
+    traceShape(o - pL, d, inv, mask, m, p, norm);
+    if (m < before) hit = true;
+  }
+
+  if (!hit) return vec3(0.0);
+
+  vec3 W = o + m * d;
+
+  // ambient occlusion: how boxed-in is the empty cell in front of this face
+  float ao = 1.0;
+  if (uAO == 1){
+    ivec3 hc = clamp(ivec3(floor((W - norm * 0.002 + WORLD) * 1.5)), ivec3(0), ivec3(8));
+    ivec3 n3 = ivec3(round(norm));
+    ivec3 fc = hc + n3;
+    ivec3 a1 = (abs(norm.x) > 0.5) ? ivec3(0,1,0) : ivec3(1,0,0);
+    ivec3 a2 = ivec3(round(cross(vec3(n3), vec3(a1))));
+    float n = 0.0;
+    for (int i = -1; i <= 1; ++i)
+      for (int k = -1; k <= 1; ++k){
+        if (i == 0 && k == 0) continue;
+        if (occG(fc + a1 * i + a2 * k)) n += 1.0;
+      }
+    ao = 1.0 - 0.5 * (n / 8.0);
+  }
+
+  float key  = 0.55 + 0.45 * max(dot(norm, normalize(vec3(0.45, 0.82, 0.36))), 0.0);
+  float view = mix(1.0 - CUT_SHADE, 1.0, max(dot(norm, -d), 0.0));
+  return colorize(p, W / WORLD) * (key * view * ao);
+}
+
+void mainImage(out vec4 O, in vec2 F){
+  vec3 acc = vec3(0.0);
+  for (int j = 0; j < AA; ++j)
+    for (int i = 0; i < AA; ++i){
+      vec2 off = (vec2(float(i), float(j)) + 0.5) / float(AA);
+      acc += render(((F - uOrigin + off - 0.5) * 2.0 - iResolution.xy) / iResolution.y);
+    }
+  O = vec4(acc / float(AA * AA), 1.0);
+}
+
+void main(){ mainImage(fragColor, gl_FragCoord.xy); }`;
+
+/* ==========================================================================
+   THE GROUP: 48 signed permutations of Oh
+   element e in 0..47:  p = e>>3 (permutation), s = e&7 (sign bits)
+   apply:  out_i = sgn_i * v[ PERM[p][i] ]
+   ========================================================================== */
+const PERM = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+const PERM_NAME = ["XYZ","XZY","YXZ","YZX","ZXY","ZYX"];
+
+function applyG(v, e){
+  const P = PERM[e >> 3], s = e & 7;
+  return [((s & 1) ? -1 : 1) * v[P[0]],
+          ((s & 2) ? -1 : 1) * v[P[1]],
+          ((s & 4) ? -1 : 1) * v[P[2]]];
+}
+const MATS = [];
+for (let e = 0; e < 48; e++){
+  const P = PERM[e >> 3], s = e & 7, M = [[0,0,0],[0,0,0],[0,0,0]];
+  for (let i = 0; i < 3; i++) M[i][P[i]] = ((s >> i) & 1) ? -1 : 1;
+  MATS.push(M);
+}
+function eOf(M){
+  for (let e = 0; e < 48; e++){
+    const A = MATS[e]; let ok = true;
+    for (let i = 0; i < 3 && ok; i++) for (let j = 0; j < 3 && ok; j++) if (A[i][j] !== M[i][j]) ok = false;
+    if (ok) return e;
+  }
+  return -1;
+}
+function mulE(e1, e2){
+  const A = MATS[e1], B = MATS[e2], C = [[0,0,0],[0,0,0],[0,0,0]];
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++){
+    let t = 0; for (let k = 0; k < 3; k++) t += A[i][k] * B[k][j]; C[i][j] = t;
+  }
+  return eOf(C);
+}
+function detE(e){
+  const M = MATS[e];
+  return M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])
+       - M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])
+       + M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
+}
+function closure(gens){
+  const set = new Set([0]);
+  let grew = true;
+  while (grew){
+    grew = false;
+    for (const a of [...set]) for (const g of gens){
+      const c = mulE(a, g);
+      if (!set.has(c)){ set.add(c); grew = true; }
+    }
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
+const GEN = {
+  Mx:    eOf([[-1,0,0],[0,1,0],[0,0,1]]),
+  Mz:    eOf([[1,0,0],[0,1,0],[0,0,-1]]),
+  R180y: eOf([[-1,0,0],[0,1,0],[0,0,-1]]),
+  R90y:  eOf([[0,0,1],[0,1,0],[-1,0,0]]),
+  cyc:   eOf([[0,1,0],[0,0,1],[1,0,0]]),   // 120 deg about the [111] diagonal
+  negI:  eOf([[-1,0,0],[0,-1,0],[0,0,-1]]),
+  Sxy:   eOf([[0,1,0],[1,0,0],[0,0,1]]),
+  MxMy:  eOf([[-1,0,0],[0,-1,0],[0,0,1]])
+};
+
+// every entry is an exact subgroup of Oh, so every fold is lattice-preserving
+const GROUPS = [
+  { name:"C1:free",      gens:[] },
+  { name:"Cs:mirror-X",  gens:[GEN.Mx] },
+  { name:"C2:rot180-Y",  gens:[GEN.R180y] },
+  { name:"C2v:bi-axial", gens:[GEN.Mx, GEN.Mz] },
+  { name:"C3:diag-3",    gens:[GEN.cyc] },
+  { name:"C4:pinwheel",  gens:[GEN.R90y] },
+  { name:"C4v:quad-4",   gens:[GEN.R90y, GEN.Mx] },
+  { name:"S6:diag-6",    gens:[GEN.cyc, GEN.negI] },
+  { name:"Td:tetra-24",  gens:[GEN.Sxy, GEN.cyc, GEN.MxMy] },
+  { name:"Oh:octa-48",   gens:[GEN.Mx, GEN.Sxy, GEN.cyc] }
+].map(g => {
+  g.els = closure(g.gens);
+  g.order = g.els.length;
+  g.chiral = g.els.every(e => detE(e) > 0);   // no improper element
+  // g48 only matters up to the coset Gg, so precompute which settings repeat
+  const rep = new Int32Array(48);
+  for (let e = 0; e < 48; e++){ let r = 48; for (const h of g.els) r = Math.min(r, mulE(h, e)); rep[e] = r; }
+  const uniq = [...new Set([...rep])].sort((a, b) => a - b);
+  g.cosetOf = Array.from(rep, r => uniq.indexOf(r));
+  g.cosets = uniq.length;
+  return g;
+});
+
+// canonical representative = lexicographic minimum over the orbit.
+// Equivariant by construction; no boundary cases to get wrong.
+function foldOrbit(v, els){
+  let bx = v[0], by = v[1], bz = v[2];
+  for (let i = 1; i < els.length; i++){
+    const w = applyG(v, els[i]);
+    if (w[0] < bx || (w[0] === bx && (w[1] < by || (w[1] === by && w[2] < bz)))){
+      bx = w[0]; by = w[1]; bz = w[2];
+    }
+  }
+  return [bx, by, bz];
+}
+
+/* ---- archetype envelopes, evaluated on the folded point ------------------
+   The envelope carves the silhouette; the field decides what survives inside
+   it.  Because the point is already folded, an envelope needs no symmetry of
+   its own -- it is symmetrised for free.  What does matter is population: the
+   density control is a quantile of the cells the envelope admits, so an
+   envelope that passes too few cells yields a sparse sprite that is prone to
+   accidental extra symmetry.  Every entry below admits 110-330 of the 729.
+   -------------------------------------------------------------------------- */
+const ARCH_NAMES = ["starship","mech","totem","crystal","orbiter","full",
+                    "hollow","spire","frame","spindle","gyroid","lens"];
+const SQRT3 = 1.7320508075688772;
+function envelope(sx, sy, sz, arch){
+  if (arch === 0){
+    const wings = 0.28 + 0.72 * (1.0 - (sz + 1.0) * 0.5);
+    const thick = 0.35 + 0.65 * (1.0 - Math.abs(sz));
+    return Math.abs(sx) <= wings && Math.abs(sy) <= thick;
+  }
+  if (arch === 1){
+    if (sy > 0.25)    return Math.abs(sx) <= 0.35 && Math.abs(sz) <= 0.35;
+    if (sy >= -0.25)  return Math.abs(sx) <= 0.95 && Math.abs(sz) <= 0.65;
+    return Math.abs(sx) >= 0.15 && Math.abs(sx) <= 0.75 && Math.abs(sz) <= 0.55;
+  }
+  if (arch === 2){ const r = 0.45 + 0.38 * Math.cos(sy * 6.28318); return sx*sx + sz*sz <= r*r; }
+  if (arch === 3) return Math.abs(sx) + Math.abs(sy) + Math.abs(sz) <= 1.25;
+  if (arch === 4){
+    const r = Math.hypot(sx, sz);
+    return (Math.abs(r - 0.62) <= 0.32 && Math.abs(sy) <= 0.45) || (r <= 0.25 && Math.abs(sy) <= 0.75);
+  }
+  if (arch === 5) return true;
+
+  // hollow: a spherical husk, so the field only ever decorates a surface
+  if (arch === 6){ const r = Math.hypot(sx, sy, sz); return r >= 0.55 && r <= 1.05; }
+
+  // spire: monotone taper on a plinth -- an obelisk, distinct from totem's
+  // oscillating waist
+  if (arch === 7){
+    const r = Math.hypot(sx, sz);
+    return (sy <= -0.6) ? r <= 1.05 : r <= 0.95 - 0.62 * (sy + 1.0) * 0.5;
+  }
+
+  // frame: the twelve edges of the cube -- a cell survives only where at least
+  // two of the three coordinates are near the boundary
+  if (arch === 8){
+    let n = 0;
+    if (Math.abs(sx) >= 0.55) n++;
+    if (Math.abs(sy) >= 0.55) n++;
+    if (Math.abs(sz) >= 0.55) n++;
+    return n >= 2;
+  }
+
+  // spindle: a bicone about the [111] body diagonal.  The only envelope whose
+  // axis is a genuine 3-fold axis of the lattice, so it lines up with the
+  // C3:diag-3 and S6:diag-6 folds instead of fighting them.
+  if (arch === 9){
+    const t = (sx + sy + sz) / SQRT3;
+    const d = Math.sqrt(Math.max(0, sx*sx + sy*sy + sz*sz - t*t));
+    return d <= 0.78 * (1.0 - Math.abs(t) / 2.0);
+  }
+
+  // gyroid: the standard trigonometric approximation to the Schoen G minimal
+  // surface, thickened into a slab
+  if (arch === 10){
+    const P = Math.PI;
+    return Math.abs(Math.sin(P*sx) * Math.cos(P*sy) +
+                    Math.sin(P*sy) * Math.cos(P*sz) +
+                    Math.sin(P*sz) * Math.cos(P*sx)) <= 0.62;
+  }
+
+  // lens: an oblate spheroid flattened on Y -- a discus rather than orbiter's
+  // pierced ring
+  const yy = sy / 0.5;
+  return (sx*sx + sz*sz) + yy*yy <= 1.05;
+}
+
+/* ---- fields ---------------------------------------------------------------
+   Signed and anisotropic on purpose.  In v1 every field was invariant under
+   all sign flips (and three of four under all of Oh), which silently forced
+   mirror symmetry onto every sprite including "C1: free".
+   s is an exact multiple of 1/4 because every fold is a signed permutation,
+   so u = s*4 + 4 is an exact integer in [0,8].
+   -------------------------------------------------------------------------- */
+const FIELD_NAMES = ["xor/hash","shells","diamond","popcount",
+                     "p:conic","p:cubic","p:trefoil","p:mixmul","p:xor±","p:product"];
+const NATIVE_FIELDS = 4;   // modes below this are native 3D and ignore the lift
+
+/* Planar donors from the 2D pixel-art table.  Only the low-symmetry ones are
+   here: measured stabilisers inside D4 are conic 1/8, cubic 2/8, trefoil 2/8,
+   mixmul 2/8, signed xor 2/8, product 4/8.  The 8/8 members of that table
+   (circle, diamond, cheby, popcount, pascal, ...) are deliberately excluded --
+   dropping a fully D4-symmetric field in here would re-impose mirrors on
+   "C1:free" exactly the way v1 did.  Arguments are signed lattice integers.  */
+const PLANAR = [
+  (u, v, p) => p.a*u*u + p.b*u*v + p.c*v*v + p.d*u + p.e*v,   // conic
+  (u, v)    => u*u*u + v*v*v,                                 // cubic
+  (u, v)    => u*u*u - 3*u*v*v,                               // trefoil, Re((u+iv)^3)
+  (u, v)    => u*v*(u + v),                                   // mixmul
+  (u, v)    => u ^ v,                                         // signed xor (no abs)
+  (u, v)    => u*v                                            // product
+];
+const LIFT_NAMES = ["weighted","extrude","nested"];
+const PHI = 1.6180339887498949;
+
+// conic coefficients ride the seed, so 'n'/'p' and the morph clock both move them
+function conicParams(seed){
+  let h = seed >>> 0;
+  const nxt = () => {
+    h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d) >>> 0;
+    h = Math.imul(h ^ (h >>> 12), 0x297a2d39) >>> 0;
+    return h;
+  };
+  const r = () => (nxt() % 7) - 3;
+  const p = { a:r(), b:r(), c:r(), d:r(), e:r() };
+  if (p.d === 0 && p.e === 0) p.d = 1;               // keep the linear term alive
+  if (p.a === 0 && p.b === 0 && p.c === 0) p.b = 1;
+  return p;
+}
+
+// per-base normalisation, so the tilt and the extrude ramp stay comparable in
+// magnitude to the field itself regardless of its natural range
+function planarScale(base, p){
+  let m = 0;
+  for (let v = -4; v <= 4; v++) for (let u = -4; u <= 4; u++) m = Math.max(m, Math.abs(base(u, v, p)));
+  return m || 1;
+}
+
+// wrap an intermediate value back onto [-4,4] so f can act as a binary
+// operation on the lattice for the nested lift
+const wrap9 = x => ((Math.round(x) % 9) + 13) % 9 - 4;
+
+/* Lift a planar field to 3D.  A naive symmetric triad f(x,y)+f(y,z)+f(z,x)
+   restores the full 48-element stabiliser on most donors; the weighted triad
+   still leaves all 8 sign flips.  The linear tilt is what actually frees it --
+   the same reason 'conic' was the only free member of the 2D table.          */
+function liftPlanar(ix, iy, iz, sx, sy, sz, baseIdx, lift, pars){
+  const f = PLANAR[baseIdx], p = pars.conic, s = pars.scale[baseIdx];
+  let F;
+  if (lift === 1){                       // extrude: a plane pushed along z
+    F = f(ix, iy, p) / s + 0.37 * (iz / 4);
+  } else if (lift === 2){                // nested: f as a binary lattice op
+    F = f(wrap9(f(ix, iy, p)), iz, p) / s;
+  } else {                               // weighted triad
+    F = (f(ix, iy, p) + PHI * f(iy, iz, p) + PHI * PHI * f(iz, ix, p)) / (s * (1 + PHI + PHI * PHI));
+  }
+  return F + 0.11 * sx - 0.07 * sy + 0.19 * sz;
+}
+
+function field(sx, sy, sz, mode, effSeed, lift, pars){
+  if (mode >= NATIVE_FIELDS){
+    return liftPlanar(Math.round(sx * 4), Math.round(sy * 4), Math.round(sz * 4),
+                      sx, sy, sz, mode - NATIVE_FIELDS, lift, pars);
+  }
+  const ux = Math.round(sx * 4) + 4, uy = Math.round(sy * 4) + 4, uz = Math.round(sz * 4) + 4;
+  if (mode === 0){
+    let h = ((ux * 73856093) ^ (uy * 19349663) ^ (uz * 83492791) ^ Math.imul(effSeed, 0x9e3779b9)) >>> 0;
+    h ^= h >>> 13; h = Math.imul(h, 0x85ebca6b) >>> 0; h ^= h >>> 16;
+    return (h & 0xffff) / 65535;
+  }
+  if (mode === 1){
+    const r = Math.sqrt(1.00*sx*sx + 1.37*sy*sy + 0.71*sz*sz);
+    const tilt = 0.55*sx - 0.31*sy + 0.83*sz;
+    return 0.5 + 0.5 * Math.sin(r * 9.4248 + tilt * 4.1 + (effSeed & 0xff) * 0.1);
+  }
+  if (mode === 2){
+    const m = Math.abs(sx) * 1.00 + Math.abs(sy) * 1.31 + Math.abs(sz) * 0.73;
+    const tilt = 0.47*sx + 0.91*sy - 0.29*sz;
+    return 0.5 + 0.5 * Math.sin(m * 8.0 + tilt * 3.3 + (effSeed & 0xff) * 0.15);
+  }
+  let q = ((ux * 11) ^ (uy * 7 + uz * 23) ^ (uz * ux * 5) ^ (ux * uy * 3) ^ (effSeed & 0xffff)) >>> 0;
+  q = q - ((q >>> 1) & 0x55555555);
+  q = (q & 0x33333333) + ((q >>> 2) & 0x33333333);
+  const cnt = Math.imul((q + (q >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24;
+  // sub-band tiebreak: a pure function of the folded point, so it cannot break
+  // the symmetry -- it only makes the density quantile respond continuously.
+  const tb = Math.imul(((ux * 0x1f1f) ^ (uy * 0x0b0b) ^ (uz * 0x3d3d)) >>> 0, 0x27d4eb2d) >>> 0;
+  return (cnt + ((tb >>> 27) / 32)) / 20;
+}
+
+/* ---- mask builder ---------------------------------------------------------
+   Density is a quantile of the envelope population rather than a raw
+   threshold, so all four fields respond identically to the control.  Every
+   cell at the cut value is included, so ties can never break the symmetry.
+   -------------------------------------------------------------------------- */
+const RATE = 2.5;
+function buildMasks(P){
+  const G = GROUPS[P.sym];
+  const step = Math.floor(Math.max(P.t, 0) * RATE) >>> 0;
+  const effSeed = ((P.seed >>> 0) ^ Math.imul(step, 0x85ebca6b)) >>> 0;
+  const lift = P.lift | 0;
+
+  // planar parameters are constant across the whole sprite, so they cannot
+  // break the symmetry no matter what the seed produces
+  const pars = { conic: conicParams(effSeed), scale: [] };
+  if (P.field >= NATIVE_FIELDS)
+    pars.scale[P.field - NATIVE_FIELDS] = planarScale(PLANAR[P.field - NATIVE_FIELDS], pars.conic);
+
+  const site = [], cell = [], vals = [];
+  for (let j = 0; j < 27; j++){
+    const gx = j % 3, gy = (j / 3 | 0) % 3, gz = j / 9 | 0;
+    for (let k = 0; k < 27; k++){
+      const cx = k % 3, cy = (k / 3 | 0) % 3, cz = k / 9 | 0;
+      const n = applyG([((gx-1)*3 + (cx-1)) * 0.25,
+                        ((gy-1)*3 + (cy-1)) * 0.25,
+                        ((gz-1)*3 + (cz-1)) * 0.25], P.g48);
+      const s = foldOrbit(n, G.els);
+      if (!envelope(s[0], s[1], s[2], P.arch)) continue;
+      site.push(j); cell.push(k); vals.push(field(s[0], s[1], s[2], P.field, effSeed, lift, pars));
+    }
+  }
+
+  const masks = new Uint32Array(27);
+  let filled = 0;
+  if (vals.length){
+    const sorted = Float64Array.from(vals).sort();
+    const want = Math.max(1, Math.round(P.density * vals.length));
+    const cut = sorted[Math.max(0, vals.length - want)];
+    for (let i = 0; i < vals.length; i++)
+      if (vals[i] >= cut){ masks[site[i]] |= (1 << cell[i]) >>> 0; filled++; }
+  }
+  return { masks, envelopeCells: vals.length, filled };
+}
+
+function gridOf(masks){
+  const g = new Uint8Array(729);
+  for (let j = 0; j < 27; j++){
+    const gx = j % 3, gy = (j / 3 | 0) % 3, gz = j / 9 | 0, m = masks[j];
+    for (let k = 0; k < 27; k++){
+      if (((m >>> k) & 1) === 0) continue;
+      const cx = k % 3, cy = (k / 3 | 0) % 3, cz = k / 9 | 0;
+      g[(gx*3 + cx) + 9*(gy*3 + cy) + 81*(gz*3 + cz)] = 1;
+    }
+  }
+  return g;
+}
+
+// measured stabiliser of the finished sprite inside Oh -- the honest number
+function autOrder(grid){
+  let n = 0;
+  for (let e = 0; e < 48; e++){
+    let ok = true;
+    for (let z = 0; z < 9 && ok; z++) for (let y = 0; y < 9 && ok; y++) for (let x = 0; x < 9 && ok; x++){
+      const w = applyG([x-4, y-4, z-4], e);
+      if (grid[x + 9*y + 81*z] !== grid[(w[0]+4) + 9*(w[1]+4) + 81*(w[2]+4)]) ok = false;
+    }
+    if (ok) n++;
+  }
+  return n;
+}
+
+function formatG48(e){
+  return `#${String(e).padStart(2,"0")} ${detE(e) > 0 ? "rot" : "ref"} ${PERM_NAME[e >> 3]} ` +
+         `${(e&1)?"-":"+"}${(e&2)?"-":"+"}${(e&4)?"-":"+"}`;
+}
+
+
+/* ---- geometry + colour, shared by the screen and every exporter ----------
+   p : local surface point inside its block, [-1,1]^3
+   w : world position / WORLD, [-1,1]^3
+   Cells are 2/3 wide and the lattice spans +/-3, so a cell centre at grid
+   index X sits at (X-4)*(2/3) and normalises to (X-4)/4.5.  These must agree
+   with the shader's W / WORLD or exported colours drift away from the screen.
+   -------------------------------------------------------------------------- */
+const WORLD = 3.0;
+const wOfCentre = X => (X - 4) / 4.5;
+const wOfVertex = V => (V - 4.5) / 4.5;
+
+function colorize(p, w, palMode, els){
+  if (palMode === 1){
+    const f = foldOrbit(p, els);
+    return [f[0]*0.5+0.5, f[1]*0.5+0.5, f[2]*0.5+0.5];
+  }
+  if (palMode === 2){
+    const th = w[1] * Math.PI * 1.25, ct = Math.cos(th), st = Math.sin(th);
+    return [(p[0]*ct - p[2]*st)*0.5+0.5, p[1]*0.5+0.5, (p[0]*st + p[2]*ct)*0.5+0.5];
+  }
+  if (palMode === 3){
+    const r = Math.hypot(w[0], w[1], w[2]);
+    const cm = Math.sin(r * 12.0) * 0.5 + 0.5;
+    const core = [1.0*(1-cm) + 0.1*cm, 0.25*(1-cm) + 0.85*cm, 0.05*(1-cm) + 1.0*cm];
+    const hull = [p[0]*0.5+0.5, p[1]*0.5+0.5, p[2]*0.5+0.5];
+    let t = Math.max(0, Math.min(1, (r - 0.35) / 0.40));
+    t = t * t * (3 - 2 * t);                         // smoothstep, matching GLSL
+    return [0,1,2].map(i => core[i]*(1-t) + hull[i]*t);
+  }
+  if (palMode === 4){
+    return [0,1,2].map(i => Math.sin(p[i] * Math.PI * 0.75 + w[i] * 2.0) * 0.5 + 0.5);
+  }
+  return [p[0]*0.5+0.5, p[1]*0.5+0.5, p[2]*0.5+0.5];
+}
+const rgb255 = c => c.map(v => Math.max(0, Math.min(255, Math.round(v * 255))));
+
+function solidVoxels(masks, palMode, els){
+  const grid = gridOf(masks), out = [];
+  for (let Z = 0; Z < 9; Z++) for (let Y = 0; Y < 9; Y++) for (let X = 0; X < 9; X++){
+    if (!grid[X + 9*Y + 81*Z]) continue;
+    const p = [((X%3)-1)/1.5, ((Y%3)-1)/1.5, ((Z%3)-1)/1.5];
+    const w = [wOfCentre(X), wOfCentre(Y), wOfCentre(Z)];
+    out.push({ X, Y, Z, rgb: rgb255(colorize(p, w, palMode, els)) });
+  }
+  return { grid, out };
+}
+
+// median cut, so palettes larger than 255 degrade gracefully instead of
+// collapsing every overflow colour onto one index
+function medianCut(colors, maxColors){
+  let boxes = [{ idx: colors.map((_, i) => i) }];
+  const span = b => {
+    const lo = [255,255,255], hi = [0,0,0];
+    for (const i of b.idx) for (let c = 0; c < 3; c++){
+      lo[c] = Math.min(lo[c], colors[i][c]); hi[c] = Math.max(hi[c], colors[i][c]);
+    }
+    let ax = 0; for (let c = 1; c < 3; c++) if (hi[c] - lo[c] > hi[ax] - lo[ax]) ax = c;
+    return { ax, range: hi[ax] - lo[ax] };
+  };
+  while (boxes.length < maxColors){
+    let best = -1, bestScore = 0;
+    for (let i = 0; i < boxes.length; i++){
+      if (boxes[i].idx.length < 2) continue;
+      const sc = span(boxes[i]).range * boxes[i].idx.length;
+      if (sc > bestScore){ bestScore = sc; best = i; }
+    }
+    if (best < 0) break;
+    const b = boxes[best], ax = span(b).ax;
+    const sortedIdx = b.idx.slice().sort((p, q) => colors[p][ax] - colors[q][ax]);
+    const mid = sortedIdx.length >> 1;
+    boxes.splice(best, 1, { idx: sortedIdx.slice(0, mid) }, { idx: sortedIdx.slice(mid) });
+  }
+  const palette = [], map = new Int32Array(colors.length);
+  boxes.forEach((b, bi) => {
+    const acc = [0,0,0];
+    for (const i of b.idx){ for (let c = 0; c < 3; c++) acc[c] += colors[i][c]; map[i] = bi; }
+    palette.push(acc.map(v => Math.round(v / b.idx.length)));
+  });
+  return { palette, map };
+}
+
+function encodeVOX(masks, palMode, els){
+  const { out } = solidVoxels(masks, palMode, els);
+  if (!out.length) return { bytes:null, voxels:0, uniqueColours:0, quantised:false };
+
+  const colors = out.map(v => v.rgb);
+  const uniq = new Map();
+  for (const c of colors){ const k = (c[0]<<16)|(c[1]<<8)|c[2]; if (!uniq.has(k)) uniq.set(k, uniq.size); }
+  let palette, indexOf, quantised = false;
+  if (uniq.size <= 255){
+    palette = [...uniq.keys()].map(k => [(k>>16)&255, (k>>8)&255, k&255]);
+    indexOf = i => uniq.get((colors[i][0]<<16)|(colors[i][1]<<8)|colors[i][2]);
+  } else {
+    const mc = medianCut(colors, 255);
+    palette = mc.palette; indexOf = i => mc.map[i]; quantised = true;
+  }
+
+  // GL is Y-up right-handed; MagicaVoxel is Z-up right-handed.  The correct
+  // change of basis is (x, y, z) -> (x, -z, y); with 0..8 indices that is
+  // (X, 8-Z, Y).  A bare swap would mirror the model, which matters for every
+  // chiral symmetry mode.
+  const vox = out.map((v, i) => ({ x: v.X, y: 8 - v.Z, z: v.Y, c: indexOf(i) + 1 }));
+
+  const SIZE = new Uint8Array(24), sv = new DataView(SIZE.buffer);
+  SIZE.set([0x53,0x49,0x5a,0x45]); sv.setUint32(4, 12, true); sv.setUint32(8, 0, true);
+  sv.setUint32(12, 9, true); sv.setUint32(16, 9, true); sv.setUint32(20, 9, true);
+
+  const xLen = 4 + vox.length * 4;
+  const XYZI = new Uint8Array(12 + xLen), xv = new DataView(XYZI.buffer);
+  XYZI.set([0x58,0x59,0x5a,0x49]); xv.setUint32(4, xLen, true); xv.setUint32(8, 0, true);
+  xv.setUint32(12, vox.length, true);
+  vox.forEach((v, i) => {
+    const o = 16 + i * 4;
+    XYZI[o] = v.x; XYZI[o+1] = v.y; XYZI[o+2] = v.z; XYZI[o+3] = v.c;
+  });
+
+  // RGBA entry i holds colour index i+1
+  const RGBA = new Uint8Array(12 + 1024), rv = new DataView(RGBA.buffer);
+  RGBA.set([0x52,0x47,0x42,0x41]); rv.setUint32(4, 1024, true); rv.setUint32(8, 0, true);
+  for (let i = 0; i < 256; i++){
+    const o = 12 + i * 4, c = palette[i] || [255,255,255];
+    RGBA[o] = c[0]; RGBA[o+1] = c[1]; RGBA[o+2] = c[2]; RGBA[o+3] = 255;
+  }
+
+  const childSize = SIZE.length + XYZI.length + RGBA.length;
+  const MAIN = new Uint8Array(12 + childSize), mv = new DataView(MAIN.buffer);
+  MAIN.set([0x4d,0x41,0x49,0x4e]); mv.setUint32(4, 0, true); mv.setUint32(8, childSize, true);
+  let off = 12;
+  MAIN.set(SIZE, off); off += SIZE.length;
+  MAIN.set(XYZI, off); off += XYZI.length;
+  MAIN.set(RGBA, off);
+
+  const bytes = new Uint8Array(8 + MAIN.length), fv = new DataView(bytes.buffer);
+  bytes.set([0x56,0x4f,0x58,0x20]); fv.setUint32(4, 150, true);
+  bytes.set(MAIN, 8);
+
+  return { bytes, voxels: vox.length, uniqueColours: uniq.size, quantised };
+}
+
+const OBJ_FACES = [
+  { d:[ 1,0,0], n:1, v:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
+  { d:[-1,0,0], n:2, v:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
+  { d:[0, 1,0], n:3, v:[[0,1,0],[0,1,1],[1,1,1],[1,1,0]] },
+  { d:[0,-1,0], n:4, v:[[0,0,1],[0,0,0],[1,0,0],[1,0,1]] },
+  { d:[0,0, 1], n:5, v:[[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
+  { d:[0,0,-1], n:6, v:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]] }
+];
+
+function encodeOBJ(masks, palMode, els, headerLines){
+  const grid = gridOf(masks);
+  const lines = headerLines.concat([
+    "# v X Y Z R G B (vertex colours), outward vn",
+    "",
+    "vn  1.0000  0.0000  0.0000", "vn -1.0000  0.0000  0.0000",
+    "vn  0.0000  1.0000  0.0000", "vn  0.0000 -1.0000  0.0000",
+    "vn  0.0000  0.0000  1.0000", "vn  0.0000  0.0000 -1.0000", ""
+  ]);
+
+  let vi = 1, quads = 0;
+  for (let z = 0; z < 9; z++) for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++){
+    if (!grid[x + 9*y + 81*z]) continue;
+    const cx = x % 3, cy = y % 3, cz = z % 3;
+    for (const f of OBJ_FACES){
+      const nx = x + f.d[0], ny = y + f.d[1], nz = z + f.d[2];
+      const inside = nx >= 0 && nx < 9 && ny >= 0 && ny < 9 && nz >= 0 && nz < 9;
+      if (inside && grid[nx + 9*ny + 81*nz]) continue;
+      for (const vt of f.v){
+        const VX = x + vt[0], VY = y + vt[1], VZ = z + vt[2];
+        const pos = [ (VX - 4.5) * (2/3), (VY - 4.5) * (2/3), (VZ - 4.5) * (2/3) ];
+        const p = [ (cx + vt[0]) / 1.5 - 1, (cy + vt[1]) / 1.5 - 1, (cz + vt[2]) / 1.5 - 1 ];
+        const w = [ wOfVertex(VX), wOfVertex(VY), wOfVertex(VZ) ];
+        const c = colorize(p, w, palMode, els);
+        lines.push(`v ${pos[0].toFixed(4)} ${pos[1].toFixed(4)} ${pos[2].toFixed(4)} ` +
+                   `${c[0].toFixed(4)} ${c[1].toFixed(4)} ${c[2].toFixed(4)}`);
+      }
+      lines.push(`f ${vi}//${f.n} ${vi+1}//${f.n} ${vi+2}//${f.n} ${vi+3}//${f.n}`);
+      vi += 4; quads++;
+    }
+  }
+  return { text: lines.join("\n"), quads };
+}
+
+/* ====================== BIMOBLOCK CORE END ====================== */
+/* ------------------------------- contact sheet ---------------------------
+   Rows are symmetry groups, columns are archetypes.  Every other control is
+   shared across the sheet, so a single frame is a slice through the whole
+   parameter space at fixed field / lift / density / seed.
+
+   The core's buildMasks() re-folds all 729 lattice points on every call, which
+   costs ~290 ms for 120 cells -- too slow to morph.  The fold and the envelope
+   test depend only on (group, g48, archetype), never on seed / field / lift /
+   density / time, so they are cached as a "plan" and only the field evaluation
+   and the density quantile run per rebuild.  buildFromPlan() must stay
+   bit-identical to the core's buildMasks(); the verifier checks that.
+   -------------------------------------------------------------------------- */
+
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", { antialias:false, alpha:false, depth:false,
+                                         preserveDrawingBuffer:true });
+
+function compile(type, src){
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(sh));
+    console.error(src.split("\n").map((l,i)=>(i+1)+"| "+l).join("\n"));
+    return null;
+  }
+  return sh;
+}
+function showToast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.opacity = "1";
+  clearTimeout(t._timer); t._timer = setTimeout(()=>{ t.style.opacity = "0"; }, 2100);
+}
+
+const ROWS = GROUPS.length, COLS = ARCH_NAMES.length;
+
+/* ---- plan cache ---------------------------------------------------------- */
+const foldCache = new Map();          // "sym:g48" -> flat fold of all 729 cells
+function foldPlan(sym, g48){
+  const key = sym + ":" + g48;
+  let p = foldCache.get(key);
+  if (p) return p;
+  const els = GROUPS[sym].els, J = [], K = [], S = [];
+  for (let j = 0; j < 27; j++){
+    const gx = j % 3, gy = (j / 3 | 0) % 3, gz = j / 9 | 0;
+    for (let k = 0; k < 27; k++){
+      const cx = k % 3, cy = (k / 3 | 0) % 3, cz = k / 9 | 0;
+      const n = applyG([((gx-1)*3 + (cx-1)) * 0.25,
+                        ((gy-1)*3 + (cy-1)) * 0.25,
+                        ((gz-1)*3 + (cz-1)) * 0.25], g48);
+      const f = foldOrbit(n, els);
+      J.push(j); K.push(k); S.push(f[0], f[1], f[2]);
+    }
+  }
+  p = { n:J.length, j:Int32Array.from(J), k:Int32Array.from(K), s:Float64Array.from(S) };
+  foldCache.set(key, p);
+  return p;
+}
+
+// Both caches are keyed on g48, and a full scan of the 48 settings would pin
+// ~5700 plans in memory.  g48 is a global of the sheet, so the caches are
+// simply dropped when it moves: bounded at 10 folds + 120 plans.
+function clearPlans(){ foldCache.clear(); planCache.clear(); }
+
+const planCache = new Map();          // "sym:g48:arch" -> cells passing the envelope
+function plan(sym, g48, arch){
+  const key = sym + ":" + g48 + ":" + arch;
+  let p = planCache.get(key);
+  if (p) return p;
+  const f = foldPlan(sym, g48), J = [], K = [], S = [];
+  for (let i = 0; i < f.n; i++){
+    const a = f.s[3*i], b = f.s[3*i+1], c = f.s[3*i+2];
+    if (!envelope(a, b, c, arch)) continue;
+    J.push(f.j[i]); K.push(f.k[i]); S.push(a, b, c);
+  }
+  p = { n:J.length, j:Int32Array.from(J), k:Int32Array.from(K), s:Float64Array.from(S),
+        vals:new Float64Array(J.length), tmp:new Float64Array(J.length) };
+  planCache.set(key, p);
+  return p;
+}
+
+// the morph clock, the seed hash and the planar coefficients are shared by all
+// 120 cells, so they are resolved once per rebuild rather than once per cell
+function sheetSeed(fmode, seed, tNow){
+  const step = Math.floor(Math.max(tNow, 0) * RATE) >>> 0;
+  const effSeed = ((seed >>> 0) ^ Math.imul(step, 0x85ebca6b)) >>> 0;
+  const pars = { conic: conicParams(effSeed), scale: [] };
+  if (fmode >= NATIVE_FIELDS)
+    pars.scale[fmode - NATIVE_FIELDS] = planarScale(PLANAR[fmode - NATIVE_FIELDS], pars.conic);
+  return { effSeed, pars };
+}
+
+// must stay bit-identical to the core's buildMasks(), minus the cached work
+function buildFromPlan(p, fmode, lift, effSeed, pars, density){
+  const v = p.vals;
+  for (let i = 0; i < p.n; i++)
+    v[i] = field(p.s[3*i], p.s[3*i+1], p.s[3*i+2], fmode, effSeed, lift, pars);
+
+  const masks = new Uint32Array(27);
+  let filled = 0;
+  if (p.n){
+    p.tmp.set(v);
+    const sorted = p.tmp.sort();
+    const want = Math.max(1, Math.round(density * p.n));
+    const cut = sorted[Math.max(0, p.n - want)];
+    for (let i = 0; i < p.n; i++)
+      if (v[i] >= cut){ masks[p.j[i]] |= (1 << p.k[i]) >>> 0; filled++; }
+  }
+  return { masks, envelopeCells: p.n, filled };
+}
+
+/* ------------------------------------ host ------------------------------- */
+function main(){
+  const vs = compile(gl.VERTEX_SHADER, VERT), fs = compile(gl.FRAGMENT_SHADER, FRAG);
+  if (!vs || !fs) return;
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(prog)); return; }
+  gl.useProgram(prog);
+  gl.bindVertexArray(gl.createVertexArray());
+
+  const uRes      = gl.getUniformLocation(prog, "iResolution");
+  const uOrigin   = gl.getUniformLocation(prog, "uOrigin");
+  const uTime     = gl.getUniformLocation(prog, "iTime");
+  const uMasks    = gl.getUniformLocation(prog, "uMasks[0]");
+  const uGroupEls = gl.getUniformLocation(prog, "uGroupEls[0]");
+  const uGroupN   = gl.getUniformLocation(prog, "uGroupN");
+  const uPalMode  = gl.getUniformLocation(prog, "uPaletteMode");
+  const uAO       = gl.getUniformLocation(prog, "uAO");
+
+  const hud = document.getElementById("hud");
+  const labels = document.getElementById("labels");
+  const selBox = document.getElementById("sel");
+
+  const PAL_NAMES = ["gamut","orbit-sym","helical","core/hull","cyber-phase"];
+  const DENSITIES = [0.12, 0.22, 0.35, 0.50, 0.65];
+  const GUTTER_L = 92, GUTTER_T = 24, PAD = 10, GAP = 3;
+
+  let iTime = 0, maskT = 0, lastStep = -1;
+  let running = true, morph = false, ao = false;
+  let g48 = 0, fieldMode = 0, lift = 0, palMode = 0, seed = 42, densityIdx = 2;
+  let fps = 0, dpr = 1, cell = 60, sel = null, buildMs = 0;
+  let zoom = null;                        // { r, c } while a single cell is isolated
+  const cells = [];                       // [row][col] -> { masks, filled, envelopeCells }
+  const groupEls = GROUPS.map(g => { const a = new Int32Array(48); a.set(g.els); return a; });
+
+  function rebuild(){
+    const t0 = performance.now();
+    const S = sheetSeed(fieldMode, seed, maskT);
+    for (let r = 0; r < ROWS; r++){
+      cells[r] = cells[r] || [];
+      for (let c = 0; c < COLS; c++)
+        cells[r][c] = buildFromPlan(plan(r, g48, c), fieldMode, lift, S.effSeed, S.pars, DENSITIES[densityIdx]);
+    }
+    buildMs = performance.now() - t0;
+    paintHud();
+  }
+
+  /* ---- layout ----------------------------------------------------------- */
+  function layout(){
+    const W = innerWidth, H = innerHeight;
+    cell = Math.max(28, Math.floor(Math.min((W - GUTTER_L - PAD) / COLS, (H - GUTTER_T - PAD) / ROWS)));
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+    const cw = Math.round(W * dpr), ch = Math.round(H * dpr);
+    if (canvas.width !== cw || canvas.height !== ch){ canvas.width = cw; canvas.height = ch; }
+
+    if (zoom){
+      const g = GROUPS[zoom.r];
+      labels.innerHTML =
+        `<div class="lbl col" style="left:0;top:8px;width:${W}px;text-align:center">` +
+        `<span style="color:#b8b8cc">${g.name}</span>` +
+        `<span style="color:#4c4c5c"> x </span>` +
+        `<span style="color:#b8b8cc">${ARCH_NAMES[zoom.c]}</span>` +
+        `<span style="color:#4c4c5c">   |G|=${g.order}${g.chiral ? " chiral" : ""}` +
+        `   cosets ${g.cosetOf[g48] + 1}/${g.cosets}</span></div>` +
+        `<div class="lbl col" style="left:0;bottom:8px;width:${W}px;text-align:center;color:#3e3e4c">` +
+        `click or esc to return to the sheet &nbsp;&middot;&nbsp; arrows to move</div>`;
+      selBox.style.display = "none";
+      canvas.style.cursor = "zoom-out";
+      return;
+    }
+    canvas.style.cursor = "zoom-in";
+
+    const out = [];
+    for (let c = 0; c < COLS; c++)
+      out.push(`<div class="lbl col" style="left:${GUTTER_L + c*cell}px;top:6px;width:${cell}px;` +
+               `text-align:center;overflow:hidden">${ARCH_NAMES[c]}</div>`);
+    for (let r = 0; r < ROWS; r++)
+      out.push(`<div class="lbl row" style="left:0;top:${GUTTER_T + r*cell + cell/2 - 7}px;` +
+               `width:${GUTTER_L - 8}px">${GROUPS[r].name}<br><span style="color:#4c4c5c">|G|=${GROUPS[r].order}` +
+               `${GROUPS[r].chiral ? " chiral" : ""}</span></div>`);
+    labels.innerHTML = out.join("");
+  }
+
+  const cellRect = (r, c) => ({ x: GUTTER_L + c*cell, y: GUTTER_T + r*cell, w: cell - GAP, h: cell - GAP });
+
+  // a centred square, so the isolated view is not distorted by window aspect
+  function zoomRect(){
+    const W = innerWidth, H = innerHeight;
+    const side = Math.max(64, Math.min(W - 2*PAD, H - GUTTER_T - 3*PAD));
+    return { x: (W - side) / 2, y: GUTTER_T + (H - GUTTER_T - side) / 2, w: side, h: side };
+  }
+
+  function setSel(r, c){
+    sel = { r, c };
+    sel.aut = autOrder(gridOf(cells[r][c].masks));
+  }
+
+  /* ---- picking ---------------------------------------------------------- */
+  function pick(mx, my){
+    const c = Math.floor((mx - GUTTER_L) / cell), r = Math.floor((my - GUTTER_T) / cell);
+    return (r >= 0 && r < ROWS && c >= 0 && c < COLS) ? { r, c } : null;
+  }
+  addEventListener("mousemove", ev => {
+    if (zoom) return;
+    const p = pick(ev.clientX, ev.clientY);
+    if (p && (!sel || sel.r !== p.r || sel.c !== p.c)){
+      const q = cellRect(p.r, p.c);
+      selBox.style.cssText = `display:block;left:${q.x}px;top:${q.y}px;width:${q.w}px;height:${q.h}px`;
+      setSel(p.r, p.c);
+      paintHud();
+    } else if (!p && sel){ sel = null; selBox.style.display = "none"; paintHud(); }
+  });
+  function paramLine(r, c){
+    return `sym=${GROUPS[r].name} arch=${ARCH_NAMES[c]} g48=${formatG48(g48)} ` +
+      `field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? "/" + LIFT_NAMES[lift] : ""} ` +
+      `density=${DENSITIES[densityIdx]} seed=${seed} | aut=${sel && sel.aut}/48 fill=${cells[r][c].filled}/729`;
+  }
+  function exitZoom(){ if (!zoom) return; zoom = null; layout(); paintHud(); }
+  addEventListener("click", () => {
+    if (zoom){ exitZoom(); return; }
+    if (!sel) return;
+    zoom = { r: sel.r, c: sel.c };
+    console.log(paramLine(zoom.r, zoom.c));
+    layout(); paintHud();
+  });
+
+  /* ---- exports ----------------------------------------------------------- */
+  function download(blob, name){
+    const url = URL.createObjectURL(blob), a = document.createElement("a");
+    a.href = url; a.download = name; document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+  }
+  function sheetName(){
+    const cellTag = zoom ? `cell_${GROUPS[zoom.r].name.split(":")[0]}_${ARCH_NAMES[zoom.c]}_` : "";
+    return `${cellTag}contactsheet_${FIELD_NAMES[fieldMode].replace("/","-").replace("±","pm")}` +
+           `${fieldMode >= NATIVE_FIELDS ? "-" + LIFT_NAMES[lift] : ""}` +
+           `_g${String(g48).padStart(2,"0")}_d${DENSITIES[densityIdx]}_${PAL_NAMES[palMode]}_s${seed}`;
+  }
+  function exportPNG(){
+    draw();                                       // guarantee a fresh buffer
+    const W = innerWidth, H = innerHeight;
+    const out = document.createElement("canvas");
+    out.width = Math.round(W * dpr); out.height = Math.round(H * dpr);
+    const c2 = out.getContext("2d");
+    c2.fillStyle = "#07070a"; c2.fillRect(0, 0, out.width, out.height);
+    c2.drawImage(canvas, 0, 0);
+    c2.scale(dpr, dpr);
+    c2.font = "10px ui-monospace, Menlo, Consolas, monospace";
+    c2.textAlign = "center";
+    if (zoom){
+      const g = GROUPS[zoom.r];
+      c2.fillStyle = "#b8b8cc";
+      c2.fillText(`${g.name}  x  ${ARCH_NAMES[zoom.c]}`, W/2, 16);
+      c2.fillStyle = "#4c4c5c";
+      c2.fillText(`|G|=${g.order}${g.chiral ? " chiral" : ""}   coset ${g.cosetOf[g48]+1}/${g.cosets}` +
+                  `   aut ${sel ? sel.aut : "?"}/48   fill ${cells[zoom.r][zoom.c].filled}/729`, W/2, 28);
+    } else {
+      c2.fillStyle = "#8a8a9e";
+      for (let c = 0; c < COLS; c++) c2.fillText(ARCH_NAMES[c], GUTTER_L + c*cell + cell/2, 14);
+      c2.textAlign = "right";
+      for (let r = 0; r < ROWS; r++){
+        c2.fillStyle = "#8a8a9e"; c2.fillText(GROUPS[r].name, GUTTER_L - 8, GUTTER_T + r*cell + cell/2);
+        c2.fillStyle = "#4c4c5c"; c2.fillText("|G|=" + GROUPS[r].order, GUTTER_L - 8, GUTTER_T + r*cell + cell/2 + 12);
+      }
+    }
+    c2.textAlign = "left"; c2.fillStyle = "#4c4c5c";
+    c2.fillText(sheetName(), 6, H - 6);
+    out.toBlob(b => { download(b, sheetName() + ".png"); showToast(sheetName() + ".png"); });
+  }
+  // .vox / .obj describe one model, so they are only offered while a cell is
+  // isolated.  They route through the same core encoders the main app uses.
+  function cellName(){
+    const g = GROUPS[zoom.r];
+    return `${ARCH_NAMES[zoom.c]}_${g.name.split(":")[0]}_g${String(g48).padStart(2,"0")}` +
+           `_${FIELD_NAMES[fieldMode].replace("/","-").replace("±","pm")}` +
+           `${fieldMode >= NATIVE_FIELDS ? "-" + LIFT_NAMES[lift] : ""}_${PAL_NAMES[palMode]}_s${seed}`;
+  }
+  function exportVOX(){
+    if (!zoom){ showToast("isolate a cell first — click one"); return; }
+    const r = encodeVOX(cells[zoom.r][zoom.c].masks, palMode, GROUPS[zoom.r].els);
+    if (!r.voxels){ showToast("model is empty"); return; }
+    download(new Blob([r.bytes], { type:"application/octet-stream" }), cellName() + ".vox");
+    showToast(`${cellName()}.vox — ${r.voxels} voxels, ` +
+              (r.quantised ? `${r.uniqueColours} colours -> 255 (median cut)` : `${r.uniqueColours} colours exact`));
+  }
+  function exportOBJ(){
+    if (!zoom){ showToast("isolate a cell first — click one"); return; }
+    const G = GROUPS[zoom.r];
+    const r = encodeOBJ(cells[zoom.r][zoom.c].masks, palMode, G.els, [
+      "# bimoblock lattice sprite v2 (from contact sheet)",
+      `# archetype=${ARCH_NAMES[zoom.c]} group=${G.name} |G|=${G.order}` +
+      ` g48=${formatG48(g48)} coset=${G.cosetOf[g48]+1}/${G.cosets}`,
+      `# field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? " lift=" + LIFT_NAMES[lift] : ""}` +
+      ` density=${DENSITIES[densityIdx]} domain=${PAL_NAMES[palMode]} seed=${seed}`,
+      `# measured stabiliser inside Oh: order ${sel ? sel.aut : autOrder(gridOf(cells[zoom.r][zoom.c].masks))}/48`
+    ]);
+    if (!r.quads){ showToast("mesh is empty"); return; }
+    download(new Blob([r.text], { type:"text/plain" }), cellName() + ".obj");
+    showToast(`${cellName()}.obj — ${r.quads} quads`);
+  }
+
+  function exportJSON(){
+    const doc = {
+      format: "bimoblock-contact-sheet/1",
+      generated: new Date().toISOString(),
+      shared: { g48, g48Label: formatG48(g48), field: FIELD_NAMES[fieldMode],
+                lift: fieldMode >= NATIVE_FIELDS ? LIFT_NAMES[lift] : null,
+                density: DENSITIES[densityIdx], domain: PAL_NAMES[palMode], seed,
+                morphStep: Math.floor(maskT * RATE) },
+      rows: GROUPS.map(g => ({ name: g.name, order: g.order, chiral: g.chiral, cosets: g.cosets })),
+      cols: ARCH_NAMES.slice(),
+      cells: []
+    };
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++){
+      const m = cells[r][c];
+      doc.cells.push({
+        group: GROUPS[r].name, archetype: ARCH_NAMES[c],
+        stabiliserOrder: autOrder(gridOf(m.masks)),
+        envelopeCells: m.envelopeCells, filledCells: m.filled,
+        masks: [...m.masks].map(v => "0x" + v.toString(16).padStart(7, "0"))
+      });
+    }
+    download(new Blob([JSON.stringify(doc, null, 2)], { type:"application/json" }), sheetName() + ".json");
+    showToast(sheetName() + ".json — " + doc.cells.length + " cells");
+  }
+
+  /* ---- hud --------------------------------------------------------------- */
+  function paintHud(){
+    const R = [];
+    R.push("<span class='sec'>--- SHEET ---</span>");
+    R.push("grid".padEnd(9) + `${ROWS} groups x ${COLS} arch`.padEnd(18));
+    R.push("field".padEnd(9) + FIELD_NAMES[fieldMode].padEnd(18) + "f");
+    R.push("lift".padEnd(9) + (fieldMode >= NATIVE_FIELDS ? LIFT_NAMES[lift] : "<span class='sec'>n/a</span>").padEnd(18) + "x");
+    R.push("density".padEnd(9) + DENSITIES[densityIdx].toFixed(2).padEnd(18) + "d");
+    R.push("g48".padEnd(9) + formatG48(g48).padEnd(18) + "g/h");
+    R.push("domain".padEnd(9) + PAL_NAMES[palMode].padEnd(18) + "k");
+    R.push("seed".padEnd(9) + ("#" + seed).padEnd(18) + "n/p");
+    R.push("build".padEnd(9) + (buildMs.toFixed(1) + " ms").padEnd(18));
+    R.push("");
+    R.push("<span class='sec'>--- VIEW ---</span>");
+    R.push("morph".padEnd(9) + (morph ? "on" : "hold").padEnd(18) + "m");
+    R.push("orbit".padEnd(9) + (running ? "run" : "hold").padEnd(18) + "space");
+    R.push("ao".padEnd(9) + (ao ? "on" : "off").padEnd(18) + "l");
+    R.push("random".padEnd(9) + "".padEnd(18) + "r");
+    R.push("");
+    R.push("<span class='sec'>--- EXPORT ---</span>");
+    R.push((zoom ? ".png cell / .json" : ".png sheet / .json").padEnd(27) + "y/j");
+    R.push((zoom ? ".vox / .obj  this cell" : "<span class='sec'>.vox / .obj  isolate first</span>").padEnd(38) + "e/o");
+    if (sel){
+      const m = cells[sel.r][sel.c];
+      R.push("");
+      R.push("<span class='sec'>--- " + (zoom ? "ISOLATED" : "CELL") + " ---</span>");
+      R.push(GROUPS[sel.r].name + " x " + ARCH_NAMES[sel.c]);
+      R.push("aut".padEnd(9) + (`${sel.aut}/48` + (sel.aut > GROUPS[sel.r].order ? "  *" : "")).padEnd(18));
+      R.push("fill".padEnd(9) + `${m.filled}/729  of ${m.envelopeCells}`);
+      R.push("<span class='sec'>" + (zoom ? "click / esc to go back" : "click to isolate") + "</span>");
+      R.push("<span class='sec'>arrows move the selection</span>");
+    }
+    hud.innerHTML = R.join("\n") + "\n\n<b>" + fps + " fps</b>";
+  }
+
+  /* ---- input -------------------------------------------------------------- */
+  addEventListener("keydown", ev => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const k = ev.key.toLowerCase();
+    if (k === "escape"){ exitZoom(); return; }
+    if (k.startsWith("arrow")){
+      ev.preventDefault();
+      const base = zoom || sel || { r:0, c:0 };
+      const dr = (k === "arrowdown") - (k === "arrowup");
+      const dc = (k === "arrowright") - (k === "arrowleft");
+      const r = (base.r + dr + ROWS) % ROWS, c = (base.c + dc + COLS) % COLS;
+      setSel(r, c);
+      if (zoom){ zoom = { r, c }; layout(); }
+      else {
+        const q = cellRect(r, c);
+        selBox.style.cssText = `display:block;left:${q.x}px;top:${q.y}px;width:${q.w}px;height:${q.h}px`;
+      }
+      paintHud(); return;
+    }
+    if (k === " " || ev.code === "Space"){ ev.preventDefault(); running = !running; paintHud(); return; }
+    switch (k){
+      case "m": morph = !morph; paintHud(); return;
+      case "l": ao = !ao; gl.uniform1i(uAO, ao ? 1 : 0); paintHud(); return;
+      case "f": fieldMode = (fieldMode + 1) % FIELD_NAMES.length; rebuild(); return;
+      case "x": lift = (lift + 1) % LIFT_NAMES.length; rebuild(); return;
+      case "d": densityIdx = (densityIdx + 1) % DENSITIES.length; rebuild(); return;
+      case "g": g48 = (g48 + 1) % 48; clearPlans(); rebuild(); return;
+      case "h": g48 = (g48 + 47) % 48; clearPlans(); rebuild(); return;
+      case "k": palMode = (palMode + 1) % PAL_NAMES.length; gl.uniform1i(uPalMode, palMode); paintHud(); return;
+      case "n": seed = (seed + 1) & 0xffff; rebuild(); return;
+      case "p": seed = (seed + 0xffff) & 0xffff; rebuild(); return;
+      case "r":
+        g48 = Math.floor(Math.random() * 48); clearPlans();
+        fieldMode = Math.floor(Math.random() * FIELD_NAMES.length);
+        lift = Math.floor(Math.random() * LIFT_NAMES.length);
+        densityIdx = Math.floor(Math.random() * DENSITIES.length);
+        seed = Math.floor(Math.random() * 0x10000);
+        rebuild(); return;
+      case "y": exportPNG(); return;
+      case "e": exportVOX(); return;
+      case "o": exportOBJ(); return;
+      case "j": exportJSON(); return;
+    }
+  });
+  addEventListener("resize", () => { layout(); });
+
+  /* ---- draw --------------------------------------------------------------- */
+  function draw(){
+    gl.disable(gl.SCISSOR_TEST);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.027, 0.027, 0.039, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    const Hpx = canvas.height;
+
+    if (zoom){
+      const q = zoomRect();
+      const vx = Math.round(q.x * dpr), vw = Math.round(q.w * dpr), vh = Math.round(q.h * dpr);
+      const vy = Hpx - Math.round((q.y + q.h) * dpr);
+      gl.uniform1iv(uGroupEls, groupEls[zoom.r]);
+      gl.uniform1i(uGroupN, GROUPS[zoom.r].order);
+      gl.viewport(vx, vy, vw, vh);
+      gl.uniform3f(uRes, vw, vh, 1);
+      gl.uniform2f(uOrigin, vx, vy);
+      gl.uniform1uiv(uMasks, cells[zoom.r][zoom.c].masks);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      return;
+    }
+
+    for (let r = 0; r < ROWS; r++){
+      gl.uniform1iv(uGroupEls, groupEls[r]);
+      gl.uniform1i(uGroupN, GROUPS[r].order);
+      for (let c = 0; c < COLS; c++){
+        const q = cellRect(r, c);
+        const vx = Math.round(q.x * dpr), vw = Math.round(q.w * dpr), vh = Math.round(q.h * dpr);
+        const vy = Hpx - Math.round((q.y + q.h) * dpr);
+        gl.viewport(vx, vy, vw, vh);
+        gl.uniform3f(uRes, vw, vh, 1);
+        gl.uniform2f(uOrigin, vx, vy);
+        gl.uniform1uiv(uMasks, cells[r][c].masks);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
+    }
+  }
+
+  gl.uniform1i(uPalMode, palMode);
+  gl.uniform1i(uAO, ao ? 1 : 0);
+  layout();
+  rebuild();
+  lastStep = Math.floor(maskT * RATE);
+
+  let last = performance.now(), acc = 0, frames = 0;
+  function frame(now){
+    const dt = Math.min((now - last) / 1000, 0.05); last = now;
+    if (running){
+      iTime += dt;
+      if (morph){
+        maskT += dt;
+        const step = Math.floor(maskT * RATE);
+        if (step !== lastStep){ lastStep = step; rebuild(); }
+      }
+    }
+    gl.uniform1f(uTime, iTime);
+    draw();
+    acc += dt; frames++;
+    if (acc >= 0.5){ fps = Math.round(frames / acc); acc = 0; frames = 0; paintHud(); }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+if (gl) main();
+else { console.error("WebGL2 unavailable."); document.getElementById("hud").textContent = "needs WebGL2"; }
+</script>
+</body>
+</html>
