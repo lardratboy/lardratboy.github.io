@@ -18,6 +18,15 @@
         border:1px solid rgba(255,255,255,.07); pointer-events:none; }
   #hud b{ color:#a0a0b2; font-weight:normal; }
   #hud .sec{ color:#3e3e4c; }
+  #menu{ position:fixed; display:none; z-index:10; min-width:186px;
+    background:rgba(18,18,24,.97); border:1px solid rgba(255,255,255,.14);
+    border-radius:5px; padding:4px; box-shadow:0 6px 24px rgba(0,0,0,.55); }
+  #menu button{ display:block; width:100%; text-align:left; background:none; border:0;
+    color:#b8b8cc; font:inherit; padding:5px 10px; border-radius:3px; cursor:pointer; }
+  #menu button:hover{ background:rgba(120,140,220,.22); color:#e6e6f2; }
+  #menu .hdr{ color:#4c4c5c; padding:4px 10px 6px; border-bottom:1px solid rgba(255,255,255,.08);
+    margin-bottom:4px; white-space:nowrap; }
+  #menu .rule{ height:1px; background:rgba(255,255,255,.08); margin:4px 0; }
   #toast{ position:fixed; left:50%; top:16px; transform:translateX(-50%);
     background:rgba(20,20,28,.88); color:#c8c8dc; border:1px solid rgba(255,255,255,.15);
     padding:6px 14px; border-radius:4px; opacity:0; transition:opacity .25s ease; pointer-events:none; }
@@ -27,6 +36,7 @@
 <canvas id="gl"></canvas>
 <div id="labels"></div>
 <div id="sel"></div>
+<div id="menu"></div>
 <div id="hud"></div>
 <div id="toast"></div>
 
@@ -758,6 +768,110 @@ function encodeOBJ(masks, palMode, els, headerLines){
   return { text: lines.join("\n"), quads };
 }
 
+
+/* ---- 729-bit occupancy interchange ---------------------------------------
+   A sprite is 729 bits of geometry.  The ?b64= link carries only those bits
+   -- no group, no field, no seed -- so a shared link keeps meaning even after
+   the generator changes underneath it.
+
+   Bit i of the stream is grid[i] with i = X + 9Y + 81Z, LSB-first inside each
+   byte.  729 bits -> 92 bytes -> 123 base64url characters, no padding.
+   -------------------------------------------------------------------------- */
+const B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const B64_BYTES = 92, B64_CHARS = 123;
+
+function gridToB64(grid){
+  const bytes = new Uint8Array(B64_BYTES);
+  for (let i = 0; i < 729; i++) if (grid[i]) bytes[i >> 3] |= 1 << (i & 7);
+  let out = "";
+  for (let i = 0; i < B64_BYTES; i += 3){
+    const n = (bytes[i] << 16) | ((bytes[i+1] || 0) << 8) | (bytes[i+2] || 0);
+    const chars = Math.min(3, B64_BYTES - i) + 1;      // 3 bytes -> 4 chars, 2 -> 3
+    for (let j = 0; j < chars; j++) out += B64URL[(n >> (18 - 6*j)) & 63];
+  }
+  return out;
+}
+
+// liberal on input: accepts standard base64 as well as base64url, with or
+// without padding.  Returns null rather than throwing on anything malformed.
+function b64ToGrid(str){
+  if (!str) return null;
+  const s = String(str).trim().replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  if (!/^[A-Za-z0-9_-]+$/.test(s)) return null;
+  const bytes = new Uint8Array(B64_BYTES);
+  let bi = 0, acc = 0, bits = 0;
+  for (let i = 0; i < s.length; i++){
+    const v = B64URL.indexOf(s[i]);
+    if (v < 0) return null;
+    acc = (acc << 6) | v; bits += 6;
+    if (bits >= 8){ bits -= 8; if (bi < B64_BYTES) bytes[bi++] = (acc >> bits) & 255; }
+  }
+  if (bi < B64_BYTES) return null;                      // truncated
+  const grid = new Uint8Array(729);
+  for (let i = 0; i < 729; i++) grid[i] = (bytes[i >> 3] >> (i & 7)) & 1;
+  return grid;
+}
+
+// inverse of gridOf(): repack a flat 9^3 grid into the 27 block masks the
+// renderer consumes
+function masksFromGrid(grid){
+  const m = new Uint32Array(27);
+  for (let Z = 0; Z < 9; Z++) for (let Y = 0; Y < 9; Y++) for (let X = 0; X < 9; X++){
+    if (!grid[X + 9*Y + 81*Z]) continue;
+    m[(X/3|0) + 3*(Y/3|0) + 9*(Z/3|0)] |= (1 << ((X%3) + 3*(Y%3) + 9*(Z%3))) >>> 0;
+  }
+  return m;
+}
+
+function stabilises(grid, e){
+  for (let z = 0; z < 9; z++) for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++){
+    const w = applyG([x-4, y-4, z-4], e);
+    if (grid[x + 9*y + 81*z] !== grid[(w[0]+4) + 9*(w[1]+4) + 81*(w[2]+4)]) return false;
+  }
+  return true;
+}
+
+// An imported grid arrives with no declared symmetry, but the palette's
+// orbit-sym mode needs a group to fold against.  Take the largest declared
+// subgroup that actually stabilises it -- always well defined, since C1 does.
+function bestGroupFor(grid){
+  let best = 0;
+  for (let i = 1; i < GROUPS.length; i++)
+    if (GROUPS[i].order > GROUPS[best].order && GROUPS[i].els.every(e => stabilises(grid, e))) best = i;
+  return best;
+}
+
+function b64FromLocation(){
+  try {
+    const m = /[?&]b64=([^&]+)/.exec((typeof location !== "undefined" && location.search) || "");
+    return m ? decodeURIComponent(m[1]) : null;
+  } catch (_){ return null; }
+}
+function permalinkFor(b64){
+  try { const u = new URL(location.href); u.search = "?b64=" + b64; u.hash = ""; return u.href; }
+  catch (_){ return "?b64=" + b64; }
+}
+
+// clipboard with a synchronous fallback for file:// and permission-denied,
+// and an unconditional console echo so the string is never simply lost
+function copyToClipboard(text, onDone, onFail){
+  console.log(text);
+  const fallback = () => {
+    let done = false;
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      done = document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch (_){ done = false; }
+    done ? onDone && onDone() : onFail && onFail();
+  };
+  if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText)
+    navigator.clipboard.writeText(text).then(() => onDone && onDone(), fallback);
+  else fallback();
+}
+
 /* ====================== BIMOBLOCK CORE END ====================== */
 /* ------------------------------- contact sheet ---------------------------
    Rows are symmetry groups, columns are archetypes.  Every other control is
@@ -901,6 +1015,8 @@ function main(){
   let g48 = 0, fieldMode = 0, lift = 0, palMode = 0, seed = 42, densityIdx = 2;
   let fps = 0, dpr = 1, cell = 60, sel = null, buildMs = 0;
   let zoom = null;                        // { r, c } while a single cell is isolated
+  let imported = null;                    // a 729-bit grid handed in via ?b64=
+  const menu = document.getElementById("menu");
   const cells = [];                       // [row][col] -> { masks, filled, envelopeCells }
   const groupEls = GROUPS.map(g => { const a = new Int32Array(48); a.set(g.els); return a; });
 
@@ -925,6 +1041,19 @@ function main(){
     const cw = Math.round(W * dpr), ch = Math.round(H * dpr);
     if (canvas.width !== cw || canvas.height !== ch){ canvas.width = cw; canvas.height = ch; }
 
+    if (imported){
+      const g = GROUPS[imported.groupIdx];
+      labels.innerHTML =
+        `<div class="lbl col" style="left:0;top:8px;width:${W}px;text-align:center">` +
+        `<span style="color:#b8b8cc">imported 729-bit grid</span>` +
+        `<span style="color:#4c4c5c">   ${imported.filled}/729 cells` +
+        `   stabiliser ${imported.aut}/48   largest declared subgroup ${g.name}</span></div>` +
+        `<div class="lbl col" style="left:0;bottom:8px;width:${W}px;text-align:center;color:#3e3e4c">` +
+        `click or esc to return to the sheet &nbsp;&middot;&nbsp; right-click to copy or export</div>`;
+      selBox.style.display = "none";
+      canvas.style.cursor = "zoom-out";
+      return;
+    }
     if (zoom){
       const g = GROUPS[zoom.r];
       labels.innerHTML =
@@ -973,7 +1102,7 @@ function main(){
     return (r >= 0 && r < ROWS && c >= 0 && c < COLS) ? { r, c } : null;
   }
   addEventListener("mousemove", ev => {
-    if (zoom) return;
+    if (zoom || imported || menu.style.display === "block") return;
     const p = pick(ev.clientX, ev.clientY);
     if (p && (!sel || sel.r !== p.r || sel.c !== p.c)){
       const q = cellRect(p.r, p.c);
@@ -988,7 +1117,59 @@ function main(){
       `density=${DENSITIES[densityIdx]} seed=${seed} | aut=${sel && sel.aut}/48 fill=${cells[r][c].filled}/729`;
   }
   function exitZoom(){ if (!zoom) return; zoom = null; layout(); paintHud(); }
+
+  /* ---- context menu ------------------------------------------------------ */
+  function hideMenu(){ menu.style.display = "none"; }
+  function copyAs(text, label){
+    copyToClipboard(text, () => showToast(`${label} copied (${text.length} chars)`),
+                          () => showToast(`${label} logged to console — clipboard blocked`));
+  }
+  function openMenu(x, y){
+    const t = subject();
+    if (!t){ hideMenu(); return; }
+    const b64 = gridToB64(gridOf(t.masks));
+    const title = t.imported ? "imported grid" : `${t.group.name} x ${t.name}`;
+    const items = [];
+    if (t.imported) items.push(["Return to sheet", exitImported]);
+    else items.push([zoom ? "Return to sheet" : "Isolate this cell",
+                     () => { if (zoom) exitZoom(); else { zoom = { r:t.r, c:t.c }; layout(); paintHud(); } }]);
+    items.push(null);
+    items.push(["Copy as base64 (729 bits)", () => copyAs(b64, "base64")]);
+    items.push(["Copy permalink", () => copyAs(permalinkFor(b64), "permalink")]);
+    if (!t.imported) items.push(["Copy parameters", () => copyAs(paramLine(t.r, t.c), "parameters")]);
+    items.push(null);
+    items.push(["Export .vox", exportVOX]);
+    items.push(["Export .obj", exportOBJ]);
+
+    menu.innerHTML = `<div class="hdr">${title}<br>` +
+      `<span style="color:#3e3e4c">aut ${t.aut}/48 &middot; ${t.filled}/729 cells</span></div>`;
+    for (const it of items){
+      if (!it){ menu.appendChild(Object.assign(document.createElement("div"), { className:"rule" })); continue; }
+      const b = document.createElement("button");
+      b.textContent = it[0];
+      b.addEventListener("click", ev => { ev.stopPropagation(); hideMenu(); it[1](); });
+      menu.appendChild(b);
+    }
+    menu.style.display = "block";
+    const w = menu.offsetWidth || 190, h = menu.offsetHeight || 200;
+    menu.style.left = Math.min(x, innerWidth  - w - 6) + "px";
+    menu.style.top  = Math.min(y, innerHeight - h - 6) + "px";
+  }
+  menu.addEventListener("click", ev => ev.stopPropagation());
+  addEventListener("contextmenu", ev => {
+    if (!imported && !zoom){
+      const p = pick(ev.clientX, ev.clientY);
+      if (!p){ hideMenu(); return; }        // off-grid: leave the browser menu alone
+      setSel(p.r, p.c);
+      const q = cellRect(p.r, p.c);
+      selBox.style.cssText = `display:block;left:${q.x}px;top:${q.y}px;width:${q.w}px;height:${q.h}px`;
+    }
+    ev.preventDefault();
+    openMenu(ev.clientX, ev.clientY);
+  });
   addEventListener("click", () => {
+    if (menu.style.display === "block"){ hideMenu(); return; }
+    if (imported){ exitImported(); return; }
     if (zoom){ exitZoom(); return; }
     if (!sel) return;
     zoom = { r: sel.r, c: sel.c };
@@ -1041,34 +1222,67 @@ function main(){
   }
   // .vox / .obj describe one model, so they are only offered while a cell is
   // isolated.  They route through the same core encoders the main app uses.
-  function cellName(){
-    const g = GROUPS[zoom.r];
-    return `${ARCH_NAMES[zoom.c]}_${g.name.split(":")[0]}_g${String(g48).padStart(2,"0")}` +
+  function cellName(sub_){
+    const g = sub_.group;
+    if (sub_.imported) return `imported_${g.name.split(":")[0]}_${PAL_NAMES[palMode]}`;
+    return `${sub_.name}_${g.name.split(":")[0]}_g${String(g48).padStart(2,"0")}` +
            `_${FIELD_NAMES[fieldMode].replace("/","-").replace("±","pm")}` +
            `${fieldMode >= NATIVE_FIELDS ? "-" + LIFT_NAMES[lift] : ""}_${PAL_NAMES[palMode]}_s${seed}`;
   }
   function exportVOX(){
-    if (!zoom){ showToast("isolate a cell first — click one"); return; }
-    const r = encodeVOX(cells[zoom.r][zoom.c].masks, palMode, GROUPS[zoom.r].els);
+    const t = subject();
+    if (!t){ showToast("hover or isolate a cell first"); return; }
+    const r = encodeVOX(t.masks, palMode, t.els);
     if (!r.voxels){ showToast("model is empty"); return; }
-    download(new Blob([r.bytes], { type:"application/octet-stream" }), cellName() + ".vox");
-    showToast(`${cellName()}.vox — ${r.voxels} voxels, ` +
+    download(new Blob([r.bytes], { type:"application/octet-stream" }), cellName(t) + ".vox");
+    showToast(`${cellName(t)}.vox — ${r.voxels} voxels, ` +
               (r.quantised ? `${r.uniqueColours} colours -> 255 (median cut)` : `${r.uniqueColours} colours exact`));
   }
   function exportOBJ(){
-    if (!zoom){ showToast("isolate a cell first — click one"); return; }
-    const G = GROUPS[zoom.r];
-    const r = encodeOBJ(cells[zoom.r][zoom.c].masks, palMode, G.els, [
-      "# bimoblock lattice sprite v2 (from contact sheet)",
-      `# archetype=${ARCH_NAMES[zoom.c]} group=${G.name} |G|=${G.order}` +
-      ` g48=${formatG48(g48)} coset=${G.cosetOf[g48]+1}/${G.cosets}`,
-      `# field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? " lift=" + LIFT_NAMES[lift] : ""}` +
-      ` density=${DENSITIES[densityIdx]} domain=${PAL_NAMES[palMode]} seed=${seed}`,
-      `# measured stabiliser inside Oh: order ${sel ? sel.aut : autOrder(gridOf(cells[zoom.r][zoom.c].masks))}/48`
-    ]);
+    const t = subject();
+    if (!t){ showToast("hover or isolate a cell first"); return; }
+    const G = t.group;
+    const hdr = t.imported
+      ? ["# bimoblock lattice sprite v2 (imported 729-bit grid)",
+         `# stabilised by ${G.name} |G|=${G.order}`,
+         `# domain=${PAL_NAMES[palMode]}`]
+      : ["# bimoblock lattice sprite v2 (from contact sheet)",
+         `# archetype=${t.name} group=${G.name} |G|=${G.order}` +
+         ` g48=${formatG48(g48)} coset=${G.cosetOf[g48]+1}/${G.cosets}`,
+         `# field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? " lift=" + LIFT_NAMES[lift] : ""}` +
+         ` density=${DENSITIES[densityIdx]} domain=${PAL_NAMES[palMode]} seed=${seed}`];
+    const r = encodeOBJ(t.masks, palMode, G.els, hdr.concat([`# measured stabiliser inside Oh: order ${t.aut}/48`]));
     if (!r.quads){ showToast("mesh is empty"); return; }
-    download(new Blob([r.text], { type:"text/plain" }), cellName() + ".obj");
-    showToast(`${cellName()}.obj — ${r.quads} quads`);
+    download(new Blob([r.text], { type:"text/plain" }), cellName(t) + ".obj");
+    showToast(`${cellName(t)}.obj — ${r.quads} quads`);
+  }
+
+  /* ---- imported geometry ------------------------------------------------
+     An imported grid is pure geometry, so the generation controls have nothing
+     to act on.  They are refused while it is on screen rather than silently
+     desynchronising the HUD from what is being drawn.                       */
+  function loadImported(b64, quiet){
+    const grid = b64ToGrid(b64);
+    if (!grid){ if (!quiet) showToast("?b64= is not a valid 729-bit string"); return false; }
+    let n = 0; for (const v of grid) n += v;
+    imported = { grid, masks: masksFromGrid(grid), filled: n,
+                 groupIdx: bestGroupFor(grid), aut: autOrder(grid), b64: gridToB64(grid) };
+    zoom = null; sel = null;
+    layout(); paintHud();
+    return true;
+  }
+  function exitImported(){ if (!imported) return; imported = null; layout(); paintHud(); }
+
+  // whichever cell the menu and the e/o keys should act on
+  function subject(){
+    if (imported) return { imported:true, masks:imported.masks, els:GROUPS[imported.groupIdx].els,
+                           aut:imported.aut, filled:imported.filled,
+                           name:"imported", group:GROUPS[imported.groupIdx] };
+    const t = zoom || sel;
+    if (!t) return null;
+    return { r:t.r, c:t.c, masks:cells[t.r][t.c].masks, els:GROUPS[t.r].els,
+             aut:(sel && sel.r === t.r && sel.c === t.c) ? sel.aut : autOrder(gridOf(cells[t.r][t.c].masks)),
+             filled:cells[t.r][t.c].filled, name:ARCH_NAMES[t.c], group:GROUPS[t.r] };
   }
 
   function exportJSON(){
@@ -1117,7 +1331,8 @@ function main(){
     R.push("");
     R.push("<span class='sec'>--- EXPORT ---</span>");
     R.push((zoom ? ".png cell / .json" : ".png sheet / .json").padEnd(27) + "y/j");
-    R.push((zoom ? ".vox / .obj  this cell" : "<span class='sec'>.vox / .obj  isolate first</span>").padEnd(38) + "e/o");
+    R.push(".vox / .obj  selected".padEnd(27) + "e/o");
+    R.push("<span class='sec'>right-click to copy base64</span>");
     if (sel){
       const m = cells[sel.r][sel.c];
       R.push("");
@@ -1135,7 +1350,12 @@ function main(){
   addEventListener("keydown", ev => {
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const k = ev.key.toLowerCase();
-    if (k === "escape"){ exitZoom(); return; }
+    if (menu.style.display === "block" && k !== "escape") hideMenu();
+    if (k === "escape"){ hideMenu(); if (imported) exitImported(); else exitZoom(); return; }
+    if (imported && "fxdghnprjm".includes(k)){
+      showToast("imported geometry — esc to return to the sheet");
+      return;                              // generation controls have nothing to act on
+    }
     if (k.startsWith("arrow")){
       ev.preventDefault();
       const base = zoom || sel || { r:0, c:0 };
@@ -1184,6 +1404,20 @@ function main(){
     gl.clearColor(0.027, 0.027, 0.039, 1); gl.clear(gl.COLOR_BUFFER_BIT);
     const Hpx = canvas.height;
 
+    if (imported){
+      const q = zoomRect();
+      const vx = Math.round(q.x * dpr), vw = Math.round(q.w * dpr), vh = Math.round(q.h * dpr);
+      const vy = Hpx - Math.round((q.y + q.h) * dpr);
+      gl.uniform1iv(uGroupEls, groupEls[imported.groupIdx]);
+      gl.uniform1i(uGroupN, GROUPS[imported.groupIdx].order);
+      gl.viewport(vx, vy, vw, vh);
+      gl.uniform3f(uRes, vw, vh, 1);
+      gl.uniform2f(uOrigin, vx, vy);
+      gl.uniform1uiv(uMasks, imported.masks);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      return;
+    }
+
     if (zoom){
       const q = zoomRect();
       const vx = Math.round(q.x * dpr), vw = Math.round(q.w * dpr), vh = Math.round(q.h * dpr);
@@ -1219,6 +1453,7 @@ function main(){
   layout();
   rebuild();
   lastStep = Math.floor(maskT * RATE);
+  { const q = b64FromLocation(); if (q) loadImported(q, false); }
 
   let last = performance.now(), acc = 0, frames = 0;
   function frame(now){
