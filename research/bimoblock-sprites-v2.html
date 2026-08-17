@@ -18,6 +18,16 @@
   #hud b{ color:#a0a0b2; font-weight:normal; }
   #hud .sec{ color:#424250; }
   #hud .warn{ color:#b09060; }
+  #menu{ position:fixed; display:none; z-index:10; min-width:186px;
+    background:rgba(18,18,24,.97); border:1px solid rgba(255,255,255,.14);
+    border-radius:5px; padding:4px; box-shadow:0 6px 24px rgba(0,0,0,.55);
+    font:10.5px/1.5 ui-monospace, Menlo, Consolas, monospace; letter-spacing:.05em; }
+  #menu button{ display:block; width:100%; text-align:left; background:none; border:0;
+    color:#b8b8cc; font:inherit; padding:5px 10px; border-radius:3px; cursor:pointer; }
+  #menu button:hover{ background:rgba(120,140,220,.22); color:#e6e6f2; }
+  #menu .hdr{ color:#4c4c5c; padding:4px 10px 6px; border-bottom:1px solid rgba(255,255,255,.08);
+    margin-bottom:4px; white-space:nowrap; }
+  #menu .rule{ height:1px; background:rgba(255,255,255,.08); margin:4px 0; }
   #toast{
     position:fixed; left:50%; top:20px; transform:translateX(-50%);
     background:rgba(20,20,28,0.85); color:#c8c8dc;
@@ -30,6 +40,7 @@
 <body>
 <canvas id="gl"></canvas>
 <div id="hud"></div>
+<div id="menu"></div>
 <div id="toast"></div>
 
 <script>
@@ -49,6 +60,11 @@
    of Oh, so folds are provably equivariant and map the lattice onto itself.
    ========================================================================== */
 
+/* ===================== BIMOBLOCK CORE BEGIN =====================
+   Shared verbatim with bimoblock-contact-sheet.html.  The verifier compares
+   this region byte-for-byte between the two files; edit it in one place and
+   copy, never fork.
+   ================================================================= */
 const VERT = `#version 300 es
 void main(){
   vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
@@ -59,7 +75,8 @@ const FRAG = `#version 300 es
 precision highp float;
 precision highp int;
 
-uniform vec3  iResolution;
+uniform vec3  iResolution;   // size of the viewport being drawn, not the canvas
+uniform vec2  uOrigin;       // window-space origin of that viewport
 uniform float iTime;
 uniform uint  uMasks[27];     // the whole sprite, uploaded from the CPU
 uniform int   uGroupEls[48];  // element indices of the active Oh subgroup
@@ -222,7 +239,7 @@ void mainImage(out vec4 O, in vec2 F){
   for (int j = 0; j < AA; ++j)
     for (int i = 0; i < AA; ++i){
       vec2 off = (vec2(float(i), float(j)) + 0.5) / float(AA);
-      acc += render(((F + off - 0.5) * 2.0 - iResolution.xy) / iResolution.y);
+      acc += render(((F - uOrigin + off - 0.5) * 2.0 - iResolution.xy) / iResolution.y);
     }
   O = vec4(acc / float(AA * AA), 1.0);
 }
@@ -585,6 +602,295 @@ function formatG48(e){
          `${(e&1)?"-":"+"}${(e&2)?"-":"+"}${(e&4)?"-":"+"}`;
 }
 
+
+/* ---- geometry + colour, shared by the screen and every exporter ----------
+   p : local surface point inside its block, [-1,1]^3
+   w : world position / WORLD, [-1,1]^3
+   Cells are 2/3 wide and the lattice spans +/-3, so a cell centre at grid
+   index X sits at (X-4)*(2/3) and normalises to (X-4)/4.5.  These must agree
+   with the shader's W / WORLD or exported colours drift away from the screen.
+   -------------------------------------------------------------------------- */
+const WORLD = 3.0;
+const wOfCentre = X => (X - 4) / 4.5;
+const wOfVertex = V => (V - 4.5) / 4.5;
+
+function colorize(p, w, palMode, els){
+  if (palMode === 1){
+    const f = foldOrbit(p, els);
+    return [f[0]*0.5+0.5, f[1]*0.5+0.5, f[2]*0.5+0.5];
+  }
+  if (palMode === 2){
+    const th = w[1] * Math.PI * 1.25, ct = Math.cos(th), st = Math.sin(th);
+    return [(p[0]*ct - p[2]*st)*0.5+0.5, p[1]*0.5+0.5, (p[0]*st + p[2]*ct)*0.5+0.5];
+  }
+  if (palMode === 3){
+    const r = Math.hypot(w[0], w[1], w[2]);
+    const cm = Math.sin(r * 12.0) * 0.5 + 0.5;
+    const core = [1.0*(1-cm) + 0.1*cm, 0.25*(1-cm) + 0.85*cm, 0.05*(1-cm) + 1.0*cm];
+    const hull = [p[0]*0.5+0.5, p[1]*0.5+0.5, p[2]*0.5+0.5];
+    let t = Math.max(0, Math.min(1, (r - 0.35) / 0.40));
+    t = t * t * (3 - 2 * t);                         // smoothstep, matching GLSL
+    return [0,1,2].map(i => core[i]*(1-t) + hull[i]*t);
+  }
+  if (palMode === 4){
+    return [0,1,2].map(i => Math.sin(p[i] * Math.PI * 0.75 + w[i] * 2.0) * 0.5 + 0.5);
+  }
+  return [p[0]*0.5+0.5, p[1]*0.5+0.5, p[2]*0.5+0.5];
+}
+const rgb255 = c => c.map(v => Math.max(0, Math.min(255, Math.round(v * 255))));
+
+function solidVoxels(masks, palMode, els){
+  const grid = gridOf(masks), out = [];
+  for (let Z = 0; Z < 9; Z++) for (let Y = 0; Y < 9; Y++) for (let X = 0; X < 9; X++){
+    if (!grid[X + 9*Y + 81*Z]) continue;
+    const p = [((X%3)-1)/1.5, ((Y%3)-1)/1.5, ((Z%3)-1)/1.5];
+    const w = [wOfCentre(X), wOfCentre(Y), wOfCentre(Z)];
+    out.push({ X, Y, Z, rgb: rgb255(colorize(p, w, palMode, els)) });
+  }
+  return { grid, out };
+}
+
+// median cut, so palettes larger than 255 degrade gracefully instead of
+// collapsing every overflow colour onto one index
+function medianCut(colors, maxColors){
+  let boxes = [{ idx: colors.map((_, i) => i) }];
+  const span = b => {
+    const lo = [255,255,255], hi = [0,0,0];
+    for (const i of b.idx) for (let c = 0; c < 3; c++){
+      lo[c] = Math.min(lo[c], colors[i][c]); hi[c] = Math.max(hi[c], colors[i][c]);
+    }
+    let ax = 0; for (let c = 1; c < 3; c++) if (hi[c] - lo[c] > hi[ax] - lo[ax]) ax = c;
+    return { ax, range: hi[ax] - lo[ax] };
+  };
+  while (boxes.length < maxColors){
+    let best = -1, bestScore = 0;
+    for (let i = 0; i < boxes.length; i++){
+      if (boxes[i].idx.length < 2) continue;
+      const sc = span(boxes[i]).range * boxes[i].idx.length;
+      if (sc > bestScore){ bestScore = sc; best = i; }
+    }
+    if (best < 0) break;
+    const b = boxes[best], ax = span(b).ax;
+    const sortedIdx = b.idx.slice().sort((p, q) => colors[p][ax] - colors[q][ax]);
+    const mid = sortedIdx.length >> 1;
+    boxes.splice(best, 1, { idx: sortedIdx.slice(0, mid) }, { idx: sortedIdx.slice(mid) });
+  }
+  const palette = [], map = new Int32Array(colors.length);
+  boxes.forEach((b, bi) => {
+    const acc = [0,0,0];
+    for (const i of b.idx){ for (let c = 0; c < 3; c++) acc[c] += colors[i][c]; map[i] = bi; }
+    palette.push(acc.map(v => Math.round(v / b.idx.length)));
+  });
+  return { palette, map };
+}
+
+function encodeVOX(masks, palMode, els){
+  const { out } = solidVoxels(masks, palMode, els);
+  if (!out.length) return { bytes:null, voxels:0, uniqueColours:0, quantised:false };
+
+  const colors = out.map(v => v.rgb);
+  const uniq = new Map();
+  for (const c of colors){ const k = (c[0]<<16)|(c[1]<<8)|c[2]; if (!uniq.has(k)) uniq.set(k, uniq.size); }
+  let palette, indexOf, quantised = false;
+  if (uniq.size <= 255){
+    palette = [...uniq.keys()].map(k => [(k>>16)&255, (k>>8)&255, k&255]);
+    indexOf = i => uniq.get((colors[i][0]<<16)|(colors[i][1]<<8)|colors[i][2]);
+  } else {
+    const mc = medianCut(colors, 255);
+    palette = mc.palette; indexOf = i => mc.map[i]; quantised = true;
+  }
+
+  // GL is Y-up right-handed; MagicaVoxel is Z-up right-handed.  The correct
+  // change of basis is (x, y, z) -> (x, -z, y); with 0..8 indices that is
+  // (X, 8-Z, Y).  A bare swap would mirror the model, which matters for every
+  // chiral symmetry mode.
+  const vox = out.map((v, i) => ({ x: v.X, y: 8 - v.Z, z: v.Y, c: indexOf(i) + 1 }));
+
+  const SIZE = new Uint8Array(24), sv = new DataView(SIZE.buffer);
+  SIZE.set([0x53,0x49,0x5a,0x45]); sv.setUint32(4, 12, true); sv.setUint32(8, 0, true);
+  sv.setUint32(12, 9, true); sv.setUint32(16, 9, true); sv.setUint32(20, 9, true);
+
+  const xLen = 4 + vox.length * 4;
+  const XYZI = new Uint8Array(12 + xLen), xv = new DataView(XYZI.buffer);
+  XYZI.set([0x58,0x59,0x5a,0x49]); xv.setUint32(4, xLen, true); xv.setUint32(8, 0, true);
+  xv.setUint32(12, vox.length, true);
+  vox.forEach((v, i) => {
+    const o = 16 + i * 4;
+    XYZI[o] = v.x; XYZI[o+1] = v.y; XYZI[o+2] = v.z; XYZI[o+3] = v.c;
+  });
+
+  // RGBA entry i holds colour index i+1
+  const RGBA = new Uint8Array(12 + 1024), rv = new DataView(RGBA.buffer);
+  RGBA.set([0x52,0x47,0x42,0x41]); rv.setUint32(4, 1024, true); rv.setUint32(8, 0, true);
+  for (let i = 0; i < 256; i++){
+    const o = 12 + i * 4, c = palette[i] || [255,255,255];
+    RGBA[o] = c[0]; RGBA[o+1] = c[1]; RGBA[o+2] = c[2]; RGBA[o+3] = 255;
+  }
+
+  const childSize = SIZE.length + XYZI.length + RGBA.length;
+  const MAIN = new Uint8Array(12 + childSize), mv = new DataView(MAIN.buffer);
+  MAIN.set([0x4d,0x41,0x49,0x4e]); mv.setUint32(4, 0, true); mv.setUint32(8, childSize, true);
+  let off = 12;
+  MAIN.set(SIZE, off); off += SIZE.length;
+  MAIN.set(XYZI, off); off += XYZI.length;
+  MAIN.set(RGBA, off);
+
+  const bytes = new Uint8Array(8 + MAIN.length), fv = new DataView(bytes.buffer);
+  bytes.set([0x56,0x4f,0x58,0x20]); fv.setUint32(4, 150, true);
+  bytes.set(MAIN, 8);
+
+  return { bytes, voxels: vox.length, uniqueColours: uniq.size, quantised };
+}
+
+const OBJ_FACES = [
+  { d:[ 1,0,0], n:1, v:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
+  { d:[-1,0,0], n:2, v:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
+  { d:[0, 1,0], n:3, v:[[0,1,0],[0,1,1],[1,1,1],[1,1,0]] },
+  { d:[0,-1,0], n:4, v:[[0,0,1],[0,0,0],[1,0,0],[1,0,1]] },
+  { d:[0,0, 1], n:5, v:[[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
+  { d:[0,0,-1], n:6, v:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]] }
+];
+
+function encodeOBJ(masks, palMode, els, headerLines){
+  const grid = gridOf(masks);
+  const lines = headerLines.concat([
+    "# v X Y Z R G B (vertex colours), outward vn",
+    "",
+    "vn  1.0000  0.0000  0.0000", "vn -1.0000  0.0000  0.0000",
+    "vn  0.0000  1.0000  0.0000", "vn  0.0000 -1.0000  0.0000",
+    "vn  0.0000  0.0000  1.0000", "vn  0.0000  0.0000 -1.0000", ""
+  ]);
+
+  let vi = 1, quads = 0;
+  for (let z = 0; z < 9; z++) for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++){
+    if (!grid[x + 9*y + 81*z]) continue;
+    const cx = x % 3, cy = y % 3, cz = z % 3;
+    for (const f of OBJ_FACES){
+      const nx = x + f.d[0], ny = y + f.d[1], nz = z + f.d[2];
+      const inside = nx >= 0 && nx < 9 && ny >= 0 && ny < 9 && nz >= 0 && nz < 9;
+      if (inside && grid[nx + 9*ny + 81*nz]) continue;
+      for (const vt of f.v){
+        const VX = x + vt[0], VY = y + vt[1], VZ = z + vt[2];
+        const pos = [ (VX - 4.5) * (2/3), (VY - 4.5) * (2/3), (VZ - 4.5) * (2/3) ];
+        const p = [ (cx + vt[0]) / 1.5 - 1, (cy + vt[1]) / 1.5 - 1, (cz + vt[2]) / 1.5 - 1 ];
+        const w = [ wOfVertex(VX), wOfVertex(VY), wOfVertex(VZ) ];
+        const c = colorize(p, w, palMode, els);
+        lines.push(`v ${pos[0].toFixed(4)} ${pos[1].toFixed(4)} ${pos[2].toFixed(4)} ` +
+                   `${c[0].toFixed(4)} ${c[1].toFixed(4)} ${c[2].toFixed(4)}`);
+      }
+      lines.push(`f ${vi}//${f.n} ${vi+1}//${f.n} ${vi+2}//${f.n} ${vi+3}//${f.n}`);
+      vi += 4; quads++;
+    }
+  }
+  return { text: lines.join("\n"), quads };
+}
+
+
+/* ---- 729-bit occupancy interchange ---------------------------------------
+   A sprite is 729 bits of geometry.  The ?b64= link carries only those bits
+   -- no group, no field, no seed -- so a shared link keeps meaning even after
+   the generator changes underneath it.
+
+   Bit i of the stream is grid[i] with i = X + 9Y + 81Z, LSB-first inside each
+   byte.  729 bits -> 92 bytes -> 123 base64url characters, no padding.
+   -------------------------------------------------------------------------- */
+const B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const B64_BYTES = 92, B64_CHARS = 123;
+
+function gridToB64(grid){
+  const bytes = new Uint8Array(B64_BYTES);
+  for (let i = 0; i < 729; i++) if (grid[i]) bytes[i >> 3] |= 1 << (i & 7);
+  let out = "";
+  for (let i = 0; i < B64_BYTES; i += 3){
+    const n = (bytes[i] << 16) | ((bytes[i+1] || 0) << 8) | (bytes[i+2] || 0);
+    const chars = Math.min(3, B64_BYTES - i) + 1;      // 3 bytes -> 4 chars, 2 -> 3
+    for (let j = 0; j < chars; j++) out += B64URL[(n >> (18 - 6*j)) & 63];
+  }
+  return out;
+}
+
+// liberal on input: accepts standard base64 as well as base64url, with or
+// without padding.  Returns null rather than throwing on anything malformed.
+function b64ToGrid(str){
+  if (!str) return null;
+  const s = String(str).trim().replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  if (!/^[A-Za-z0-9_-]+$/.test(s)) return null;
+  const bytes = new Uint8Array(B64_BYTES);
+  let bi = 0, acc = 0, bits = 0;
+  for (let i = 0; i < s.length; i++){
+    const v = B64URL.indexOf(s[i]);
+    if (v < 0) return null;
+    acc = (acc << 6) | v; bits += 6;
+    if (bits >= 8){ bits -= 8; if (bi < B64_BYTES) bytes[bi++] = (acc >> bits) & 255; }
+  }
+  if (bi < B64_BYTES) return null;                      // truncated
+  const grid = new Uint8Array(729);
+  for (let i = 0; i < 729; i++) grid[i] = (bytes[i >> 3] >> (i & 7)) & 1;
+  return grid;
+}
+
+// inverse of gridOf(): repack a flat 9^3 grid into the 27 block masks the
+// renderer consumes
+function masksFromGrid(grid){
+  const m = new Uint32Array(27);
+  for (let Z = 0; Z < 9; Z++) for (let Y = 0; Y < 9; Y++) for (let X = 0; X < 9; X++){
+    if (!grid[X + 9*Y + 81*Z]) continue;
+    m[(X/3|0) + 3*(Y/3|0) + 9*(Z/3|0)] |= (1 << ((X%3) + 3*(Y%3) + 9*(Z%3))) >>> 0;
+  }
+  return m;
+}
+
+function stabilises(grid, e){
+  for (let z = 0; z < 9; z++) for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++){
+    const w = applyG([x-4, y-4, z-4], e);
+    if (grid[x + 9*y + 81*z] !== grid[(w[0]+4) + 9*(w[1]+4) + 81*(w[2]+4)]) return false;
+  }
+  return true;
+}
+
+// An imported grid arrives with no declared symmetry, but the palette's
+// orbit-sym mode needs a group to fold against.  Take the largest declared
+// subgroup that actually stabilises it -- always well defined, since C1 does.
+function bestGroupFor(grid){
+  let best = 0;
+  for (let i = 1; i < GROUPS.length; i++)
+    if (GROUPS[i].order > GROUPS[best].order && GROUPS[i].els.every(e => stabilises(grid, e))) best = i;
+  return best;
+}
+
+function b64FromLocation(){
+  try {
+    const m = /[?&]b64=([^&]+)/.exec((typeof location !== "undefined" && location.search) || "");
+    return m ? decodeURIComponent(m[1]) : null;
+  } catch (_){ return null; }
+}
+function permalinkFor(b64){
+  try { const u = new URL(location.href); u.search = "?b64=" + b64; u.hash = ""; return u.href; }
+  catch (_){ return "?b64=" + b64; }
+}
+
+// clipboard with a synchronous fallback for file:// and permission-denied,
+// and an unconditional console echo so the string is never simply lost
+function copyToClipboard(text, onDone, onFail){
+  console.log(text);
+  const fallback = () => {
+    let done = false;
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      done = document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch (_){ done = false; }
+    done ? onDone && onDone() : onFail && onFail();
+  };
+  if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText)
+    navigator.clipboard.writeText(text).then(() => onDone && onDone(), fallback);
+  else fallback();
+}
+
+/* ====================== BIMOBLOCK CORE END ====================== */
+
 /* ------------------------------------ host ------------------------------- */
 
 const canvas = document.getElementById("gl");
@@ -622,6 +928,7 @@ function main(){
   gl.bindVertexArray(gl.createVertexArray());
 
   const uRes      = gl.getUniformLocation(prog, "iResolution");
+  const uOrigin   = gl.getUniformLocation(prog, "uOrigin");
   const uTime     = gl.getUniformLocation(prog, "iTime");
   const uMasks    = gl.getUniformLocation(prog, "uMasks[0]");
   const uGroupEls = gl.getUniformLocation(prog, "uGroupEls[0]");
@@ -637,7 +944,9 @@ function main(){
   let running = true, morph = true, ao = false;
   let g48 = 0, sym = 1, arch = 0, fieldMode = 0, lift = 0, palMode = 0, seed = 42, densityIdx = 2;
   let fps = 0;
-  let cur = null;   // { masks, filled, envelopeCells, aut }
+  let cur = null;        // { masks, filled, envelopeCells, aut }
+  let imported = null;   // a 729-bit grid handed in via ?b64=, shown instead of cur
+  const menu = document.getElementById("menu");
 
   function params(){
     return { t: maskT, seed, g48, sym, arch, field: fieldMode, lift, density: DENSITIES[densityIdx] };
@@ -647,50 +956,43 @@ function main(){
     const r = buildMasks(params());
     r.aut = autOrder(gridOf(r.masks));
     cur = r;
-    gl.uniform1uiv(uMasks, r.masks);
+    if (!imported) gl.uniform1uiv(uMasks, r.masks);
     paintHud();
   }
 
-  function syncGroup(){
+  /* ---- imported geometry -------------------------------------------------
+     ?b64= carries 729 bits and nothing else, so while one is on screen the
+     generation controls describe something other than what is being drawn.
+     Touching any of them returns to the generated sprite.                   */
+  function loadImported(b64){
+    const grid = b64ToGrid(b64);
+    if (!grid){ showToast("?b64= is not a valid 729-bit string"); return false; }
+    let n = 0; for (const v of grid) n += v;
+    imported = { grid, masks: masksFromGrid(grid), filled: n,
+                 groupIdx: bestGroupFor(grid), aut: autOrder(grid) };
+    gl.uniform1uiv(uMasks, imported.masks);
+    syncGroupIdx(imported.groupIdx);
+    paintHud();
+    return true;
+  }
+  function exitImported(){
+    if (!imported) return;
+    imported = null;
+    gl.uniform1uiv(uMasks, cur.masks);
+    syncGroup();
+    showToast("back to the generated sprite");
+    paintHud();
+  }
+  const view = () => imported || cur;
+  const viewGroup = () => GROUPS[imported ? imported.groupIdx : sym];
+
+  function syncGroupIdx(i){
     const els = new Int32Array(48);
-    els.set(GROUPS[sym].els);
+    els.set(GROUPS[i].els);
     gl.uniform1iv(uGroupEls, els);
-    gl.uniform1i(uGroupN, GROUPS[sym].order);
+    gl.uniform1i(uGroupN, GROUPS[i].order);
   }
-
-  /* ---- colour, shared by screen and both exporters ----------------------
-     p : local surface point inside its block, [-1,1]^3
-     w : world position / WORLD, [-1,1]^3                                   */
-  const WORLD = 3.0;
-  function colorize(p, w){
-    if (palMode === 1){
-      const f = foldOrbit(p, GROUPS[sym].els);
-      return [f[0]*0.5+0.5, f[1]*0.5+0.5, f[2]*0.5+0.5];
-    }
-    if (palMode === 2){
-      const th = w[1] * Math.PI * 1.25, ct = Math.cos(th), st = Math.sin(th);
-      return [(p[0]*ct - p[2]*st)*0.5+0.5, p[1]*0.5+0.5, (p[0]*st + p[2]*ct)*0.5+0.5];
-    }
-    if (palMode === 3){
-      const r = Math.hypot(w[0], w[1], w[2]);
-      const cm = Math.sin(r * 12.0) * 0.5 + 0.5;
-      const core = [1.0*(1-cm) + 0.1*cm, 0.25*(1-cm) + 0.85*cm, 0.05*(1-cm) + 1.0*cm];
-      const hull = [p[0]*0.5+0.5, p[1]*0.5+0.5, p[2]*0.5+0.5];
-      let t = Math.max(0, Math.min(1, (r - 0.35) / 0.40));
-      t = t * t * (3 - 2 * t);                       // smoothstep, matching GLSL
-      return [0,1,2].map(i => core[i]*(1-t) + hull[i]*t);
-    }
-    if (palMode === 4){
-      return [0,1,2].map(i => Math.sin(p[i] * Math.PI * 0.75 + w[i] * 2.0) * 0.5 + 0.5);
-    }
-    return [p[0]*0.5+0.5, p[1]*0.5+0.5, p[2]*0.5+0.5];
-  }
-  const rgb255 = c => c.map(v => Math.max(0, Math.min(255, Math.round(v * 255))));
-
-  // grid index -> world/WORLD.  Cells are 2/3 wide, the lattice spans +/-3,
-  // so a cell centre at index X sits at (X-4)*(2/3) and normalises to (X-4)/4.5.
-  const wOfCentre = X => (X - 4) / 4.5;
-  const wOfVertex = V => (V - 4.5) / 4.5;
+  function syncGroup(){ syncGroupIdx(sym); }
 
   /* ---- exporters ------------------------------------------------------- */
   function downloadBlob(blob, filename){
@@ -701,165 +1003,36 @@ function main(){
     URL.revokeObjectURL(url);
   }
   function baseName(){
+    if (imported) return `imported_${GROUPS[imported.groupIdx].name.split(":")[0]}_${PAL_NAMES[palMode]}`;
     return `${ARCH_NAMES[arch]}_${GROUPS[sym].name.split(":")[0]}_g${String(g48).padStart(2,"0")}` +
            `_${FIELD_NAMES[fieldMode].replace("/","-").replace("±","pm")}` +
            `${fieldMode >= NATIVE_FIELDS ? "-" + LIFT_NAMES[lift] : ""}_${PAL_NAMES[palMode]}_s${seed}`;
   }
 
-  function solidVoxels(){
-    const grid = gridOf(cur.masks), out = [];
-    for (let Z = 0; Z < 9; Z++) for (let Y = 0; Y < 9; Y++) for (let X = 0; X < 9; X++){
-      if (!grid[X + 9*Y + 81*Z]) continue;
-      const p = [((X%3)-1)/1.5, ((Y%3)-1)/1.5, ((Z%3)-1)/1.5];
-      const w = [wOfCentre(X), wOfCentre(Y), wOfCentre(Z)];
-      out.push({ X, Y, Z, rgb: rgb255(colorize(p, w)) });
-    }
-    return { grid, out };
-  }
-
-  // median cut, so palettes larger than 255 degrade gracefully instead of
-  // collapsing every overflow colour onto one index
-  function medianCut(colors, maxColors){
-    let boxes = [{ idx: colors.map((_, i) => i) }];
-    const span = b => {
-      const lo = [255,255,255], hi = [0,0,0];
-      for (const i of b.idx) for (let c = 0; c < 3; c++){
-        lo[c] = Math.min(lo[c], colors[i][c]); hi[c] = Math.max(hi[c], colors[i][c]);
-      }
-      let ax = 0; for (let c = 1; c < 3; c++) if (hi[c] - lo[c] > hi[ax] - lo[ax]) ax = c;
-      return { ax, range: hi[ax] - lo[ax] };
-    };
-    while (boxes.length < maxColors){
-      let best = -1, bestScore = 0;
-      for (let i = 0; i < boxes.length; i++){
-        if (boxes[i].idx.length < 2) continue;
-        const sc = span(boxes[i]).range * boxes[i].idx.length;
-        if (sc > bestScore){ bestScore = sc; best = i; }
-      }
-      if (best < 0) break;
-      const b = boxes[best], ax = span(b).ax;
-      const sortedIdx = b.idx.slice().sort((p, q) => colors[p][ax] - colors[q][ax]);
-      const mid = sortedIdx.length >> 1;
-      boxes.splice(best, 1, { idx: sortedIdx.slice(0, mid) }, { idx: sortedIdx.slice(mid) });
-    }
-    const palette = [], map = new Int32Array(colors.length);
-    boxes.forEach((b, bi) => {
-      const acc = [0,0,0];
-      for (const i of b.idx){ for (let c = 0; c < 3; c++) acc[c] += colors[i][c]; map[i] = bi; }
-      palette.push(acc.map(v => Math.round(v / b.idx.length)));
-    });
-    return { palette, map };
-  }
-
   function exportVOX(){
-    const { out } = solidVoxels();
-    if (!out.length){ showToast("model is empty"); return; }
-
-    const colors = out.map(v => v.rgb);
-    const uniq = new Map();
-    for (const c of colors){ const k = (c[0]<<16)|(c[1]<<8)|c[2]; if (!uniq.has(k)) uniq.set(k, uniq.size); }
-    let palette, indexOf;
-    if (uniq.size <= 255){
-      palette = [...uniq.keys()].map(k => [(k>>16)&255, (k>>8)&255, k&255]);
-      indexOf = i => uniq.get((colors[i][0]<<16)|(colors[i][1]<<8)|colors[i][2]);
-    } else {
-      const mc = medianCut(colors, 255);
-      palette = mc.palette; indexOf = i => mc.map[i];
-    }
-
-    // GL is Y-up right-handed; MagicaVoxel is Z-up right-handed.  The correct
-    // change of basis is (x, y, z) -> (x, -z, y); with 0..8 indices that is
-    // (X, 8-Z, Y).  A bare swap would mirror the model, which matters for
-    // every chiral symmetry mode.
-    const vox = out.map((v, i) => ({ x: v.X, y: 8 - v.Z, z: v.Y, c: indexOf(i) + 1 }));
-
-    const SIZE = new Uint8Array(24), sv = new DataView(SIZE.buffer);
-    SIZE.set([0x53,0x49,0x5a,0x45]); sv.setUint32(4, 12, true); sv.setUint32(8, 0, true);
-    sv.setUint32(12, 9, true); sv.setUint32(16, 9, true); sv.setUint32(20, 9, true);
-
-    const xLen = 4 + vox.length * 4;
-    const XYZI = new Uint8Array(12 + xLen), xv = new DataView(XYZI.buffer);
-    XYZI.set([0x58,0x59,0x5a,0x49]); xv.setUint32(4, xLen, true); xv.setUint32(8, 0, true);
-    xv.setUint32(12, vox.length, true);
-    vox.forEach((v, i) => {
-      const o = 16 + i * 4;
-      XYZI[o] = v.x; XYZI[o+1] = v.y; XYZI[o+2] = v.z; XYZI[o+3] = v.c;
-    });
-
-    // RGBA entry i holds colour index i+1
-    const RGBA = new Uint8Array(12 + 1024), rv = new DataView(RGBA.buffer);
-    RGBA.set([0x52,0x47,0x42,0x41]); rv.setUint32(4, 1024, true); rv.setUint32(8, 0, true);
-    for (let i = 0; i < 256; i++){
-      const o = 12 + i * 4, c = palette[i] || [255,255,255];
-      RGBA[o] = c[0]; RGBA[o+1] = c[1]; RGBA[o+2] = c[2]; RGBA[o+3] = 255;
-    }
-
-    const childSize = SIZE.length + XYZI.length + RGBA.length;
-    const MAIN = new Uint8Array(12 + childSize), mv = new DataView(MAIN.buffer);
-    MAIN.set([0x4d,0x41,0x49,0x4e]); mv.setUint32(4, 0, true); mv.setUint32(8, childSize, true);
-    let off = 12;
-    MAIN.set(SIZE, off); off += SIZE.length;
-    MAIN.set(XYZI, off); off += XYZI.length;
-    MAIN.set(RGBA, off);
-
-    const file = new Uint8Array(8 + MAIN.length), fv = new DataView(file.buffer);
-    file.set([0x56,0x4f,0x58,0x20]); fv.setUint32(4, 150, true);
-    file.set(MAIN, 8);
-
-    downloadBlob(new Blob([file], { type:"application/octet-stream" }), baseName() + ".vox");
-    showToast(`${baseName()}.vox — ${vox.length} voxels, ` +
-              (uniq.size <= 255 ? `${uniq.size} colours exact` : `${uniq.size} colours -> 255 (median cut)`));
+    const r = encodeVOX(view().masks, palMode, viewGroup().els);
+    if (!r.voxels){ showToast("model is empty"); return; }
+    downloadBlob(new Blob([r.bytes], { type:"application/octet-stream" }), baseName() + ".vox");
+    showToast(`${baseName()}.vox — ${r.voxels} voxels, ` +
+              (r.quantised ? `${r.uniqueColours} colours -> 255 (median cut)` : `${r.uniqueColours} colours exact`));
   }
 
   function exportOBJ(){
-    const { grid } = solidVoxels();
-    const lines = [
-      "# bimoblock lattice sprite v2",
-      `# archetype=${ARCH_NAMES[arch]} group=${GROUPS[sym].name} |G|=${GROUPS[sym].order}` +
-      ` g48=${formatG48(g48)} coset=${GROUPS[sym].cosetOf[g48]+1}/${GROUPS[sym].cosets}`,
-      `# field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? " lift=" + LIFT_NAMES[lift] : ""}`
-      + ` density=${DENSITIES[densityIdx]} domain=${PAL_NAMES[palMode]} seed=${seed}`,
-      `# measured stabiliser inside Oh: order ${cur.aut}/48`,
-      "# v X Y Z R G B (vertex colours), outward vn",
-      "",
-      "vn  1.0000  0.0000  0.0000", "vn -1.0000  0.0000  0.0000",
-      "vn  0.0000  1.0000  0.0000", "vn  0.0000 -1.0000  0.0000",
-      "vn  0.0000  0.0000  1.0000", "vn  0.0000  0.0000 -1.0000", ""
-    ];
-
-    const FACES = [
-      { d:[ 1,0,0], n:1, v:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
-      { d:[-1,0,0], n:2, v:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
-      { d:[0, 1,0], n:3, v:[[0,1,0],[0,1,1],[1,1,1],[1,1,0]] },
-      { d:[0,-1,0], n:4, v:[[0,0,1],[0,0,0],[1,0,0],[1,0,1]] },
-      { d:[0,0, 1], n:5, v:[[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
-      { d:[0,0,-1], n:6, v:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]] }
-    ];
-
-    let vi = 1, quads = 0;
-    for (let z = 0; z < 9; z++) for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++){
-      if (!grid[x + 9*y + 81*z]) continue;
-      const cx = x % 3, cy = y % 3, cz = z % 3;
-      for (const f of FACES){
-        const nx = x + f.d[0], ny = y + f.d[1], nz = z + f.d[2];
-        const inside = nx >= 0 && nx < 9 && ny >= 0 && ny < 9 && nz >= 0 && nz < 9;
-        if (inside && grid[nx + 9*ny + 81*nz]) continue;
-        for (const vt of f.v){
-          const VX = x + vt[0], VY = y + vt[1], VZ = z + vt[2];
-          const pos = [ (VX - 4.5) * (2/3), (VY - 4.5) * (2/3), (VZ - 4.5) * (2/3) ];
-          const p = [ (cx + vt[0]) / 1.5 - 1, (cy + vt[1]) / 1.5 - 1, (cz + vt[2]) / 1.5 - 1 ];
-          const w = [ wOfVertex(VX), wOfVertex(VY), wOfVertex(VZ) ];
-          const c = colorize(p, w);
-          lines.push(`v ${pos[0].toFixed(4)} ${pos[1].toFixed(4)} ${pos[2].toFixed(4)} ` +
-                     `${c[0].toFixed(4)} ${c[1].toFixed(4)} ${c[2].toFixed(4)}`);
-        }
-        lines.push(`f ${vi}//${f.n} ${vi+1}//${f.n} ${vi+2}//${f.n} ${vi+3}//${f.n}`);
-        vi += 4; quads++;
-      }
-    }
-    if (!quads){ showToast("mesh is empty"); return; }
-    downloadBlob(new Blob([lines.join("\n")], { type:"text/plain" }), baseName() + ".obj");
-    showToast(`${baseName()}.obj — ${quads} quads`);
+    const G = viewGroup();
+    const hdr = imported
+      ? ["# bimoblock lattice sprite v2 (imported 729-bit grid)",
+         `# stabilised by ${G.name} |G|=${G.order}`,
+         `# domain=${PAL_NAMES[palMode]}`]
+      : ["# bimoblock lattice sprite v2",
+         `# archetype=${ARCH_NAMES[arch]} group=${G.name} |G|=${G.order}` +
+         ` g48=${formatG48(g48)} coset=${G.cosetOf[g48]+1}/${G.cosets}`,
+         `# field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? " lift=" + LIFT_NAMES[lift] : ""}` +
+         ` density=${DENSITIES[densityIdx]} domain=${PAL_NAMES[palMode]} seed=${seed}`];
+    const r = encodeOBJ(view().masks, palMode, G.els,
+                        hdr.concat([`# measured stabiliser inside Oh: order ${view().aut}/48`]));
+    if (!r.quads){ showToast("mesh is empty"); return; }
+    downloadBlob(new Blob([r.text], { type:"text/plain" }), baseName() + ".obj");
+    showToast(`${baseName()}.obj — ${r.quads} quads`);
   }
 
   function exportJSON(){
@@ -893,10 +1066,66 @@ function main(){
     showToast(`${baseName()}.json — 27 masks + measured stabiliser`);
   }
 
+  /* ---- context menu ------------------------------------------------------ */
+  function hideMenu(){ menu.style.display = "none"; }
+  function copyAs(text, label){
+    copyToClipboard(text, () => showToast(`${label} copied (${text.length} chars)`),
+                          () => showToast(`${label} logged to console — clipboard blocked`));
+  }
+  function paramLine(){
+    if (imported) return `imported 729-bit grid | stabiliser ${imported.aut}/48 fill ${imported.filled}/729`;
+    return `sym=${GROUPS[sym].name} arch=${ARCH_NAMES[arch]} g48=${formatG48(g48)} ` +
+      `field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? "/" + LIFT_NAMES[lift] : ""} ` +
+      `density=${DENSITIES[densityIdx]} seed=${seed} | aut=${cur.aut}/48 fill=${cur.filled}/729`;
+  }
+  function openMenu(x, y){
+    const v = view();
+    if (!v){ hideMenu(); return; }
+    const b64 = gridToB64(gridOf(v.masks));
+    const title = imported ? "imported grid" : `${GROUPS[sym].name} x ${ARCH_NAMES[arch]}`;
+    const items = [
+      ["Copy as base64 (729 bits)", () => copyAs(b64, "base64")],
+      ["Copy permalink",            () => copyAs(permalinkFor(b64), "permalink")],
+      ["Copy parameters",           () => copyAs(paramLine(), "parameters")],
+      null,
+      ["Export .vox",  exportVOX],
+      ["Export .obj",  exportOBJ],
+      ["Export .json", exportJSON]
+    ];
+    if (imported) items.push(null, ["Return to generated sprite", exitImported]);
+
+    menu.innerHTML = `<div class="hdr">${title}<br>` +
+      `<span style="color:#3e3e4c">aut ${v.aut}/48 &middot; ${v.filled}/729 cells</span></div>`;
+    for (const it of items){
+      if (!it){ menu.appendChild(Object.assign(document.createElement("div"), { className:"rule" })); continue; }
+      const b = document.createElement("button");
+      b.textContent = it[0];
+      b.addEventListener("click", ev => { ev.stopPropagation(); hideMenu(); it[1](); });
+      menu.appendChild(b);
+    }
+    menu.style.display = "block";
+    const w = menu.offsetWidth || 190, h = menu.offsetHeight || 220;
+    menu.style.left = Math.min(x, innerWidth  - w - 6) + "px";
+    menu.style.top  = Math.min(y, innerHeight - h - 6) + "px";
+  }
+  menu.addEventListener("click", ev => ev.stopPropagation());
+  addEventListener("contextmenu", ev => { ev.preventDefault(); openMenu(ev.clientX, ev.clientY); });
+  addEventListener("click", () => hideMenu());
+
   /* ---- hud -------------------------------------------------------------- */
   function paintHud(){
     const G = GROUPS[sym];
     const R = [];
+    if (imported){
+      R.push("<span class='sec'>--- IMPORTED ---</span>");
+      R.push("source".padEnd(8) + "?b64= 729 bits".padEnd(16));
+      R.push("aut".padEnd(8) + `${imported.aut}/48`.padEnd(16));
+      R.push("fill".padEnd(8) + `${imported.filled}/729`.padEnd(16));
+      R.push("group".padEnd(8) + GROUPS[imported.groupIdx].name.padEnd(16));
+      R.push("<span class='sec'>any control returns to</span>");
+      R.push("<span class='sec'>the generated sprite</span>");
+      R.push("");
+    }
     R.push("<span class='sec'>--- SYMMETRY ---</span>");
     R.push("group".padEnd(8) + G.name.padEnd(16) + "s");
     R.push("|G|".padEnd(8) + (`${G.order}  ${G.chiral ? "chiral" : "achiral"}`).padEnd(16));
@@ -921,6 +1150,7 @@ function main(){
     R.push("");
     R.push("<span class='sec'>--- EXPORT ---</span>");
     R.push(".vox / .obj / .json".padEnd(24) + "e/o/j");
+    R.push("<span class='sec'>right-click to copy base64</span>");
     if (cur && cur.aut > G.order)
       R.push("<span class='warn'>* accidentally more symmetric</span>");
     hud.innerHTML = R.join("\n") + "\n\n<b>" + fps + " fps</b>";
@@ -930,6 +1160,9 @@ function main(){
   addEventListener("keydown", ev => {
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const k = ev.key.toLowerCase();
+    hideMenu();
+    if (k === "escape"){ exitImported(); return; }
+    if (imported && "sghafxdnpr".includes(k)) exitImported();
     if (k === " " || ev.code === "Space"){ ev.preventDefault(); running = !running; paintHud(); return; }
     switch (k){
       case "m": morph = !morph; paintHud(); return;
@@ -966,6 +1199,7 @@ function main(){
       canvas.width = w; canvas.height = h;
       gl.viewport(0, 0, w, h);
       gl.uniform3f(uRes, w, h, 1);
+      gl.uniform2f(uOrigin, 0, 0);
     }
   }
 
@@ -974,6 +1208,7 @@ function main(){
   syncGroup();
   rebuild();
   lastStep = Math.floor(maskT * RATE);
+  { const q = b64FromLocation(); if (q) loadImported(q); }
 
   let last = performance.now(), acc = 0, frames = 0;
   function frame(now){
