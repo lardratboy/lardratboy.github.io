@@ -209,7 +209,7 @@
     <div class="row"><span>Freeze an instance</span><kbd>X</kbd></div>
     <div class="row"><span>Undo / redo</span><kbd>U</kbd> <kbd>Y</kbd></div>
     <div class="row"><span>Wireframe <i style="opacity:.5">(debug)</i></span><kbd>|</kbd></div>
-    <div class="row"><span>Flight law <i style="opacity:.5">(experimental)</i></span><kbd>V</kbd></div>
+    <div class="row"><span>Flight law <i style="opacity:.5">(scene / body)</i></span><kbd>V</kbd></div>
     <div class="row"><span>Dive pulse fx</span><kbd>P</kbd></div>
     <div class="row"><span>Shrink (dive)</span><kbd>Q</kbd> <kbd>scroll &uarr;</kbd></div>
     <div class="row"><span>Grow (surface)</span><kbd>Z</kbd> <kbd>scroll &darr;</kbd></div>
@@ -931,11 +931,14 @@
           }
         } else diveBlocked = { kind:'walk' };
 
-        if (!cam.fly) {
-          cam.R = R_MIN; // keep clamp in walk mode for physics stability
-        } else {
-          cam.R = Math.max(cam.R, 1e-6); 
-        }
+        // FIX (the abyss): a refused dive used to let R fall to 1e-6 in fly
+        // mode. Since speed is proportional to R, that left you moving at
+        // ~7e-6 m/s — 1.3 MILLION seconds to cross a 9 m world, i.e. frozen,
+        // with no way out but scrolling back up by exactly the amount you
+        // scrolled down. Nothing is gained by shrinking past the floor when
+        // there is nothing under you to shrink INTO, so both modes now stop at
+        // the floor and the refusal message explains why.
+        cam.R = R_MIN;
       }
       if(!cam.world.parent) cam.R = Math.min(cam.R, R_ROOF);   // only if growth was refused
       break;
@@ -1380,7 +1383,7 @@
     return best;
   }
 
-  // ---- W2 · scene-scaled flight (experimental, toggle with V) ----
+  // ---- W2 · scene-scaled flight (default; toggle with V) ----
   // Classic flight speed is body-proportional (7·R cells/s): constant in units
   // of you, but meaningless when your body and the visible scene decouple —
   // frozen in the sub-envelope abyss, capped-and-kinked at the root roof,
@@ -1395,13 +1398,45 @@
   // means no world is ever crossed in under FLY_CROSS_S seconds, at any zoom.
   const FLY_K       = 7 / REACH;   // = 1.4 /s — parity with classic at reach
   const FLY_FLOOR_R = 3.5;         // d_eff floor, in bodies → near-wall v ≈ 4.9R
-  const FLY_CROSS_S = 2.5;         // seconds to cross a world at full speed
-  let   flyScene    = false;       // V toggles; classic law by default
+  // FLY_CROSS_S was tuned when the root world was 30 cells across. Step 4 made
+  // every world N³, so at N=9 the same constant tightened this ceiling by 3.3×
+  // — it began biting for anything further than ~2.6 cells, which is most of a
+  // 9-cell world. Because the ceiling is in cells and cells resize at a band
+  // crossing, a biting ceiling causes an N× absolute speed drop every time you
+  // dive: the same "huge steps then tiny steps" symptom by another route.
+  // Retuned so it only catches attention distances BEYOND the current world,
+  // where the thing you are looking at really is an ancestor block and moving
+  // fast really is what you want.
+  const FLY_CROSS_S = 0.6;         // seconds to cross a world at full speed
+  // FIX (the swing): the classic law is body-proportional, so zooming — which
+  // is exactly how you change your body — swings your speed by the full width
+  // of the envelope, N× (9× at N=9), before a band crossing resets it. That is
+  // the "sometimes huge steps, sometimes tiny" feel: it is not drift, it is
+  // speed tracking R while R tracks the scroll wheel. The scene law tracks what
+  // you are LOOKING at instead, which is scale-stable across a zoom, so it is
+  // now the default. V still switches back for comparison.
+  let   flyScene    = true;        // V toggles; scene law by default
   let   flyDSm      = null;        // smoothed d_eff, in current-band cells
 
+  const crossCeil = dims => Math.max(dims[0],dims[1],dims[2]) / FLY_CROSS_S;
   function flySpeedLaw(dEff, R, dims){          // → cells/s, unboosted (pure)
     const d = Math.max(dEff, R * FLY_FLOOR_R);
-    return Math.min(FLY_K * d, Math.max(dims[0],dims[1],dims[2]) / FLY_CROSS_S);
+    return Math.min(FLY_K * d, crossCeil(dims));
+  }
+  // FIX (the roof): the classic law had no ceiling at all, so at the top of the
+  // envelope it ran 7·R with R up to R_ROOF — crossing a whole world in 0.43 s,
+  // the "huge steps" end of the complaint. Outward growth (step 4) already
+  // stops R climbing past R_MAX in normal play, since the sky opens instead of
+  // clamping; this is the backstop for when growth is refused.
+  //
+  // The clamp is on R, NOT on crossing time. A world-crossing limit expressed
+  // in cells can never be scale-continuous — cells change size at a band
+  // crossing — so any such ceiling that bites during normal play makes your
+  // speed jump every time you dive. Clamping R to the top of the envelope caps
+  // the pathology at exactly the ordinary top-of-band speed, and is continuous
+  // everywhere inside the envelope by construction.
+  function flyClassicLaw(R, dims){              // → cells/s, unboosted (pure)
+    return 7 * Math.min(R, R_MAX);
   }
   function probeDist(rd, maxT){                 // nearest surface along rd, ≤ maxT
     let best = maxT;
@@ -2628,8 +2663,8 @@
     }
     if(e.code==='KeyV'){
       flyScene = !flyScene; flyDSm = null;   // re-seed smoothing on switch
-      flash(flyScene ? 'flight law: <b>scene-scaled</b> (experimental) — speed follows what you look at'
-                     : 'flight law: <b>classic</b> — speed follows your size');
+      flash(flyScene ? 'flight law: <b>scene-scaled</b> (default) — speed follows what you look at'
+                     : 'flight law: <b>classic</b> — speed follows your size, so zooming changes it');
     }
     if(e.code==='KeyF'){
       cam.fly=!cam.fly; cam.vel=[0,0,0];
@@ -2733,7 +2768,7 @@
       if(keys.has('Space')) my+=1;
       if(keys.has('ShiftLeft')||keys.has('ShiftRight')) my-=1;
       const cellsPerSec = flyScene ? flySceneSpeed(dt) * (boost?2.5:1)
-                                   : speedR * 7       * (boost?4:1);
+                                   : flyClassicLaw(cam.R, cam.world.dims) * (boost?4:1);
       const v = cellsPerSec * dt;
       if(mx||my||mz){
         // W0 — normalize the composed wish vector: diagonals no longer
@@ -2905,6 +2940,59 @@
         flySpeedLaw(1e9, 16, dims) === Math.max(...dims)/FLY_CROSS_S]);
       out.push(['flight law is monotone in attention distance',
         flySpeedLaw(2,R,dims) <= flySpeedLaw(3,R,dims) && flySpeedLaw(3,R,dims) <= flySpeedLaw(5,R,dims)]);
+
+      // -- the three movement fixes ---------------------------------------
+      const D = [N,N,N];
+      // 1. no roof blitz: the out-of-envelope pathology is clamped
+      out.push(['movement: R at the roof no longer blitzes a world in 0.43s (now '
+                +(N/flyClassicLaw(R_ROOF,D)).toFixed(2)+'s)',
+        flyClassicLaw(R_ROOF,D) === flyClassicLaw(R_MAX,D)]);
+
+      // 2. ...but neither clamp may bite inside normal play, or it would break
+      //    continuity at every crossing.
+      let clampBites = false;
+      for(let t=0;t<=200;t++){
+        const r = R_MIN + (R_MAX-R_MIN)*t/200;
+        if(flyClassicLaw(r,D) < 7*r - 1e-12) clampBites = true;
+      }
+      out.push(['movement: the classic clamp never bites inside the envelope', !clampBites]);
+      let sceneBites = false;
+      for(let t=0;t<=200;t++){                      // attention inside this world
+        const d = (N)*t/200, r = R_MIN + (R_MAX-R_MIN)*t/200;
+        if(flySpeedLaw(d,r,D) < FLY_K*Math.max(d, r*FLY_FLOOR_R) - 1e-12) sceneBites = true;
+      }
+      out.push(['movement: the scene ceiling never bites within the current world', !sceneBites]);
+
+      // 3. no abyss: speed at the band floor is a fixed 7 body-lengths/s, at
+      //    any N — that is the invariant the 1e-6 collapse was destroying.
+      const bodiesPerSec = flyClassicLaw(R_MIN, D) / R_MIN;
+      out.push(['movement: at the band floor you still move 7 body-lengths/s (got '
+                +bodiesPerSec.toFixed(2)+')', Math.abs(bodiesPerSec - 7) < 1e-9]);
+      out.push(['movement: the scene law never crawls, even aimed point-blank',
+        flySpeedLaw(0, R_MIN, D) > 0 && N/flySpeedLaw(0, R_MIN, D) < 60]);
+
+      // 4. continuity. A descend maps R_MIN at level L to exactly R_MAX at
+      //    level L+1 (R *= N, and R_MIN·N = R_MAX), and the scene law's
+      //    attention distance is transported the same way. Absolute speed —
+      //    cells/s × metres/cell — must be identical across that map.
+      const mL = Math.pow(N,0), mL1 = Math.pow(N,-1);
+      const cBefore = flyClassicLaw(R_MIN, D) * mL, cAfter = flyClassicLaw(R_MAX, D) * mL1;
+      out.push(['movement: classic law — absolute speed survives a band crossing',
+        Math.abs(cBefore - cAfter) < 1e-12]);
+      let sceneOK = true;
+      for(let t=1;t<=40;t++){
+        const d = N*t/40;
+        const sB = flySpeedLaw(d, R_MIN, D), sA = flySpeedLaw(d*N, R_MAX, D);
+        // skip only where the ceiling clamps EITHER side — a clamp is not
+        // meant to be continuous, it is meant to be a clamp
+        if(sB >= crossCeil(D)-1e-12 || sA >= crossCeil(D)-1e-12) continue;
+        if(Math.abs(sB*mL - sA*mL1) > 1e-12) sceneOK = false;
+      }
+      out.push(['movement: scene law — absolute speed survives a band crossing', sceneOK]);
+
+      // 5. the envelope is closed on both sides now
+      out.push(['movement: the envelope is bounded below by R_MIN and above by the sky',
+        R_MIN > 0 && R_MIN < R_MAX && R_MIN*N === R_MAX]);
     }
     {
       // -- orientation-code algebra: 48 elements, homomorphism, inverses --
