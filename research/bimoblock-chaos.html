@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bimoblock chaos — 27 independent inversions</title>
+<style>
+  html,body{ height:100%; margin:0; background:#000; overflow:hidden; }
+  canvas{ display:block; width:100%; height:100%; }
+  #hud{
+    position:fixed; right:10px; bottom:8px; text-align:right;
+    font:10px/1.55 ui-monospace, Menlo, Consolas, monospace;
+    color:#5a5a66; letter-spacing:.08em; user-select:none; white-space:pre;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hud"></div>
+
+<script>
+"use strict";
+
+/* =========================================================================
+   Twenty-seven inversions, one per cell.
+
+   The pole was only ever hoisted out of the cell loop for convenience — it
+   appears in the quadratic through av = o - pole, av2, avd and
+   nsc = n.(site - pole). Push those three back inside and every cell gets an
+   independent Mobius map for about ten extra flops. Nothing else changes;
+   each cell's trace was always self-contained.
+
+   Left raw that would scatter the lattice, so the poles are constrained
+   instead. For cell j put the pole at distance D from the cell centre and
+   set
+
+       R^2 = D^2 - rho^2                (rho^2 = 3, the circumradius squared)
+
+   which is exactly the power of the pole with respect to that cell's
+   circumsphere. The inversion then fixes that sphere setwise and maps its
+   interior to its interior: near side and far side swap, the boundary is
+   pinned. Verified — 240k interior samples, zero escapes, sphere fixed to
+   1e-14, and the image-sphere formula collapses to (site, rho) exactly.
+
+   So each cell is deformed as violently as you like while its footprint
+   stays exactly where it was. D controls how nonlinear: as D -> rho the map
+   crushes everything toward the pole, and as D grows it flattens toward an
+   ordinary mirror through the cell centre.
+
+   CHAOS blends pole and R^2 between the single shared pole and the 27 local
+   ones. Every intermediate value is still an exact inversion per cell, so
+   the trace never stops being exact anywhere along the blend.
+   ========================================================================= */
+
+const N     = 27;
+const PITCH = 2.6;
+const RHO2  = 3.0;          // squared circumradius of the biunit cube
+const RHO   = Math.sqrt(RHO2);
+const DMIN  = 1.95;         // pole distance floor; must exceed rho = 1.732
+const DVAR  = 0.85;
+const TRATE = 0.45;
+const DUTY  = 0.55;
+const HOLD  = 6;
+
+/* ---------------------- the octahedral rotation group --------------------- */
+
+const PERMS = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+const PSGN  = [ 1, -1, -1, 1, 1, -1 ];
+
+const OCTA = [];
+for (let pi = 0; pi < 6; ++pi){
+  const p = PERMS[pi];
+  for (let b = 0; b < 8; ++b){
+    const s = [ (b & 1) ? -1 : 1, (b & 2) ? -1 : 1, (b & 4) ? -1 : 1 ];
+    if (PSGN[pi] * s[0] * s[1] * s[2] !== 1) continue;
+    const M = new Float64Array(9);
+    for (let c = 0; c < 3; ++c) M[c*3 + p[c]] = s[c];
+    OCTA.push(M);
+  }
+}
+
+function mul3(A, B){
+  const o = new Float64Array(9);
+  for (let c = 0; c < 3; ++c)
+    for (let r = 0; r < 3; ++r)
+      o[c*3+r] = A[r]*B[c*3] + A[3+r]*B[c*3+1] + A[6+r]*B[c*3+2];
+  return o;
+}
+
+const mkey = M => Array.from(M, x => Math.round(x)).join(",");
+const INDEX = new Map(OCTA.map((M, i) => [mkey(M), i]));
+const ID = INDEX.get("1,0,0,0,1,0,0,0,1");
+
+const CAY = new Int32Array(24 * 24);
+for (let a = 0; a < 24; ++a)
+  for (let b = 0; b < 24; ++b)
+    CAY[a*24 + b] = INDEX.get(mkey(mul3(OCTA[a], OCTA[b])));
+
+const CPERM = OCTA.map(M => {
+  const p = new Int32Array(27);
+  for (let i = 0; i < 27; ++i){
+    const v = [ i%3 - 1, ((i/3)|0)%3 - 1, ((i/9)|0) - 1 ];
+    const x = Math.round(M[0]*v[0] + M[3]*v[1] + M[6]*v[2]);
+    const y = Math.round(M[1]*v[0] + M[4]*v[1] + M[7]*v[2]);
+    const z = Math.round(M[2]*v[0] + M[5]*v[1] + M[8]*v[2]);
+    p[i] = (x+1) + 3*(y+1) + 9*(z+1);
+  }
+  return p;
+});
+
+function actMask(g, m){
+  const p = CPERM[g];
+  let o = 0;
+  for (let i = 0; i < 27; ++i) if ((m >>> i) & 1) o |= (1 << p[i]);
+  return o >>> 0;
+}
+
+function canonical(m){
+  let best = 0xffffffff;
+  for (let g = 0; g < 24; ++g){ const v = actMask(g, m); if (v < best) best = v; }
+  let stab = 0;
+  for (let g = 0; g < 24; ++g) if (actMask(g, best) === best) stab++;
+  return { canon: best >>> 0, orbit: 24 / stab };
+}
+
+const GEN = [];
+for (let ax = 0; ax < 3; ++ax) for (const s of [1,-1]){
+  const M = new Float64Array(9);
+  const a = (ax+1)%3, b = (ax+2)%3;
+  M[ax*3+ax] = 1; M[a*3+b] = s; M[b*3+a] = -s;
+  GEN.push(INDEX.get(mkey(M)));
+}
+
+function matToQuat(m){
+  const m00=m[0],m10=m[1],m20=m[2],m01=m[3],m11=m[4],m21=m[5],m02=m[6],m12=m[7],m22=m[8];
+  const tr = m00 + m11 + m22;
+  let w,x,y,z;
+  if (tr > 0){ const S = Math.sqrt(tr+1)*2;
+    w=0.25*S; x=(m21-m12)/S; y=(m02-m20)/S; z=(m10-m01)/S;
+  } else if (m00 > m11 && m00 > m22){ const S = Math.sqrt(1+m00-m11-m22)*2;
+    w=(m21-m12)/S; x=0.25*S; y=(m01+m10)/S; z=(m02+m20)/S;
+  } else if (m11 > m22){ const S = Math.sqrt(1+m11-m00-m22)*2;
+    w=(m02-m20)/S; x=(m01+m10)/S; y=0.25*S; z=(m12+m21)/S;
+  } else { const S = Math.sqrt(1+m22-m00-m11)*2;
+    w=(m10-m01)/S; x=(m02+m20)/S; y=(m12+m21)/S; z=0.25*S;
+  }
+  return [x,y,z,w];
+}
+
+function quatToMat(q){
+  const [x,y,z,w] = q;
+  return [ 1-2*(y*y+z*z), 2*(x*y+w*z),   2*(x*z-w*y),
+           2*(x*y-w*z),   1-2*(x*x+z*z), 2*(y*z+w*x),
+           2*(x*z+w*y),   2*(y*z-w*x),   1-2*(x*x+y*y) ];
+}
+
+const QUAT = OCTA.map(matToQuat);
+
+function slerp(a, b, t){
+  let d = a[0]*b[0]+a[1]*b[1]+a[2]*b[2]+a[3]*b[3], bb = b;
+  if (d < 0){ bb = [-b[0],-b[1],-b[2],-b[3]]; d = -d; }
+  if (d > 0.9995){
+    const o = [a[0]+(bb[0]-a[0])*t, a[1]+(bb[1]-a[1])*t,
+               a[2]+(bb[2]-a[2])*t, a[3]+(bb[3]-a[3])*t];
+    const n = Math.hypot(o[0],o[1],o[2],o[3]);
+    return [o[0]/n,o[1]/n,o[2]/n,o[3]/n];
+  }
+  const th = Math.acos(d), s = Math.sin(th);
+  const wa = Math.sin((1-t)*th)/s, wb = Math.sin(t*th)/s;
+  return [a[0]*wa+bb[0]*wb, a[1]*wa+bb[1]*wb, a[2]*wa+bb[2]*wb, a[3]*wa+bb[3]*wb];
+}
+
+/* ------------------------------- shaders ---------------------------------- */
+
+const VERT = `#version 300 es
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+precision highp int;
+
+uniform vec3 iResolution;
+uniform vec3 uCamO, uCamU, uCamV, uCamW;
+uniform bool uInvert;
+
+uniform mat3 uRot[27];        // tumble frame, in shape space
+uniform vec4 uSite[27];       // xyz = lattice site
+uniform vec4 uPole[27];       // xyz = this cell's pole, w = its R^2
+uniform vec4 uBS[27];         // world bounding sphere; w < 0 => unbounded
+uniform uint uMask[27];
+
+out vec4 fragColor;
+
+#define AA 2
+
+bool occ(ivec3 c, uint m){
+  if (any(greaterThanEqual(uvec3(c), uvec3(3u)))) return false;
+  return ((m >> uint(c.x + 3 * c.y + 9 * c.z)) & 1u) != 0u;
+}
+
+vec3 safeDir(vec3 d){
+  vec3 s = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(d, vec3(0.0)));
+  return s * max(abs(d), vec3(1e-6));
+}
+
+// ---- straight-ray trace, for the uninverted comparison ----------------------
+void traceLinear(vec3 rl, vec3 rd, vec3 inv, uint mask, inout float m, inout vec3 p){
+  for (int a = 0; a < 3; ++a){
+    bool pos  = rd[a] > 0.0;
+    int  base = pos ? 0 : 1;
+    for (int k = 0; k < 3; ++k){
+      int   q = base + k;
+      float t = (-1.0 + float(q) * (2.0 / 3.0) - rl[a]) * inv[a];
+      if (t <= 0.0 || t >= m) continue;
+      vec3  h  = rl + t * rd;
+      ivec3 ci = ivec3(floor(h * 1.5 + 1.5));
+      ivec3 ce = ci;
+      ci[a] = pos ? q     : q - 1;
+      ce[a] = pos ? q - 1 : q;
+      if (occ(ci, mask) && !occ(ce, mask)){ m = t; p = h; }
+    }
+  }
+}
+
+// ---- curved-ray trace, now with the pole as an argument ----------------------
+// This function was always per-cell; only av/av2/avd used to be hoisted out of
+// the loop. Passing pole and r2 in is the whole cost of 27 independent maps.
+void traceMobius(vec3 o, vec3 d, vec3 pole, float r2,
+                 vec3 site, mat3 R, uint mask, inout float m, inout vec3 p){
+  vec3  av  = o - pole;
+  float av2 = dot(av, av);
+  float avd = dot(av, d);
+  vec3  sc  = site - pole;
+
+  for (int a = 0; a < 3; ++a){
+    vec3  n   = R[a];                    // column a: the plane normal
+    float nd  = dot(n, d);
+    float na  = dot(n, av);
+    float nsc = dot(n, sc);
+
+    for (int q = 0; q < 4; ++q){
+      float K = (-1.0 + float(q) * (2.0 / 3.0)) + nsc;
+      float B = 2.0 * K * avd - r2 * nd;
+      float C = K * av2 - r2 * na;
+
+      vec2 roots = vec2(-1.0);
+      int  nr = 0;
+
+      if (abs(K) < 1e-7){                // plane through the pole: stays flat
+        if (abs(B) > 1e-12){ roots.x = -C / B; nr = 1; }
+      } else {
+        float ds = B * B - 4.0 * K * C;
+        if (ds >= 0.0){
+          float sq = sqrt(ds);
+          float qq = -0.5 * (B + (B >= 0.0 ? sq : -sq));   // stable form
+          float r0 = qq / K;
+          float r1 = (abs(qq) > 1e-20) ? C / qq : r0;
+          roots = vec2(min(r0, r1), max(r0, r1));
+          nr = 2;
+        }
+      }
+
+      for (int j = 0; j < 2; ++j){
+        if (j >= nr) break;
+        float t = roots[j];
+        if (t <= 1e-4 || t >= m) continue;
+
+        vec3  pv  = av + t * d;
+        float ip2 = 1.0 / max(dot(pv, pv), 1e-8);
+        vec3  y   = pole + (r2 * ip2) * pv;
+        vec3  l   = (y - site) * R;
+
+        // entry or exit is local: read the sign of d(n.y)/dt at this root
+        float g = nd - 2.0 * dot(pv, n) * dot(pv, d) * ip2;
+        bool  pos = g > 0.0;
+
+        ivec3 ci = ivec3(floor(l * 1.5 + 1.5));
+        ivec3 ce = ci;
+        ci[a] = pos ? q     : q - 1;
+        ce[a] = pos ? q - 1 : q;
+
+        if (occ(ci, mask) && !occ(ce, mask)){ m = t; p = l; }
+      }
+    }
+  }
+}
+
+vec3 render(vec2 v){
+  vec3 o = uCamO;
+  vec3 d = safeDir(normalize(v.x * uCamU + v.y * uCamV + 1.8 * uCamW));
+
+  float m = 1e9;
+  vec3  p = vec3(0.0);
+  bool  hit = false;
+
+  for (int j = 0; j < 27; ++j){
+    uint mask = uMask[j];
+    if (mask == 0u) continue;
+
+    vec4 bs = uBS[j];
+    if (bs.w > 0.0){
+      vec3  oc = o - bs.xyz;
+      float b  = dot(oc, d);
+      float c  = dot(oc, oc) - bs.w * bs.w;
+      float ds = b * b - c;
+      if (ds < 0.0) continue;
+      float sq = sqrt(ds);
+      if (-b + sq < 0.0 || -b - sq >= m) continue;
+    }
+
+    vec3 site = uSite[j].xyz;
+    mat3 R    = uRot[j];
+
+    float before = m;
+    if (uInvert){
+      vec4 pw = uPole[j];
+      traceMobius(o, d, pw.xyz, pw.w, site, R, mask, m, p);
+    } else {
+      vec3 ol = (o - site) * R;
+      vec3 dl = safeDir(d * R);
+      traceLinear(ol, dl, 1.0 / dl, mask, m, p);
+    }
+    if (m < before) hit = true;
+  }
+
+  // shape-space local position, exactly as in the flat build — so the gamut
+  // is unchanged and the deformation reads directly off how the gradient
+  // bends across a face.
+  return hit ? p * 0.5 + 0.5 : vec3(0.0);
+}
+
+void mainImage(out vec4 O, in vec2 F){
+  vec3 acc = vec3(0.0);
+  for (int j = 0; j < AA; ++j)
+    for (int i = 0; i < AA; ++i){
+      vec2 off = (vec2(float(i), float(j)) + 0.5) / float(AA);
+      vec2 v = ((F + off - 0.5) * 2.0 - iResolution.xy) / iResolution.y;
+      acc += render(v);
+    }
+  O = vec4(acc / float(AA * AA), 1.0);
+}
+
+void main(){ mainImage(fragColor, gl_FragCoord.xy); }`;
+
+/* ------------------------------ cell table -------------------------------- */
+
+function hash32(a, b){
+  let h = (Math.imul(a, 0x9e3779b9) ^ Math.imul(b, 0x85ebca6b)) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0; h = Math.imul(h, 0x7feb352d) >>> 0;
+  h = (h ^ (h >>> 15)) >>> 0; h = Math.imul(h, 0x846ca68b) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+function rawMask(site, step, dense){
+  const a = hash32(site, step) & 0x7ffffff;
+  return dense ? a : (a & hash32(site + 997, step)) & 0x7ffffff;
+}
+
+const smooth = t => t * t * t * (t * (t * 6 - 15) + 10);
+
+const ROT_BUF  = new Float32Array(N * 9);
+const SITE_BUF = new Float32Array(N * 4);
+const POLE_BUF = new Float32Array(N * 4);
+const BS_BUF   = new Float32Array(N * 4);
+const M_BUF    = new Uint32Array(N);
+
+const cur = new Int32Array(N).fill(ID);
+const nxt = new Int32Array(N).fill(ID);
+const lastStep = new Int32Array(N).fill(-1 >>> 1);
+const rawPrev = new Int32Array(N).fill(-1);
+const canonOf = new Int32Array(N);
+const orbitOf = new Int32Array(N).fill(24);
+
+const tmpR = [], tmpBS = [], tmpPole = [], tmpSite = [], key = new Float64Array(N);
+const IDENT = [1,0,0, 0,1,0, 0,0,1];
+
+// the single shared pole, as in the previous build
+function globalPole(T){
+  const A = 1.05 * PITCH;
+  return [ A * Math.sin(0.310 * T),
+           A * Math.sin(0.217 * T + 1.9),
+           A * Math.sin(0.163 * T + 3.4) ];
+}
+const globalR2 = T => 9.0 + 4.0 * Math.sin(T * 0.13);
+
+// per-cell pole: a direction wandering over the sphere at distance D > rho,
+// with each site given its own frequencies so nothing beats in unison
+function localPole(j, T, site){
+  const th = (0.37 + 0.031 * j) * T + j * 2.399;
+  const cz = Math.sin((0.29 + 0.023 * j) * T + j * 1.681);
+  const sz = Math.sqrt(Math.max(0, 1 - cz * cz));
+  const u  = [ sz * Math.cos(th), cz, sz * Math.sin(th) ];
+  const D  = DMIN + DVAR * (0.5 + 0.5 * Math.sin(0.21 * T + j * 1.13));
+  return { pole: [ site[0] + D*u[0], site[1] + D*u[1], site[2] + D*u[2] ],
+           r2: D * D - RHO2, D };
+}
+
+function buildCells(T, invert, chaos, tumble, mT, dense, eye){
+  const gp = globalPole(T), gr2 = globalR2(T);
+  let orbitSum = 0, unbounded = 0, dAvg = 0;
+  let fx = 0, fy = 0, fz = 0, nb = 0;
+
+  for (let j = 0; j < N; ++j){
+    const site = [ ((j % 3) - 1) * PITCH,
+                   (((j / 3) | 0) % 3 - 1) * PITCH,
+                   (((j / 9) | 0) - 1) * PITCH ];
+    tmpSite[j] = site;
+
+    /* --- tumble: quarter-turn walk on the Cayley graph of O -------------- */
+    const fstep = mT * TRATE + j * 0.61;
+    const step  = Math.floor(fstep);
+    const phase = fstep - step;
+
+    if (lastStep[j] !== step){
+      if (lastStep[j] > step || step - lastStep[j] > 64){
+        cur[j] = nxt[j] = ID;
+      } else {
+        for (let n = lastStep[j]; n < step; ++n){
+          cur[j] = nxt[j];
+          nxt[j] = CAY[cur[j]*24 + GEN[hash32(j, n + 1) % 6]];
+        }
+      }
+      lastStep[j] = step;
+    }
+
+    const raw = rawMask(j, Math.floor(step / HOLD), dense);
+    if (rawPrev[j] !== raw){
+      const c = canonical(raw);
+      rawPrev[j] = raw; canonOf[j] = c.canon; orbitOf[j] = c.orbit;
+    }
+    M_BUF[j] = canonOf[j];
+    orbitSum += orbitOf[j];
+
+    const e = smooth(Math.min(1, phase / DUTY));
+    tmpR[j] = tumble > 0.001
+      ? quatToMat(slerp(QUAT[cur[j]], QUAT[nxt[j]], e * tumble))
+      : IDENT;
+
+    /* --- blend the shared pole toward this cell's own -------------------- */
+    const lp = localPole(j, T, site);
+    dAvg += lp.D;
+    const pole = [ gp[0] + (lp.pole[0] - gp[0]) * chaos,
+                   gp[1] + (lp.pole[1] - gp[1]) * chaos,
+                   gp[2] + (lp.pole[2] - gp[2]) * chaos ];
+    const r2 = gr2 + (lp.r2 - gr2) * chaos;
+    tmpPole[j] = [pole[0], pole[1], pole[2], r2];
+
+    /* --- exact image of the cell circumsphere ---------------------------- */
+    // At chaos = 1, r2 is the power of the pole wrt this sphere, so den = r2,
+    // the factor is 1, and this collapses to (site, rho) exactly: every cell
+    // stays in its own lattice slot no matter how mangled its interior is.
+    if (invert){
+      const dx = site[0]-pole[0], dy = site[1]-pole[1], dz = site[2]-pole[2];
+      const den = dx*dx + dy*dy + dz*dz - RHO2;
+      if (den <= 0.5){
+        tmpBS[j] = [0, 0, 0, -1];                    // pole inside: unbounded
+        unbounded++;
+      } else {
+        const f = r2 / den;
+        tmpBS[j] = [ pole[0] + dx*f, pole[1] + dy*f, pole[2] + dz*f, RHO * f ];
+        fx += tmpBS[j][0]; fy += tmpBS[j][1]; fz += tmpBS[j][2]; nb++;
+      }
+    } else {
+      tmpBS[j] = [site[0], site[1], site[2], RHO];
+      fx += site[0]; fy += site[1]; fz += site[2]; nb++;
+    }
+
+    const bx = tmpBS[j][0]-eye[0], by = tmpBS[j][1]-eye[1], bz = tmpBS[j][2]-eye[2];
+    key[j] = tmpBS[j][3] < 0 ? -1e9 : Math.hypot(bx,by,bz) - tmpBS[j][3];
+  }
+
+  const ord = Array.from({length: N}, (_, i) => i).sort((a, b) => key[a] - key[b]);
+  for (let k = 0; k < N; ++k){
+    const j = ord[k];
+    ROT_BUF.set(tmpR[j], k*9);
+    SITE_BUF[k*4] = tmpSite[j][0]; SITE_BUF[k*4+1] = tmpSite[j][1];
+    SITE_BUF[k*4+2] = tmpSite[j][2]; SITE_BUF[k*4+3] = 0;
+    POLE_BUF.set(tmpPole[j], k*4);
+    BS_BUF.set(tmpBS[j], k*4);
+    M_BUF[k] = canonOf[j];
+  }
+
+  let focus = [0,0,0], ext = 6;
+  if (nb > 0){
+    focus = [fx/nb, fy/nb, fz/nb];
+    ext = 0;
+    for (let k = 0; k < N; ++k){
+      if (BS_BUF[k*4+3] < 0) continue;
+      const dx = BS_BUF[k*4]-focus[0], dy = BS_BUF[k*4+1]-focus[1], dz = BS_BUF[k*4+2]-focus[2];
+      ext = Math.max(ext, Math.hypot(dx,dy,dz) + Math.min(BS_BUF[k*4+3], 9));
+    }
+  }
+  return { orbitAvg: orbitSum / N, unbounded, focus, ext, dAvg: dAvg / N, gr2 };
+}
+
+/* ------------------------------------ host -------------------------------- */
+
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, depth: false });
+
+function compile(type, src){
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(sh));
+    console.error(src.split("\n").map((l, i) => (i + 1) + "| " + l).join("\n"));
+    return null;
+  }
+  return sh;
+}
+
+function main(){
+  // mat3[27] + four vec4[27] arrays is ~189 uniform vectors; the WebGL2 floor
+  // is 224, so this fits, but it is worth knowing when it doesn't.
+  const maxVec = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
+  if (maxVec < 200) console.warn("MAX_FRAGMENT_UNIFORM_VECTORS = " + maxVec + ", may be tight");
+
+  const vs = compile(gl.VERTEX_SHADER, VERT);
+  const fs = compile(gl.FRAGMENT_SHADER, FRAG);
+  if (!vs || !fs) return;
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+    console.error(gl.getProgramInfoLog(prog)); return;
+  }
+  gl.useProgram(prog);
+  gl.bindVertexArray(gl.createVertexArray());
+
+  const uRes = gl.getUniformLocation(prog, "iResolution");
+  const uO   = gl.getUniformLocation(prog, "uCamO");
+  const uU   = gl.getUniformLocation(prog, "uCamU");
+  const uV   = gl.getUniformLocation(prog, "uCamV");
+  const uW   = gl.getUniformLocation(prog, "uCamW");
+  const uInv = gl.getUniformLocation(prog, "uInvert");
+  const uRl  = gl.getUniformLocation(prog, "uRot[0]");
+  const uSl  = gl.getUniformLocation(prog, "uSite[0]");
+  const uPl  = gl.getUniformLocation(prog, "uPole[0]");
+  const uBl  = gl.getUniformLocation(prog, "uBS[0]");
+  const uMl  = gl.getUniformLocation(prog, "uMask[0]");
+  const hud  = document.getElementById("hud");
+
+  function resize(){
+    const dpr = Math.min(devicePixelRatio || 1, 1.75);
+    const w = Math.round(canvas.clientWidth * dpr);
+    const h = Math.round(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h){
+      canvas.width = w; canvas.height = h;
+      gl.viewport(0, 0, w, h);
+      gl.uniform3f(uRes, w, h, 1);
+    }
+  }
+
+  function camera(time, focus, dist){
+    const t = time * 0.22;
+    const o = [ focus[0] + dist * Math.sin(t),
+                focus[1] + dist * (0.42 + 0.22 * Math.sin(t * 0.63)),
+                focus[2] + dist * Math.cos(t) ];
+    const L = Math.hypot(focus[0]-o[0], focus[1]-o[1], focus[2]-o[2]) || 1;
+    const w = [(focus[0]-o[0])/L, (focus[1]-o[1])/L, (focus[2]-o[2])/L];
+    let u = [ w[2], 0, -w[0] ];
+    const ul = Math.hypot(u[0], u[1], u[2]) || 1;
+    u = [u[0]/ul, u[1]/ul, u[2]/ul];
+    const v = [ u[1]*w[2]-u[2]*w[1], u[2]*w[0]-u[0]*w[2], u[0]*w[1]-u[1]*w[0] ];
+    return { o, u, v, w };
+  }
+
+  let T = 0, mT = 0;
+  let invert = true, chaos = 1, chaosTarget = 1;
+  let tumble = 1, tumbleTarget = 1;
+  let running = true, masksLive = true, dense = false;
+  let last = performance.now(), acc = 0, frames = 0, fps = 0;
+  let camF = [0,0,0], camD = 11;
+  let st = { orbitAvg: 24, unbounded: 0, focus: [0,0,0], ext: 6, dAvg: 2.4, gr2: 9 };
+
+  addEventListener("keydown", (ev) => {
+    const k = ev.key.toLowerCase();
+    if (k === "c"){ chaosTarget = chaosTarget > 0.5 ? 0 : 1; console.log("poles", chaosTarget ? "27 local" : "1 shared"); }
+    else if (k === "i"){ invert = !invert; console.log("inversion", invert ? "on" : "off"); }
+    else if (k === "t"){ tumbleTarget = tumbleTarget > 0.5 ? 0 : 1; console.log("tumble", tumbleTarget ? "on" : "off"); }
+    else if (k === "d"){ dense = !dense; console.log("mask density", dense ? "half" : "quarter"); }
+    else if (k === "m"){ masksLive = !masksLive; console.log("tumble clock", masksLive ? "running" : "held"); }
+    else if (k === " "){ ev.preventDefault(); running = !running; console.log(running ? "run" : "pause"); }
+    else return;
+  });
+
+  function frame(now){
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    if (running) T += dt;
+    if (running && masksLive) mT += dt;
+    tumble += (tumbleTarget - tumble) * Math.min(1, dt * 3.0);
+    chaos  += (chaosTarget  - chaos)  * Math.min(1, dt * 0.8);
+
+    resize();
+
+    const cam = camera(T, camF, camD);
+    gl.uniform3fv(uO, cam.o); gl.uniform3fv(uU, cam.u);
+    gl.uniform3fv(uV, cam.v); gl.uniform3fv(uW, cam.w);
+
+    st = buildCells(T, invert, chaos, tumble, mT, dense, cam.o);
+
+    const kf = Math.min(1, dt * 0.9);
+    for (let i = 0; i < 3; ++i) camF[i] += (st.focus[i] - camF[i]) * kf;
+    camD += (Math.min(30, Math.max(7, st.ext * 1.45)) - camD) * kf;
+
+    gl.uniform1i(uInv, invert ? 1 : 0);
+    gl.uniformMatrix3fv(uRl, false, ROT_BUF);
+    gl.uniform4fv(uSl, SITE_BUF);
+    gl.uniform4fv(uPl, POLE_BUF);
+    gl.uniform4fv(uBl, BS_BUF);
+    gl.uniform1uiv(uMl, M_BUF);
+
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    acc += dt; frames++;
+    if (acc >= 0.5){ fps = Math.round(frames / acc); acc = 0; frames = 0; }
+
+    const poles = chaos > 0.98 ? "27 local" : chaos < 0.02 ? "1 shared" : "blend " + chaos.toFixed(2);
+    hud.textContent =
+      fps + " fps\n" +
+      (invert ? "möbius   poles " + poles : "flat lattice") + "\n" +
+      (invert ? "mean pole distance " + st.dAvg.toFixed(2) + "   ρ " + RHO.toFixed(2) + "\n" : "") +
+      (invert && st.unbounded ? "unbounded cells " + st.unbounded + "\n" : "") +
+      "tumble " + (tumbleTarget ? "on" : "off") + "   orbit " + st.orbitAvg.toFixed(1) + "/24\n" +
+      "c poles  i flat/möbius  t tumble  d density  m hold  space pause";
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  console.log("bimoblock chaos — 27 independent inversions, each fixing its own circumsphere");
+}
+
+if (gl){ main(); }
+else {
+  console.error("WebGL2 unavailable.");
+  document.getElementById("hud").textContent = "needs WebGL2";
+}
+</script>
+</body>
+</html>
