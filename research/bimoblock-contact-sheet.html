@@ -67,6 +67,7 @@ uniform uint  uMasks[27];     // the whole sprite, uploaded from the CPU
 uniform int   uGroupEls[48];  // element indices of the active Oh subgroup
 uniform int   uGroupN;        // |G|
 uniform int   uPaletteMode;
+uniform int   uColorScope;    // 0 = 3x3x3 block local, 1 = 9x9x9 global
 uniform int   uAO;
 
 out vec4 fragColor;
@@ -148,22 +149,24 @@ vec3 safeDir(vec3 d){
 }
 
 // ---- domain colour fields ---------------------------------------------------
-// p  : local surface point inside its block, in [-1,1]^3
-// w  : world position normalised by WORLD, in [-1,1]^3
+// p  : local surface point inside its 3x3x3 block, in [-1,1]^3
+// w  : world position normalised by WORLD (9x9x9 global), in [-1,1]^3
+// uColorScope allows toggling between private 3x3x3 block space and the full 9x9x9 space
 vec3 colorize(vec3 p, vec3 w){
+  vec3 pt = (uColorScope == 1) ? clamp(w, -1.0, 1.0) : p;
   if (uPaletteMode == 1){
-    return foldOrbit(p) * 0.5 + 0.5;
+    return foldOrbit(pt) * 0.5 + 0.5;
   } else if (uPaletteMode == 2){
     float th = w.y * 3.14159265 * 1.25, ct = cos(th), st = sin(th);
-    return vec3(p.x * ct - p.z * st, p.y, p.x * st + p.z * ct) * 0.5 + 0.5;
+    return vec3(pt.x * ct - pt.z * st, pt.y, pt.x * st + pt.z * ct) * 0.5 + 0.5;
   } else if (uPaletteMode == 3){
     float r = length(w);
     vec3 core = mix(vec3(1.0, 0.25, 0.05), vec3(0.1, 0.85, 1.0), sin(r * 12.0) * 0.5 + 0.5);
-    return mix(core, p * 0.5 + 0.5, smoothstep(0.35, 0.75, r));
+    return mix(core, pt * 0.5 + 0.5, smoothstep(0.35, 0.75, r));
   } else if (uPaletteMode == 4){
-    return sin(p * 3.14159265 * 0.75 + w * 2.0) * 0.5 + 0.5;
+    return sin(pt * 3.14159265 * 0.75 + w * 2.0) * 0.5 + 0.5;
   }
-  return p * 0.5 + 0.5;
+  return pt * 0.5 + 0.5;
 }
 
 // ---- camera -----------------------------------------------------------------
@@ -617,7 +620,8 @@ function formatG48(e){
 
 /* ---- geometry + colour, shared by the screen and every exporter ----------
    p : local surface point inside its block, [-1,1]^3
-   w : world position / WORLD, [-1,1]^3
+   w : world position / WORLD (full 9x9x9 bimoblock coordinate), [-1,1]^3
+   colorScope: 0 for 3x3x3 block-local coordinates, 1 for global 9x9x9 coordinates
    Cells are 2/3 wide and the lattice spans +/-3, so a cell centre at grid
    index X sits at (X-4)*(2/3) and normalises to (X-4)/4.5.  These must agree
    with the shader's W / WORLD or exported colours drift away from the screen.
@@ -626,38 +630,39 @@ const WORLD = 3.0;
 const wOfCentre = X => (X - 4) / 4.5;
 const wOfVertex = V => (V - 4.5) / 4.5;
 
-function colorize(p, w, palMode, els){
+function colorize(p, w, palMode, els, colorScope = 0){
+  const pt = (colorScope === 1) ? w : p;
   if (palMode === 1){
-    const f = foldOrbit(p, els);
+    const f = foldOrbit(pt, els);
     return [f[0]*0.5+0.5, f[1]*0.5+0.5, f[2]*0.5+0.5];
   }
   if (palMode === 2){
     const th = w[1] * Math.PI * 1.25, ct = Math.cos(th), st = Math.sin(th);
-    return [(p[0]*ct - p[2]*st)*0.5+0.5, p[1]*0.5+0.5, (p[0]*st + p[2]*ct)*0.5+0.5];
+    return [(pt[0]*ct - pt[2]*st)*0.5+0.5, pt[1]*0.5+0.5, (pt[0]*st + pt[2]*ct)*0.5+0.5];
   }
   if (palMode === 3){
     const r = Math.hypot(w[0], w[1], w[2]);
     const cm = Math.sin(r * 12.0) * 0.5 + 0.5;
     const core = [1.0*(1-cm) + 0.1*cm, 0.25*(1-cm) + 0.85*cm, 0.05*(1-cm) + 1.0*cm];
-    const hull = [p[0]*0.5+0.5, p[1]*0.5+0.5, p[2]*0.5+0.5];
+    const hull = [pt[0]*0.5+0.5, pt[1]*0.5+0.5, pt[2]*0.5+0.5];
     let t = Math.max(0, Math.min(1, (r - 0.35) / 0.40));
     t = t * t * (3 - 2 * t);                         // smoothstep, matching GLSL
     return [0,1,2].map(i => core[i]*(1-t) + hull[i]*t);
   }
   if (palMode === 4){
-    return [0,1,2].map(i => Math.sin(p[i] * Math.PI * 0.75 + w[i] * 2.0) * 0.5 + 0.5);
+    return [0,1,2].map(i => Math.sin(pt[i] * Math.PI * 0.75 + w[i] * 2.0) * 0.5 + 0.5);
   }
-  return [p[0]*0.5+0.5, p[1]*0.5+0.5, p[2]*0.5+0.5];
+  return [pt[0]*0.5+0.5, pt[1]*0.5+0.5, pt[2]*0.5+0.5];
 }
 const rgb255 = c => c.map(v => Math.max(0, Math.min(255, Math.round(v * 255))));
 
-function solidVoxels(masks, palMode, els){
+function solidVoxels(masks, palMode, els, colorScope = 0){
   const grid = gridOf(masks), out = [];
   for (let Z = 0; Z < 9; Z++) for (let Y = 0; Y < 9; Y++) for (let X = 0; X < 9; X++){
     if (!grid[X + 9*Y + 81*Z]) continue;
     const p = [((X%3)-1)/1.5, ((Y%3)-1)/1.5, ((Z%3)-1)/1.5];
     const w = [wOfCentre(X), wOfCentre(Y), wOfCentre(Z)];
-    out.push({ X, Y, Z, rgb: rgb255(colorize(p, w, palMode, els)) });
+    out.push({ X, Y, Z, rgb: rgb255(colorize(p, w, palMode, els, colorScope)) });
   }
   return { grid, out };
 }
@@ -696,8 +701,8 @@ function medianCut(colors, maxColors){
   return { palette, map };
 }
 
-function encodeVOX(masks, palMode, els){
-  const { out } = solidVoxels(masks, palMode, els);
+function encodeVOX(masks, palMode, els, colorScope = 0){
+  const { out } = solidVoxels(masks, palMode, els, colorScope);
   if (!out.length) return { bytes:null, voxels:0, uniqueColours:0, quantised:false };
 
   const colors = out.map(v => v.rgb);
@@ -763,7 +768,7 @@ const OBJ_FACES = [
   { d:[0,0,-1], n:6, v:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]] }
 ];
 
-function encodeOBJ(masks, palMode, els, headerLines){
+function encodeOBJ(masks, palMode, els, headerLines, colorScope = 0){
   const grid = gridOf(masks);
   const lines = headerLines.concat([
     "# v X Y Z R G B (vertex colours), outward vn",
@@ -786,7 +791,7 @@ function encodeOBJ(masks, palMode, els, headerLines){
         const pos = [ (VX - 4.5) * (2/3), (VY - 4.5) * (2/3), (VZ - 4.5) * (2/3) ];
         const p = [ (cx + vt[0]) / 1.5 - 1, (cy + vt[1]) / 1.5 - 1, (cz + vt[2]) / 1.5 - 1 ];
         const w = [ wOfVertex(VX), wOfVertex(VY), wOfVertex(VZ) ];
-        const c = colorize(p, w, palMode, els);
+        const c = colorize(p, w, palMode, els, colorScope);
         lines.push(`v ${pos[0].toFixed(4)} ${pos[1].toFixed(4)} ${pos[2].toFixed(4)} ` +
                    `${c[0].toFixed(4)} ${c[1].toFixed(4)} ${c[2].toFixed(4)}`);
       }
@@ -1022,22 +1027,24 @@ function main(){
   gl.useProgram(prog);
   gl.bindVertexArray(gl.createVertexArray());
 
-  const uRes      = gl.getUniformLocation(prog, "iResolution");
-  const uOrigin   = gl.getUniformLocation(prog, "uOrigin");
-  const uTime     = gl.getUniformLocation(prog, "iTime");
-  const uMouse    = gl.getUniformLocation(prog, "iMouse");
-  const uMasks    = gl.getUniformLocation(prog, "uMasks[0]");
-  const uGroupEls = gl.getUniformLocation(prog, "uGroupEls[0]");
-  const uGroupN   = gl.getUniformLocation(prog, "uGroupN");
-  const uPalMode  = gl.getUniformLocation(prog, "uPaletteMode");
-  const uAO       = gl.getUniformLocation(prog, "uAO");
+  const uRes        = gl.getUniformLocation(prog, "iResolution");
+  const uOrigin     = gl.getUniformLocation(prog, "uOrigin");
+  const uTime       = gl.getUniformLocation(prog, "iTime");
+  const uMouse      = gl.getUniformLocation(prog, "iMouse");
+  const uMasks      = gl.getUniformLocation(prog, "uMasks[0]");
+  const uGroupEls   = gl.getUniformLocation(prog, "uGroupEls[0]");
+  const uGroupN     = gl.getUniformLocation(prog, "uGroupN");
+  const uPalMode    = gl.getUniformLocation(prog, "uPaletteMode");
+  const uColorScope = gl.getUniformLocation(prog, "uColorScope");
+  const uAO         = gl.getUniformLocation(prog, "uAO");
 
   const hud = document.getElementById("hud");
   const labels = document.getElementById("labels");
   const selBox = document.getElementById("sel");
 
-  const PAL_NAMES = ["gamut","orbit-sym","helical","core/hull","cyber-phase"];
-  const DENSITIES = [0.12, 0.22, 0.35, 0.50, 0.65];
+  const PAL_NAMES   = ["gamut","orbit-sym","helical","core/hull","cyber-phase"];
+  const SCOPE_NAMES = ["3³ block","9³ global"];
+  const DENSITIES   = [0.12, 0.22, 0.35, 0.50, 0.65];
   const GUTTER_L = 92, GUTTER_T = 24, PAD = 10, GAP = 3;
 
   let iTime = 0, maskT = 0, lastStep = -1;
@@ -1054,7 +1061,7 @@ function main(){
   const ACCUM = true;
   const mouse = { x:0, y:0, ax:0, ay:0, ox:0, oy:0,
                   down:false, clicked:false, moved:false, x0:0, y0:0 };
-  let g48 = 0, fieldMode = 0, lift = 0, palMode = 0, seed = 42, densityIdx = 2;
+  let g48 = 0, fieldMode = 0, lift = 0, palMode = 0, colorScope = 0, seed = 42, densityIdx = 2;
   let fps = 0, dpr = 1, cell = 60, sel = null, buildMs = 0;
   let zoom = null;                        // { r, c } while a single cell is isolated
   let imported = null;                    // a 729-bit grid handed in via ?b64=
@@ -1184,7 +1191,7 @@ function main(){
   function paramLine(r, c){
     return `sym=${GROUPS[r].name} arch=${ARCH_NAMES[c]} g48=${formatG48(g48)} ` +
       `field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? "/" + LIFT_NAMES[lift] : ""} ` +
-      `density=${DENSITIES[densityIdx]} seed=${seed} | aut=${sel && sel.aut}/48 fill=${cells[r][c].filled}/729`;
+      `density=${DENSITIES[densityIdx]} scope=${SCOPE_NAMES[colorScope]} seed=${seed} | aut=${sel && sel.aut}/48 fill=${cells[r][c].filled}/729`;
   }
   function exitZoom(){ if (!zoom) return; zoom = null; layout(); paintHud(); }
 
@@ -1256,9 +1263,10 @@ function main(){
   }
   function sheetName(){
     const cellTag = zoom ? `cell_${GROUPS[zoom.r].name.split(":")[0]}_${ARCH_NAMES[zoom.c]}_` : "";
+    const scopeTag = colorScope === 1 ? "_scope9" : "";
     return `${cellTag}contactsheet_${FIELD_NAMES[fieldMode].replace("/","-").replace("±","pm")}` +
            `${fieldMode >= NATIVE_FIELDS ? "-" + LIFT_NAMES[lift] : ""}` +
-           `_g${String(g48).padStart(2,"0")}_d${DENSITIES[densityIdx]}_${PAL_NAMES[palMode]}_s${seed}`;
+           `_g${String(g48).padStart(2,"0")}_d${DENSITIES[densityIdx]}_${PAL_NAMES[palMode]}${scopeTag}_s${seed}`;
   }
   function exportPNG(){
     draw();                                       // guarantee a fresh buffer
@@ -1277,7 +1285,7 @@ function main(){
       c2.fillText(`${g.name}  x  ${ARCH_NAMES[zoom.c]}`, W/2, 16);
       c2.fillStyle = "#4c4c5c";
       c2.fillText(`|G|=${g.order}${g.chiral ? " chiral" : ""}   coset ${g.cosetOf[g48]+1}/${g.cosets}` +
-                  `   aut ${sel ? sel.aut : "?"}/48   fill ${cells[zoom.r][zoom.c].filled}/729`, W/2, 28);
+                  `   scope ${SCOPE_NAMES[colorScope]}   aut ${sel ? sel.aut : "?"}/48   fill ${cells[zoom.r][zoom.c].filled}/729`, W/2, 28);
     } else {
       c2.fillStyle = "#8a8a9e";
       for (let c = 0; c < COLS; c++) c2.fillText(ARCH_NAMES[c], GUTTER_L + c*cell + cell/2, 14);
@@ -1295,15 +1303,16 @@ function main(){
   // isolated.  They route through the same core encoders the main app uses.
   function cellName(sub_){
     const g = sub_.group;
-    if (sub_.imported) return `imported_${g.name.split(":")[0]}_${PAL_NAMES[palMode]}`;
+    const scopeTag = colorScope === 1 ? "_scope9" : "";
+    if (sub_.imported) return `imported_${g.name.split(":")[0]}_${PAL_NAMES[palMode]}${scopeTag}`;
     return `${sub_.name}_${g.name.split(":")[0]}_g${String(g48).padStart(2,"0")}` +
            `_${FIELD_NAMES[fieldMode].replace("/","-").replace("±","pm")}` +
-           `${fieldMode >= NATIVE_FIELDS ? "-" + LIFT_NAMES[lift] : ""}_${PAL_NAMES[palMode]}_s${seed}`;
+           `${fieldMode >= NATIVE_FIELDS ? "-" + LIFT_NAMES[lift] : ""}_${PAL_NAMES[palMode]}${scopeTag}_s${seed}`;
   }
   function exportVOX(){
     const t = subject();
     if (!t){ showToast("hover or isolate a cell first"); return; }
-    const r = encodeVOX(t.masks, palMode, t.els);
+    const r = encodeVOX(t.masks, palMode, t.els, colorScope);
     if (!r.voxels){ showToast("model is empty"); return; }
     download(new Blob([r.bytes], { type:"application/octet-stream" }), cellName(t) + ".vox");
     showToast(`${cellName(t)}.vox — ${r.voxels} voxels, ` +
@@ -1316,13 +1325,13 @@ function main(){
     const hdr = t.imported
       ? ["# bimoblock lattice sprite v2 (imported 729-bit grid)",
          `# stabilised by ${G.name} |G|=${G.order}`,
-         `# domain=${PAL_NAMES[palMode]}`]
+         `# domain=${PAL_NAMES[palMode]} scope=${SCOPE_NAMES[colorScope]}`]
       : ["# bimoblock lattice sprite v2 (from contact sheet)",
          `# archetype=${t.name} group=${G.name} |G|=${G.order}` +
          ` g48=${formatG48(g48)} coset=${G.cosetOf[g48]+1}/${G.cosets}`,
          `# field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? " lift=" + LIFT_NAMES[lift] : ""}` +
-         ` density=${DENSITIES[densityIdx]} domain=${PAL_NAMES[palMode]} seed=${seed}`];
-    const r = encodeOBJ(t.masks, palMode, G.els, hdr.concat([`# measured stabiliser inside Oh: order ${t.aut}/48`]));
+         ` density=${DENSITIES[densityIdx]} domain=${PAL_NAMES[palMode]} scope=${SCOPE_NAMES[colorScope]} seed=${seed}`];
+    const r = encodeOBJ(t.masks, palMode, G.els, hdr.concat([`# measured stabiliser inside Oh: order ${t.aut}/48`]), colorScope);
     if (!r.quads){ showToast("mesh is empty"); return; }
     download(new Blob([r.text], { type:"text/plain" }), cellName(t) + ".obj");
     showToast(`${cellName(t)}.obj — ${r.quads} quads`);
@@ -1362,7 +1371,8 @@ function main(){
       generated: new Date().toISOString(),
       shared: { g48, g48Label: formatG48(g48), field: FIELD_NAMES[fieldMode],
                 lift: fieldMode >= NATIVE_FIELDS ? LIFT_NAMES[lift] : null,
-                density: DENSITIES[densityIdx], domain: PAL_NAMES[palMode], seed,
+                density: DENSITIES[densityIdx], domain: PAL_NAMES[palMode],
+                scope: SCOPE_NAMES[colorScope], seed,
                 morphStep: Math.floor(maskT * RATE) },
       rows: GROUPS.map(g => ({ name: g.name, order: g.order, chiral: g.chiral, cosets: g.cosets })),
       cols: ARCH_NAMES.slice(),
@@ -1391,6 +1401,7 @@ function main(){
     R.push("density".padEnd(9) + DENSITIES[densityIdx].toFixed(2).padEnd(18) + "d");
     R.push("g48".padEnd(9) + formatG48(g48).padEnd(18) + "g/h");
     R.push("domain".padEnd(9) + PAL_NAMES[palMode].padEnd(18) + "k");
+    R.push("scope".padEnd(9) + SCOPE_NAMES[colorScope].padEnd(18) + "c");
     R.push("seed".padEnd(9) + ("#" + seed).padEnd(18) + "n/p");
     R.push("build".padEnd(9) + (buildMs.toFixed(1) + " ms").padEnd(18));
     R.push("");
@@ -1452,6 +1463,7 @@ function main(){
       case "g": g48 = (g48 + 1) % 48; clearPlans(); rebuild(); return;
       case "h": g48 = (g48 + 47) % 48; clearPlans(); rebuild(); return;
       case "k": palMode = (palMode + 1) % PAL_NAMES.length; gl.uniform1i(uPalMode, palMode); paintHud(); return;
+      case "c": colorScope = (colorScope + 1) % SCOPE_NAMES.length; gl.uniform1i(uColorScope, colorScope); paintHud(); return;
       case "n": seed = (seed + 1) & 0xffff; rebuild(); return;
       case "p": seed = (seed + 0xffff) & 0xffff; rebuild(); return;
       case "r":
@@ -1522,6 +1534,7 @@ function main(){
   }
 
   gl.uniform1i(uPalMode, palMode);
+  gl.uniform1i(uColorScope, colorScope);
   gl.uniform1i(uAO, ao ? 1 : 0);
   layout();
   rebuild();
