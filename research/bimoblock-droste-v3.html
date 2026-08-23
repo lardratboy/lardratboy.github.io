@@ -200,7 +200,7 @@
   <div class="bar"></div>
   <div class="grp">
     <label class="slider" title="Number of bimoblock objects orbiting each Möbius strip">
-      <span>count</span><input type="range" id="count" min="6" max="36" step="1" value="18">
+      <span>count</span><input type="range" id="count" min="6" max="108" step="1" value="18">
     </label>
     <label class="slider" title="Procedural generation voxel density fill quantile">
       <span>density</span><input type="range" id="dens" min="6" max="70" value="25">
@@ -829,27 +829,85 @@ placeholder.setAttribute('position', new THREE.BufferAttribute(new Float32Array(
    ===================================================================== */
 const levels = [];
 
-function mintRungFleet(lv, rungGen){
-  lv.rungGen = rungGen;
-  for (let bi = 0; bi < CFG.BLOCKS_PER_RUNG; bi++){
-    const old = lv.pool[bi];
-    const data = generateBlockData(bi, rungGen);
-    lv.pool[bi] = data;
-    if (lv.meshes[bi]){
-      lv.meshes[bi].geometry = data.geo;
-    }
-    if (old){
-      if (old.geo) old.geo.dispose();
-      if (old.geoLod) old.geoLod.dispose();
-    }
-  }
-  // Update central specimen for this tier
-  if (lv.hub && lv.pool[focus]){
-    lv.hub.geometry = lv.pool[focus].geo;
-  }
+/* A fleet is the stock of one absolute depth tier: the pool itself plus the
+   generator seed that produced it and a cursor saying how much of it has
+   actually been built yet. Rungs hold a reference to a fleet, they do not
+   own one -- which is what lets the ladder hand fleets along instead of
+   regenerating them. */
+function tierGen(tier){ return tier * 97 + Mint.gen * 1013 + 19; }
+
+function makeFleet(tier){
+  return { pool: new Array(CFG.BLOCKS_PER_RUNG).fill(null),
+           tier, gen: tierGen(tier), next: 0 };
 }
 
-function createRacerLayout(rungIndex, totalBlocks){
+// Re-aim an existing fleet at a new tier, keeping its current blocks on
+// screen until the replacements are ready. Used when a fleet is recycled
+// round to the far end of the ladder, where nothing is visible anyway.
+function retargetFleet(F, tier){
+  F.tier = tier; F.gen = tierGen(tier); F.next = 0;
+  return F;
+}
+
+function mintFleetNow(F){
+  while (F.next < CFG.BLOCKS_PER_RUNG) mintOne(F);
+}
+
+function mintOne(F){
+  const bi = F.next++;
+  const old = F.pool[bi];
+  F.pool[bi] = generateBlockData(bi, F.gen);
+  if (old){
+    if (old.geo) old.geo.dispose();
+    if (old.geoLod) old.geoLod.dispose();
+  }
+  if (bi === focus) setHubGeometry();
+}
+
+/* generateBlockData costs about 1.6 ms -- 729 folds, an envelope test and a
+   field evaluation per cell, then two meshings. A whole fleet is therefore
+   tens to hundreds of milliseconds, far too much to do inside one frame, so
+   minting is spread across frames under a time budget. Rungs are serviced
+   near-to-far so anything the viewer can actually see is finished first. */
+const MINT_BUDGET_MS = 3.0;
+
+function serviceMint(budgetMs){
+  const t0 = performance.now();
+  let built = 0;
+  for (const lv of levels){
+    const F = lv.fleet;
+    while (F.next < CFG.BLOCKS_PER_RUNG){
+      mintOne(F); built++;
+      if (performance.now() - t0 >= budgetMs) return built;
+    }
+  }
+  return built;
+}
+
+function fleetsPending(){
+  let n = 0;
+  for (const lv of levels) n += CFG.BLOCKS_PER_RUNG - lv.fleet.next;
+  return n;
+}
+
+/* The layout is deliberately identical on every rung.
+
+   It used to be seeded off rungIndex -- u0 got + rungIndex * 0.73, speedMul
+   a per-rung multiplier, spinSpeed a per-rung term -- which looked fine
+   standing still and broke the moment the ladder wrapped. A Droste rung
+   does not own its content: when the descent passes a whole tier, rung 0
+   takes over rung 1's fleet, rung 1 takes rung 2's, and so on. If rung 0
+   also imposes rung 0's positions on the fleet it just inherited, every
+   block teleports along the strip at the seam. Identical layout across
+   rungs is what makes the handover invisible.
+
+   Lane count is capped at four on purpose. Lanes are spread over
+   +-0.70 * STRIP_W, so five or more would space them closer than a block is
+   wide and the stream would self-intersect. Raising the count packs each
+   lane denser along u instead, which is the direction with room: at 108
+   blocks the four lanes hold 27 each, one every 1.08 world units of arc
+   against a block 0.50 across. */
+function createRacerLayout(totalBlocks){
   const racers = [];
   const lanes = totalBlocks >= 24 ? 4 : totalBlocks >= 12 ? 3 : 2;
   const blocksPerLane = Math.ceil(totalBlocks / lanes);
@@ -857,16 +915,16 @@ function createRacerLayout(rungIndex, totalBlocks){
   for (let lane = 0; lane < lanes; lane++){
     const vNorm = lanes === 1 ? 0 : (lane / (lanes - 1) * 2 - 1) * 0.70;
     const vOffset = vNorm * CFG.STRIP_W;
-    const speedMul = (1.0 + (lane - (lanes - 1) / 2) * 0.22) * (1.0 + (rungIndex % 3) * 0.12);
+    const speedMul = 1.0 + (lane - (lanes - 1) / 2) * 0.22;
 
     for (let k = 0; k < blocksPerLane; k++){
       const bi = lane * blocksPerLane + k;
       if (bi >= totalBlocks) break;
 
-      const u0 = (k / blocksPerLane) * TAU + (lane * (TAU / (lanes * 2))) + (rungIndex * 0.73);
+      const u0 = (k / blocksPerLane) * TAU + (lane * (TAU / (lanes * 2)));
       racers.push({
         lane, vOffset, u0, speedMul, bi,
-        spinSpeed: (lane % 2 === 0 ? 1 : -1) * (1.2 + (k % 3) * 0.35 + (rungIndex * 0.2))
+        spinSpeed: (lane % 2 === 0 ? 1 : -1) * (1.2 + (k % 3) * 0.35)
       });
     }
   }
@@ -875,7 +933,7 @@ function createRacerLayout(rungIndex, totalBlocks){
 
 function buildLadder(n){
   for (const lv of levels){
-    for (const p of lv.pool) if (p){ p.geo.dispose(); p.geoLod.dispose(); }
+    for (const p of lv.fleet.pool) if (p){ p.geo.dispose(); p.geoLod.dispose(); }
     lv.trackMat.dispose();
     root.remove(lv.group);
   }
@@ -892,7 +950,6 @@ function buildLadder(n){
     trackMesh.frustumCulled = false;
     group.add(trackMesh);
 
-    const pool = new Array(CFG.BLOCKS_PER_RUNG).fill(null);
     const meshes = [];
     const buffers = [];
     const attribs = [];
@@ -920,12 +977,14 @@ function buildLadder(n){
     hub.visible = State.hub;
     group.add(hub);
 
-    const racers = createRacerLayout(i, CFG.BLOCKS_PER_RUNG);
-    const lv = { group, trackMat, pool, meshes, buffers, attribs, hub, racers, assignedTier: -999 };
+    const racers = createRacerLayout(CFG.BLOCKS_PER_RUNG);
+    const lv = { group, trackMat, meshes, buffers, attribs, hub, racers,
+                 fleet: makeFleet(ladderCycle + i) };
     levels.push(lv);
-
-    mintRungFleet(lv, (i + 1) * 37);
   }
+  /* The nearest rung is built outright so the scene is never empty; the rest
+     fill in under the frame budget over the next second or two. */
+  mintFleetNow(levels[0].fleet);
   setHubGeometry();
   refreshInspector();
 }
@@ -933,8 +992,8 @@ function buildLadder(n){
 function setHubGeometry(){
   for (let i = 0; i < levels.length; i++){
     const lv = levels[i];
-    if (lv && lv.hub && lv.pool[focus]){
-      lv.hub.geometry = lv.pool[focus].geo;
+    if (lv && lv.hub && lv.fleet.pool[focus]){
+      lv.hub.geometry = lv.fleet.pool[focus].geo;
     }
   }
 }
@@ -1009,22 +1068,54 @@ function rungAlpha(t){
   return smoothstep(deep - 0.2, deep + 1.2, t) * (1.0 - smoothstep(-0.2, 0.8, t));
 }
 
+/* Descending one whole tier used to hand every rung a new absolute tier at
+   once, so all seven regenerated on the same frame: 126 blocks, a measured
+   180 ms stall, and it landed at every integer of depth. But the rungs are
+   not really getting new content -- rung 0's new tier is exactly the tier
+   rung 1 was already holding. So the ladder shifts fleet references along
+   by one and only the rung that falls off the far end needs fresh stock,
+   which it mints in the dark under the frame budget. Seven regenerations
+   per tier become one, spread over several seconds. */
+let ladderCycle = 0;
+
+function shiftLadder(newCycle, down){
+  const L = levels.length;
+  if (down){
+    const recycled = levels[0].fleet;
+    for (let i = 0; i < L - 1; i++) levels[i].fleet = levels[i + 1].fleet;
+    levels[L - 1].fleet = retargetFleet(recycled, newCycle + L - 1);
+  } else {
+    const recycled = levels[L - 1].fleet;
+    for (let i = L - 1; i > 0; i--) levels[i].fleet = levels[i - 1].fleet;
+    levels[0].fleet = retargetFleet(recycled, newCycle);
+  }
+}
+
+function syncLadderCycle(){
+  const c = Math.floor(State.totalDepth);
+  if (c === ladderCycle) return;
+  const L = levels.length;
+
+  // A wheel flick can jump further than the ladder is deep; past that there
+  // is nothing left to inherit and every rung starts over.
+  if (Math.abs(c - ladderCycle) >= L){
+    for (let i = 0; i < L; i++) retargetFleet(levels[i].fleet, c + i);
+    ladderCycle = c;
+    setHubGeometry();
+    return;
+  }
+  while (ladderCycle < c){ ladderCycle++; shiftLadder(ladderCycle, true);  }
+  while (ladderCycle > c){ ladderCycle--; shiftLadder(ladderCycle, false); }
+  setHubGeometry();
+}
+
 let frameTris = 0;
 function layoutLadder(f){
   frameTris = 0;
-  const cycle = Math.floor(State.totalDepth);
+  syncLadderCycle();
 
   for (let i = 0; i < CFG.LEVELS; i++){
     const lv = levels[i];
-    const absTier = cycle + i;
-
-    /* Re-mint seamlessly in the dark (alpha = 0.0) upon completing a cycle */
-    if (lv.assignedTier !== absTier){
-      lv.assignedTier = absTier;
-      mintRungFleet(lv, absTier * 97 + Mint.gen * 1013 + 19);
-      if (i === 0) setHubGeometry();
-    }
-
     const t = f - i;
     const s = Math.pow(CFG.RATIO, t);
     const a = rungAlpha(t);
@@ -1038,7 +1129,7 @@ function layoutLadder(f){
     const lod = t < -CFG.LOD_DEPTH;
     if (vis){
       for (let bi = 0; bi < CFG.BLOCKS_PER_RUNG; bi++){
-        const p = lv.pool[bi]; if (!p) continue;
+        const p = lv.fleet.pool[bi]; if (!p) continue;
         const want = lod ? p.geoLod : p.geo;
         const m = lv.meshes[bi];
         if (m.geometry !== want) m.geometry = want;
@@ -1117,8 +1208,8 @@ FIELD_NAMES.forEach((n, i) => opt(selField, String(i), 'field: ' + n));
 
 function refreshInspector(){
   const lv0 = levels[0];
-  if (!lv0 || !lv0.pool[focus]){ elInspect.textContent = ''; return; }
-  const p = lv0.pool[focus];
+  if (!lv0 || !lv0.fleet.pool[focus]){ elInspect.textContent = ''; return; }
+  const p = lv0.fleet.pool[focus];
   if (p.aut < 0) p.aut = autOrder(gridOf(p.masks));
   const g = GROUPS[p.sym];
   const totalBlocks = CFG.LEVELS * CFG.BLOCKS_PER_RUNG;
@@ -1146,7 +1237,7 @@ function setFocus(i){
 function remintAllRungs(){
   Mint.gen++;
   for (let i = 0; i < CFG.LEVELS; i++){
-    levels[i].assignedTier = -999; // force immediate re-mint across tiers
+    retargetFleet(levels[i].fleet, ladderCycle + i);
   }
   showToast('Minted new fleets across all rungs');
 }
@@ -1183,18 +1274,33 @@ selTwist.addEventListener('change', () => {
 });
 selRungs.addEventListener('change', () => { buildLadder(parseInt(selRungs.value, 10)); });
 
-/* Count & Density Sliders */
-inCount.addEventListener('input', () => {
+/* Count and density both invalidate geometry, and the input event fires on
+   every pixel of a drag. At the top of the count range that is 756 blocks
+   rebuilt per pixel, so the value is echoed live and the rebuild waits for
+   the drag to settle. */
+function debounce(fn, ms){
+  let h = 0;
+  return (...a) => { if (h) clearTimeout(h); h = setTimeout(() => { h = 0; fn(...a); }, ms); };
+}
+
+const applyCount = debounce(() => {
   CFG.BLOCKS_PER_RUNG = parseInt(inCount.value, 10);
   if (focus >= CFG.BLOCKS_PER_RUNG) focus = CFG.BLOCKS_PER_RUNG - 1;
   buildLadder(CFG.LEVELS);
-  setStatus('Objects per strip: ' + CFG.BLOCKS_PER_RUNG + ' (' + (CFG.LEVELS * CFG.BLOCKS_PER_RUNG) + ' total active)');
+}, 180);
+
+inCount.addEventListener('input', () => {
+  const n = parseInt(inCount.value, 10);
+  setStatus('Objects per strip: ' + n + ' (' + (CFG.LEVELS * n) + ' total active)');
+  applyCount();
 });
+
+const applyDensity = debounce(() => { remintAllRungs(); }, 180);
 
 inDens.addEventListener('input', () => {
   Mint.density = parseInt(inDens.value, 10) / 100;
-  remintAllRungs();
   setStatus('Generation voxel density: ' + inDens.value + '%');
+  applyDensity();
 });
 
 inSpeed.addEventListener('input',  () => { State.speed  = parseFloat(inSpeed.value)  / 100; });
@@ -1221,8 +1327,8 @@ function specimenName(p){
 
 function exportSpecimenOBJ(){
   const lv0 = levels[0];
-  if (!lv0 || !lv0.pool[focus]) return;
-  const p = lv0.pool[focus];
+  if (!lv0 || !lv0.fleet.pool[focus]) return;
+  const p = lv0.fleet.pool[focus];
   const grid = gridOf(p.masks);
   const lines = [
     `# bimoblock specimen — ${specimenName(p)}`,
@@ -1255,8 +1361,8 @@ function exportSpecimenOBJ(){
 
 function exportSpecimenVOX(){
   const lv0 = levels[0];
-  if (!lv0 || !lv0.pool[focus]) return;
-  const p = lv0.pool[focus];
+  if (!lv0 || !lv0.fleet.pool[focus]) return;
+  const p = lv0.fleet.pool[focus];
   const grid = gridOf(p.masks);
   const out = [];
   for (let Z = 0; Z < 9; Z++) for (let Y = 0; Y < 9; Y++) for (let X = 0; X < 9; X++){
@@ -1341,7 +1447,7 @@ function exportStreamBlocksOBJ(){
     if (!lv.group.visible) continue;
 
     for (let bi = 0; bi < CFG.BLOCKS_PER_RUNG; bi++){
-      const p = lv.pool[bi];
+      const p = lv.fleet.pool[bi];
       if (!p || !p.geo) continue;
       const geo = p.geo;
 
@@ -1482,10 +1588,10 @@ function frame(){
       const bi = State.morphCursor++ % CFG.BLOCKS_PER_RUNG;
       const lv0 = levels[0];
       if (lv0){
-        const old = lv0.pool[bi];
-        lv0.pool[bi] = generateBlockData(bi, Mint.gen * 100 + State.morphCursor);
-        lv0.meshes[bi].geometry = lv0.pool[bi].geo;
-        if (bi === focus && lv0.hub) lv0.hub.geometry = lv0.pool[bi].geo;
+        const old = lv0.fleet.pool[bi];
+        lv0.fleet.pool[bi] = generateBlockData(bi, Mint.gen * 100 + State.morphCursor);
+        lv0.meshes[bi].geometry = lv0.fleet.pool[bi].geo;
+        if (bi === focus && lv0.hub) lv0.hub.geometry = lv0.fleet.pool[bi].geo;
         if (old){ old.geo.dispose(); old.geoLod.dispose(); }
         if (bi === focus) refreshInspector();
       }
@@ -1498,6 +1604,7 @@ function frame(){
   }
 
   layoutLadder(State.f);
+  serviceMint(MINT_BUDGET_MS);
 
   root.rotation.z = State.time * 0.032;
   root.rotation.x = Math.sin(State.time * 0.10) * 0.08;
