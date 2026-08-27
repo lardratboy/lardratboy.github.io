@@ -907,6 +907,100 @@ function copyToClipboard(text, onDone, onFail){
 }
 
 /* ====================== BIMOBLOCK CORE END ====================== */
+/* ---- TIERED-COORDINATE FIELD EXTENSIONS ---------------------------------
+   The shared core above deliberately stays untouched.  On the 9^3 lattice each
+   folded coordinate is an exact integer g in [-4,4].  Shift to u=g+4 in [0,8]
+   and decompose in base 3:
+
+       u = 3 * macro + micro,   macro,micro in {0,1,2}
+
+   Centering each digit gives two local 3-vectors A,B in {-1,0,1}^3.  The
+   extensions below operate on the RELATION between those tiers instead of only
+   on the flattened coordinate.  Since they are evaluated after foldOrbit(),
+   every field still respects the selected subgroup exactly.                 */
+const LEGACY_FIELD_COUNT = FIELD_NAMES.length;
+const TIER_FIELD_NAMES = [
+  "t:digit-swap", "t:wreath", "t:cross", "t:carry", "t:phasecell", "t:prefix-hash"
+];
+FIELD_NAMES.push(...TIER_FIELD_NAMES);
+
+const TIER_PERMS = PERM; // six axis permutations already used by Oh
+
+function tierDigits(sx, sy, sz){
+  const G = [Math.round(sx*4), Math.round(sy*4), Math.round(sz*4)];
+  const U = G.map(v => v + 4);
+  const M = U.map(v => Math.floor(v / 3));
+  const Q = U.map((v,i) => v - 3*M[i]);
+  return {
+    g:G, u:U,
+    a:M.map(v => v - 1),      // outer / macro trit, centered
+    b:Q.map(v => v - 1),      // inner / micro trit, centered
+    macro:M[0] + 3*M[1] + 9*M[2],
+    micro:Q[0] + 3*Q[1] + 9*Q[2]
+  };
+}
+
+function tierField(sx, sy, sz, mode, effSeed){
+  const T = tierDigits(sx,sy,sz), A=T.a, B=T.b;
+  const seedPhase = ((effSeed >>> 0) & 255) / 255;
+
+  if (mode === 0){
+    // Exchange significance: u'=3*micro+macro per axis.  This is a literal
+    // two-tier digit reversal, then an anisotropic wave on the folded result.
+    const q = [3*B[0]+A[0], 3*B[1]+A[1], 3*B[2]+A[2]];
+    return Math.sin(1.37*q[0] + 2.11*q[1] - 1.73*q[2] + seedPhase*6.28318);
+  }
+
+  if (mode === 1){
+    // Wreath-like fold: the macro address chooses a local signed permutation
+    // of the micro coordinate.  Same inner motif, different frame per parent.
+    const P = TIER_PERMS[T.macro % 6];
+    const signCode = ((T.macro * 0x9e37) ^ effSeed) & 7;
+    const C = [0,1,2].map(i => B[P[i]] * ((signCode >> i & 1) ? -1 : 1));
+    return 0.91*C[0] - 1.27*C[1] + 1.63*C[2] +
+           0.43*A[0] + 0.71*A[1] - 0.37*A[2] + 0.21*(C[0]*A[1]-C[1]*A[0]);
+  }
+
+  if (mode === 2){
+    // The two tier vectors are treated as a paired frame.  Parallel, opposed,
+    // and transverse macro/micro addresses form different bands.
+    const dot = A[0]*B[0] + A[1]*B[1] + A[2]*B[2];
+    const cx = A[1]*B[2]-A[2]*B[1];
+    const cy = A[2]*B[0]-A[0]*B[2];
+    const cz = A[0]*B[1]-A[1]*B[0];
+    return dot + 0.73*cx - 0.41*cy + 0.59*cz + 0.17*(T.macro-T.micro);
+  }
+
+  if (mode === 3){
+    // Mixed-radix odometer/carry field.  Macro and micro are each base-3^3
+    // digits; the diagonal terms make carry boundaries visible as folds.
+    const n = T.micro + 27*T.macro;
+    const carry = Math.floor((T.micro + (T.macro % 9)) / 9);
+    return Math.sin(n*0.173 + carry*1.91 + seedPhase*4.0) +
+           0.35*Math.cos((T.micro - T.macro)*0.67);
+  }
+
+  if (mode === 4){
+    // Every macro cell owns the same local wave but receives a phase chosen by
+    // its outer address.  This is scale-dependent folding without scrambling
+    // the macro silhouette itself.
+    const r = Math.hypot(B[0],B[1],B[2]);
+    const local = B[0] + 1.7*B[1] - 1.3*B[2];
+    const phase = ((T.macro * 7 + (effSeed & 31)) % 27) / 27 * 6.28318530718;
+    return Math.sin(local*1.55 + r*2.4 + phase) + 0.18*(A[0]-A[1]+A[2]);
+  }
+
+  // Prefix hash: hash the outer address, then use that hash as the coefficients
+  // of the inner field.  Visually this makes each parent cell a related but
+  // non-identical 'local world' while remaining a pure address function.
+  let h = Math.imul((T.macro + 1) ^ effSeed, 0x85ebca6b) >>> 0;
+  h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35) >>> 0; h ^= h >>> 16;
+  const c0 = ((h      ) & 255) / 127.5 - 1;
+  const c1 = ((h >>  8) & 255) / 127.5 - 1;
+  const c2 = ((h >> 16) & 255) / 127.5 - 1;
+  return c0*B[0] + c1*B[1] + c2*B[2] + 0.28*(A[0]*B[1] + A[1]*B[2] + A[2]*B[0]);
+}
+
 /* ------------------------------- contact sheet ---------------------------
    Rows are symmetry groups, columns are archetypes.  Every other control is
    shared across the sheet, so a single frame is a slice through the whole
@@ -993,7 +1087,7 @@ function sheetSeed(fmode, seed, tNow){
   const step = Math.floor(Math.max(tNow, 0) * RATE) >>> 0;
   const effSeed = ((seed >>> 0) ^ Math.imul(step, 0x85ebca6b)) >>> 0;
   const pars = { conic: conicParams(effSeed), scale: [] };
-  if (fmode >= NATIVE_FIELDS)
+  if (fmode >= NATIVE_FIELDS && fmode < LEGACY_FIELD_COUNT)
     pars.scale[fmode - NATIVE_FIELDS] = planarScale(PLANAR[fmode - NATIVE_FIELDS], pars.conic);
   return { effSeed, pars };
 }
@@ -1001,8 +1095,12 @@ function sheetSeed(fmode, seed, tNow){
 // must stay bit-identical to the core's buildMasks(), minus the cached work
 function buildFromPlan(p, fmode, lift, effSeed, pars, density){
   const v = p.vals;
-  for (let i = 0; i < p.n; i++)
-    v[i] = field(p.s[3*i], p.s[3*i+1], p.s[3*i+2], fmode, effSeed, lift, pars);
+  for (let i = 0; i < p.n; i++){
+    const sx=p.s[3*i], sy=p.s[3*i+1], sz=p.s[3*i+2];
+    v[i] = (fmode < LEGACY_FIELD_COUNT)
+      ? field(sx, sy, sz, fmode, effSeed, lift, pars)
+      : tierField(sx, sy, sz, fmode - LEGACY_FIELD_COUNT, effSeed);
+  }
 
   const masks = new Uint32Array(27);
   let filled = 0;
@@ -1190,7 +1288,7 @@ function main(){
   });
   function paramLine(r, c){
     return `sym=${GROUPS[r].name} arch=${ARCH_NAMES[c]} g48=${formatG48(g48)} ` +
-      `field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? "/" + LIFT_NAMES[lift] : ""} ` +
+      `field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS && fieldMode < LEGACY_FIELD_COUNT ? "/" + LIFT_NAMES[lift] : ""} ` +
       `density=${DENSITIES[densityIdx]} scope=${SCOPE_NAMES[colorScope]} seed=${seed} | aut=${sel && sel.aut}/48 fill=${cells[r][c].filled}/729`;
   }
   function exitZoom(){ if (!zoom) return; zoom = null; layout(); paintHud(); }
@@ -1265,7 +1363,7 @@ function main(){
     const cellTag = zoom ? `cell_${GROUPS[zoom.r].name.split(":")[0]}_${ARCH_NAMES[zoom.c]}_` : "";
     const scopeTag = colorScope === 1 ? "_scope9" : "";
     return `${cellTag}contactsheet_${FIELD_NAMES[fieldMode].replace("/","-").replace("±","pm")}` +
-           `${fieldMode >= NATIVE_FIELDS ? "-" + LIFT_NAMES[lift] : ""}` +
+           `${fieldMode >= NATIVE_FIELDS && fieldMode < LEGACY_FIELD_COUNT ? "-" + LIFT_NAMES[lift] : ""}` +
            `_g${String(g48).padStart(2,"0")}_d${DENSITIES[densityIdx]}_${PAL_NAMES[palMode]}${scopeTag}_s${seed}`;
   }
   function exportPNG(){
@@ -1307,7 +1405,7 @@ function main(){
     if (sub_.imported) return `imported_${g.name.split(":")[0]}_${PAL_NAMES[palMode]}${scopeTag}`;
     return `${sub_.name}_${g.name.split(":")[0]}_g${String(g48).padStart(2,"0")}` +
            `_${FIELD_NAMES[fieldMode].replace("/","-").replace("±","pm")}` +
-           `${fieldMode >= NATIVE_FIELDS ? "-" + LIFT_NAMES[lift] : ""}_${PAL_NAMES[palMode]}${scopeTag}_s${seed}`;
+           `${fieldMode >= NATIVE_FIELDS && fieldMode < LEGACY_FIELD_COUNT ? "-" + LIFT_NAMES[lift] : ""}_${PAL_NAMES[palMode]}${scopeTag}_s${seed}`;
   }
   function exportVOX(){
     const t = subject();
@@ -1329,7 +1427,7 @@ function main(){
       : ["# bimoblock lattice sprite v2 (from contact sheet)",
          `# archetype=${t.name} group=${G.name} |G|=${G.order}` +
          ` g48=${formatG48(g48)} coset=${G.cosetOf[g48]+1}/${G.cosets}`,
-         `# field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS ? " lift=" + LIFT_NAMES[lift] : ""}` +
+         `# field=${FIELD_NAMES[fieldMode]}${fieldMode >= NATIVE_FIELDS && fieldMode < LEGACY_FIELD_COUNT ? " lift=" + LIFT_NAMES[lift] : ""}` +
          ` density=${DENSITIES[densityIdx]} domain=${PAL_NAMES[palMode]} scope=${SCOPE_NAMES[colorScope]} seed=${seed}`];
     const r = encodeOBJ(t.masks, palMode, G.els, hdr.concat([`# measured stabiliser inside Oh: order ${t.aut}/48`]), colorScope);
     if (!r.quads){ showToast("mesh is empty"); return; }
@@ -1370,7 +1468,7 @@ function main(){
       format: "bimoblock-contact-sheet/1",
       generated: new Date().toISOString(),
       shared: { g48, g48Label: formatG48(g48), field: FIELD_NAMES[fieldMode],
-                lift: fieldMode >= NATIVE_FIELDS ? LIFT_NAMES[lift] : null,
+                lift: fieldMode >= NATIVE_FIELDS && fieldMode < LEGACY_FIELD_COUNT ? LIFT_NAMES[lift] : null,
                 density: DENSITIES[densityIdx], domain: PAL_NAMES[palMode],
                 scope: SCOPE_NAMES[colorScope], seed,
                 morphStep: Math.floor(maskT * RATE) },
@@ -1397,7 +1495,9 @@ function main(){
     R.push("<span class='sec'>--- SHEET ---</span>");
     R.push("grid".padEnd(9) + `${ROWS} groups x ${COLS} arch`.padEnd(18));
     R.push("field".padEnd(9) + FIELD_NAMES[fieldMode].padEnd(18) + "f");
-    R.push("lift".padEnd(9) + (fieldMode >= NATIVE_FIELDS ? LIFT_NAMES[lift] : "<span class='sec'>n/a</span>").padEnd(18) + "x");
+    if (fieldMode >= LEGACY_FIELD_COUNT)
+      R.push("tiers".padEnd(9) + "3³ outer → 3³ inner".padEnd(18) + "t");
+    R.push("lift".padEnd(9) + (fieldMode >= NATIVE_FIELDS && fieldMode < LEGACY_FIELD_COUNT ? LIFT_NAMES[lift] : "<span class='sec'>n/a</span>").padEnd(18) + "x");
     R.push("density".padEnd(9) + DENSITIES[densityIdx].toFixed(2).padEnd(18) + "d");
     R.push("g48".padEnd(9) + formatG48(g48).padEnd(18) + "g/h");
     R.push("domain".padEnd(9) + PAL_NAMES[palMode].padEnd(18) + "k");
@@ -1458,6 +1558,11 @@ function main(){
       case "m": morph = !morph; paintHud(); return;
       case "l": ao = !ao; gl.uniform1i(uAO, ao ? 1 : 0); paintHud(); return;
       case "f": fieldMode = (fieldMode + 1) % FIELD_NAMES.length; rebuild(); return;
+      case "t":
+        fieldMode = fieldMode < LEGACY_FIELD_COUNT
+          ? LEGACY_FIELD_COUNT
+          : LEGACY_FIELD_COUNT + ((fieldMode - LEGACY_FIELD_COUNT + 1) % TIER_FIELD_NAMES.length);
+        rebuild(); return;
       case "x": lift = (lift + 1) % LIFT_NAMES.length; rebuild(); return;
       case "d": densityIdx = (densityIdx + 1) % DENSITIES.length; rebuild(); return;
       case "g": g48 = (g48 + 1) % 48; clearPlans(); rebuild(); return;
