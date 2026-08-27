@@ -212,7 +212,7 @@
   </div>
 </div>
 
-<div id="hint">[ ] focus specimen &nbsp;·&nbsp; C copy base64 &nbsp;·&nbsp; O export specimen obj &nbsp;·&nbsp; E export all blocks &nbsp;·&nbsp; X export vox
+<div id="hint">click block focus · [ ] cycle specimen &nbsp;·&nbsp; C copy base64 &nbsp;·&nbsp; O export specimen obj &nbsp;·&nbsp; E export all blocks &nbsp;·&nbsp; X export vox
 <br>space mint &nbsp;·&nbsp; S specimen &nbsp;·&nbsp; M morph &nbsp;·&nbsp; D dive &nbsp;·&nbsp; R home &nbsp;·&nbsp; wheel to fall</div>
 
 <div id="toast"></div>
@@ -726,7 +726,8 @@ function buildBandLattice(uSeg, vSeg){
 /* =====================================================================
    PROCEDURAL SPECIMEN GENERATION FOR RUNG FLEETS
    ===================================================================== */
-let focus = 0; // Focus index on Rung 0
+let focus = 0;      // Focus index within the selected rung
+let focusLevel = 0; // Visual rung whose fleet owns the focused specimen
 
 const Mint = {
   gen: 0,
@@ -1036,6 +1037,7 @@ function buildLadder(n){
   }
   levels.length = 0;
   CFG.LEVELS = n;
+  focusLevel = Math.max(0, Math.min(focusLevel, n - 1));
 
   for (let i = 0; i < n; i++){
     const group = new THREE.Group();
@@ -1057,6 +1059,8 @@ function buildLadder(n){
       attr.setUsage(THREE.DynamicDrawUsage);
 
       const im = new THREE.InstancedMesh(placeholder, makeGamutMaterial(), 1);
+      im.userData.bi = bi;
+      im.userData.rung = i;
       im.instanceMatrix = attr;
       im.frustumCulled = false;
       im.renderOrder = -i;
@@ -1086,12 +1090,18 @@ function buildLadder(n){
   refreshInspector();
 }
 
+function focusedData(){
+  const lv = levels[focusLevel];
+  return lv && lv.fleet && lv.fleet.pool[focus] ? lv.fleet.pool[focus] : null;
+}
+
 function setHubGeometry(){
-  for (let i = 0; i < levels.length; i++){
-    const lv = levels[i];
-    if (lv && lv.hub && lv.fleet.pool[focus]){
-      lv.hub.geometry = lv.fleet.pool[focus].geo;
-    }
+  const p = focusedData();
+  if (!p) return;
+  // "Focused specimen" is literal: every center display shows the exact
+  // clicked/cycled block, even when it originated on a deeper rung.
+  for (const lv of levels){
+    if (lv && lv.hub) lv.hub.geometry = p.geo;
   }
 }
 
@@ -1146,7 +1156,7 @@ function updateRungRacers(lv, time, speedParam, tumbleParam){
     qSpin.setFromEuler(eSpin);
     qRot.multiply(qSpin);
 
-    const scale = (r.bi === focus) ? BS * 1.35 : BS;
+    const scale = (lv === levels[focusLevel] && r.bi === focus) ? BS * 1.35 : BS;
     vScl.setScalar(scale);
 
     mOut.compose(vPos, qRot, vScl);
@@ -1177,6 +1187,10 @@ let ladderCycle = 0;
 
 function shiftLadder(newCycle, down){
   const L = levels.length;
+  // Keep focus attached to the same fleet as rungs hand their content along.
+  // Without this, a selected deeper specimen would suddenly become another
+  // block whenever the Droste ladder crossed an integer depth.
+  const focusedFleet = levels[focusLevel] && levels[focusLevel].fleet;
   if (down){
     const recycled = levels[0].fleet;
     for (let i = 0; i < L - 1; i++) levels[i].fleet = levels[i + 1].fleet;
@@ -1185,6 +1199,10 @@ function shiftLadder(newCycle, down){
     const recycled = levels[L - 1].fleet;
     for (let i = L - 1; i > 0; i--) levels[i].fleet = levels[i - 1].fleet;
     levels[0].fleet = retargetFleet(recycled, newCycle);
+  }
+  if (focusedFleet){
+    const movedTo = levels.findIndex(lv => lv.fleet === focusedFleet);
+    if (movedTo >= 0) focusLevel = movedTo;
   }
 }
 
@@ -1304,15 +1322,15 @@ opt(selField, '-1', 'field: roam all', true);
 FIELD_NAMES.forEach((n, i) => opt(selField, String(i), 'field: ' + n));
 
 function refreshInspector(){
-  const lv0 = levels[0];
-  if (!lv0 || !lv0.fleet.pool[focus]){ elInspect.textContent = ''; return; }
-  const p = lv0.fleet.pool[focus];
+  const lv = levels[focusLevel];
+  if (!lv || !lv.fleet.pool[focus]){ elInspect.textContent = ''; return; }
+  const p = lv.fleet.pool[focus];
   if (p.aut < 0) p.aut = autOrder(gridOf(p.masks));
   const g = GROUPS[p.sym];
   const totalBlocks = CFG.LEVELS * CFG.BLOCKS_PER_RUNG;
 
   elInspect.innerHTML =
-    `<span class="k">specimen</span> <b>${String(focus + 1).padStart(2,'0')} / ${CFG.BLOCKS_PER_RUNG}</b>\n` +
+    `<span class="k">specimen</span> <b>${String(focus + 1).padStart(2,'0')} / ${CFG.BLOCKS_PER_RUNG}</b> <span class="k">· rung ${focusLevel + 1}</span>\n` +
     `<span class="k">group</span> <b>${g.name}</b>\n` +
     `<span class="k">archetype</span> <b>${ARCH_NAMES[p.arch]}</b>\n` +
     `<span class="k">field</span> <b>${FIELD_NAMES[p.field]}</b>` +
@@ -1325,7 +1343,8 @@ function refreshInspector(){
     `<span class="k">stream tris</span> <b>${(frameTris / 1000).toFixed(0)}k</b> <span class="k">· ${fps.toFixed(0)} fps</span>`;
 }
 
-function setFocus(i){
+function setFocus(i, rung = focusLevel){
+  focusLevel = Math.max(0, Math.min(levels.length - 1, rung | 0));
   focus = ((i % CFG.BLOCKS_PER_RUNG) + CFG.BLOCKS_PER_RUNG) % CFG.BLOCKS_PER_RUNG;
   setHubGeometry();
   refreshInspector();
@@ -1383,6 +1402,7 @@ function debounce(fn, ms){
 const applyCount = debounce(() => {
   CFG.BLOCKS_PER_RUNG = parseInt(inCount.value, 10);
   if (focus >= CFG.BLOCKS_PER_RUNG) focus = CFG.BLOCKS_PER_RUNG - 1;
+  if (focusLevel >= CFG.LEVELS) focusLevel = Math.max(0, CFG.LEVELS - 1);
   buildLadder(CFG.LEVELS);
 }, 180);
 
@@ -1423,9 +1443,9 @@ function specimenName(p){
 }
 
 function exportSpecimenOBJ(){
-  const lv0 = levels[0];
-  if (!lv0 || !lv0.fleet.pool[focus]) return;
-  const p = lv0.fleet.pool[focus];
+  const lv = levels[focusLevel];
+  if (!lv || !lv.fleet.pool[focus]) return;
+  const p = lv.fleet.pool[focus];
   const grid = gridOf(p.masks);
   const lines = [
     `# bimoblock specimen — ${specimenName(p)}`,
@@ -1457,9 +1477,9 @@ function exportSpecimenOBJ(){
 }
 
 function exportSpecimenVOX(){
-  const lv0 = levels[0];
-  if (!lv0 || !lv0.fleet.pool[focus]) return;
-  const p = lv0.fleet.pool[focus];
+  const lv = levels[focusLevel];
+  if (!lv || !lv.fleet.pool[focus]) return;
+  const p = lv.fleet.pool[focus];
   const grid = gridOf(p.masks);
   const out = [];
   for (let Z = 0; Z < 9; Z++) for (let Y = 0; Y < 9; Y++) for (let X = 0; X < 9; X++){
@@ -1626,6 +1646,47 @@ btnExpB.addEventListener('click', exportStreamBlocksOBJ);
 btnExpObj.addEventListener('click', exportSpecimenOBJ);
 btnExpVox.addEventListener('click', exportSpecimenVOX);
 
+/* Click any racer to make that exact bimoblock the focused specimen.
+   OrbitControls owns dragging, so only a short stationary pointer gesture
+   counts as a pick; this keeps camera orbiting unchanged. */
+const pickRay = new THREE.Raycaster();
+const pickNdc = new THREE.Vector2();
+let pickDown = null;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  pickDown = { x:e.clientX, y:e.clientY, id:e.pointerId };
+});
+
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (!pickDown || e.button !== 0 || e.pointerId !== pickDown.id) return;
+  const moved = Math.hypot(e.clientX - pickDown.x, e.clientY - pickDown.y);
+  pickDown = null;
+  if (moved > 5) return;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  pickNdc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pickNdc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  pickRay.setFromCamera(pickNdc, camera);
+
+  const targets = [];
+  for (const lv of levels) if (lv.group.visible)
+    for (const m of lv.meshes) if (m.geometry !== placeholder) targets.push(m);
+
+  const hit = pickRay.intersectObjects(targets, false)[0];
+  if (!hit) return;
+  const bi = hit.object.userData.bi;
+  const rung = hit.object.userData.rung;
+  if (!Number.isInteger(bi) || !Number.isInteger(rung)) return;
+
+  setFocus(bi, rung);
+  if (!State.hub) btnSpec.click();
+  const p = focusedData();
+  showToast(p ? `Focused rung ${rung + 1} · block ${bi + 1} · ${ARCH_NAMES[p.arch]}`
+              : `Focused rung ${rung + 1} · block ${bi + 1}`);
+});
+renderer.domElement.addEventListener('pointercancel', () => { pickDown = null; });
+
 /* Keyboard Shortcuts */
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
@@ -1688,9 +1749,9 @@ function frame(){
         const old = lv0.fleet.pool[bi];
         lv0.fleet.pool[bi] = generateBlockData(bi, Mint.gen * 100 + State.morphCursor);
         lv0.meshes[bi].geometry = lv0.fleet.pool[bi].geo;
-        if (bi === focus && lv0.hub) lv0.hub.geometry = lv0.fleet.pool[bi].geo;
+        if (focusLevel === 0 && bi === focus) setHubGeometry();
         if (old){ old.geo.dispose(); old.geoLod.dispose(); }
-        if (bi === focus) refreshInspector();
+        if (focusLevel === 0 && bi === focus) refreshInspector();
       }
     }
   }
