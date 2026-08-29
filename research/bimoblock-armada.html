@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
-<title>BIMOBLOCK ARMADA &mdash; Kinetic Droste Descent & Sphere Inversion</title>
+<title>BIMOBLOCK ARMADA &mdash; Kinetic Droste Descent & Global Inversion Lens</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
@@ -147,7 +147,7 @@
     padding:5px 9px; backdrop-filter:blur(8px);
   }
   .slider span { font-size:8px; letter-spacing:.2em; color:rgba(190, 210, 255, 0.6); text-transform:uppercase; white-space:nowrap; }
-  input[type=range] { -webkit-appearance:none; appearance:none; width:60px; height:2px; background:rgba(180, 190, 255, 0.3); outline:none; }
+  input[type=range] { -webkit-appearance:none; appearance:none; width:56px; height:2px; background:rgba(180, 190, 255, 0.3); outline:none; }
   input[type=range]::-webkit-slider-thumb {
     -webkit-appearance:none; width:10px; height:10px; border-radius:50%;
     background:var(--accent2); cursor:pointer; box-shadow:0 0 8px var(--accent2);
@@ -200,7 +200,8 @@
   <div class="grp">
     <button id="mint" class="primary" title="Re-mint enemy boss and fleet with fresh parameters">mint</button>
     <button id="dive" class="on" title="Toggle active Droste descent down the throat">dive</button>
-    <button id="warp" class="on" title="Toggle exact in-place sphere inversion conformal warp on diving units">warp</button>
+    <button id="warp" class="on" title="Toggle exact in-place sphere inversion conformal warp on diving units">unit warp</button>
+    <button id="lens" class="on" title="Toggle bouncing global biunit cube sphere-inversion anomaly lens">global lens</button>
     <button id="pause" title="Pause combat simulation for specimen inspection">pause</button>
     <button id="nextStg" title="Jump to next stage / deeper rung">stage +</button>
     <button id="bossJump" title="Skip approach squadrons and engage boss">boss</button>
@@ -218,14 +219,17 @@
     <label class="slider" title="Descent / elevator speed">
       <span>descent</span><input type="range" id="rate" min="0" max="60" value="16">
     </label>
-    <label class="slider" title="Sphere Inversion Pole Distance D (D -> rho=1.732 is intense crush, larger D is flatter)">
-      <span>warp D</span><input type="range" id="warpD" min="176" max="420" value="235">
+    <label class="slider" title="Unit Inversion Pole Distance D (D -> rho=1.732 is intense crush)">
+      <span>unit D</span><input type="range" id="warpD" min="176" max="420" value="235">
+    </label>
+    <label class="slider" title="Global Lens Radius (Size of the bouncing biunit circumsphere)">
+      <span>lens R</span><input type="range" id="lensR" min="8" max="45" value="22">
     </label>
   </div>
 </div>
 
 <div id="hint">
-  &larr; &rarr; / A D / drag move &nbsp;·&nbsp; SPACE / tap fire &nbsp;·&nbsp; W toggle sphere inversion &nbsp;·&nbsp; P pause &nbsp;·&nbsp; R restart<br>
+  &larr; &rarr; / A D / drag move &nbsp;·&nbsp; SPACE / tap fire &nbsp;·&nbsp; G toggle global lens &nbsp;·&nbsp; W unit warp &nbsp;·&nbsp; P pause &nbsp;·&nbsp; R restart<br>
   O export OBJ &nbsp;·&nbsp; X export VOX &nbsp;·&nbsp; N next stage &nbsp;·&nbsp; B boss &nbsp;·&nbsp; wheel descent
 </div>
 
@@ -296,7 +300,7 @@ const GEN = {
   Mz:    eOf([[1,0,0],[0,1,0],[0,0,-1]]),
   R180y: eOf([[-1,0,0],[0,1,0],[0,0,-1]]),
   R90y:  eOf([[0,0,1],[0,1,0],[-1,0,0]]),
-  cyc:   eOf([[0,1,0],[0,0,1],[1,0,0]]),   // 120 deg about [111] diagonal
+  cyc:   eOf([[0,1,0],[0,0,1],[1,0,0]]),
   negI:  eOf([[-1,0,0],[0,-1,0],[0,0,-1]]),
   Sxy:   eOf([[0,1,0],[1,0,0],[0,0,1]]),
   MxMy:  eOf([[-1,0,0],[0,-1,0],[0,0,1]])
@@ -586,14 +590,14 @@ function autOrder(grid){
 }
 
 /* =====================================================================
-   WEBGL2 SHADER: EXACT VOXEL RAYMARCHING & CONFORMAL SPHERE INVERSION
+   WEBGL2 SHADER: EXACT VOXEL RAYMARCHING, CONFORMAL INVERSION & GLOBAL LENS
    ---------------------------------------------------------------------
-   Includes:
-   1. Flat slab intersection for 9^3 lattices.
+   1. Flat slab intersection for 9^3 lattices & standard blocks.
    2. Exact analytic quadratic root solving for 3^3 biunit cubes under
-      conformal sphere inversion (fixes circumsphere setwise, 24 roots).
-   3. Conformal normal transformation for realistic lighting highlights.
-   4. Relativistic Droste background tunnel with depth tracking.
+      local conformal sphere inversion (fixes circumsphere setwise).
+   3. Bouncing Macro Inversion Anomaly Lens: Involution map I(x) applied
+      to the entire scene within a roving circumsphere of radius rho_G.
+   4. Relativistic Droste tunnel with depth elevator tracking.
    ===================================================================== */
 const VERT = `#version 300 es
 void main(){
@@ -625,9 +629,14 @@ uniform float uCamZ;
 uniform float uFocal;
 uniform float uShake;
 
-// Sphere Inversion Uniforms
-uniform float uWarp;     // 1.0 = warp active on diving units, 0.0 = flat
-uniform float uWarpD;    // Distance D of the pole from origin (> sqrt(3) = 1.73205)
+// Sphere Inversion Uniforms (Unit & Global)
+uniform float uWarp;       // 1.0 = unit-level inversion active on divers
+uniform float uWarpD;      // Distance D of pole from unit center
+uniform float uGlobalLens; // 1.0 = bouncing global anomaly lens active
+uniform vec3  uLensCenter; // Bouncing center C_g of the global biunit cube
+uniform float uLensRadius; // Circumsphere radius rho_g of the global lens
+uniform vec3  uLensPole;   // Position of the macro pole P_g
+uniform float uLensR2;     // Macro power R_g^2 = D_g^2 - rho_g^2
 
 out vec4 fragColor;
 
@@ -689,22 +698,14 @@ void traceShape(vec3 rl, vec3 rd, vec3 inv, uint mask,
   }
 }
 
-/* ---------------------------------------------------------------------------
-   EXACT IN-PLACE CONFORMAL SPHERE INVERSION TRACER
-   Pole sits at distance D from block centre, R^2 = D*D - 3.
-   Fixes the circumsphere setwise, mapping interior to interior.
-   Each of the 12 slab planes pulls back through the map to an exact quadratic,
-   yielding 24 analytic roots with ZERO raymarching loops.
-   --------------------------------------------------------------------------- */
+/* Exact In-Place Conformal Sphere Inversion Tracer for 3x3x3 Biunit Cubes */
 void traceInvertedShape(vec3 rl, vec3 rd, vec3 inv, uint mask, vec3 P, float R2,
                         inout float m, inout vec3 p, inout vec3 norm, inout float shell){
-  // Check bounding circumsphere of radius sqrt(3.0) -> r^2 = 3.0
   float bb = dot(rl, rd);
   float cc = dot(rl, rl) - 3.0;
   float ds = bb * bb - cc;
   if (ds < 0.0) return;
 
-  // Accumulate faint ghost circumsphere glow
   float tSphere = -bb - sqrt(max(0.0, ds));
   if (tSphere > 0.0 && tSphere < m) {
     shell = max(shell, pow(max(0.0, 1.0 - ds / 3.0), 12.0) * 0.45);
@@ -717,7 +718,7 @@ void traceInvertedShape(vec3 rl, vec3 rd, vec3 inv, uint mask, vec3 P, float R2,
   for (int i = 0; i < 12; ++i){
     int x = i >> 2;
     int q = i & 3;
-    float K = -1.0 + float(q) * (2.0 / 3.0) - P[x]; // Slab plane, pole-relative
+    float K = -1.0 + float(q) * (2.0 / 3.0) - P[x];
     float B = 2.0 * K * ad - R2 * rd[x];
     float C = K * a2 - R2 * a[x];
     float r0, r1;
@@ -741,10 +742,10 @@ void traceInvertedShape(vec3 rl, vec3 rd, vec3 inv, uint mask, vec3 P, float R2,
       vec3 pv = a + T * rd;
       float pv2 = dot(pv, pv);
       float ip = 1.0 / pv2;
-      vec3 y = P + (R2 * ip) * pv; // Image point in shape-space
+      vec3 y = P + (R2 * ip) * pv;
 
       float d_comp = rd[x] - 2.0 * pv[x] * dot(pv, rd) * ip;
-      bool e = d_comp > 0.0; // Entering locally?
+      bool e = d_comp > 0.0;
 
       ivec3 ci = ivec3(floor(y * 1.5 + 1.5));
       ivec3 ce = ci;
@@ -753,10 +754,9 @@ void traceInvertedShape(vec3 rl, vec3 rd, vec3 inv, uint mask, vec3 P, float R2,
 
       if (occ(ci, mask) && !occ(ce, mask)){
         m = T;
-        p = y; // Shape-space position preserves exact local gamut RGB!
+        p = y;
         vec3 n0 = vec3(0.0);
         n0[x] = e ? -1.0 : 1.0;
-        // Conformal normal transformation: J^T * n0 ~ (I - 2 * pv * pv^T / pv2) * n0
         norm = normalize(n0 - 2.0 * pv * (dot(pv, n0) * ip));
       }
     }
@@ -780,7 +780,6 @@ void boxHit(vec3 ro, vec3 inv, vec3 c, float h,
 }
 
 vec3 drosteBackground(vec2 v){
-  // Depth-aware relativistic warp tunnel & starfield
   float r = length(v);
   float tunnel = fract(log(max(r, 0.01)) * 1.25 - uDepth * 1.4);
   float ring = smoothstep(0.0, 0.05, abs(fract(tunnel * 6.0) - 0.5));
@@ -793,6 +792,15 @@ vec3 drosteBackground(vec2 v){
   vec3 stars = vec3(0.55, 0.75, 1.0) * s * tw;
   vec3 tunnelGlow = mix(vec3(0.04, 0.01, 0.09), vec3(0.0, 0.08, 0.12), ring) * exp(-r * 0.75);
   return stars + tunnelGlow;
+}
+
+/* Macro Sphere-Inversion Lens Evaluator */
+vec3 applyGlobalLens(vec3 wpos){
+  if (uGlobalLens < 0.5) return wpos;
+  vec3 delta = wpos - uLensCenter;
+  if (dot(delta, delta) > uLensRadius * uLensRadius) return wpos; // Strictly outside
+  vec3 a = wpos - uLensPole;
+  return uLensPole + (uLensR2 / max(1e-5, dot(a, a))) * a;
 }
 
 vec3 render(vec2 v){
@@ -808,10 +816,27 @@ vec3 render(vec2 v){
 
   vec3 flip = step(d, vec3(0.0));
 
-  // 1. Formation & Player 9^3 Lattices
+  // --- 1. Global Macro Anomaly Lens Ray Intersect ---
+  float lensShell = 0.0;
+  if (uGlobalLens > 0.5){
+    vec3 ro_lens = o - uLensCenter;
+    float bb = dot(ro_lens, d);
+    float cc = dot(ro_lens, ro_lens) - uLensRadius * uLensRadius;
+    float ds = bb * bb - cc;
+    if (ds > 0.0){
+      float tL = -bb - sqrt(ds);
+      if (tL > 0.0 && tL < m){
+        lensShell = pow(max(0.0, 1.0 - ds / (uLensRadius * uLensRadius)), 8.0) * 0.40;
+      }
+    }
+  }
+
+  // --- 2. Formation & Player 9^3 Lattices ---
   for (int I = 0; I < 2; ++I){
     float S = uScale[I];
-    vec3  ol = (o - uCenter[I]) / S;
+    vec3 cI = uCenter[I];
+    // Global lens overlap shifts the apparent field
+    vec3  ol = (o - cI) / S;
 
     vec3 rc = -ol * inv, e = abs(inv) * WORLD;
     if (max(max(rc.x - e.x, rc.y - e.y), rc.z - e.z) >=
@@ -844,7 +869,7 @@ vec3 render(vec2 v){
     }
   }
 
-  // 2. Detached Orbit Divers & Squadrons (With Sphere Inversion Conformal Warp)
+  // --- 3. Detached Orbit Divers & Squadrons ---
   float D = max(1.733, uWarpD);
   float R2 = D * D - 3.0;
   float cz = sin(0.29 * iTime), sz = sqrt(max(0.0, 1.0 - cz * cz)), th = 0.37 * iTime;
@@ -857,11 +882,11 @@ vec3 render(vec2 v){
 
     vec4 DP = uDivPos[i];
     float S = DP.w;
-    vec3 rl = applyG((o - DP.xyz) / S, uDivGi[i]);
+    vec3 dpos = applyGlobalLens(DP.xyz); // Global lens warps diver location
+    vec3 rl = applyG((o - dpos) / S, uDivGi[i]);
     vec3 dl = safeDir(applyG(d, uDivGi[i]));
     vec3 il = 1.0 / dl;
 
-    // Bounding culling
     vec3 rc = -rl * il, e = abs(il) * (uWarp > 0.5 ? 1.74 : 1.0);
     if (max(max(rc.x - e.x, rc.y - e.y), rc.z - e.z) >=
         min(min(rc.x + e.x, rc.y + e.y), rc.z + e.z)) continue;
@@ -882,23 +907,23 @@ vec3 render(vec2 v){
     }
   }
 
-  // 3. Projectiles (Shots & Bullets)
+  // --- 4. Projectiles (Shots & Bullets) ---
   for (int i = 0; i < 16; ++i){
     if (i >= uShotN) break;
     float w = uShots[i].w;
     if (w == 0.0) continue;
     int k0 = kind;
-    boxHit(o, inv, uShots[i].xyz, abs(w), m, norm, kind);
+    boxHit(o, inv, applyGlobalLens(uShots[i].xyz), abs(w), m, norm, kind);
     if (kind != k0){ enemyShot = w < 0.0; divIdx = -1; hitInst = -1; }
   }
 
   if (kind < 0){
     vec3 bg = drosteBackground(v);
     if (ghostShell > 0.0) bg += vec3(0.12, 0.28, 0.45) * ghostShell;
+    if (lensShell > 0.0)  bg += vec3(0.40, 0.15, 0.55) * lensShell;
     return bg;
   }
 
-  // Render Laser / Bullet Box
   if (kind == 2){
     vec3 c = enemyShot ? vec3(1.0, 0.28, 0.20) : vec3(0.0, 0.96, 0.83);
     return c * (0.90 + 0.40 * max(dot(norm, -d), 0.0));
@@ -906,7 +931,7 @@ vec3 render(vec2 v){
 
   // Pure Normalized Local Gamut Shading
   vec3 W = o + m * d;
-  vec3 base = p * 0.5 + 0.5; // Shape-space position preserves exact gamut under inversion!
+  vec3 base = p * 0.5 + 0.5;
   vec3 tint = vec3(1.0);
   float ao = 1.0, dep = 1.0, glow = 0.0;
   bool wounded = false;
@@ -955,6 +980,7 @@ vec3 render(vec2 v){
   col *= key * view * ao;
   col += col * glow;
   if (ghostShell > 0.0) col += vec3(0.1, 0.25, 0.4) * ghostShell;
+  if (lensShell > 0.0)  col += vec3(0.35, 0.12, 0.5) * lensShell;
   if (hitInst >= 0) col += vec3(1.0, 0.85, 0.6) * uFlash[hitInst];
   return col;
 }
@@ -975,7 +1001,7 @@ void main(){ mainImage(fragColor, gl_FragCoord.xy); }`;
 /* =====================================================================
    GAMEPLAY, STAGE LADDER & CONTROLS STATE
    ===================================================================== */
-const LADDER = [0, 1, 2, 4, 3, 5, 6, 7, 8, 9];   // C1 Cs C2 C3 C2v C4 C4v S6 Td Oh
+const LADDER = [0, 1, 2, 4, 3, 5, 6, 7, 8, 9];
 const BOSS_ARCH = [11, 4, 2, 3, 0, 8, 1, 6, 3, 1];
 
 const ENEMY_SCALE = 1.0, PLAYER_SCALE = 0.42, HENCH_SCALE = 0.62;
@@ -1011,7 +1037,9 @@ const Mint = {
   density: 0.34,
   rate: 0.16,
   warp: true,
-  warpD: 2.35
+  warpD: 2.35,
+  globalLens: true,
+  lensRadius: 2.20
 };
 
 const S = {
@@ -1026,7 +1054,8 @@ const S = {
   px: 0, pvx: 0, cool: 0,
   keys: Object.create(null), pointer: null, firing: false,
   banner: 0, bannerText: "",
-  depth: 0.0, diving: true
+  depth: 0.0, diving: true,
+  lensPos: [0, 0, 0], lensPole: [0, 0, 0], lensR2: 1.0
 };
 
 /* ---- Orbits ---------------------------------------------------------------- */
@@ -1600,6 +1629,7 @@ const elToast = document.getElementById('toast');
 const btnMint = document.getElementById('mint');
 const btnDive = document.getElementById('dive');
 const btnWarp = document.getElementById('warp');
+const btnLens = document.getElementById('lens');
 const btnPause = document.getElementById('pause');
 const btnNextStg = document.getElementById('nextStg');
 const btnBossJump = document.getElementById('bossJump');
@@ -1612,6 +1642,7 @@ const selField = document.getElementById('field');
 const inDens = document.getElementById('dens');
 const inRate = document.getElementById('rate');
 const inWarpD = document.getElementById('warpD');
+const inLensR = document.getElementById('lensR');
 
 function setStatus(t){ elStatus.textContent = t; }
 let toastTimer = 0;
@@ -1660,15 +1691,14 @@ function refreshInspector(){
       `<span class="k">voxels</span> <b>${e.alive}</b> / ${e.total} <span class="bar"><i style="width:${Math.round(100 * (1 - e.alive / e.total))}%"></i></span>\n` +
       `<span class="k">cell orbits</span> <b>${e.liveOrbits}</b> / ${e.totalOrbits}\n` +
       `<span class="k">|aut|</span> <b>${e.alive > 0 ? e.aut : 0}</b> / ${e.G.order} <span class="bar ${pure ? "pure" : "impure"}"><i style="width:${e.alive > 0 ? Math.round(100 * e.aut / e.G.order) : 0}%"></i></span>\n` +
-      `<span class="k">seed</span> <b>#${(e.P.seed >>> 0).toString(16).padStart(8,'0')}</b>\n` +
-      `<span class="k">sphere warp</span> <b>${Mint.warp ? `D=${Mint.warpD.toFixed(2)}` : 'OFF'}</b>\n` +
+      `<span class="k">global lens</span> <b>${Mint.globalLens ? `R=${Mint.lensRadius.toFixed(2)}` : 'OFF'}</b>\n` +
       `<span class="k">status</span> <b>${e.alive === 0 ? "DEFEATED" : pure ? "SYMMETRY INTACT" : "SYMMETRY BROKEN"}</b>`;
   } else {
     elInspect.innerHTML =
       `<span class="k">squadrons left</span> <b>${S.squadsLeft}</b>\n` +
       `<span class="k">in flight</span> <b>${S.hench.length}</b>\n` +
       `<span class="k">next squadron</span> <b>${HG[Math.min(HG.length - 1, S.squadIdx + (S.stage > 2 ? 1 : 0))].name}</b>\n` +
-      `<span class="k">sphere warp</span> <b>${Mint.warp ? `D=${Mint.warpD.toFixed(2)}` : 'OFF'}</b>\n` +
+      `<span class="k">global lens</span> <b>${Mint.globalLens ? `R=${Mint.lensRadius.toFixed(2)}` : 'OFF'}</b>\n` +
       `<span class="k">approach mode</span> <b>3x3x3 blocks</b>`;
   }
 }
@@ -1689,7 +1719,13 @@ btnDive.addEventListener('click', () => {
 btnWarp.addEventListener('click', () => {
   Mint.warp = !Mint.warp;
   btnWarp.classList.toggle('on', Mint.warp);
-  setStatus(Mint.warp ? 'Exact sphere inversion conformal warp active' : 'Conformal warp deactivated (flat Euclidean blocks)');
+  setStatus(Mint.warp ? 'Unit-scale sphere inversion active' : 'Unit-scale warp deactivated');
+  refreshInspector();
+});
+btnLens.addEventListener('click', () => {
+  Mint.globalLens = !Mint.globalLens;
+  btnLens.classList.toggle('on', Mint.globalLens);
+  setStatus(Mint.globalLens ? 'Bouncing global biunit cube sphere-inversion lens ACTIVE' : 'Global lens deactivated');
   refreshInspector();
 });
 btnPause.addEventListener('click', () => {
@@ -1719,6 +1755,10 @@ inWarpD.addEventListener('input', () => {
   Mint.warpD = parseInt(inWarpD.value, 10) / 100;
   refreshInspector();
 });
+inLensR.addEventListener('input', () => {
+  Mint.lensRadius = parseInt(inLensR.value, 10) / 10;
+  refreshInspector();
+});
 
 window.addEventListener('wheel', (e) => {
   S.depth += e.deltaY * 0.00045;
@@ -1734,6 +1774,7 @@ window.addEventListener("keydown", e => {
   if (e.code === "KeyB" && S.phase === "hench"){ S.hench.length = 0; S.squadsLeft = 0; }
   if (e.code === "KeyP") btnPause.click();
   if (e.code === "KeyW") btnWarp.click();
+  if (e.code === "KeyG") btnLens.click();
   if (e.code === "KeyO") exportSpecimenOBJ();
   if (e.code === "KeyX") exportSpecimenVOX();
 });
@@ -1787,7 +1828,9 @@ const LOC = {
   divGi: U("uDivGi[0]"), divSite: U("uDivSite[0]"), divN: U("uDivN"),
   shots: U("uShots[0]"), shotN: U("uShotN"),
   camZ: U("uCamZ"), focal: U("uFocal"), shake: U("uShake"),
-  warp: U("uWarp"), warpD: U("uWarpD")
+  warp: U("uWarp"), warpD: U("uWarpD"),
+  globalLens: U("uGlobalLens"), lensCenter: U("uLensCenter"),
+  lensRadius: U("uLensRadius"), lensPole: U("uLensPole"), lensR2: U("uLensR2")
 };
 
 const maskBuf  = new Uint32Array(54);
@@ -1843,6 +1886,18 @@ function frame(now){
     if (S.keys.Space || S.firing) fire();
 
     if (S.enemy) S.enemy.cx = 1.15 * Math.sin(clock * 0.34);
+
+    // Update Bouncing Macro Inversion Anomaly Lens Center & Pole
+    S.lensPos[0] = 3.6 * Math.sin(clock * 0.47);
+    S.lensPos[1] = 1.8 * Math.cos(clock * 0.63) + 0.3;
+    S.lensPos[2] = 1.2 * Math.sin(clock * 0.31);
+
+    const lD = Mint.lensRadius * 1.35;
+    const lR2 = lD * lD - Mint.lensRadius * Mint.lensRadius;
+    S.lensR2 = lR2;
+    S.lensPole[0] = S.lensPos[0] + lD * Math.cos(clock * 0.82);
+    S.lensPole[1] = S.lensPos[1] + lD * Math.sin(clock * 0.74);
+    S.lensPole[2] = S.lensPos[2] + lD * Math.sin(clock * 0.53);
 
     if (!S.over){
       if (S.phase === "hench"){
@@ -1963,6 +2018,11 @@ function frame(now){
   gl.uniform1f(LOC.shake, S.shake);
   gl.uniform1f(LOC.warp, Mint.warp ? 1.0 : 0.0);
   gl.uniform1f(LOC.warpD, Mint.warpD);
+  gl.uniform1f(LOC.globalLens, Mint.globalLens ? 1.0 : 0.0);
+  gl.uniform3fv(LOC.lensCenter, S.lensPos);
+  gl.uniform1f(LOC.lensRadius, Mint.lensRadius);
+  gl.uniform3fv(LOC.lensPole, S.lensPole);
+  gl.uniform1f(LOC.lensR2, S.lensR2);
 
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
