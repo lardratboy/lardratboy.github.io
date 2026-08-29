@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
-<title>BIMOBLOCK ARMADA &mdash; Kinetic Droste Descent & Global Inversion Lens</title>
+<title>BIMOBLOCK ARMADA &mdash; Rasterised Droste Descent & Global Inversion Lens</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
@@ -54,6 +54,8 @@
     font-variant-numeric:tabular-nums;
   }
   .sub { font-size:9.5px; letter-spacing:.2em; color:rgba(180, 205, 255, 0.65); margin-top:2px; }
+  .perf { font-size:9px; letter-spacing:.14em; color:rgba(0, 245, 212, 0.72); margin-top:3px;
+          font-variant-numeric:tabular-nums; }
 
   /* Player Combat Status HUD */
   #playerStats {
@@ -188,7 +190,8 @@
   <div id="readout">
     <div class="tag">Droste Elevator</div>
     <div class="val" id="depth">0.000</div>
-    <div class="sub" id="status">kinetic procedural armada stream</div>
+    <div class="sub" id="status">rasterised procedural armada stream</div>
+    <div class="perf" id="perf">&mdash;</div>
   </div>
 
   <div id="playerStats"></div>
@@ -200,7 +203,7 @@
   <div class="grp">
     <button id="mint" class="primary" title="Re-mint enemy boss and fleet with fresh parameters">mint</button>
     <button id="dive" class="on" title="Toggle active Droste descent down the throat">dive</button>
-    <button id="warp" class="on" title="Toggle exact in-place sphere inversion conformal warp on diving units">unit warp</button>
+    <button id="warp" class="on" title="Toggle exact in-place sphere inversion conformal warp on diving units (analytic proxy-box pass)">unit warp</button>
     <button id="lens" class="on" title="Toggle bouncing global biunit cube sphere-inversion anomaly lens">global lens</button>
     <button id="pause" title="Pause combat simulation for specimen inspection">pause</button>
     <button id="nextStg" title="Jump to next stage / deeper rung">stage +</button>
@@ -222,8 +225,11 @@
     <label class="slider" title="Unit Inversion Pole Distance D (D -> rho=1.732 is intense crush)">
       <span>unit D</span><input type="range" id="warpD" min="176" max="420" value="235">
     </label>
-    <label class="slider" title="Global Lens Radius (Size of the bouncing biunit circumsphere)">
+    <label class="slider" title="Global Lens peak radius (size of the bouncing biunit circumsphere at full sustain)">
       <span>lens R</span><input type="range" id="lensR" min="8" max="45" value="22">
+    </label>
+    <label class="slider" title="Anomaly lifecycle period: grow, sustain, shrink to nothing, dark, repeat">
+      <span>lens T</span><input type="range" id="lensT" min="20" max="240" value="75">
     </label>
   </div>
 </div>
@@ -234,6 +240,8 @@
 </div>
 
 <div id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
 <script>
 "use strict";
@@ -590,413 +598,150 @@ function autOrder(grid){
 }
 
 /* =====================================================================
-   WEBGL2 SHADER: EXACT VOXEL RAYMARCHING, CONFORMAL INVERSION & GLOBAL LENS
+   VOXEL MESHER — SHARED REGION WITH bimoblock-droste-v3.html
    ---------------------------------------------------------------------
-   1. Flat slab intersection for 9^3 lattices & standard blocks.
-   2. Exact analytic quadratic root solving for 3^3 biunit cubes under
-      local conformal sphere inversion (fixes circumsphere setwise).
-   3. Bouncing Macro Inversion Anomaly Lens: Involution map I(x) applied
-      to the entire scene within a roving circumsphere of radius rho_G.
-   4. Relativistic Droste tunnel with depth elevator tracking.
+   Emits geometry normalised to the unit cube [-0.5, 0.5]^3 so that a
+   single scale factor recovers any lattice order:
+
+     9^3 lattice  ->  scale 6 * S   (raymarcher half-extent WORLD = 3)
+     3^3 block    ->  scale 2 * S   (raymarcher half-extent      = 1)
+
+   Verified headlessly: for both orders every emitted vertex lands exactly
+   on a raymarcher cell-boundary plane, so the rasterised silhouette is the
+   same solid the analytic tracer was intersecting.
+
+   Per-vertex payload:
+     color = pos + 0.5     pure normalised local gamut (droste-v3 rule)
+     ao    = 0..3          classic three-neighbour corner occlusion
+     flag  = z + 16*wound  packed cell depth tier and damage bit
    ===================================================================== */
-const VERT = `#version 300 es
-void main(){
-  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
-}`;
+const BLOCK_NORM = 1 / 6;
+const OBJ_FACES = [
+  { d:[ 1,0,0], n:1, v:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
+  { d:[-1,0,0], n:2, v:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
+  { d:[0, 1,0], n:3, v:[[0,1,0],[0,1,1],[1,1,1],[1,1,0]] },
+  { d:[0,-1,0], n:4, v:[[0,0,1],[0,0,0],[1,0,0],[1,0,1]] },
+  { d:[0,0, 1], n:5, v:[[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
+  { d:[0,0,-1], n:6, v:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]] }
+];
 
-const FRAG = `#version 300 es
-precision highp float;
-precision highp int;
+/* Tangent basis per face, derived from the winding in OBJ_FACES so the
+   corner-occlusion lookup matches the vertex order without a table. */
+const FACE_T = OBJ_FACES.map(f => {
+  const a = f.v[0], b = f.v[1], c = f.v[3];
+  return { e1:[c[0]-a[0], c[1]-a[1], c[2]-a[2]],
+           e2:[b[0]-a[0], b[1]-a[1], b[2]-a[2]] };
+});
 
-uniform vec3  iResolution;
-uniform float iTime;
-uniform float uDepth;
-uniform uint  uMasks[54];
-uniform uint  uWound[27];
-uniform vec3  uCenter[2];
-uniform float uScale[2];
-uniform float uFlash[2];
-uniform uint  uDiv[12];
-uniform vec4  uDivPos[12];
-uniform int   uDivG[12];
-uniform int   uDivGi[12];
-uniform int   uDivSite[12];
-uniform int   uDivN;
-uniform vec4  uShots[16];
-uniform int   uShotN;
-uniform float uCamZ;
-uniform float uFocal;
-uniform float uShake;
+function meshVoxels(at, N, flagAt){
+  const S = 9 / N;
+  const solid = (x,y,z) =>
+    x>=0 && x<N && y>=0 && y<N && z>=0 && z<N && at(x,y,z);
 
-// Sphere Inversion Uniforms (Unit & Global)
-uniform float uWarp;       // 1.0 = unit-level inversion active on divers
-uniform float uWarpD;      // Distance D of pole from unit center
-uniform float uGlobalLens; // 1.0 = bouncing global anomaly lens active
-uniform vec3  uLensCenter; // Bouncing center C_g of the global biunit cube
-uniform float uLensRadius; // Circumsphere radius rho_g of the global lens
-uniform vec3  uLensPole;   // Position of the macro pole P_g
-uniform float uLensR2;     // Macro power R_g^2 = D_g^2 - rho_g^2
+  let quads = 0;
+  for (let z=0; z<N; z++) for (let y=0; y<N; y++) for (let x=0; x<N; x++){
+    if (!at(x,y,z)) continue;
+    for (const f of OBJ_FACES)
+      if (!solid(x+f.d[0], y+f.d[1], z+f.d[2])) quads++;
+  }
 
-out vec4 fragColor;
+  const pos  = new Float32Array(quads * 12);
+  const col  = new Float32Array(quads * 12);
+  const nrm  = new Float32Array(quads * 12);
+  const ao   = new Float32Array(quads * 4);
+  const flag = new Float32Array(quads * 4);
+  const idx  = new (quads * 4 > 65535 ? Uint32Array : Uint16Array)(quads * 6);
 
-#define AA 2
-#define PITCH 2.0
-#define WORLD 3.0
-#define CUT_SHADE 0.28
+  let v = 0, o = 0, io = 0, c4 = 0;
+  for (let z=0; z<N; z++) for (let y=0; y<N; y++) for (let x=0; x<N; x++){
+    if (!at(x,y,z)) continue;
+    const fl = flagAt ? flagAt(x,y,z) : 0;
+    for (let fi=0; fi<6; fi++){
+      const f = OBJ_FACES[fi];
+      const ox = x+f.d[0], oy = y+f.d[1], oz = z+f.d[2];
+      if (solid(ox,oy,oz)) continue;
+      const T = FACE_T[fi];
+      for (let k=0; k<4; k++){
+        const vt = f.v[k];
+        const VX = (x+vt[0])*S, VY = (y+vt[1])*S, VZ = (z+vt[2])*S;
+        const px = (VX-4.5)*(2/3)*BLOCK_NORM;
+        const py = (VY-4.5)*(2/3)*BLOCK_NORM;
+        const pz = (VZ-4.5)*(2/3)*BLOCK_NORM;
+        pos[o]=px; pos[o+1]=py; pos[o+2]=pz;
+        col[o]=px+0.5; col[o+1]=py+0.5; col[o+2]=pz+0.5;
+        nrm[o]=f.d[0]; nrm[o+1]=f.d[1]; nrm[o+2]=f.d[2];
+        o += 3;
 
-vec3 applyG(vec3 v, int e){
-  int p = e >> 3, s = e & 7;
-  vec3 vp = v;
-  if      (p == 1) vp = v.xzy;
-  else if (p == 2) vp = v.yxz;
-  else if (p == 3) vp = v.yzx;
-  else if (p == 4) vp = v.zxy;
-  else if (p == 5) vp = v.zyx;
-  return vp * vec3(((s & 1) != 0) ? -1.0 : 1.0,
-                   ((s & 2) != 0) ? -1.0 : 1.0,
-                   ((s & 4) != 0) ? -1.0 : 1.0);
-}
-
-bool occ(ivec3 c, uint m){
-  if (any(greaterThanEqual(uvec3(c), uvec3(3u)))) return false;
-  return ((m >> uint(c.x + 3 * c.y + 9 * c.z)) & 1u) != 0u;
-}
-
-bool occG(int inst, ivec3 c){
-  if (any(lessThan(c, ivec3(0))) || any(greaterThan(c, ivec3(8)))) return false;
-  ivec3 b = c / 3, q = c - b * 3;
-  uint m = uMasks[inst * 27 + b.x + 3 * b.y + 9 * b.z];
-  return ((m >> uint(q.x + 3 * q.y + 9 * q.z)) & 1u) != 0u;
-}
-
-bool woundAt(ivec3 c){
-  if (any(lessThan(c, ivec3(0))) || any(greaterThan(c, ivec3(8)))) return false;
-  ivec3 b = c / 3, q = c - b * 3;
-  return ((uWound[b.x + 3 * b.y + 9 * b.z] >> uint(q.x + 3 * q.y + 9 * q.z)) & 1u) != 0u;
-}
-
-/* Flat Euclidean Ray-Slab Tracer (Standard Bimoblock Voxel Slice) */
-void traceShape(vec3 rl, vec3 rd, vec3 inv, uint mask,
-                inout float m, inout vec3 p, inout vec3 norm){
-  for (int a = 0; a < 3; ++a){
-    bool pos  = rd[a] > 0.0;
-    int  base = pos ? 0 : 1;
-    for (int k = 0; k < 3; ++k){
-      int   q = base + k;
-      float t = (-1.0 + float(q) * (2.0 / 3.0) - rl[a]) * inv[a];
-      if (t <= 0.0 || t >= m) continue;
-      vec3 h  = rl + t * rd;
-      ivec3 ci = ivec3(floor(h * 1.5 + 1.5));
-      ivec3 ce = ci;
-      ci[a] = pos ? q     : q - 1;
-      ce[a] = pos ? q - 1 : q;
-      if (occ(ci, mask) && !occ(ce, mask)){
-        m = t; p = h; norm = vec3(0.0); norm[a] = pos ? -1.0 : 1.0;
+        /* Corner occlusion: the two edge neighbours and the diagonal, read
+           one step along the face normal. Signs follow the quad winding. */
+        const s1 = (k===0||k===1) ? -1 : 1;
+        const s2 = (k===0||k===3) ? -1 : 1;
+        const n1 = solid(ox+T.e1[0]*s1, oy+T.e1[1]*s1, oz+T.e1[2]*s1) ? 1 : 0;
+        const n2 = solid(ox+T.e2[0]*s2, oy+T.e2[1]*s2, oz+T.e2[2]*s2) ? 1 : 0;
+        const nc = solid(ox+T.e1[0]*s1+T.e2[0]*s2,
+                         oy+T.e1[1]*s1+T.e2[1]*s2,
+                         oz+T.e1[2]*s1+T.e2[2]*s2) ? 1 : 0;
+        ao[c4]   = (n1 && n2) ? 0 : 3 - (n1+n2+nc);
+        flag[c4] = fl;
+        c4++;
       }
+      idx[io]=v; idx[io+1]=v+1; idx[io+2]=v+2;
+      idx[io+3]=v; idx[io+4]=v+2; idx[io+5]=v+3;
+      v += 4; io += 6;
     }
   }
+  return { pos, col, nrm, ao, flag, idx, quads };
 }
 
-/* Exact In-Place Conformal Sphere Inversion Tracer for 3x3x3 Biunit Cubes */
-void traceInvertedShape(vec3 rl, vec3 rd, vec3 inv, uint mask, vec3 P, float R2,
-                        inout float m, inout vec3 p, inout vec3 norm, inout float shell){
-  float bb = dot(rl, rd);
-  float cc = dot(rl, rl) - 3.0;
-  float ds = bb * bb - cc;
-  if (ds < 0.0) return;
-
-  float tSphere = -bb - sqrt(max(0.0, ds));
-  if (tSphere > 0.0 && tSphere < m) {
-    shell = max(shell, pow(max(0.0, 1.0 - ds / 3.0), 12.0) * 0.45);
-  }
-
-  vec3 a = rl - P;
-  float a2 = dot(a, a);
-  float ad = dot(a, rd);
-
-  for (int i = 0; i < 12; ++i){
-    int x = i >> 2;
-    int q = i & 3;
-    float K = -1.0 + float(q) * (2.0 / 3.0) - P[x];
-    float B = 2.0 * K * ad - R2 * rd[x];
-    float C = K * a2 - R2 * a[x];
-    float r0, r1;
-
-    if (abs(K) < 1e-7){
-      if (abs(B) < 1e-7) continue;
-      r0 = r1 = -C / B;
-    } else {
-      float s = B * B - 4.0 * K * C;
-      if (s < 0.0) continue;
-      float sq = sqrt(s);
-      float qb = -0.5 * (B + (B < 0.0 ? -sq : sq));
-      r0 = qb / K;
-      r1 = C / qb;
-    }
-
-    for (int j = 0; j < 2; ++j){
-      float T = (j == 0) ? r0 : r1;
-      if (T <= 1e-4 || T >= m) continue;
-
-      vec3 pv = a + T * rd;
-      float pv2 = dot(pv, pv);
-      float ip = 1.0 / pv2;
-      vec3 y = P + (R2 * ip) * pv;
-
-      float d_comp = rd[x] - 2.0 * pv[x] * dot(pv, rd) * ip;
-      bool e = d_comp > 0.0;
-
-      ivec3 ci = ivec3(floor(y * 1.5 + 1.5));
-      ivec3 ce = ci;
-      ci[x] = e ? q : q - 1;
-      ce[x] = e ? q - 1 : q;
-
-      if (occ(ci, mask) && !occ(ce, mask)){
-        m = T;
-        p = y;
-        vec3 n0 = vec3(0.0);
-        n0[x] = e ? -1.0 : 1.0;
-        norm = normalize(n0 - 2.0 * pv * (dot(pv, n0) * ip));
-      }
-    }
-  }
+function toGeometry(M){
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(M.pos,  3));
+  g.setAttribute('color',    new THREE.BufferAttribute(M.col,  3));
+  g.setAttribute('normal',   new THREE.BufferAttribute(M.nrm,  3));
+  g.setAttribute('aAo',      new THREE.BufferAttribute(M.ao,   1));
+  g.setAttribute('aFlag',    new THREE.BufferAttribute(M.flag, 1));
+  g.setIndex(new THREE.BufferAttribute(M.idx, 1));
+  g.computeBoundingSphere();
+  g.userData.tris = M.quads * 2;
+  return g;
 }
 
-vec3 safeDir(vec3 d){
-  vec3 s = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(d, vec3(0.0)));
-  return s * max(abs(d), vec3(1e-6));
+/* 9^3 lattice: honours the detached-site set so sortied blocks vanish from
+   the formation exactly as zeroing uMasks[site] did in the tracer. */
+function latticeGeometry(u, detached, woundOn){
+  const grid = u.grid;
+  const at = (x,y,z) => {
+    if (detached && detached.has((x/3|0) + 3*(y/3|0) + 9*(z/3|0))) return false;
+    return grid[x + 9*y + 81*z] !== 0;
+  };
+  const flagAt = woundOn
+    ? (x,y,z) => z + 16 * ((u.wound[(x/3|0)+3*(y/3|0)+9*(z/3|0)]
+                            >>> ((x%3)+3*(y%3)+9*(z%3))) & 1)
+    : (x,y,z) => z;
+  return toGeometry(meshVoxels(at, 9, flagAt));
 }
 
-void boxHit(vec3 ro, vec3 inv, vec3 c, float h,
-            inout float m, inout vec3 norm, inout int kind){
-  vec3 rc = (c - ro) * inv, e = abs(inv) * h;
-  vec3 t1 = rc - e, t2 = rc + e;
-  float tn = max(max(t1.x, t1.y), t1.z);
-  float tf = min(min(t2.x, t2.y), t2.z);
-  if (tn >= tf || tf < 0.0 || tn >= m) return;
-  m = tn; kind = 2;
-  norm = -sign(1.0 / inv) * step(vec3(tn) - 1e-4, t1);
+/* 3^3 block: `site` >= 0 means a detached formation block, which carries the
+   formation's wound bits; henchmen pass -1 and are never wounded. */
+function blockGeometry(mask, site, wound){
+  const at = (x,y,z) => ((mask >>> (x + 3*y + 9*z)) & 1) !== 0;
+  const w = (site >= 0 && wound) ? wound[site] : 0;
+  const flagAt = (x,y,z) => 16 * ((w >>> (x + 3*y + 9*z)) & 1);
+  return toGeometry(meshVoxels(at, 3, flagAt));
 }
 
-vec3 drosteBackground(vec2 v){
-  float r = length(v);
-  float tunnel = fract(log(max(r, 0.01)) * 1.25 - uDepth * 1.4);
-  float ring = smoothstep(0.0, 0.05, abs(fract(tunnel * 6.0) - 0.5));
-
-  vec2 g = floor(v * 48.0 + vec2(0.0, uDepth * 32.0));
-  float h = fract(sin(dot(g, vec2(127.1, 311.7))) * 43758.5453);
-  float s = smoothstep(0.9955, 1.0, h);
-  float tw = 0.55 + 0.45 * sin(iTime * 2.2 + h * 50.0);
-
-  vec3 stars = vec3(0.55, 0.75, 1.0) * s * tw;
-  vec3 tunnelGlow = mix(vec3(0.04, 0.01, 0.09), vec3(0.0, 0.08, 0.12), ring) * exp(-r * 0.75);
-  return stars + tunnelGlow;
+/* 32-bit rolling digest of everything a cached mesh depends on. Comparing
+   digests each frame is cheaper than tracking invalidation by hand and
+   cannot miss an edit made anywhere in the gameplay code. */
+function digest(words){
+  let h = 0x811c9dc5 >>> 0;
+  for (let i = 0; i < words.length; i++){
+    h = Math.imul(h ^ (words[i] >>> 0), 0x01000193) >>> 0;
+    h = (h ^ (h >>> 15)) >>> 0;
+  }
+  return h;
 }
 
-/* Macro Sphere-Inversion Lens Evaluator */
-vec3 applyGlobalLens(vec3 wpos){
-  if (uGlobalLens < 0.5) return wpos;
-  vec3 delta = wpos - uLensCenter;
-  if (dot(delta, delta) > uLensRadius * uLensRadius) return wpos; // Strictly outside
-  vec3 a = wpos - uLensPole;
-  return uLensPole + (uLensR2 / max(1e-5, dot(a, a))) * a;
-}
-
-vec3 render(vec2 v){
-  vec3 o = vec3(0.0, 0.0, uCamZ);
-  vec3 d = safeDir(normalize(vec3(v.x, v.y, -uFocal)));
-  vec3 inv = 1.0 / d;
-
-  float m = 1e9;
-  vec3  p = vec3(0.0), norm = vec3(0.0), lnorm = vec3(0.0), lp = vec3(0.0);
-  int   kind = -1, hitInst = -1, divIdx = -1;
-  bool  enemyShot = false;
-  float ghostShell = 0.0;
-
-  vec3 flip = step(d, vec3(0.0));
-
-  // --- 1. Global Macro Anomaly Lens Ray Intersect ---
-  float lensShell = 0.0;
-  if (uGlobalLens > 0.5){
-    vec3 ro_lens = o - uLensCenter;
-    float bb = dot(ro_lens, d);
-    float cc = dot(ro_lens, ro_lens) - uLensRadius * uLensRadius;
-    float ds = bb * bb - cc;
-    if (ds > 0.0){
-      float tL = -bb - sqrt(ds);
-      if (tL > 0.0 && tL < m){
-        lensShell = pow(max(0.0, 1.0 - ds / (uLensRadius * uLensRadius)), 8.0) * 0.40;
-      }
-    }
-  }
-
-  // --- 2. Formation & Player 9^3 Lattices ---
-  for (int I = 0; I < 2; ++I){
-    float S = uScale[I];
-    vec3 cI = uCenter[I];
-    // Global lens overlap shifts the apparent field
-    vec3  ol = (o - cI) / S;
-
-    vec3 rc = -ol * inv, e = abs(inv) * WORLD;
-    if (max(max(rc.x - e.x, rc.y - e.y), rc.z - e.z) >=
-        min(min(rc.x + e.x, rc.y + e.y), rc.z + e.z)) continue;
-    if (min(min(rc.x + e.x, rc.y + e.y), rc.z + e.z) < 0.0) continue;
-
-    float mLoc = m / S, entry = mLoc;
-    vec3  lpI = vec3(0.0), nI = vec3(0.0);
-
-    for (int j = 0; j < 27; ++j){
-      vec3 g = vec3(j % 3, (j / 3) % 3, j / 9);
-      g = mix(g, 2.0 - g, flip);
-      int site = int(g.x) + 3 * int(g.y) + 9 * int(g.z);
-      uint mask = uMasks[I * 27 + site];
-      if (mask == 0u) continue;
-
-      vec3 pL = (g - 1.0) * PITCH;
-      vec3 r2 = (pL - ol) * inv, e2 = abs(inv);
-      vec3 t1 = r2 - e2, t2 = r2 + e2;
-      if (max(max(t1.x, t1.y), t1.z) >= min(min(t2.x, t2.y), t2.z)) continue;
-      if (min(min(t2.x, t2.y), t2.z) < 0.0) continue;
-      if (max(max(t1.x, t1.y), t1.z) >= mLoc) continue;
-
-      traceShape(ol - pL, d, inv, mask, mLoc, lpI, nI);
-    }
-
-    if (mLoc < entry){
-      m = mLoc * S; p = lpI; norm = nI; lnorm = nI; lp = ol + mLoc * d;
-      kind = 0; hitInst = I; divIdx = -1;
-    }
-  }
-
-  // --- 3. Detached Orbit Divers & Squadrons ---
-  float D = max(1.733, uWarpD);
-  float R2 = D * D - 3.0;
-  float cz = sin(0.29 * iTime), sz = sqrt(max(0.0, 1.0 - cz * cz)), th = 0.37 * iTime;
-  vec3 poleP = D * vec3(sz * cos(th), cz, sz * sin(th));
-
-  for (int i = 0; i < 12; ++i){
-    if (i >= uDivN) break;
-    uint mask = uDiv[i];
-    if (mask == 0u) continue;
-
-    vec4 DP = uDivPos[i];
-    float S = DP.w;
-    vec3 dpos = applyGlobalLens(DP.xyz); // Global lens warps diver location
-    vec3 rl = applyG((o - dpos) / S, uDivGi[i]);
-    vec3 dl = safeDir(applyG(d, uDivGi[i]));
-    vec3 il = 1.0 / dl;
-
-    vec3 rc = -rl * il, e = abs(il) * (uWarp > 0.5 ? 1.74 : 1.0);
-    if (max(max(rc.x - e.x, rc.y - e.y), rc.z - e.z) >=
-        min(min(rc.x + e.x, rc.y + e.y), rc.z + e.z)) continue;
-    if (min(min(rc.x + e.x, rc.y + e.y), rc.z + e.z) < 0.0) continue;
-
-    float mLoc = m / S, entry = mLoc;
-    vec3  lpI = vec3(0.0), nI = vec3(0.0);
-
-    if (uWarp > 0.5){
-      traceInvertedShape(rl, dl, il, mask, poleP, R2, mLoc, lpI, nI, ghostShell);
-    } else {
-      traceShape(rl, dl, il, mask, mLoc, lpI, nI);
-    }
-
-    if (mLoc < entry){
-      m = mLoc * S; p = lpI; lnorm = nI; norm = applyG(nI, uDivG[i]);
-      kind = 1; hitInst = -1; divIdx = i;
-    }
-  }
-
-  // --- 4. Projectiles (Shots & Bullets) ---
-  for (int i = 0; i < 16; ++i){
-    if (i >= uShotN) break;
-    float w = uShots[i].w;
-    if (w == 0.0) continue;
-    int k0 = kind;
-    boxHit(o, inv, applyGlobalLens(uShots[i].xyz), abs(w), m, norm, kind);
-    if (kind != k0){ enemyShot = w < 0.0; divIdx = -1; hitInst = -1; }
-  }
-
-  if (kind < 0){
-    vec3 bg = drosteBackground(v);
-    if (ghostShell > 0.0) bg += vec3(0.12, 0.28, 0.45) * ghostShell;
-    if (lensShell > 0.0)  bg += vec3(0.40, 0.15, 0.55) * lensShell;
-    return bg;
-  }
-
-  if (kind == 2){
-    vec3 c = enemyShot ? vec3(1.0, 0.28, 0.20) : vec3(0.0, 0.96, 0.83);
-    return c * (0.90 + 0.40 * max(dot(norm, -d), 0.0));
-  }
-
-  // Pure Normalized Local Gamut Shading
-  vec3 W = o + m * d;
-  vec3 base = p * 0.5 + 0.5;
-  vec3 tint = vec3(1.0);
-  float ao = 1.0, dep = 1.0, glow = 0.0;
-  bool wounded = false;
-
-  if (kind == 0){
-    ivec3 hc = clamp(ivec3(floor((lp - lnorm * 0.002 + WORLD) * 1.5)), ivec3(0), ivec3(8));
-    ivec3 n3 = ivec3(round(norm));
-    ivec3 fc = hc + n3;
-    ivec3 a1 = (abs(norm.x) > 0.5) ? ivec3(0,1,0) : ivec3(1,0,0);
-    ivec3 a2 = ivec3(round(cross(vec3(n3), vec3(a1))));
-    float n = 0.0;
-    for (int i = -1; i <= 1; ++i)
-      for (int k = -1; k <= 1; ++k){
-        if (i == 0 && k == 0) continue;
-        if (occG(hitInst, fc + a1 * i + a2 * k)) n += 1.0;
-      }
-    ao = 1.0 - 0.45 * (n / 8.0);
-    dep = float(hc.z) / 8.0;
-    tint = (hitInst == 0) ? vec3(0.55, 0.85, 1.10) : vec3(1.10, 0.75, 0.45);
-    if (hitInst == 0) wounded = woundAt(hc);
-  } else {
-    ivec3 ci = clamp(ivec3(floor((p - lnorm * 0.002) * 1.5 + 1.5)), ivec3(0), ivec3(2));
-    int st = uDivSite[divIdx];
-    ao = 0.92;
-    dep = clamp(W.z / 6.0 + 0.5, 0.0, 1.0);
-    if (st < 0){
-      tint = vec3(1.15, 0.88, 0.38);
-      glow = 0.22;
-    } else {
-      wounded = woundAt(ivec3(st % 3, (st / 3) % 3, st / 9) * 3 + ci);
-      tint = vec3(0.65, 0.95, 1.20);
-      glow = 0.16;
-    }
-  }
-
-  vec3 col = mix(vec3(dot(base, vec3(0.33))), base, 0.88) * tint;
-  col *= mix(0.48, 1.0, dep);
-
-  if (wounded){
-    float b = 0.65 + 0.35 * sin(iTime * 10.0 + W.x * 2.5 + W.y * 1.8);
-    col = mix(col, vec3(1.0, 0.22, 0.12), 0.75 * b);
-  }
-
-  float key  = 0.55 + 0.45 * max(dot(norm, normalize(vec3(0.32, 0.74, 0.59))), 0.0);
-  float view = mix(1.0 - CUT_SHADE, 1.0, max(dot(norm, -d), 0.0));
-  col *= key * view * ao;
-  col += col * glow;
-  if (ghostShell > 0.0) col += vec3(0.1, 0.25, 0.4) * ghostShell;
-  if (lensShell > 0.0)  col += vec3(0.35, 0.12, 0.5) * lensShell;
-  if (hitInst >= 0) col += vec3(1.0, 0.85, 0.6) * uFlash[hitInst];
-  return col;
-}
-
-void mainImage(out vec4 O, in vec2 F){
-  vec2 sh = vec2(sin(iTime * 137.0), cos(iTime * 111.0)) * uShake;
-  vec3 acc = vec3(0.0);
-  for (int j = 0; j < AA; ++j)
-    for (int i = 0; i < AA; ++i){
-      vec2 off = (vec2(float(i), float(j)) + 0.5) / float(AA);
-      acc += render(((F + sh + off - 0.5) * 2.0 - iResolution.xy) / iResolution.y);
-    }
-  O = vec4(acc / float(AA * AA), 1.0);
-}
-
-void main(){ mainImage(fragColor, gl_FragCoord.xy); }`;
 
 /* =====================================================================
    GAMEPLAY, STAGE LADDER & CONTROLS STATE
@@ -1039,7 +784,8 @@ const Mint = {
   warp: true,
   warpD: 2.35,
   globalLens: true,
-  lensRadius: 2.20
+  lensRadius: 2.20,
+  lensPeriod: 7.5
 };
 
 const S = {
@@ -1055,7 +801,8 @@ const S = {
   keys: Object.create(null), pointer: null, firing: false,
   banner: 0, bannerText: "",
   depth: 0.0, diving: true,
-  lensPos: [0, 0, 0], lensPole: [0, 0, 0], lensR2: 1.0
+  lensPos: [0, 0, 0], lensPole: [0, 0, 0], lensR2: 1.0,
+  lensR: 0, lensAmt: 0, lensPhase: "dark"
 };
 
 /* ---- Orbits ---------------------------------------------------------------- */
@@ -1130,7 +877,7 @@ function makeUnit(P, scale, cy){
     liveOrbits: nLive, totalOrbits: nLive,
     alive, total: alive,
     wound: new Uint32Array(27),
-    aut: autOrder(grid),
+    aut: autOrder(grid), autDirty: false,
     scale, cx: 0, cy
   };
 }
@@ -1203,7 +950,10 @@ function destroyCell(u, X, Y, Z){
     S.shake = Math.min(3.2, 0.9 + n * 0.16);
     flashBanner(`ORBIT CLEARED  ${n} CELLS  +${n * n * 10}`);
   }
-  u.aut = autOrder(u.grid);
+  /* |aut| is an inspector readout only, and autOrder is a 48 x 729 sweep --
+     four times the cost of remeshing the lattice. Mark it stale and let the
+     HUD refresh recompute it at its own 0.15 s cadence. */
+  u.autDirty = true;
   rebuildWound(u);
   return pts;
 }
@@ -1500,15 +1250,8 @@ function flashBanner(t){ S.bannerText = t; S.banner = 1.8; }
 /* =====================================================================
    EXPORTERS: SPECIMEN OBJ & VOX
    ===================================================================== */
-const BLOCK_NORM = 1 / 6;
-const OBJ_FACES = [
-  { d:[ 1,0,0], v:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
-  { d:[-1,0,0], v:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
-  { d:[0, 1,0], v:[[0,1,0],[0,1,1],[1,1,1],[1,1,0]] },
-  { d:[0,-1,0], v:[[0,0,1],[0,0,0],[1,0,0],[1,0,1]] },
-  { d:[0,0, 1], v:[[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
-  { d:[0,0,-1], v:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]] }
-];
+/* BLOCK_NORM and OBJ_FACES now live in the shared mesher region above; the
+   exporters read the same tables the renderer meshes from. */
 
 function download(blob, name){
   const a = document.createElement('a');
@@ -1614,7 +1357,6 @@ function exportSpecimenVOX(){
   download(new Blob([bytes], { type:'application/octet-stream' }), name + '.vox');
   showToast(`${name}.vox exported (${out.length} voxels)`);
 }
-
 /* =====================================================================
    INPUT HANDLING, UI CONTROLS & HUD
    ===================================================================== */
@@ -1625,6 +1367,7 @@ const elPlayerStats = document.getElementById('playerStats');
 const elInspect = document.getElementById('inspect');
 const elMid = document.getElementById('mid');
 const elToast = document.getElementById('toast');
+const elPerf = document.getElementById('perf');
 
 const btnMint = document.getElementById('mint');
 const btnDive = document.getElementById('dive');
@@ -1643,6 +1386,7 @@ const inDens = document.getElementById('dens');
 const inRate = document.getElementById('rate');
 const inWarpD = document.getElementById('warpD');
 const inLensR = document.getElementById('lensR');
+const inLensT = document.getElementById('lensT');
 
 function setStatus(t){ elStatus.textContent = t; }
 let toastTimer = 0;
@@ -1683,6 +1427,7 @@ function refreshInspector(){
 
   if (S.phase === "boss" && S.enemy){
     const e = S.enemy;
+    if (e.autDirty){ e.aut = autOrder(e.grid); e.autDirty = false; }
     const pure = e.alive > 0 && e.aut === e.G.order;
     elInspect.innerHTML =
       `<span class="k">boss specimen</span> <b>${e.G.name}</b>\n` +
@@ -1691,14 +1436,14 @@ function refreshInspector(){
       `<span class="k">voxels</span> <b>${e.alive}</b> / ${e.total} <span class="bar"><i style="width:${Math.round(100 * (1 - e.alive / e.total))}%"></i></span>\n` +
       `<span class="k">cell orbits</span> <b>${e.liveOrbits}</b> / ${e.totalOrbits}\n` +
       `<span class="k">|aut|</span> <b>${e.alive > 0 ? e.aut : 0}</b> / ${e.G.order} <span class="bar ${pure ? "pure" : "impure"}"><i style="width:${e.alive > 0 ? Math.round(100 * e.aut / e.G.order) : 0}%"></i></span>\n` +
-      `<span class="k">global lens</span> <b>${Mint.globalLens ? `R=${Mint.lensRadius.toFixed(2)}` : 'OFF'}</b>\n` +
+      `<span class="k">global lens</span> <b>${Mint.globalLens ? `${S.lensPhase} R=${S.lensR.toFixed(2)}/${Mint.lensRadius.toFixed(2)}` : 'OFF'}</b>\n` +
       `<span class="k">status</span> <b>${e.alive === 0 ? "DEFEATED" : pure ? "SYMMETRY INTACT" : "SYMMETRY BROKEN"}</b>`;
   } else {
     elInspect.innerHTML =
       `<span class="k">squadrons left</span> <b>${S.squadsLeft}</b>\n` +
       `<span class="k">in flight</span> <b>${S.hench.length}</b>\n` +
       `<span class="k">next squadron</span> <b>${HG[Math.min(HG.length - 1, S.squadIdx + (S.stage > 2 ? 1 : 0))].name}</b>\n` +
-      `<span class="k">global lens</span> <b>${Mint.globalLens ? `R=${Mint.lensRadius.toFixed(2)}` : 'OFF'}</b>\n` +
+      `<span class="k">global lens</span> <b>${Mint.globalLens ? `${S.lensPhase} R=${S.lensR.toFixed(2)}/${Mint.lensRadius.toFixed(2)}` : 'OFF'}</b>\n` +
       `<span class="k">approach mode</span> <b>3x3x3 blocks</b>`;
   }
 }
@@ -1759,6 +1504,10 @@ inLensR.addEventListener('input', () => {
   Mint.lensRadius = parseInt(inLensR.value, 10) / 10;
   refreshInspector();
 });
+inLensT.addEventListener('input', () => {
+  Mint.lensPeriod = parseInt(inLensT.value, 10) / 10;
+  refreshInspector();
+});
 
 window.addEventListener('wheel', (e) => {
   S.depth += e.deltaY * 0.00045;
@@ -1800,67 +1549,712 @@ function fire(){
 }
 
 /* =====================================================================
-   GL SETUP & UNIFORMS BINDING
+   RENDERER — RASTERISED BIMOBLOCK PIPELINE
+   ---------------------------------------------------------------------
+   The old build ran one fullscreen fragment shader that, at every sample,
+   walked 2 x 27 formation sites, 12 detached blocks and 16 projectiles,
+   then evaluated the Droste tunnel. With AA = 2 that is four full traversals
+   per pixel whether or not the ray hits anything.
+
+   Here the solids are meshed once and rasterised, in the manner of
+   bimoblock-droste-v3.html:
+
+     pass 0   Droste tunnel, one fullscreen quad, one sample
+     pass 1   meshed voxel solids: both 9^3 lattices, unwarped 3^3 blocks,
+              projectiles                                    (~2.4k triangles)
+     pass 2   analytic sphere-inversion trace for warped 3^3 blocks, confined
+              to each block's circumsphere proxy box and resolved against the
+              raster depth buffer through gl_FragDepth
+     pass 3   additive limb glows (unit ghost shells, macro anomaly lens)
+
+   Pass 2 keeps the exact tracer rather than warping mesh vertices. The
+   inversion is measurably not meshable at the tight end of the pole slider:
+   with the pole 0.16 from the near corner at D = 1.76 a flat quad still
+   deviates ~48% of the circumsphere radius at 6x6 subdivision, because the
+   near corner is stretched across the entire far hemisphere. Confining the
+   exact tracer to a proxy box costs a fraction of the old fullscreen sweep
+   and stays correct at every pole distance.
    ===================================================================== */
-const gl = cv.getContext("webgl2", { antialias: false, alpha: false });
-if (!gl) console.error("WebGL2 unavailable");
+const renderer = new THREE.WebGLRenderer({
+  canvas: cv, antialias: true, alpha: false, stencil: false,
+  powerPreference: 'high-performance'
+});
+renderer.setClearColor(0x000000, 1);
+renderer.autoClear = true;
 
-function compile(type, src){
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src); gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
-  return s;
+const HAS_GL2 = renderer.capabilities.isWebGL2;
+if (!HAS_GL2){
+  console.warn('WebGL2 unavailable — analytic inversion pass disabled, ' +
+               'unit warp will render as unwarped meshes.');
 }
-const prog = gl.createProgram();
-gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
-gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
-gl.linkProgram(prog);
-if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(prog));
-gl.useProgram(prog);
-gl.bindVertexArray(gl.createVertexArray());
 
-const U = n => gl.getUniformLocation(prog, n);
-const LOC = {
-  res: U("iResolution"), time: U("iTime"), depth: U("uDepth"),
-  masks: U("uMasks[0]"), wound: U("uWound[0]"),
-  centre: U("uCenter[0]"), scale: U("uScale[0]"), flash: U("uFlash[0]"),
-  div: U("uDiv[0]"), divPos: U("uDivPos[0]"), divG: U("uDivG[0]"),
-  divGi: U("uDivGi[0]"), divSite: U("uDivSite[0]"), divN: U("uDivN"),
-  shots: U("uShots[0]"), shotN: U("uShotN"),
-  camZ: U("uCamZ"), focal: U("uFocal"), shake: U("uShake"),
-  warp: U("uWarp"), warpD: U("uWarpD"),
-  globalLens: U("uGlobalLens"), lensCenter: U("uLensCenter"),
-  lensRadius: U("uLensRadius"), lensPole: U("uLensPole"), lensR2: U("uLensR2")
-};
+const scene = new THREE.Scene();
+const FOCAL = CAM_Z / HALF_H;
+const camera = new THREE.PerspectiveCamera(
+  2 * Math.atan(1 / FOCAL) * 180 / Math.PI, 1, 28, 55);
+camera.position.set(0, 0, CAM_Z);
+camera.matrixAutoUpdate = true;
 
-const maskBuf  = new Uint32Array(54);
-const formBuf  = new Uint32Array(27);
-const emptyW   = new Uint32Array(27);
-const centBuf  = new Float32Array(6);
-const scaleBuf = new Float32Array(2);
-const flashBuf = new Float32Array(2);
-const divBuf   = new Uint32Array(MAX_BLOCKS);
-const divPos   = new Float32Array(MAX_BLOCKS * 4);
-const divG     = new Int32Array(MAX_BLOCKS);
-const divGi    = new Int32Array(MAX_BLOCKS);
-const divSite  = new Int32Array(MAX_BLOCKS);
-const shotBuf  = new Float32Array(64);
+/* ---- shared GLSL ---------------------------------------------------- */
+const GLSL_COMMON = `
+#define CUT_SHADE 0.28
+vec3 applyG(vec3 v, int e){
+  int p = e >> 3, s = e & 7;
+  vec3 vp = v;
+  if      (p == 1) vp = v.xzy;
+  else if (p == 2) vp = v.yxz;
+  else if (p == 3) vp = v.yzx;
+  else if (p == 4) vp = v.zxy;
+  else if (p == 5) vp = v.zyx;
+  return vp * vec3(((s & 1) != 0) ? -1.0 : 1.0,
+                   ((s & 2) != 0) ? -1.0 : 1.0,
+                   ((s & 4) != 0) ? -1.0 : 1.0);
+}
+vec3 shadeGamut(vec3 base, vec3 nrm, vec3 d, vec3 tint,
+                float dep, float ao, float glow, float wounded, float t, vec3 W){
+  vec3 col = mix(vec3(dot(base, vec3(0.33))), base, 0.88) * tint;
+  col *= mix(0.48, 1.0, dep);
+  if (wounded > 0.5){
+    float b = 0.65 + 0.35 * sin(t * 10.0 + W.x * 2.5 + W.y * 1.8);
+    col = mix(col, vec3(1.0, 0.22, 0.12), 0.75 * b);
+  }
+  float key  = 0.55 + 0.45 * max(dot(nrm, normalize(vec3(0.32, 0.74, 0.59))), 0.0);
+  float view = mix(1.0 - CUT_SHADE, 1.0, max(dot(nrm, -d), 0.0));
+  col *= key * view * ao;
+  return col + col * glow;
+}`;
 
+/* ---- pass 0: Droste tunnel ------------------------------------------ */
+const bgMat = new THREE.ShaderMaterial({
+  uniforms: { uTime:{value:0}, uDepth:{value:0}, uAspect:{value:1} },
+  vertexShader: `
+    varying vec2 vV;
+    uniform float uAspect;
+    void main(){
+      vV = position.xy * vec2(uAspect, 1.0);
+      gl_Position = vec4(position.xy, 1.0, 1.0);
+    }`,
+  fragmentShader: `
+    precision highp float;
+    varying vec2 vV;
+    uniform float uTime, uDepth;
+    void main(){
+      vec2 v = vV;
+      float r = length(v);
+      float tunnel = fract(log(max(r, 0.01)) * 1.25 - uDepth * 1.4);
+      float ring = smoothstep(0.0, 0.05, abs(fract(tunnel * 6.0) - 0.5));
+      vec2 g = floor(v * 48.0 + vec2(0.0, uDepth * 32.0));
+      float h = fract(sin(dot(g, vec2(127.1, 311.7))) * 43758.5453);
+      float s = smoothstep(0.9955, 1.0, h);
+      float tw = 0.55 + 0.45 * sin(uTime * 2.2 + h * 50.0);
+      vec3 stars = vec3(0.55, 0.75, 1.0) * s * tw;
+      vec3 glow = mix(vec3(0.04, 0.01, 0.09), vec3(0.0, 0.08, 0.12), ring) * exp(-r * 0.75);
+      gl_FragColor = vec4(stars + glow, 1.0);
+    }`,
+  depthTest: false, depthWrite: false
+});
+const bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat);
+bgMesh.frustumCulled = false;
+bgMesh.renderOrder = -1000;
+scene.add(bgMesh);
+
+/* ---- pass 1: meshed voxel solids ------------------------------------ */
+const VOX_VERT = `
+attribute float aAo;
+attribute float aFlag;
+varying vec3  vCol;
+varying vec3  vNrm;
+varying vec3  vW;
+varying float vAo;
+varying float vFlag;
+void main(){
+  vCol  = color;
+  vAo   = aAo;
+  vFlag = aFlag;
+  vNrm  = mat3(modelMatrix) * normal;
+  vec4 wp = modelMatrix * vec4(position, 1.0);
+  vW = wp.xyz;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}`;
+
+const VOX_FRAG = `
+precision highp float;
+${GLSL_COMMON}
+varying vec3  vCol;
+varying vec3  vNrm;
+varying vec3  vW;
+varying float vAo;
+varying float vFlag;
+uniform vec3  uTint;
+uniform float uGamut;     // local-gamut span: 3.0 for 9^3, 1.0 for 3^3
+uniform float uGlow;
+uniform float uFlash;
+uniform float uTime;
+uniform int   uDepthMode; // 0 = baked cell tier, 1 = world z
+void main(){
+  vec3 base = (vCol - 0.5) * uGamut + 0.5;
+  vec3 d    = normalize(vW - cameraPosition);
+  vec3 nrm  = normalize(vNrm);
+  if (!gl_FrontFacing) nrm = -nrm;
+
+  float tier    = mod(vFlag, 16.0);
+  float wounded = step(8.0, vFlag / 2.0);
+  float dep = (uDepthMode == 0) ? tier / 8.0
+                                : clamp(vW.z / 6.0 + 0.5, 0.0, 1.0);
+  float ao = 0.55 + 0.15 * vAo;
+
+  vec3 col = shadeGamut(base, nrm, d, uTint, dep, ao, uGlow, wounded, uTime, vW);
+  col += vec3(1.0, 0.85, 0.6) * uFlash;
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+function makeVoxelMaterial(tint, gamut, glow, depthMode){
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTint:{value:new THREE.Vector3(...tint)}, uGamut:{value:gamut},
+      uGlow:{value:glow}, uFlash:{value:0}, uTime:{value:0},
+      uDepthMode:{value:depthMode}
+    },
+    vertexShader: VOX_VERT, fragmentShader: VOX_FRAG,
+    vertexColors: true, side: THREE.DoubleSide
+  });
+}
+
+/* ---- pass 2: analytic sphere-inversion trace ------------------------- */
+const ANA_FRAG = `
+precision highp float;
+precision highp int;
+${GLSL_COMMON}
+varying vec3 vW;
+/* projectionMatrix is declared by THREE in the vertex stage only; the
+   fragment prefix carries just viewMatrix, cameraPosition and
+   isOrthographic. Declaring it here is picked up by setProgram, which
+   assigns every built-in by name against the linked program's uniform map. */
+uniform mat4  projectionMatrix;
+uniform uint  uMask;
+uniform uint  uWoundMask;
+uniform vec3  uPos;
+uniform float uScale;
+uniform int   uG;
+uniform int   uGi;
+uniform int   uSite;
+uniform float uWarpD;
+uniform float uTime;
+
+bool occ(ivec3 c, uint m){
+  if (any(greaterThanEqual(uvec3(c), uvec3(3u)))) return false;
+  return ((m >> uint(c.x + 3 * c.y + 9 * c.z)) & 1u) != 0u;
+}
+
+vec3 safeDir(vec3 d){
+  vec3 s = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(d, vec3(0.0)));
+  return s * max(abs(d), vec3(1e-6));
+}
+
+/* Exact in-place conformal sphere inversion tracer for 3x3x3 biunit cubes.
+   Byte-identical to the routine in the previous fullscreen build. */
+void traceInvertedShape(vec3 rl, vec3 rd, vec3 inv, uint mask, vec3 P, float R2,
+                        inout float m, inout vec3 p, inout vec3 norm, inout float shell){
+  float bb = dot(rl, rd);
+  float cc = dot(rl, rl) - 3.0;
+  float ds = bb * bb - cc;
+  if (ds < 0.0) return;
+
+  float tSphere = -bb - sqrt(max(0.0, ds));
+  if (tSphere > 0.0 && tSphere < m) {
+    shell = max(shell, pow(max(0.0, 1.0 - ds / 3.0), 12.0) * 0.45);
+  }
+
+  vec3 a = rl - P;
+  float a2 = dot(a, a);
+  float ad = dot(a, rd);
+
+  for (int i = 0; i < 12; ++i){
+    int x = i >> 2;
+    int q = i & 3;
+    float K = -1.0 + float(q) * (2.0 / 3.0) - P[x];
+    float B = 2.0 * K * ad - R2 * rd[x];
+    float C = K * a2 - R2 * a[x];
+    float r0, r1;
+
+    if (abs(K) < 1e-7){
+      if (abs(B) < 1e-7) continue;
+      r0 = r1 = -C / B;
+    } else {
+      float s = B * B - 4.0 * K * C;
+      if (s < 0.0) continue;
+      float sq = sqrt(s);
+      float qb = -0.5 * (B + (B < 0.0 ? -sq : sq));
+      r0 = qb / K;
+      r1 = C / qb;
+    }
+
+    for (int j = 0; j < 2; ++j){
+      float T = (j == 0) ? r0 : r1;
+      if (T <= 1e-4 || T >= m) continue;
+
+      vec3 pv = a + T * rd;
+      float pv2 = dot(pv, pv);
+      float ip = 1.0 / pv2;
+      vec3 y = P + (R2 * ip) * pv;
+
+      float d_comp = rd[x] - 2.0 * pv[x] * dot(pv, rd) * ip;
+      bool e = d_comp > 0.0;
+
+      ivec3 ci = ivec3(floor(y * 1.5 + 1.5));
+      ivec3 ce = ci;
+      ci[x] = e ? q : q - 1;
+      ce[x] = e ? q - 1 : q;
+
+      if (occ(ci, mask) && !occ(ce, mask)){
+        m = T;
+        p = y;
+        vec3 n0 = vec3(0.0);
+        n0[x] = e ? -1.0 : 1.0;
+        norm = normalize(n0 - 2.0 * pv * (dot(pv, n0) * ip));
+      }
+    }
+  }
+}
+
+void main(){
+  vec3 o  = cameraPosition;
+  vec3 dW = normalize(vW - o);
+
+  vec3 rl = applyG((o - uPos) / uScale, uGi);
+  vec3 dl = safeDir(applyG(dW, uGi));
+  vec3 il = 1.0 / dl;
+
+  float D  = max(1.733, uWarpD);
+  float R2 = D * D - 3.0;
+  float cz = sin(0.29 * uTime), sz = sqrt(max(0.0, 1.0 - cz * cz)), th = 0.37 * uTime;
+  vec3  poleP = D * vec3(sz * cos(th), cz, sz * sin(th));
+
+  float m = 1e9, shell = 0.0;
+  vec3  p = vec3(0.0), nI = vec3(0.0);
+  traceInvertedShape(rl, dl, il, uMask, poleP, R2, m, p, nI, shell);
+  if (m > 1e8) discard;
+
+  vec3 W = o + (m * uScale) * dW;
+  vec4 clip = projectionMatrix * viewMatrix * vec4(W, 1.0);
+  gl_FragDepthEXT = clamp(clip.z / clip.w * 0.5 + 0.5, 0.0, 1.0);
+
+  vec3 norm = applyG(nI, uG);
+  ivec3 ci = clamp(ivec3(floor((p - nI * 0.002) * 1.5 + 1.5)), ivec3(0), ivec3(2));
+
+  vec3  tint; float glow; float wounded = 0.0;
+  if (uSite < 0){
+    tint = vec3(1.15, 0.88, 0.38); glow = 0.22;
+  } else {
+    tint = vec3(0.65, 0.95, 1.20); glow = 0.16;
+    if (((uWoundMask >> uint(ci.x + 3 * ci.y + 9 * ci.z)) & 1u) != 0u) wounded = 1.0;
+  }
+  float dep = clamp(W.z / 6.0 + 0.5, 0.0, 1.0);
+  vec3 col = shadeGamut(p * 0.5 + 0.5, norm, dW, tint, dep, 0.92, glow, wounded, uTime, W);
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+function makeAnalyticMaterial(){
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uMask:{value:0}, uWoundMask:{value:0},
+      uPos:{value:new THREE.Vector3()}, uScale:{value:1},
+      uG:{value:0}, uGi:{value:0}, uSite:{value:-1},
+      uWarpD:{value:2.35}, uTime:{value:0}
+    },
+    vertexShader: `
+      varying vec3 vW;
+      void main(){
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vW = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }`,
+    fragmentShader: ANA_FRAG,
+    side: THREE.FrontSide
+  });
+}
+
+/* ---- pass 3: additive limb glows ------------------------------------ */
+const SHELL_FRAG = `
+precision highp float;
+varying vec3 vW;
+uniform vec3  uCentre;
+uniform float uR;
+uniform float uPow;
+uniform float uAmt;
+uniform vec3  uColour;
+void main(){
+  vec3 d  = normalize(vW - cameraPosition);
+  vec3 ro = cameraPosition - uCentre;
+  float bb = dot(ro, d);
+  float cc = dot(ro, ro) - uR * uR;
+  float ds = bb * bb - cc;
+  if (ds <= 0.0) discard;
+  if (-bb - sqrt(ds) <= 0.0) discard;
+  float s = pow(max(0.0, 1.0 - ds / (uR * uR)), uPow) * uAmt;
+  gl_FragColor = vec4(uColour * s, 1.0);
+}`;
+
+function makeShellMaterial(colour, pow_, amt){
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uCentre:{value:new THREE.Vector3()}, uR:{value:1},
+      uPow:{value:pow_}, uAmt:{value:amt},
+      uColour:{value:new THREE.Vector3(...colour)}
+    },
+    vertexShader: `
+      varying vec3 vW;
+      void main(){
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vW = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }`,
+    fragmentShader: SHELL_FRAG,
+    transparent: true, blending: THREE.AdditiveBlending,
+    depthTest: false, depthWrite: false, side: THREE.FrontSide
+  });
+}
+
+/* ---- object pools ---------------------------------------------------- */
+const EMPTY_GEO = new THREE.BufferGeometry();
+EMPTY_GEO.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
+EMPTY_GEO.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(3), 3));
+EMPTY_GEO.setAttribute('normal',   new THREE.BufferAttribute(new Float32Array(3), 3));
+EMPTY_GEO.setAttribute('aAo',      new THREE.BufferAttribute(new Float32Array(1), 1));
+EMPTY_GEO.setAttribute('aFlag',    new THREE.BufferAttribute(new Float32Array(1), 1));
+
+const BOX_GEO   = new THREE.BoxGeometry(2, 2, 2);
+const SHELL_GEO = new THREE.SphereGeometry(1, 20, 14);
+const RT3 = 1.7320508075688772;
+
+function addMesh(geo, mat, order){
+  const m = new THREE.Mesh(geo, mat);
+  m.frustumCulled = false;
+  m.matrixAutoUpdate = false;
+  m.visible = false;
+  if (order !== undefined) m.renderOrder = order;
+  scene.add(m);
+  return m;
+}
+function place(mesh, x, y, z, s, e){
+  const M = (e === undefined || e === 0) ? null : MATS[e];
+  const a = M ? M[0] : [1,0,0], b = M ? M[1] : [0,1,0], c = M ? M[2] : [0,0,1];
+  mesh.matrix.set(a[0]*s, a[1]*s, a[2]*s, x,
+                  b[0]*s, b[1]*s, b[2]*s, y,
+                  c[0]*s, c[1]*s, c[2]*s, z,
+                  0, 0, 0, 1);
+  mesh.matrixWorldNeedsUpdate = true;
+}
+
+const enemyMat  = makeVoxelMaterial([0.55, 0.85, 1.10], 3.0, 0.0, 0);
+const playerMat = makeVoxelMaterial([1.10, 0.75, 0.45], 3.0, 0.0, 0);
+const enemyMesh  = addMesh(EMPTY_GEO, enemyMat, 0);
+const playerMesh = addMesh(EMPTY_GEO, playerMat, 0);
+let enemyKey = -1, playerKey = -1;
+
+/* One slot per detachable 3^3 block: a meshed form, an analytic proxy box
+   and a ghost shell. Exactly one of the first two is ever visible. */
+const blockSlots = [];
+for (let i = 0; i < MAX_BLOCKS; i++){
+  const mat = makeVoxelMaterial([0.65, 0.95, 1.20], 1.0, 0.16, 1);
+  const ana = makeAnalyticMaterial();
+  blockSlots.push({
+    key: -1,
+    vox:   addMesh(EMPTY_GEO, mat, 0),
+    ana:   addMesh(BOX_GEO,   ana, 1),
+    shell: addMesh(SHELL_GEO, makeShellMaterial([0.12, 0.28, 0.45], 12.0, 0.45), 10),
+    mat, ana_mat: ana
+  });
+}
+
+const SHOT_FRAG = `
+precision highp float;
+varying vec3 vN;
+varying vec3 vW;
+uniform vec3 uColour;
+void main(){
+  vec3 d = normalize(vW - cameraPosition);
+  vec3 n = normalize(vN);
+  if (!gl_FrontFacing) n = -n;
+  gl_FragColor = vec4(uColour * (0.90 + 0.40 * max(dot(n, -d), 0.0)), 1.0);
+}`;
+function makeShotMaterial(colour){
+  return new THREE.ShaderMaterial({
+    uniforms: { uColour:{value:new THREE.Vector3(...colour)} },
+    vertexShader: `
+      varying vec3 vN; varying vec3 vW;
+      void main(){
+        vN = mat3(modelMatrix) * normal;
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vW = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }`,
+    fragmentShader: SHOT_FRAG
+  });
+}
+const friendlyMat = makeShotMaterial([0.0, 0.96, 0.83]);
+const hostileMat  = makeShotMaterial([1.0, 0.28, 0.20]);
+const shotSlots = [];
+for (let i = 0; i < 16; i++) shotSlots.push(addMesh(BOX_GEO, friendlyMat, 0));
+
+const lensShell = addMesh(SHELL_GEO, makeShellMaterial([0.40, 0.15, 0.55], 8.0, 0.40), 10);
+
+/* ---- resize ---------------------------------------------------------- */
 let W = 0, H = 0;
 function resize(){
-  const dpr = Math.min(devicePixelRatio || 1, 1.75);
-  const w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr);
+  const w = cv.clientWidth, h = cv.clientHeight;
   if (w === W && h === H) return;
-  W = cv.width = w; H = cv.height = h;
-  gl.viewport(0, 0, W, H);
+  W = w; H = h;
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.75));
+  renderer.setSize(w, h, false);
+  camera.aspect = w / Math.max(1, h);
+  camera.updateProjectionMatrix();
+  bgMat.uniforms.uAspect.value = camera.aspect;
 }
-window.addEventListener("resize", resize);
+window.addEventListener('resize', resize);
+
+/* ---- per-frame scene synchronisation --------------------------------- */
+const detachedWords = new Uint32Array(27);
+const hashWords = new Uint32Array(56);
+
+function latticeKey(u, detached, woundOn){
+  for (let j = 0; j < 27; j++){
+    hashWords[j] = u.masks[j];
+    hashWords[27 + j] = woundOn ? u.wound[j] : 0;
+  }
+  let dm = 0;
+  if (detached) for (const s of detached) dm ^= (0x9e3779b9 + s * 0x85ebca6b) >>> 0;
+  hashWords[54] = dm;
+  hashWords[55] = woundOn ? 1 : 0;
+  return digest(hashWords);
+}
+
+function syncScene(clock){
+  const warpOn = Mint.warp && HAS_GL2;
+
+  /* --- formation lattice --- */
+  const showEnemy = S.bossActive && !!S.enemy;
+  enemyMesh.visible = showEnemy;
+  if (showEnemy){
+    const k = latticeKey(S.enemy, S.detached, true);
+    if (k !== enemyKey){
+      enemyKey = k;
+      if (enemyMesh.geometry !== EMPTY_GEO) enemyMesh.geometry.dispose();
+      enemyMesh.geometry = latticeGeometry(S.enemy, S.detached, true);
+    }
+    place(enemyMesh, S.enemy.cx, ENEMY_Y, 0, 6 * ENEMY_SCALE, 0);
+    enemyMat.uniforms.uFlash.value = S.flash[0];
+    enemyMat.uniforms.uTime.value = clock;
+  }
+
+  /* --- player hull --- */
+  playerMesh.visible = !!S.player;
+  if (S.player){
+    const k = latticeKey(S.player, null, false);
+    if (k !== playerKey){
+      playerKey = k;
+      if (playerMesh.geometry !== EMPTY_GEO) playerMesh.geometry.dispose();
+      playerMesh.geometry = latticeGeometry(S.player, null, false);
+    }
+    place(playerMesh, S.px, PLAYER_Y, 0, 6 * PLAYER_SCALE, 0);
+    playerMat.uniforms.uFlash.value = S.flash[1];
+    playerMat.uniforms.uTime.value = clock;
+  }
+
+  /* --- detached 3^3 blocks: divers then henchmen, as the tracer packed them --- */
+  let n = 0;
+  const feed = [];
+  for (const d of S.divers){
+    if (n++ >= MAX_BLOCKS) break;
+    feed.push({ mask:S.enemy ? S.enemy.masks[d.site] >>> 0 : 0, x:d.x, y:d.y, z:d.z,
+                s:ENEMY_SCALE, g:d.g, gi:d.gi, site:d.site });
+  }
+  for (const h of S.hench){
+    if (n++ >= MAX_BLOCKS) break;
+    feed.push({ mask:h.mask >>> 0, x:h.x, y:h.y, z:h.z,
+                s:HENCH_SCALE, g:h.g, gi:h.gi, site:-1 });
+  }
+
+  for (let i = 0; i < MAX_BLOCKS; i++){
+    const slot = blockSlots[i];
+    const b = feed[i];
+    if (!b || b.mask === 0){
+      slot.vox.visible = slot.ana.visible = slot.shell.visible = false;
+      continue;
+    }
+    const wm = (b.site >= 0 && S.enemy) ? (S.enemy.wound[b.site] >>> 0) : 0;
+    const wp = applyGlobalLensJS(b.x, b.y, b.z);
+
+    if (warpOn){
+      slot.vox.visible = false;
+      slot.ana.visible = true;
+      const U = slot.ana_mat.uniforms;
+      U.uMask.value = b.mask;
+      U.uWoundMask.value = wm;
+      U.uPos.value.set(wp[0], wp[1], wp[2]);
+      U.uScale.value = b.s;
+      U.uG.value = b.g; U.uGi.value = b.gi; U.uSite.value = b.site;
+      U.uWarpD.value = Mint.warpD;
+      U.uTime.value = clock;
+      // proxy box: the inverted image is confined to the circumsphere
+      place(slot.ana, wp[0], wp[1], wp[2], b.s * 1.74, 0);
+
+      slot.shell.visible = true;
+      const SU = slot.shell.material.uniforms;
+      SU.uCentre.value.set(wp[0], wp[1], wp[2]);
+      SU.uR.value = b.s * RT3;
+      place(slot.shell, wp[0], wp[1], wp[2], b.s * RT3, 0);
+    } else {
+      slot.ana.visible = false;
+      slot.shell.visible = false;
+      slot.vox.visible = true;
+      const key = digest([b.mask, wm, b.site < 0 ? 1 : 0]);
+      if (key !== slot.key){
+        slot.key = key;
+        if (slot.vox.geometry !== EMPTY_GEO) slot.vox.geometry.dispose();
+        slot.vox.geometry = blockGeometry(b.mask, b.site, S.enemy ? S.enemy.wound : null);
+      }
+      const tint = b.site < 0 ? [1.15, 0.88, 0.38] : [0.65, 0.95, 1.20];
+      slot.mat.uniforms.uTint.value.set(tint[0], tint[1], tint[2]);
+      slot.mat.uniforms.uGlow.value = b.site < 0 ? 0.22 : 0.16;
+      slot.mat.uniforms.uTime.value = clock;
+      place(slot.vox, wp[0], wp[1], wp[2], 2 * b.s, b.g);
+    }
+  }
+
+  /* --- projectiles --- */
+  let sn = 0;
+  for (const s of S.shots){
+    if (sn >= 16 || s.dead) continue;
+    const m = shotSlots[sn++];
+    const wp = applyGlobalLensJS(s.x, s.y, 0);
+    m.visible = true; m.material = friendlyMat;
+    place(m, wp[0], wp[1], wp[2], SHOT_SIZE, 0);
+  }
+  for (const b of S.ebullets){
+    if (sn >= 16 || b.dead) continue;
+    const m = shotSlots[sn++];
+    const wp = applyGlobalLensJS(b.x, b.y, 0);
+    m.visible = true; m.material = hostileMat;
+    place(m, wp[0], wp[1], wp[2], EBULLET_SIZE, 0);
+  }
+  for (let i = sn; i < 16; i++) shotSlots[i].visible = false;
+
+  /* --- macro anomaly lens limb --- */
+  lensShell.visible = Mint.globalLens && S.lensR > 1e-3;
+  if (lensShell.visible){
+    const U = lensShell.material.uniforms;
+    U.uCentre.value.set(S.lensPos[0], S.lensPos[1], S.lensPos[2]);
+    U.uR.value = S.lensR;
+    U.uAmt.value = 0.40 * S.lensAmt;
+    place(lensShell, S.lensPos[0], S.lensPos[1], S.lensPos[2], S.lensR, 0);
+  }
+
+  bgMat.uniforms.uTime.value = clock;
+  bgMat.uniforms.uDepth.value = S.depth;
+}
+
+/* =====================================================================
+   MACRO ANOMALY LIFECYCLE
+   ---------------------------------------------------------------------
+   The anomaly grows, sustains, shrinks to nothing, goes dark, and repeats,
+   all while continuing to bounce. Radius and displacement strength ride the
+   same envelope: an anomaly at half size also bends space half as hard, so
+   it fades in rather than snapping on at full force inside a small sphere.
+
+   Each cycle re-seeds the bounce phases so successive appearances trace
+   different paths. The re-seed happens at the cycle boundary, where the
+   radius is exactly zero and the lens displaces nothing, so the jump is
+   not observable.
+   ===================================================================== */
+const LENS_TAU = Math.PI * 2;
+const LENS_PHASE = { grow: 0.22, hold: 0.42, shrink: 0.24 };   // rest is dark
+
+function lensEnvelope(u){
+  const G = LENS_PHASE.grow, H = LENS_PHASE.hold, K = LENS_PHASE.shrink;
+  if (u < G){ const k = u / G;                 return k * k * (3 - 2 * k); }
+  if (u < G + H) return 1;
+  if (u < G + H + K){ const k = 1 - (u - G - H) / K; return k * k * (3 - 2 * k); }
+  return 0;
+}
+function lensPhaseName(u){
+  const G = LENS_PHASE.grow, H = LENS_PHASE.hold, K = LENS_PHASE.shrink;
+  return u < G ? "grow" : u < G + H ? "sustain" : u < G + H + K ? "shrink" : "dark";
+}
+
+function updateLens(t){
+  const T = Math.max(0.5, Mint.lensPeriod);
+  const n = Math.floor(t / T);
+  const u = t / T - n;
+  const e = lensEnvelope(u);
+
+  S.lensR     = Mint.lensRadius * e;
+  S.lensAmt   = e;
+  S.lensPhase = lensPhaseName(u);
+
+  let h = Math.imul(n + 1, 0x9e3779b1) >>> 0;
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  const o1 = ((h        ) & 1023) / 1023 * LENS_TAU;
+  const o2 = ((h >>> 10) & 1023) / 1023 * LENS_TAU;
+  const o3 = ((h >>> 20) & 1023) / 1023 * LENS_TAU;
+
+  S.lensPos[0] = 3.6 * Math.sin(t * 0.47 + o1);
+  S.lensPos[1] = 1.8 * Math.cos(t * 0.63 + o2) + 0.3;
+  S.lensPos[2] = 1.2 * Math.sin(t * 0.31 + o3);
+
+  const lD = S.lensR * 1.35;
+  S.lensR2 = lD * lD - S.lensR * S.lensR;
+
+  /* The pole offset direction must be a unit vector. The identity
+     R2 = D^2 - rho^2 is the power of the point P with respect to the
+     circumsphere, and it only holds when P really sits at distance D from
+     the centre. The raw (cos, sin, sin) triple has length wandering between
+     0.07 and 1.71, which put the pole inside the sphere 7.2% of the time and
+     threw interior points as far as 38 radii out. Normalised, the sphere is
+     invariant and swallowed objects stay inside the anomaly. */
+  let dx = Math.cos(t * 0.82 + o1), dy = Math.sin(t * 0.74 + o2), dz = Math.sin(t * 0.53 + o3);
+  const L = Math.hypot(dx, dy, dz) || 1;
+  dx /= L; dy /= L; dz /= L;
+  S.lensPole[0] = S.lensPos[0] + lD * dx;
+  S.lensPole[1] = S.lensPos[1] + lD * dy;
+  S.lensPole[2] = S.lensPos[2] + lD * dz;
+}
+
+/* Macro sphere-inversion lens, evaluated on the CPU exactly as the tracer
+   evaluated it per ray: it displaces whole object centres, it does not warp
+   the 9^3 formations. */
+function applyGlobalLensJS(x, y, z){
+  const R = S.lensR;
+  if (!Mint.globalLens || R <= 1e-4) return [x, y, z];
+  const dx = x - S.lensPos[0], dy = y - S.lensPos[1], dz = z - S.lensPos[2];
+  if (dx*dx + dy*dy + dz*dz > R * R) return [x, y, z];
+  const ax = x - S.lensPole[0], ay = y - S.lensPole[1], az = z - S.lensPole[2];
+  const k = S.lensR2 / Math.max(1e-5, ax*ax + ay*ay + az*az);
+  const a = S.lensAmt;
+  return [x + (S.lensPole[0] + k*ax - x) * a,
+          y + (S.lensPole[1] + k*ay - y) * a,
+          z + (S.lensPole[2] + k*az - z) * a];
+}
+
+/* Screen shake is a sample-position offset, so it belongs in the projection
+   matrix rather than the camera transform: shifting the camera would also
+   shift parallax, which the fullscreen build never did. */
+function applyShake(clock){
+  camera.updateProjectionMatrix();
+  if (S.shake <= 0) return;
+  const sx = Math.sin(clock * 137.0) * S.shake;
+  const sy = Math.cos(clock * 111.0) * S.shake;
+  const e = camera.projectionMatrix.elements;
+  e[8]  -= 2.0 * sx / Math.max(1, W * renderer.getPixelRatio());
+  e[9]  -= 2.0 * sy / Math.max(1, H * renderer.getPixelRatio());
+}
+
 
 /* =====================================================================
    MAIN ANIMATION & COMBAT LOOP
    ===================================================================== */
-let last = performance.now(), clock = 0, hudTimer = 0;
-
+let last = performance.now(), clock = 0, hudTimer = 0, fpsAcc = 0, fpsN = 0;
 function frame(now){
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
@@ -1887,17 +2281,8 @@ function frame(now){
 
     if (S.enemy) S.enemy.cx = 1.15 * Math.sin(clock * 0.34);
 
-    // Update Bouncing Macro Inversion Anomaly Lens Center & Pole
-    S.lensPos[0] = 3.6 * Math.sin(clock * 0.47);
-    S.lensPos[1] = 1.8 * Math.cos(clock * 0.63) + 0.3;
-    S.lensPos[2] = 1.2 * Math.sin(clock * 0.31);
-
-    const lD = Mint.lensRadius * 1.35;
-    const lR2 = lD * lD - Mint.lensRadius * Mint.lensRadius;
-    S.lensR2 = lR2;
-    S.lensPole[0] = S.lensPos[0] + lD * Math.cos(clock * 0.82);
-    S.lensPole[1] = S.lensPos[1] + lD * Math.sin(clock * 0.74);
-    S.lensPole[2] = S.lensPos[2] + lD * Math.sin(clock * 0.53);
+    // Bouncing Macro Inversion Anomaly Lens: lifecycle, centre and pole
+    updateLens(clock);
 
     if (!S.over){
       if (S.phase === "hench"){
@@ -1955,84 +2340,28 @@ function frame(now){
     if (S.bossActive && S.enemy.alive === 0) startStage(S.stage + 1);
   }
 
-  // Uniform Buffer Data Pack
-  if (S.bossActive && S.enemy){
-    formBuf.set(S.enemy.masks);
-    for (const site of S.detached) formBuf[site] = 0;
-  } else formBuf.fill(0);
-  maskBuf.set(formBuf, 0);
-  if (S.player) maskBuf.set(S.player.masks, 27);
-
-  centBuf[0] = S.enemy ? S.enemy.cx : 0; centBuf[1] = ENEMY_Y; centBuf[2] = 0;
-  centBuf[3] = S.px; centBuf[4] = PLAYER_Y; centBuf[5] = 0;
-  scaleBuf[0] = ENEMY_SCALE; scaleBuf[1] = PLAYER_SCALE;
-  flashBuf[0] = S.flash[0]; flashBuf[1] = S.flash[1];
-
-  divBuf.fill(0); divPos.fill(0);
-  let dn = 0;
-  for (const d of S.divers){
-    if (dn >= MAX_BLOCKS) break;
-    divBuf[dn] = S.enemy.masks[d.site];
-    divPos[dn * 4] = d.x; divPos[dn * 4 + 1] = d.y; divPos[dn * 4 + 2] = d.z;
-    divPos[dn * 4 + 3] = ENEMY_SCALE;
-    divG[dn] = d.g; divGi[dn] = d.gi; divSite[dn] = d.site; dn++;
-  }
-  for (const h of S.hench){
-    if (dn >= MAX_BLOCKS) break;
-    divBuf[dn] = h.mask >>> 0;
-    divPos[dn * 4] = h.x; divPos[dn * 4 + 1] = h.y; divPos[dn * 4 + 2] = h.z;
-    divPos[dn * 4 + 3] = HENCH_SCALE;
-    divG[dn] = h.g; divGi[dn] = h.gi; divSite[dn] = -1; dn++;
-  }
-
-  shotBuf.fill(0);
-  let sn = 0;
-  for (const s of S.shots){
-    if (sn >= 16 || s.dead) continue;
-    shotBuf[sn * 4] = s.x; shotBuf[sn * 4 + 1] = s.y; shotBuf[sn * 4 + 3] = SHOT_SIZE; sn++;
-  }
-  for (const b of S.ebullets){
-    if (sn >= 16 || b.dead) continue;
-    shotBuf[sn * 4] = b.x; shotBuf[sn * 4 + 1] = b.y; shotBuf[sn * 4 + 3] = -EBULLET_SIZE; sn++;
-  }
-
-  // Upload Uniforms & Render Screen Quad
-  gl.uniform3f(LOC.res, W, H, 1);
-  gl.uniform1f(LOC.time, clock);
-  gl.uniform1f(LOC.depth, S.depth);
-  gl.uniform1uiv(LOC.masks, maskBuf);
-  gl.uniform1uiv(LOC.wound, S.bossActive && S.enemy ? S.enemy.wound : emptyW);
-  gl.uniform3fv(LOC.centre, centBuf);
-  gl.uniform1fv(LOC.scale, scaleBuf);
-  gl.uniform1fv(LOC.flash, flashBuf);
-  gl.uniform1uiv(LOC.div, divBuf);
-  gl.uniform4fv(LOC.divPos, divPos);
-  gl.uniform1iv(LOC.divG, divG);
-  gl.uniform1iv(LOC.divGi, divGi);
-  gl.uniform1iv(LOC.divSite, divSite);
-  gl.uniform1i(LOC.divN, dn);
-  gl.uniform4fv(LOC.shots, shotBuf);
-  gl.uniform1i(LOC.shotN, sn);
-  gl.uniform1f(LOC.camZ, CAM_Z);
-  gl.uniform1f(LOC.focal, CAM_Z / HALF_H);
-  gl.uniform1f(LOC.shake, S.shake);
-  gl.uniform1f(LOC.warp, Mint.warp ? 1.0 : 0.0);
-  gl.uniform1f(LOC.warpD, Mint.warpD);
-  gl.uniform1f(LOC.globalLens, Mint.globalLens ? 1.0 : 0.0);
-  gl.uniform3fv(LOC.lensCenter, S.lensPos);
-  gl.uniform1f(LOC.lensRadius, Mint.lensRadius);
-  gl.uniform3fv(LOC.lensPole, S.lensPole);
-  gl.uniform1f(LOC.lensR2, S.lensR2);
-
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  // Scene synchronisation & draw
+  syncScene(clock);
+  applyShake(clock);
+  renderer.render(scene, camera);
 
   // HUD and Timers
   elDepth.textContent = S.depth.toFixed(3);
   elMid.textContent = S.bannerText;
   elMid.className = S.banner > 0 ? "on" : "";
 
+  fpsAcc += dt; fpsN++;
   hudTimer += dt;
-  if (hudTimer >= 0.15){ hudTimer = 0; refreshInspector(); }
+  if (hudTimer >= 0.15){
+    hudTimer = 0;
+    refreshInspector();
+    if (fpsAcc > 0){
+      const info = renderer.info.render;
+      elPerf.textContent =
+        `${(fpsN / fpsAcc).toFixed(0)} fps · ${info.triangles} tris · ${info.calls} calls`;
+    }
+    fpsAcc = 0; fpsN = 0;
+  }
 
   if (toastTimer > 0){
     toastTimer -= dt;
