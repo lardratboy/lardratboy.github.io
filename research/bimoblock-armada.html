@@ -288,11 +288,16 @@ vec3 render(vec2 v){
   } else {
     ivec3 ci = clamp(ivec3(floor((p - lnorm * 0.002) * 1.5 + 1.5)), ivec3(0), ivec3(2));
     int st = uDivSite[divIdx];
-    wounded = woundAt(ivec3(st % 3, (st / 3) % 3, st / 9) * 3 + ci);
     ao = 0.92;
     dep = clamp(W.z / 6.0 + 0.5, 0.0, 1.0);
-    tint = vec3(0.60, 0.92, 1.18);
-    glow = 0.14;                    // detached blocks read hotter than the wall
+    if (st < 0){
+      tint = vec3(1.12, 0.86, 0.34);        // henchmen are their own faction
+      glow = 0.20;
+    } else {
+      wounded = woundAt(ivec3(st % 3, (st / 3) % 3, st / 9) * 3 + ci);
+      tint = vec3(0.60, 0.92, 1.18);
+      glow = 0.14;                          // detached blocks read hotter than the wall
+    }
   }
 
   vec3 col = mix(vec3(dot(base, vec3(0.33))), base, 0.85) * tint;
@@ -676,12 +681,28 @@ function autOrder(grid){
 
 /* =====================================================================
    GAME
+   ---------------------------------------------------------------------
+   A stage is henchmen squadrons, then a boss.
+
+   Henchmen are single 3x3x3 blocks.  Bosses are 9^3 lattices.  Those are
+   the only two scales the bimoblock address has, so they are the only two
+   scales the game has.
+
+   Squadron layout uses the subgroup of Oh that fixes +Y, so the group can
+   act on the whole path including the descent with no untransformed fudge.
+   The boss's orbit sorties cannot do that -- half of Oh sends a diver off
+   the top -- which is why those still add the drop in world space.
+
+   Fragility is inverted between the two.  Shooting a henchman shatters the
+   whole orbit of the struck cell under its own group, so a symmetric
+   henchman dies fast.  A boss's orbits must be cleared cell by cell, which
+   is what makes it a boss.
    ===================================================================== */
 
-const LADDER = [9, 8, 6, 5, 3, 2, 1, 0];      // Oh, Td, C4v, C4, C2v, C2, Cs, C1
-const ENEMY_ARCH = [1, 3, 8, 2, 4, 11, 0, 6];
+const LADDER = [0, 1, 2, 4, 3, 5, 6, 7, 8, 9];   // C1 Cs C2 C3 C2v C4 C4v S6 Td Oh
+const BOSS_ARCH = [11, 4, 2, 3, 0, 8, 1, 6, 3, 1];
 
-const ENEMY_SCALE = 1.0, PLAYER_SCALE = 0.42;
+const ENEMY_SCALE = 1.0, PLAYER_SCALE = 0.42, HENCH_SCALE = 0.62;
 const ENEMY_Y = 2.45, PLAYER_Y = -4.55;
 const PLAYER_XLIM = 5.4;
 const CAM_Z = 40.0, HALF_H = 6.2;
@@ -690,30 +711,40 @@ const EBULLET_SPEED = 9.5, EBULLET_SIZE = 0.13, MAX_EBULLETS = 5;
 const CELL = 2 / 3, PITCH = 2.0;
 
 const DIVE_T = 4.2, DIVE_DROP = 15.5, RETURN_T = 1.5, WAVE_GAP = 1.15;
-const MAX_DIVERS = 12;
+const MAX_BLOCKS = 12;
 const LIVES = 3, HULL_FAIL = 0.32;
 
-// inverses in Oh, so a diver's world->local map is exact
+const HENCH_T = 6.6, HENCH_GAP = 2.5, HENCH_KILL = 0.5;
+const HX0 = 2.6, HZ0 = 1.05;
+
 const INV = new Int32Array(48);
 for (let e = 0; e < 48; e++)
   for (let f = 0; f < 48; f++) if (mulE(e, f) === 0){ INV[e] = f; break; }
 
+// squadron groups: every element fixes +Y, verified by construction from
+// generators that do, so a transformed path still descends
+const HG = [
+  { name: "pair",     gens: [GEN.Mx],             dens: 0.33 },
+  { name: "quad",     gens: [GEN.Mx, GEN.Mz],     dens: 0.44 },
+  { name: "pinwheel", gens: [GEN.R90y],           dens: 0.50 },
+  { name: "octet",    gens: [GEN.R90y, GEN.Mx],   dens: 0.58 }
+].map(g => { g.els = closure(g.gens); g.order = g.els.length; return g; });
+
 const S = {
-  level: 0, score: 0, combo: 0, lives: LIVES, over: false,
+  stage: 1, phase: "hench", score: 0, combo: 0, lives: LIVES, over: false,
+  bossActive: false, bossIdx: 0,
   enemy: null, player: null,
-  shots: [], ebullets: [], divers: [],
+  shots: [], ebullets: [], divers: [], hench: [],
+  squadsLeft: 0, squadIdx: 0, henchTimer: 1.2,
   waveOrder: [], waveIdx: 0, waveTimer: WAVE_GAP,
+  detached: new Set(),
   flash: [0, 0], shake: 0,
   px: 0, pvx: 0, cool: 0,
   keys: Object.create(null), pointer: null, firing: false,
   banner: 0, bannerText: ""
 };
 
-/* ---- orbits ---------------------------------------------------------------
-   Cell orbits drive scoring and the wound mask.  Site orbits drive the dive
-   waves: each member carries the group element that maps the base site onto
-   it, which is exactly the element its trajectory is pushed through.
-   -------------------------------------------------------------------------- */
+/* ---- orbits ---------------------------------------------------------------- */
 function cellOrbits(els){
   const owner = new Int32Array(729).fill(-1), orb = [];
   for (let i = 0; i < 729; i++){
@@ -725,6 +756,22 @@ function cellOrbits(els){
       set.add((w[0] + 4) + 9 * (w[1] + 4) + 81 * (w[2] + 4));
     }
     for (const k of set) owner[k] = orb.length;
+    orb.push([...set]);
+  }
+  return { owner, orb };
+}
+
+function blockOrbits(els){
+  const owner = new Int32Array(27).fill(-1), orb = [];
+  for (let k = 0; k < 27; k++){
+    if (owner[k] >= 0) continue;
+    const v = [k % 3 - 1, ((k / 3 | 0) % 3) - 1, (k / 9 | 0) - 1];
+    const set = new Set();
+    for (const e of els){
+      const w = applyG(v, e);
+      set.add((w[0] + 1) + 3 * (w[1] + 1) + 9 * (w[2] + 1));
+    }
+    for (const q of set) owner[q] = orb.length;
     orb.push([...set]);
   }
   return { owner, orb };
@@ -745,13 +792,13 @@ function siteOrbits(els){
     }
     orb.push(members);
   }
-  // shell is constant on an orbit; corners lead, the core is always last
   const shell = s => (s % 3 !== 1 ? 1 : 0) + ((s / 3 | 0) % 3 !== 1 ? 1 : 0) +
                      ((s / 9 | 0) !== 1 ? 1 : 0);
   orb.sort((a, b) => shell(b[0].site) - shell(a[0].site) || a.length - b.length);
   return orb;
 }
 
+/* ---- 9^3 unit (boss, player) ----------------------------------------------- */
 function makeUnit(P, scale, cy){
   const built = buildMasks(P);
   const grid = gridOf(built.masks);
@@ -761,7 +808,6 @@ function makeUnit(P, scale, cy){
   const live = new Int32Array(orb.length);
   for (let i = 0; i < 729; i++) if (grid[i]) live[owner[i]]++;
   const nLive = live.reduce((n, v) => n + (v > 0 ? 1 : 0), 0);
-
   let alive = 0;
   for (let i = 0; i < 729; i++) if (grid[i]) alive++;
 
@@ -776,6 +822,46 @@ function makeUnit(P, scale, cy){
   };
 }
 
+/* ---- 3^3 henchman ----------------------------------------------------------
+   Same fold-then-threshold pipeline as the contact sheet, run on the 27 cells
+   of a single block instead of the 729 of a lattice.  Density is a quantile so
+   ties are all included, which is what keeps the sprite exactly H-symmetric.
+   -------------------------------------------------------------------------- */
+function buildHenchMask(seed, H, fieldMode, lift, density){
+  const pars = { conic: conicParams(seed), scale: [] };
+  if (fieldMode >= NATIVE_FIELDS)
+    pars.scale[fieldMode - NATIVE_FIELDS] =
+      planarScale(PLANAR[fieldMode - NATIVE_FIELDS], pars.conic);
+
+  const vals = new Float64Array(27);
+  for (let k = 0; k < 27; k++){
+    const v = [(k % 3 - 1) * 0.5, (((k / 3 | 0) % 3) - 1) * 0.5, ((k / 9 | 0) - 1) * 0.5];
+    const s = foldOrbit(v, H.els);
+    vals[k] = field(s[0], s[1], s[2], fieldMode, seed, lift, pars);
+  }
+  const sorted = Float64Array.from(vals).sort();
+  const want = Math.max(5, Math.min(24, Math.round(density * 27)));
+  const cut = sorted[27 - want];
+  let mask = 0, n = 0;
+  for (let k = 0; k < 27; k++) if (vals[k] >= cut){ mask |= (1 << k) >>> 0; n++; }
+  return { mask, n };
+}
+
+function makeHench(seed, H, g){
+  let fieldMode = 4 + (seed % 6), lift = seed % 3;
+  let { mask, n } = buildHenchMask(seed, H, fieldMode, lift, H.dens);
+  if (n === 0 || n === 27){ mask = 0b000010101010000; n = 6; }   // never happens, but
+
+  const { owner, orb } = blockOrbits(H.els);
+  const live = new Int32Array(orb.length);
+  for (let k = 0; k < 27; k++) if ((mask >>> k) & 1) live[owner[k]]++;
+
+  return { mask, H, g, gi: INV[g], owner, orb, live,
+           total: n, lost: 0, t: 0, x: 0, y: 0, z: 0,
+           fireT: 0.9 + Math.random() * 1.6, dead: false };
+}
+
+/* ---- damage ---------------------------------------------------------------- */
 function rebuildWound(u){
   u.wound.fill(0);
   for (let i = 0; i < 729; i++){
@@ -783,27 +869,23 @@ function rebuildWound(u){
     const o = u.owner[i];
     if (u.live[o] === u.size[o]) continue;
     const X = i % 9, Y = (i / 9 | 0) % 9, Z = i / 81 | 0;
-    const j = (X / 3 | 0) + 3 * (Y / 3 | 0) + 9 * (Z / 3 | 0);
-    const k = (X % 3) + 3 * (Y % 3) + 9 * (Z % 3);
-    u.wound[j] |= (1 << k) >>> 0;
+    u.wound[(X / 3 | 0) + 3 * (Y / 3 | 0) + 9 * (Z / 3 | 0)] |=
+      (1 << ((X % 3) + 3 * (Y % 3) + 9 * (Z % 3))) >>> 0;
   }
 }
 
 function clearBit(u, X, Y, Z){
-  const j = (X / 3 | 0) + 3 * (Y / 3 | 0) + 9 * (Z / 3 | 0);
-  const k = (X % 3) + 3 * (Y % 3) + 9 * (Z % 3);
-  u.masks[j] &= ~((1 << k) >>> 0);
+  u.masks[(X / 3 | 0) + 3 * (Y / 3 | 0) + 9 * (Z / 3 | 0)] &=
+    ~((1 << ((X % 3) + 3 * (Y % 3) + 9 * (Z % 3))) >>> 0);
 }
 
 function destroyCell(u, X, Y, Z){
   const i = X + 9 * Y + 81 * Z;
   if (!u.grid[i]) return 0;
-  u.grid[i] = 0; u.alive--;
-  clearBit(u, X, Y, Z);
+  u.grid[i] = 0; u.alive--; clearBit(u, X, Y, Z);
 
   const o = u.owner[i];
   u.live[o]--;
-
   let pts = 10 * (9 - Z);
   if (u.live[o] === 0){
     u.liveOrbits--;
@@ -815,6 +897,22 @@ function destroyCell(u, X, Y, Z){
   }
   u.aut = autOrder(u.grid);
   rebuildWound(u);
+  return pts;
+}
+
+// one hit shatters the whole orbit of the struck cell
+function shatterHench(h, k){
+  const o = h.owner[k];
+  if (h.live[o] === 0) return 0;
+  let n = 0;
+  for (const q of h.orb[o]) if ((h.mask >>> q) & 1){ h.mask &= ~((1 << q) >>> 0); n++; }
+  h.live[o] = 0; h.lost += n;
+  let pts = 15 * n;
+  if (h.lost > h.total * HENCH_KILL || h.mask === 0){
+    h.dead = true;
+    pts += 60 * h.H.order;
+    S.shake = Math.max(S.shake, 0.7);
+  }
   return pts;
 }
 
@@ -833,22 +931,22 @@ function chipPlayerNear(wx, wy, n){
   for (let i = 0; i < 729; i++){
     if (!u.grid[i]) continue;
     const X = i % 9, Y = (i / 9 | 0) % 9, Z = i / 81 | 0;
-    hits.push([(X - cx) ** 2 + (Y - cy) ** 2, X, Y, Z]);
+    hits.push([(X - cx) * (X - cx) + (Y - cy) * (Y - cy), X, Y, Z]);
   }
   hits.sort((a, b) => a[0] - b[0]);
   for (let i = 0; i < Math.min(n, hits.length); i++)
     chipPlayer(hits[i][1], hits[i][2], hits[i][3]);
   S.flash[1] = 0.7;
   S.shake = Math.max(S.shake, 1.6);
-  if (u.alive <= u.total * HULL_FAIL) loseLife();
+  if (u.alive <= u.total * HULL_FAIL) S.pendingLife = true;
 }
 
 function loseLife(){
+  S.pendingLife = false;
   S.lives--;
-  S.divers.length = 0; S.ebullets.length = 0; S.detached.clear();
-  S.waveTimer = WAVE_GAP * 2;
-  S.combo = 0;
-  S.shake = 3.0;
+  S.divers.length = 0; S.hench.length = 0; S.ebullets.length = 0; S.detached.clear();
+  S.waveTimer = WAVE_GAP * 2; S.henchTimer = HENCH_GAP;
+  S.combo = 0; S.shake = 3.0;
   if (S.lives <= 0){
     S.over = true;
     flashBanner("HULL BREACH   GAME OVER   PRESS R");
@@ -858,15 +956,13 @@ function loseLife(){
   }
 }
 
-/* ---- exact hit tests ------------------------------------------------------
-   Formation: the shot is a +Y ray at a fixed world X, which in the lattice
-   frame is one integer column; the frontmost occupied Z at the struck (X,Y)
-   dies, i.e. the cell the player can see.
+/* ---- exact hit tests -------------------------------------------------------
+   Formation: the +Y shot ray is one integer lattice column; the frontmost
+   occupied Z at the struck (X,Y) dies, i.e. the cell the player can see.
 
-   Diver: its orientation is a signed permutation, so the same reasoning
-   holds after pushing the ray through g inverse.  Rather than rotate the
-   ray we walk the block's 27 cells and map each one out through g, which is
-   27 integer ops and needs no tolerance.
+   Blocks: a diver or henchman orientation is a signed permutation, so rather
+   than rotate the ray we walk the block's 27 cells and map each one out
+   through g.  27 integer ops, no tolerance, no hitbox.
    -------------------------------------------------------------------------- */
 function cellIndex(world, centre, scale){
   return Math.round(((world - centre) / scale) / CELL) + 4;
@@ -879,9 +975,9 @@ function sweepFormation(u, shot, y0, y1){
   if (b < 0 || a > 8) return 0;
   a = Math.max(0, a); b = Math.min(8, b);
   for (let Y = a; Y <= b; Y++){
-    const site = (X / 3 | 0) + 3 * (Y / 3 | 0);
+    const col = (X / 3 | 0) + 3 * (Y / 3 | 0);
     for (let Z = 8; Z >= 0; Z--){
-      if (S.detached.has(site + 9 * (Z / 3 | 0))) continue;   // that block is flying
+      if (S.detached.has(col + 9 * (Z / 3 | 0))) continue;
       if (u.grid[X + 9 * Y + 81 * Z]){
         shot.dead = true;
         return destroyCell(u, X, Y, Z);
@@ -891,28 +987,39 @@ function sweepFormation(u, shot, y0, y1){
   return 0;
 }
 
-function sweepDiver(d, shot, y0, y1){
-  const u = S.enemy, s = u.scale, half = s * CELL * 0.5;
-  const mask = u.masks[d.site];
-  if (!mask) return 0;
-  let bestZ = -1e9, best = null;
+// returns the struck local cell index, or -1
+function blockCellHit(mask, g, cx, cy, cz, scale, shotX, y0, y1){
+  if (!mask) return -1;
+  const half = scale * CELL * 0.5;
+  let bestZ = -1e9, best = -1;
   for (let k = 0; k < 27; k++){
     if (((mask >>> k) & 1) === 0) continue;
-    const l = [k % 3 - 1, (k / 3 | 0) % 3 - 1, (k / 9 | 0) - 1];
-    const w = applyG(l, d.g);
-    const wx = d.x + s * CELL * w[0];
-    const wy = d.y + s * CELL * w[1];
-    const wz = d.z + s * CELL * w[2];
-    if (Math.abs(shot.x - wx) > half) continue;
+    const w = applyG([k % 3 - 1, ((k / 3 | 0) % 3) - 1, (k / 9 | 0) - 1], g);
+    if (Math.abs(shotX - (cx + scale * CELL * w[0])) > half) continue;
+    const wy = cy + scale * CELL * w[1];
     if (wy < y0 - half || wy > y1 + half) continue;
-    if (wz > bestZ){ bestZ = wz; best = l; }
+    const wz = cz + scale * CELL * w[2];
+    if (wz > bestZ){ bestZ = wz; best = k; }
   }
-  if (!best) return 0;
+  return best;
+}
+
+function sweepDiver(d, shot, y0, y1){
+  const u = S.enemy;
+  const k = blockCellHit(u.masks[d.site], d.g, d.x, d.y, d.z, u.scale, shot.x, y0, y1);
+  if (k < 0) return 0;
   shot.dead = true;
   return destroyCell(u,
-    (d.site % 3) * 3 + best[0] + 1,
-    ((d.site / 3 | 0) % 3) * 3 + best[1] + 1,
-    (d.site / 9 | 0) * 3 + best[2] + 1);
+    (d.site % 3) * 3 + (k % 3),
+    ((d.site / 3 | 0) % 3) * 3 + ((k / 3 | 0) % 3),
+    (d.site / 9 | 0) * 3 + (k / 9 | 0));
+}
+
+function sweepHench(h, shot, y0, y1){
+  const k = blockCellHit(h.mask, h.g, h.x, h.y, h.z, HENCH_SCALE, shot.x, y0, y1);
+  if (k < 0) return 0;
+  shot.dead = true;
+  return shatterHench(h, k);
 }
 
 function sweepPlayer(b, y0, y1){
@@ -925,19 +1032,56 @@ function sweepPlayer(b, y0, y1){
   for (let Y = c; Y >= a; Y--)
     for (let Z = 8; Z >= 0; Z--)
       if (u.grid[X + 9 * Y + 81 * Z]){
-        b.dead = true;
-        chipPlayerNear(b.x, b.y, 4);
-        return true;
+        b.dead = true; chipPlayerNear(b.x, b.y, 4); return true;
       }
   return false;
 }
 
-/* ---- dive waves -----------------------------------------------------------
-   One authored excursion, pushed through the group.  The descent and the
-   lateral drift toward the player are added in world space afterwards, so
-   the squadron keeps its symmetry relative to itself while still coming
-   down at you.
-   -------------------------------------------------------------------------- */
+/* ---- henchmen squadrons ---------------------------------------------------- */
+function henchPath(t){
+  return [HX0 + 2.15 * Math.sin(1.35 * t),
+          7.4 - 2.15 * t,
+          HZ0 + 1.75 * Math.sin(0.95 * t + 0.7)];
+}
+
+function spawnSquad(){
+  const H = HG[Math.min(HG.length - 1, S.squadIdx + (S.stage > 2 ? 1 : 0))];
+  if (S.hench.length + H.order > MAX_BLOCKS) return false;
+  const seed = (0x51ed + S.stage * 977 + S.squadIdx * 131) >>> 0;
+  for (const e of H.els) S.hench.push(makeHench(seed, H, e));
+  S.squadIdx++; S.squadsLeft--;
+  flashBanner(`${H.name.toUpperCase()} SQUADRON   ${H.order} BLOCKS`);
+  return true;
+}
+
+function updateHench(dt){
+  for (let i = S.hench.length - 1; i >= 0; i--){
+    if (i >= S.hench.length) continue;
+    const h = S.hench[i];
+    if (!h) continue;
+    if (h.dead || h.mask === 0){ S.hench.splice(i, 1); continue; }
+
+    h.t += dt;
+    const w = applyG(henchPath(h.t), h.g);
+    h.x = w[0]; h.y = w[1]; h.z = w[2];
+
+    if (h.y < -HALF_H - 2.5){ S.hench.splice(i, 1); continue; }
+
+    h.fireT -= dt;
+    if (h.fireT <= 0 && h.y > PLAYER_Y + 1.0 && S.ebullets.length < MAX_EBULLETS){
+      S.ebullets.push({ x: h.x, y: h.y - HENCH_SCALE * 1.2, dead: false });
+      h.fireT = 1.3 + Math.random() * 1.6;
+    }
+    if (!S.over && !S.pendingLife &&
+        Math.abs(h.x - S.px) < HENCH_SCALE + PLAYER_SCALE * 2.2 &&
+        Math.abs(h.y - PLAYER_Y) < HENCH_SCALE + PLAYER_SCALE * 2.2){
+      chipPlayerNear(h.x, h.y, 6);
+      h.dead = true;
+    }
+  }
+}
+
+/* ---- boss sorties ---------------------------------------------------------- */
 function excursion(t){
   return [1.85 * Math.sin(2.30 * t),
           0.55 * Math.sin(1.35 * t),
@@ -953,7 +1097,7 @@ function launchWave(){
     const flyers = orb.filter(mm => u.masks[mm.site] !== 0);
     if (!flyers.length) continue;
     // a partial coset is not a coset, so wait for room rather than clipping it
-    if (flyers.length > MAX_DIVERS - S.divers.length){ S.waveIdx--; return; }
+    if (flyers.length > MAX_BLOCKS - S.divers.length){ S.waveIdx--; return; }
     for (const mm of flyers){
       const sx = mm.site % 3, sy = (mm.site / 3 | 0) % 3, sz = mm.site / 9 | 0;
       S.divers.push({
@@ -961,8 +1105,8 @@ function launchWave(){
         base: [(sx - 1) * PITCH, (sy - 1) * PITCH, (sz - 1) * PITCH],
         t: 0, phase: "dive", x: 0, y: 0, z: 0, fireT: 0.8 + Math.random() * 1.2
       });
+      S.detached.add(mm.site);
     }
-    for (const f of flyers) S.detached.add(f.site);
     if (flyers.length >= 4) flashBanner(`ORBIT SORTIE   ${flyers.length} BLOCKS`);
     return;
   }
@@ -971,15 +1115,11 @@ function launchWave(){
 function updateDivers(dt){
   const u = S.enemy, s = u.scale;
   for (let i = S.divers.length - 1; i >= 0; i--){
-    // a body strike can cost a life, and loseLife empties this array from
-    // under us, so re-check the bound every step rather than trusting i
     if (i >= S.divers.length) continue;
     const d = S.divers[i];
     if (!d) continue;
-    if (u.masks[d.site] === 0){            // shot to pieces mid-flight
-      S.detached.delete(d.site);
-      S.divers.splice(i, 1);
-      continue;
+    if (u.masks[d.site] === 0){
+      S.detached.delete(d.site); S.divers.splice(i, 1); continue;
     }
     d.t += dt;
 
@@ -987,7 +1127,7 @@ function updateDivers(dt){
       const E = applyG(excursion(d.t), d.g);
       const k = d.t / DIVE_T;
       const drop = DIVE_DROP * Math.pow(k, 1.7);
-      const ramp  = Math.min(1, Math.max(0, (k - 0.15) / 0.5));
+      const ramp = Math.min(1, Math.max(0, (k - 0.15) / 0.5));
       const drift = Math.max(-2.2, Math.min(2.2, (S.px - u.cx) * 0.55)) * ramp;
       d.x = u.cx + s * (d.base[0] + E[0]) + drift;
       d.y = u.cy + s * (d.base[1] + E[1]) - drop;
@@ -998,9 +1138,7 @@ function updateDivers(dt){
         S.ebullets.push({ x: d.x, y: d.y - s, dead: false });
         d.fireT = 1.1 + Math.random() * 1.4;
       }
-
-      // body strike
-      if (!S.over &&
+      if (!S.over && !S.pendingLife &&
           Math.abs(d.x - S.px) < s + PLAYER_SCALE * 2.2 &&
           Math.abs(d.y - PLAYER_Y) < s + PLAYER_SCALE * 2.2){
         chipPlayerNear(d.x, d.y, 9);
@@ -1011,45 +1149,51 @@ function updateDivers(dt){
     } else {
       const k = Math.min(1, d.t / RETURN_T);
       const ease = 1 - Math.pow(1 - k, 3);
-      const sx = u.cx + s * d.base[0], sy = u.cy + s * d.base[1];
-      d.x = sx; d.z = s * d.base[2];
-      d.y = (HALF_H + 4.5) * (1 - ease) + sy * ease;
-      if (k >= 1){
-        S.detached.delete(d.site);
-        S.divers.splice(i, 1);
-      }
+      d.x = u.cx + s * d.base[0]; d.z = s * d.base[2];
+      d.y = (HALF_H + 4.5) * (1 - ease) + (u.cy + s * d.base[1]) * ease;
+      if (k >= 1){ S.detached.delete(d.site); S.divers.splice(i, 1); }
     }
   }
 }
 
-/* ---- level ---------------------------------------------------------------- */
+/* ---- stage machine --------------------------------------------------------- */
 function makePlayer(){
   return makeUnit({ sym: 3, arch: 0, field: 4, lift: 1, density: 0.34,
                     seed: 20260828, t: 0, g48: 0 }, PLAYER_SCALE, PLAYER_Y);
 }
 
-function startLevel(n, hard){
-  S.level = n; S.over = false;
+function startStage(n, hard){
+  S.stage = n; S.over = false; S.pendingLife = false;
   if (hard){ S.lives = LIVES; S.score = 0; }
-  const sym = LADDER[n % LADDER.length];
-  const arch = ENEMY_ARCH[n % ENEMY_ARCH.length];
-  const seed = (0x9e37 + n * 7919) >>> 0;
+  S.phase = "hench"; S.bossActive = false;
+  S.squadsLeft = Math.min(4, 2 + ((n - 1) >> 1));
+  S.squadIdx = 0; S.henchTimer = 1.4;
+  S.divers.length = 0; S.hench.length = 0;
+  S.shots.length = 0; S.ebullets.length = 0;
+  S.detached.clear(); S.combo = 0;
+  if (!S.player || hard) S.player = makePlayer();
+  flashBanner(`STAGE ${n}   ${S.squadsLeft} SQUADRONS INBOUND`);
+}
 
-  S.enemy = makeUnit({ sym, arch, field: 6, lift: 0, density: 0.5,
+function startBoss(){
+  const n = S.stage - 1;
+  const sym = LADDER[n % LADDER.length];
+  const arch = BOSS_ARCH[n % BOSS_ARCH.length];
+  const seed = (0x9e37 + n * 7919) >>> 0;
+  const density = Math.min(0.52, 0.33 + 0.02 * n);
+
+  S.enemy = makeUnit({ sym, arch, field: 6, lift: 0, density,
                        seed, t: 0, g48: 0 }, ENEMY_SCALE, ENEMY_Y);
   rebuildWound(S.enemy);
-  if (!S.player || hard) S.player = makePlayer();
-
   S.waveOrder = siteOrbits(S.enemy.G.els);
-  S.waveIdx = 0; S.waveTimer = WAVE_GAP * 1.8;
-  S.detached = new Set();
-  S.divers.length = 0; S.shots.length = 0; S.ebullets.length = 0;
-  S.combo = 0;
+  S.waveIdx = 0; S.waveTimer = WAVE_GAP * 2.2;
+  S.detached.clear(); S.divers.length = 0;
+  S.phase = "boss"; S.bossActive = true; S.combo = 0;
 
-  console.log(`level ${n + 1}  ${S.enemy.G.name}  ${ARCH_NAMES[arch]}  ` +
+  console.log(`stage ${S.stage} boss  ${S.enemy.G.name}  ${ARCH_NAMES[arch]}  ` +
     `cells ${S.enemy.alive}  cellOrbits ${S.enemy.liveOrbits}  ` +
-    `siteOrbits ${S.waveOrder.map(o => o.length).join("/")}  aut ${S.enemy.aut}`);
-  flashBanner(`WAVE ${n + 1}   ${S.enemy.G.name.toUpperCase()}   ${ARCH_NAMES[arch].toUpperCase()}`);
+    `sorties ${S.waveOrder.map(o => o.length).join("/")}  aut ${S.enemy.aut}`);
+  flashBanner(`BOSS   ${S.enemy.G.name.toUpperCase()}   ${ARCH_NAMES[arch].toUpperCase()}`);
 }
 
 function flashBanner(t){ S.bannerText = t; S.banner = 1.7; }
@@ -1058,8 +1202,9 @@ function flashBanner(t){ S.bannerText = t; S.banner = 1.7; }
 addEventListener("keydown", e => {
   S.keys[e.code] = true;
   if (e.code === "Space" || e.code.startsWith("Arrow")) e.preventDefault();
-  if (e.code === "KeyR") startLevel(S.over ? 0 : S.level, S.over);
-  if (e.code === "KeyN") startLevel(S.level + 1);
+  if (e.code === "KeyR") startStage(S.over ? 1 : S.stage, S.over);
+  if (e.code === "KeyN") startStage(S.stage + 1);
+  if (e.code === "KeyB" && S.phase === "hench"){ S.hench.length = 0; S.squadsLeft = 0; }
 });
 addEventListener("keyup", e => { S.keys[e.code] = false; });
 
@@ -1114,14 +1259,15 @@ const LOC = {
 
 const maskBuf  = new Uint32Array(54);
 const formBuf  = new Uint32Array(27);
+const emptyW   = new Uint32Array(27);
 const centBuf  = new Float32Array(6);
 const scaleBuf = new Float32Array(2);
 const flashBuf = new Float32Array(2);
-const divBuf   = new Uint32Array(MAX_DIVERS);
-const divPos   = new Float32Array(MAX_DIVERS * 4);
-const divG     = new Int32Array(MAX_DIVERS);
-const divGi    = new Int32Array(MAX_DIVERS);
-const divSite  = new Int32Array(MAX_DIVERS);
+const divBuf   = new Uint32Array(MAX_BLOCKS);
+const divPos   = new Float32Array(MAX_BLOCKS * 4);
+const divG     = new Int32Array(MAX_BLOCKS);
+const divGi    = new Int32Array(MAX_BLOCKS);
+const divSite  = new Int32Array(MAX_BLOCKS);
 const shotBuf  = new Float32Array(48);
 
 let W = 0, H = 0;
@@ -1140,29 +1286,37 @@ const elBL = document.getElementById("bl"), elMID = document.getElementById("mid
 elBL.innerHTML =
   `<span class="k">move</span> &larr; &rarr; / A D / drag &nbsp; ` +
   `<span class="k">fire</span> SPACE / tap<br>` +
-  `<span class="k">R</span> restart &nbsp; <span class="k">N</span> next wave`;
+  `<span class="k">R</span> restart &nbsp; <span class="k">N</span> next stage &nbsp; ` +
+  `<span class="k">B</span> skip to boss`;
 
 function hud(){
-  const e = S.enemy, p = S.player;
-  const pure = e.alive > 0 && e.aut === e.G.order;
-  const cleared = Math.round(100 * (1 - e.alive / e.total));
-  const hull = Math.round(100 * p.alive / p.total);
+  const p = S.player, hull = Math.round(100 * p.alive / p.total);
   elTL.innerHTML =
     `<b>${String(S.score).padStart(7, "0")}</b>` +
-    `<br><span class="k">wave</span> ${S.level + 1} &nbsp; ` +
-    `<span class="k">${e.G.name}</span> / ${ARCH_NAMES[e.P.arch]}` +
+    `<br><span class="k">stage</span> ${S.stage} &nbsp; ` +
+    `<span class="k">${S.phase === "boss" ? "BOSS" : "APPROACH"}</span>` +
     `<br><span class="k">orbit run</span> ${S.combo} &nbsp; ` +
     `<span class="k">lives</span> ${Math.max(0, S.lives)}` +
     `<br><span class="k">hull</span> <span class="bar hp"><i style="width:${hull}%"></i></span>`;
-  elTR.innerHTML =
-    `<span class="k">cells</span> ${e.alive}/${e.total} ` +
-    `<span class="bar"><i style="width:${cleared}%"></i></span>` +
-    `<br><span class="k">cell orbits</span> ${e.liveOrbits}/${e.totalOrbits}` +
-    `<br><span class="k">sortie</span> ${S.divers.length}` +
-    `<br><span class="k">|Aut|</span> ${e.alive > 0 ? e.aut : "\u2014"} / ${e.G.order} ` +
-    `<span class="bar ${pure ? "pure" : "impure"}">` +
-    `<i style="width:${e.alive > 0 ? Math.round(100 * e.aut / e.G.order) : 0}%"></i></span>` +
-    `<br><span class="k">${e.alive === 0 ? "" : pure ? "SYMMETRY INTACT" : "SYMMETRY BROKEN"}</span>`;
+
+  if (S.phase === "boss" && S.enemy){
+    const e = S.enemy, pure = e.alive > 0 && e.aut === e.G.order;
+    elTR.innerHTML =
+      `<span class="k">${e.G.name}</span> / ${ARCH_NAMES[e.P.arch]}` +
+      `<br><span class="k">cells</span> ${e.alive}/${e.total} ` +
+      `<span class="bar"><i style="width:${Math.round(100 * (1 - e.alive / e.total))}%"></i></span>` +
+      `<br><span class="k">cell orbits</span> ${e.liveOrbits}/${e.totalOrbits}` +
+      `<br><span class="k">|Aut|</span> ${e.alive > 0 ? e.aut : "\u2014"} / ${e.G.order} ` +
+      `<span class="bar ${pure ? "pure" : "impure"}">` +
+      `<i style="width:${e.alive > 0 ? Math.round(100 * e.aut / e.G.order) : 0}%"></i></span>` +
+      `<br><span class="k">${e.alive === 0 ? "" : pure ? "SYMMETRY INTACT" : "SYMMETRY BROKEN"}</span>`;
+  } else {
+    elTR.innerHTML =
+      `<span class="k">squadrons left</span> ${S.squadsLeft}` +
+      `<br><span class="k">in flight</span> ${S.hench.length}` +
+      `<br><span class="k">next</span> ${HG[Math.min(HG.length - 1,
+        S.squadIdx + (S.stage > 2 ? 1 : 0))].name}`;
+  }
   elMID.textContent = S.bannerText;
   elMID.className = S.banner > 0 ? "on" : "";
 }
@@ -1186,29 +1340,39 @@ function frame(now){
     S.px += S.pvx * dt;
   }
   S.px = Math.max(-PLAYER_XLIM, Math.min(PLAYER_XLIM, S.px));
-  S.player.cx = S.px;
 
   S.cool = Math.max(0, S.cool - dt);
   if (S.keys.Space || S.firing) fire();
 
-  S.enemy.cx = 1.15 * Math.sin(clock * 0.34);
+  if (S.enemy) S.enemy.cx = 1.15 * Math.sin(clock * 0.34);
 
   if (!S.over){
-    updateDivers(dt);
-    if (S.divers.length <= 2){
-      S.waveTimer -= dt;
-      if (S.waveTimer <= 0){ launchWave(); S.waveTimer = WAVE_GAP; }
+    if (S.phase === "hench"){
+      updateHench(dt);
+      if (S.squadsLeft > 0){
+        S.henchTimer -= dt;
+        if (S.henchTimer <= 0 && spawnSquad()) S.henchTimer = HENCH_GAP;
+      } else if (S.hench.length === 0){
+        startBoss();
+      }
+    } else {
+      updateDivers(dt);
+      if (S.divers.length <= 2){
+        S.waveTimer -= dt;
+        if (S.waveTimer <= 0){ launchWave(); S.waveTimer = WAVE_GAP; }
+      }
     }
   }
 
-  // player shots: divers first, they are nearer
+  // player shots: blocks are nearer than the wall, so they get first refusal
   for (const s of S.shots){
     if (s.dead) continue;
     const y0 = s.y;
     s.y += SHOT_SPEED * dt;
     let pts = 0;
-    for (const d of S.divers){ pts = sweepDiver(d, s, y0, s.y); if (pts) break; }
-    if (!pts && !s.dead) pts = sweepFormation(S.enemy, s, y0, s.y);
+    for (const h of S.hench){ pts = sweepHench(h, s, y0, s.y); if (s.dead) break; }
+    if (!s.dead) for (const d of S.divers){ pts = sweepDiver(d, s, y0, s.y); if (s.dead) break; }
+    if (!s.dead && S.bossActive) pts = sweepFormation(S.enemy, s, y0, s.y);
     if (pts){
       S.score += pts * Math.max(1, S.combo);
       S.flash[0] = 0.5;
@@ -1222,50 +1386,62 @@ function frame(now){
     if (b.dead) continue;
     const y0 = b.y;
     b.y -= EBULLET_SPEED * dt;
-    if (!S.over) sweepPlayer(b, y0, b.y);
+    if (!S.over && !S.pendingLife) sweepPlayer(b, y0, b.y);
     if (b.y < -HALF_H - 2) b.dead = true;
   }
   for (let i = S.ebullets.length - 1; i >= 0; i--) if (S.ebullets[i].dead) S.ebullets.splice(i, 1);
+
+  // deferred so nothing is mutated out from under the loops above
+  if (S.pendingLife) loseLife();
 
   S.flash[0] = Math.max(0, S.flash[0] - dt * 3.2);
   S.flash[1] = Math.max(0, S.flash[1] - dt * 3.2);
   S.shake = Math.max(0, S.shake - dt * 7.0);
   S.banner = Math.max(0, S.banner - dt);
 
-  if (S.enemy.alive === 0) startLevel(S.level + 1);
+  if (S.bossActive && S.enemy.alive === 0) startStage(S.stage + 1);
 
   // ---- upload ----
-  formBuf.set(S.enemy.masks);
-  for (const site of S.detached) formBuf[site] = 0;
+  if (S.bossActive){
+    formBuf.set(S.enemy.masks);
+    for (const site of S.detached) formBuf[site] = 0;
+  } else formBuf.fill(0);
   maskBuf.set(formBuf, 0);
   maskBuf.set(S.player.masks, 27);
 
-  centBuf[0] = S.enemy.cx; centBuf[1] = S.enemy.cy; centBuf[2] = 0;
-  centBuf[3] = S.px;       centBuf[4] = PLAYER_Y;   centBuf[5] = 0;
+  centBuf[0] = S.enemy ? S.enemy.cx : 0; centBuf[1] = ENEMY_Y; centBuf[2] = 0;
+  centBuf[3] = S.px; centBuf[4] = PLAYER_Y; centBuf[5] = 0;
   scaleBuf[0] = ENEMY_SCALE; scaleBuf[1] = PLAYER_SCALE;
-  flashBuf[0] = S.flash[0];  flashBuf[1] = S.flash[1];
+  flashBuf[0] = S.flash[0]; flashBuf[1] = S.flash[1];
 
   divBuf.fill(0); divPos.fill(0);
-  const dn = Math.min(MAX_DIVERS, S.divers.length);
-  for (let i = 0; i < dn; i++){
-    const d = S.divers[i];
-    divBuf[i] = S.enemy.masks[d.site];
-    divPos[i * 4] = d.x; divPos[i * 4 + 1] = d.y; divPos[i * 4 + 2] = d.z;
-    divPos[i * 4 + 3] = ENEMY_SCALE;
-    divG[i] = d.g; divGi[i] = d.gi; divSite[i] = d.site;
+  let dn = 0;
+  for (const d of S.divers){
+    if (dn >= MAX_BLOCKS) break;
+    divBuf[dn] = S.enemy.masks[d.site];
+    divPos[dn * 4] = d.x; divPos[dn * 4 + 1] = d.y; divPos[dn * 4 + 2] = d.z;
+    divPos[dn * 4 + 3] = ENEMY_SCALE;
+    divG[dn] = d.g; divGi[dn] = d.gi; divSite[dn] = d.site; dn++;
+  }
+  for (const h of S.hench){
+    if (dn >= MAX_BLOCKS) break;
+    divBuf[dn] = h.mask >>> 0;
+    divPos[dn * 4] = h.x; divPos[dn * 4 + 1] = h.y; divPos[dn * 4 + 2] = h.z;
+    divPos[dn * 4 + 3] = HENCH_SCALE;
+    divG[dn] = h.g; divGi[dn] = h.gi; divSite[dn] = -1; dn++;
   }
 
   shotBuf.fill(0);
   let sn = 0;
-  for (const s of S.shots){ if (sn >= 12) break; if (s.dead) continue;
+  for (const s of S.shots){ if (sn >= 12 || s.dead) continue;
     shotBuf[sn * 4] = s.x; shotBuf[sn * 4 + 1] = s.y; shotBuf[sn * 4 + 3] = SHOT_SIZE; sn++; }
-  for (const b of S.ebullets){ if (sn >= 12) break; if (b.dead) continue;
+  for (const b of S.ebullets){ if (sn >= 12 || b.dead) continue;
     shotBuf[sn * 4] = b.x; shotBuf[sn * 4 + 1] = b.y; shotBuf[sn * 4 + 3] = -EBULLET_SIZE; sn++; }
 
   gl.uniform3f(LOC.res, W, H, 1);
   gl.uniform1f(LOC.time, clock);
   gl.uniform1uiv(LOC.masks, maskBuf);
-  gl.uniform1uiv(LOC.wound, S.enemy.wound);
+  gl.uniform1uiv(LOC.wound, S.bossActive ? S.enemy.wound : emptyW);
   gl.uniform3fv(LOC.centre, centBuf);
   gl.uniform1fv(LOC.scale, scaleBuf);
   gl.uniform1fv(LOC.flash, flashBuf);
@@ -1287,7 +1463,7 @@ function frame(now){
 }
 
 resize();
-startLevel(0, true);
+startStage(1, true);
 requestAnimationFrame(frame);
 </script>
 </body>
