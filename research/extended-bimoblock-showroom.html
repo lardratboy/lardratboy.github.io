@@ -209,6 +209,8 @@
   <div class="presets">
     <button data-preset="classic" title="Restore the original 3×3 default">classic 3×3</button>
     <button data-preset="tower3" title="Three levels of radix 3">tower [3,3,3]</button>
+    <button data-preset="tower4" title="Four levels of radix 2">tower [2,2,2,2]</button>
+    <button data-preset="hetero" title="Three levels, decreasing radix">hetero [4,3,2]</button>
     <button data-preset="n4" title="Two levels of radix 4">N=4 two-tier</button>
     <button data-preset="n5" title="Single level, radix 5">N=5 single</button>
   </div>
@@ -561,76 +563,151 @@ const TIER_PERMS = PERM; // six axis permutations already used by Oh
 function tierDigits(sx, sy, sz, levels, R){
   const ux = axisToIndex(sx,R), uy = axisToIndex(sy,R), uz = axisToIndex(sz,R);
   const dx = decomposeDigits(ux, levels), dy = decomposeDigits(uy, levels), dz = decomposeDigits(uz, levels);
-  const L = levels.length, r0 = levels[0].radix, rL = levels[L-1].radix;
-  const h0 = (r0-1)/2, hL = (rL-1)/2;
+  const L = levels.length;
+  const combined = new Array(L), centered = new Array(L), count = new Array(L);
+  for (let i = 0; i < L; i++){
+    const r = levels[i].radix, h = (r-1)/2;
+    combined[i] = dx[i] + r*dy[i] + r*r*dz[i];
+    centered[i] = [dx[i]-h, dy[i]-h, dz[i]-h];
+    count[i] = r*r*r;
+  }
   return {
-    a:[dx[0]-h0, dy[0]-h0, dz[0]-h0],           // outer / macro vector, centered
-    b:[dx[L-1]-hL, dy[L-1]-hL, dz[L-1]-hL],     // inner / micro vector, centered
-    macro: dx[0] + r0*dy[0] + r0*r0*dz[0],
-    micro: dx[L-1] + rL*dy[L-1] + rL*rL*dz[L-1],
-    r0, rL, macroCount: r0*r0*r0, microCount: rL*rL*rL
+    dx, dy, dz, L, levels, combined, centered, count,
+    a: centered[0], b: centered[L-1],                 // kept for the two axis-mixing-only terms below
+    macro: combined[0], micro: combined[L-1],
+    r0: levels[0].radix, rL: levels[L-1].radix,
+    macroCount: count[0], microCount: count[L-1]
   };
 }
 
+/* =====================================================================
+   Six modes, each a genuine cascade over every level (not just outermost
+   + innermost). Every mode is written so its L=2 specialization reduces
+   EXACTLY to the formula this replaced — hand-verified below inline,
+   then checked byte-for-byte against the golden reference again after
+   editing, the same way the original port was verified.
+   ===================================================================== */
 function tierField(sx, sy, sz, mode, effSeed, levels, R){
-  const T = tierDigits(sx,sy,sz,levels,R), A=T.a, B=T.b;
+  const T = tierDigits(sx,sy,sz,levels,R), A=T.a, B=T.b, L=T.L;
   const seedPhase = ((effSeed >>> 0) & 255) / 255;
 
   if (mode === 0){
-    // Exchange significance: u'=r0*micro+macro per axis (r0, the OUTER level's own
-    // radix, is the weight the now-more-significant micro digit takes on — verified
-    // numerically against a heterogeneous-radix case rather than assumed, since at
-    // the classic r0=rL=3 default the two weights are indistinguishable by inspection).
-    const q = [T.r0*B[0]+A[0], T.r0*B[1]+A[1], T.r0*B[2]+A[2]];
-    return Math.sin(1.37*q[0] + 2.11*q[1] - 1.73*q[2] + seedPhase*6.28318);
+    // Exchange significance across the WHOLE stack: reverse both the digit order
+    // and the level order, recompose. At L=2 this is exactly r0*B+A (proven
+    // numerically against a heterogeneous-radix case when this was first ported);
+    // at L>2 every middle level's place in the significance ordering flips too.
+    const revLevels = T.levels.slice().reverse();
+    const rev = a => a.slice().reverse();
+    const half = (R - 1) / 2;
+    const qx = composeDigits(rev(T.dx), revLevels) - half;
+    const qy = composeDigits(rev(T.dy), revLevels) - half;
+    const qz = composeDigits(rev(T.dz), revLevels) - half;
+    return Math.sin(1.37*qx + 2.11*qy - 1.73*qz + seedPhase*6.28318);
   }
 
   if (mode === 1){
-    // Wreath-like fold: the macro address chooses a local signed permutation
-    // of the micro coordinate.  Same inner motif, different frame per parent.
-    const P = TIER_PERMS[T.macro % 6];
-    const signCode = ((T.macro * 0x9e37) ^ effSeed) & 7;
-    const C = [0,1,2].map(i => B[P[i]] * ((signCode >> i & 1) ? -1 : 1));
-    return 0.91*C[0] - 1.27*C[1] + 1.63*C[2] +
-           0.43*A[0] + 0.71*A[1] - 0.37*A[2] + 0.21*(C[0]*A[1]-C[1]*A[0]);
+    // Wreath cascade: starting from the innermost centered vector, each level
+    // going outward (right to left) picks a permutation+sign from its OWN
+    // combined address and folds the result into the running vector; the
+    // outermost level's step collapses the cascade to a scalar. At L=2 the
+    // loop runs once (i=0) and reduces exactly to the old macro-picks-a-
+    // permutation-of-micro formula. At L=1 there's no outer tier to cascade
+    // from, so the single level folds onto itself instead (this used to
+    // silently fall through to mode 5's code below — caught by testing L=1
+    // explicitly rather than assuming the loop always fires).
+    let V = T.centered[L-1].slice();
+    if (L === 1){
+      const combined_i = T.combined[0];
+      const P = TIER_PERMS[combined_i % 6];
+      const signCode = ((combined_i * 0x9e37) ^ effSeed) & 7;
+      const perm = [0,1,2].map(k => V[P[k]] * ((signCode >> k & 1) ? -1 : 1));
+      return 0.91*perm[0] - 1.27*perm[1] + 1.63*perm[2] +
+             0.43*V[0] + 0.71*V[1] - 0.37*V[2] + 0.21*(perm[0]*V[1]-perm[1]*V[0]);
+    }
+    for (let i = L-2; i >= 0; i--){
+      const combined_i = T.combined[i];
+      const P = TIER_PERMS[combined_i % 6];
+      const signCode = ((combined_i * 0x9e37) ^ effSeed ^ (i * 0x2545)) & 7;
+      const perm = [0,1,2].map(k => V[P[k]] * ((signCode >> k & 1) ? -1 : 1));
+      const Ai = T.centered[i];
+      if (i === 0){
+        return 0.91*perm[0] - 1.27*perm[1] + 1.63*perm[2] +
+               0.43*Ai[0] + 0.71*Ai[1] - 0.37*Ai[2] + 0.21*(perm[0]*Ai[1]-perm[1]*Ai[0]);
+      }
+      V = [perm[0]+Ai[0], perm[1]+Ai[1], perm[2]+Ai[2]];
+    }
   }
 
   if (mode === 2){
-    // The two tier vectors are treated as a paired frame.  Parallel, opposed,
-    // and transverse macro/micro addresses form different bands.
-    const dot = A[0]*B[0] + A[1]*B[1] + A[2]*B[2];
-    const cx = A[1]*B[2]-A[2]*B[1];
-    const cy = A[2]*B[0]-A[0]*B[2];
-    const cz = A[0]*B[1]-A[1]*B[0];
-    return dot + 0.73*cx - 0.41*cy + 0.59*cz + 0.17*(T.macro-T.micro);
+    // Cross cascade: every ADJACENT pair of levels contributes its own
+    // dot/cross frame, summed. At L=2 there is exactly one pair (outer,inner)
+    // and this is precisely the old single-pair formula; a middle level at
+    // L=3 contributes via both of its adjacent relations. At L=1 there's no
+    // pair at all, so the level pairs with itself (cross terms vanish, dot
+    // survives) rather than silently returning a constant 0 for every cell.
+    if (L === 1){
+      const V = T.centered[0];
+      return V[0]*V[0] + V[1]*V[1] + V[2]*V[2];
+    }
+    let total = 0;
+    for (let i = 0; i < L-1; i++){
+      const Vi = T.centered[i], Vj = T.centered[i+1];
+      const dot = Vi[0]*Vj[0] + Vi[1]*Vj[1] + Vi[2]*Vj[2];
+      const cx = Vi[1]*Vj[2]-Vi[2]*Vj[1];
+      const cy = Vi[2]*Vj[0]-Vi[0]*Vj[2];
+      const cz = Vi[0]*Vj[1]-Vi[1]*Vj[0];
+      total += dot + 0.73*cx - 0.41*cy + 0.59*cz + 0.17*(T.combined[i]-T.combined[i+1]);
+    }
+    return total;
   }
 
   if (mode === 3){
-    // Mixed-radix odometer/carry field. "9" (=r0^2 at the classic default) folds
-    // macro down to its outer-two-axis component before combining with micro;
-    // generalized to r0*r0 so it still reduces to exactly 9 when r0=3.
-    const mod2 = T.r0 * T.r0;
-    const n = T.micro + T.microCount*T.macro;
-    const carry = Math.floor((T.micro + (T.macro % mod2)) / mod2);
-    return Math.sin(n*0.173 + carry*1.91 + seedPhase*4.0) +
-           0.35*Math.cos((T.micro - T.macro)*0.67);
+    // Carry cascade: the same mixed-radix odometer/fold formula applied to
+    // every adjacent (outer,inner) pair of levels and summed, rather than
+    // only the outermost/innermost pair. At L=1, self-pair for the same
+    // reason as mode 2 above.
+    if (L === 1){
+      const rA = T.levels[0].radix, combinedA = T.combined[0], mod2 = rA*rA;
+      const n = combinedA * (1 + T.count[0]);
+      const carry = Math.floor((combinedA + (combinedA % mod2)) / mod2);
+      return Math.sin(n*0.173 + carry*1.91 + seedPhase*4.0) + 0.35;
+    }
+    let total = 0;
+    for (let i = 0; i < L-1; i++){
+      const rA = T.levels[i].radix;
+      const combinedA = T.combined[i], combinedB = T.combined[i+1], countB = T.count[i+1];
+      const mod2 = rA*rA;
+      const n = combinedB + countB*combinedA;
+      const carry = Math.floor((combinedB + (combinedA % mod2)) / mod2);
+      total += Math.sin(n*0.173 + carry*1.91 + seedPhase*4.0) + 0.35*Math.cos((combinedB-combinedA)*0.67);
+    }
+    return total;
   }
 
   if (mode === 4){
-    // Every macro cell owns the same local wave but receives a phase chosen by
-    // its outer address.  This is scale-dependent folding without scrambling
-    // the macro silhouette itself.
+    // Phasecell cascade: every non-innermost level contributes its own phase
+    // term (chained with a per-depth salt so levels don't alias each other),
+    // summed before driving the same local/radius wave on the innermost tier.
+    let phase = 0;
+    for (let i = 0; i < L-1; i++){
+      const combined_i = T.combined[i], count_i = T.count[i];
+      phase += ((combined_i*7 + (effSeed & 31) + i*13) % count_i) / count_i * 6.28318530718;
+    }
     const r = Math.hypot(B[0],B[1],B[2]);
     const local = B[0] + 1.7*B[1] - 1.3*B[2];
-    const phase = ((T.macro * 7 + (effSeed & 31)) % T.macroCount) / T.macroCount * 6.28318530718;
     return Math.sin(local*1.55 + r*2.4 + phase) + 0.18*(A[0]-A[1]+A[2]);
   }
 
-  // Prefix hash: hash the outer address, then use that hash as the coefficients
-  // of the inner field.  Visually this makes each parent cell a related but
-  // non-identical 'local world' while remaining a pure address function.
-  let h = Math.imul((T.macro + 1) ^ effSeed, 0x85ebca6b) >>> 0;
-  h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35) >>> 0; h ^= h >>> 16;
+  // Prefix hash cascade: chain-hash through every non-innermost level (so a
+  // middle level's address perturbs the hash the same way the outermost
+  // level used to alone), then use the final hash as coefficients on the
+  // innermost tier exactly as before.
+  let h = effSeed >>> 0;
+  for (let i = 0; i < L-1; i++){
+    const combined_i = T.combined[i];
+    h = Math.imul((combined_i + 1) ^ h, 0x85ebca6b) >>> 0;
+    h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35) >>> 0; h ^= h >>> 16;
+  }
   const c0 = ((h      ) & 255) / 127.5 - 1;
   const c1 = ((h >>  8) & 255) / 127.5 - 1;
   const c2 = ((h >> 16) & 255) / 127.5 - 1;
@@ -1853,7 +1930,7 @@ inDens.addEventListener('input', () => {
    the lattice keeps up to CFG.POD_MAX specimens live at once, so the
    safe ceiling here is much lower.
    ===================================================================== */
-const MAX_R = 20;
+const MAX_R = 32;  // covers every shipped preset (tower3=27, tower4=16, hetero=24) with headroom
 const applyLevels = debounce(() => flushLattice(), 200);
 const lvRows = document.getElementById('lvrows'), resLine = document.getElementById('resLine');
 
@@ -1921,10 +1998,19 @@ document.getElementById('btnDelLevel').addEventListener('click', () => {
 });
 document.querySelectorAll('#levelsPanel .presets button').forEach(b => b.addEventListener('click', () => {
   const p = b.dataset.preset;
-  if (p === 'classic') Levels = [{radix:3,gap:0.30},{radix:3,gap:0.06}];
-  if (p === 'tower3')  Levels = [{radix:3,gap:0.35},{radix:3,gap:0.12},{radix:3,gap:0.04}];
-  if (p === 'n4')      Levels = [{radix:4,gap:0.30},{radix:4,gap:0.08}];
-  if (p === 'n5')      Levels = [{radix:5,gap:0.20}];
+  let next = Levels;
+  if (p === 'classic') next = [{radix:3,gap:0.30},{radix:3,gap:0.06}];
+  if (p === 'tower3')  next = [{radix:3,gap:0.35},{radix:3,gap:0.12},{radix:3,gap:0.04}];
+  if (p === 'tower4')  next = [{radix:2,gap:0.35},{radix:2,gap:0.20},{radix:2,gap:0.10},{radix:2,gap:0.04}];
+  if (p === 'hetero')  next = [{radix:4,gap:0.30},{radix:3,gap:0.14},{radix:2,gap:0.05}];
+  if (p === 'n4')      next = [{radix:4,gap:0.30},{radix:4,gap:0.08}];
+  if (p === 'n5')      next = [{radix:5,gap:0.20}];
+  if (levelResolution(next) > MAX_R){
+    console.warn(`[bimoblock] preset '${p}' rejected: R=${levelResolution(next)} exceeds MAX_R=${MAX_R}`);
+    setStatus(`preset too large — R capped at ${MAX_R}`);
+    return;
+  }
+  Levels = next;
   renderLevelRows();
   setStatus(`levels [${Levels.map(l=>l.radix).join('×')}] → R=${levelResolution(Levels)}`);
   applyLevels();
