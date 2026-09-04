@@ -423,10 +423,11 @@ const NATIVE_FIELDS = 4;
    axisToIndex fix for even radices (round() must apply to the whole
    expression, not to s*half before adding half — that split only lands
    back on an integer when R is odd).
-   The classic bimoblock default is Levels = [{radix:3,gap:.3},{radix:3,gap:.06}],
-   which reproduces R=9 and every formula below reduces exactly to what
-   this file used to hardcode. [V] verified against a golden reference
-   captured from the pre-port file across 384 (sym,arch,field) combos.
+   The classic bimoblock default is Levels = [{radix:3,gap:.3},{radix:3,gap:.06}].
+   Its R=9 generation formulas reduce exactly to what this file used to
+   hardcode; the gap values are applied later, during physical voxel layout.
+   [V] Generation was verified against a golden reference captured from the
+   pre-port file across 384 (sym,arch,field) combos.
    ===================================================================== */
 let Levels = [{ radix:3, gap:0.30 }, { radix:3, gap:0.06 }];
 
@@ -457,6 +458,45 @@ function foldedAxis(u, levels){
     n += (digits[i] - (levels[i].radix - 1) / 2) * innerProd;
   }
   return n / ((R - 1) / 2);
+}
+
+/* Physical placement for one axis of the mixed-radix voxel hierarchy.
+   A level's gap is measured as a fraction of the child block below it:
+   0 keeps siblings touching, 0.3 separates them by 30% of a child width,
+   and 1 leaves one full child width between them.  The complete hierarchy
+   is normalized back to a unit bounding box, so changing resolution or gaps
+   changes the spacing pattern without changing the showroom footprint. */
+function tierAxisLayout(levels, outerOnly){
+  const L = levels.length;
+  const extent = new Float64Array(L + 1);
+  const stride = new Float64Array(L);
+  extent[L] = 1; // one finest voxel
+  for (let i = L - 1; i >= 0; i--){
+    const gap = clamp(Number(levels[i].gap) || 0, 0, 1);
+    stride[i] = extent[i + 1] * (1 + gap);
+    extent[i] = levels[i].radix * extent[i + 1] +
+                (levels[i].radix - 1) * gap * extent[i + 1];
+  }
+
+  const total = extent[0];
+  if (outerOnly){
+    const N = levels[0].radix;
+    const centers = new Float64Array(N);
+    const half = (N - 1) / 2;
+    for (let u = 0; u < N; u++) centers[u] = (u - half) * stride[0] / total;
+    return { centers, cellSize:extent[1] / total };
+  }
+
+  const R = levelResolution(levels);
+  const centers = new Float64Array(R);
+  for (let u = 0; u < R; u++){
+    const digits = decomposeDigits(u, levels);
+    let p = 0;
+    for (let i = 0; i < L; i++)
+      p += (digits[i] - (levels[i].radix - 1) / 2) * stride[i];
+    centers[u] = p / total;
+  }
+  return { centers, cellSize:1 / total };
 }
 // Wrap an (already-rounded) integer into R symmetric positions centered at 0 — the
 // generalized form of the old fixed wrap9, used by the "nested" lift mode.
@@ -736,7 +776,6 @@ function autOrder(occ, R){
      G = (local_Y + 0.5)
      B = (local_Z + 0.5)
    ===================================================================== */
-const BLOCK_NORM = 1 / 6;
 const OBJ_FACES = [
   { d:[ 1,0,0], n:1, v:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
   { d:[-1,0,0], n:2, v:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
@@ -777,19 +816,31 @@ function siteTier(occ, filled, levels, R){
 
 function blockGeometry(occ, tier, filled, levels, R){
   const r0 = levels[0].radix;
-  const N = tier ? r0 : R, S = R / N;
+  const N = tier ? r0 : R;
   const sites = tier ? siteTier(occ, filled, levels, R) : null;
   const at = tier
     ? (x, y, z) => sites[x + r0*y + r0*r0*z] !== 0
     : (x, y, z) => occ[x + R*y + R*R*z] !== 0;
+  const axis = tierAxisLayout(levels, tier);
+  const centers = axis.centers, cellSize = axis.cellSize;
+
+  // Occupied logical neighbours hide a face only when their physical cubes
+  // still touch.  A non-zero gap at any crossed tier boundary exposes both
+  // sides of the resulting opening.
+  const occludes = (x, y, z, nx, ny, nz, f) => {
+    if (nx < 0 || nx >= N || ny < 0 || ny >= N || nz < 0 || nz >= N || !at(nx, ny, nz)) return false;
+    const a = f.d[0] ? Math.abs(centers[nx] - centers[x])
+            : f.d[1] ? Math.abs(centers[ny] - centers[y])
+                     : Math.abs(centers[nz] - centers[z]);
+    return a <= cellSize * (1 + 1e-9);
+  };
 
   let quads = 0;
   for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++){
     if (!at(x, y, z)) continue;
     for (const f of OBJ_FACES){
       const nx = x + f.d[0], ny = y + f.d[1], nz = z + f.d[2];
-      if (nx >= 0 && nx < N && ny >= 0 && ny < N && nz >= 0 && nz < N
-          && at(nx, ny, nz)) continue;
+      if (occludes(x, y, z, nx, ny, nz, f)) continue;
       quads++;
     }
   }
@@ -804,13 +855,11 @@ function blockGeometry(occ, tier, filled, levels, R){
     if (!at(x, y, z)) continue;
     for (const f of OBJ_FACES){
       const nx = x + f.d[0], ny = y + f.d[1], nz = z + f.d[2];
-      if (nx >= 0 && nx < N && ny >= 0 && ny < N && nz >= 0 && nz < N
-          && at(nx, ny, nz)) continue;
+      if (occludes(x, y, z, nx, ny, nz, f)) continue;
       for (const vt of f.v){
-        const VX = (x + vt[0]) * S, VY = (y + vt[1]) * S, VZ = (z + vt[2]) * S;
-        const px = (VX - R/2) * (2/3) * BLOCK_NORM;
-        const py = (VY - R/2) * (2/3) * BLOCK_NORM;
-        const pz = (VZ - R/2) * (2/3) * BLOCK_NORM;
+        const px = centers[x] + (vt[0] - 0.5) * cellSize;
+        const py = centers[y] + (vt[1] - 0.5) * cellSize;
+        const pz = centers[z] + (vt[2] - 0.5) * cellSize;
 
         pos[o]   = px; pos[o+1] = py; pos[o+2] = pz;
         // Pure normalized local gamut color
@@ -1941,7 +1990,7 @@ function renderLevelRows(){
     row.innerHTML =
       `<span class="idx">${i===0?'out':(i===Levels.length-1?'in':i)}</span>` +
       `<input type="number" min="2" max="12" value="${lv.radix}" data-i="${i}" class="radixIn">` +
-      `<input type="range" min="0" max="100" value="${Math.round(lv.gap*100)}" data-i="${i}" class="gapIn">` +
+      `<input type="range" min="0" max="100" value="${Math.round(lv.gap*100)}" data-i="${i}" class="gapIn" title="Sibling spacing at this tier (% of child width)">` +
       `<span class="gapv">${lv.gap.toFixed(2)}</span>` +
       `<button data-i="${i}" class="delBtn" title="remove this level">×</button>`;
     lvRows.appendChild(row);
@@ -1967,6 +2016,7 @@ function renderLevelRows(){
     const i = +e.target.dataset.i;
     Levels[i].gap = (+e.target.value) / 100;
     e.target.parentElement.querySelector('.gapv').textContent = Levels[i].gap.toFixed(2);
+    setStatus(`${i===0?'outer':i===Levels.length-1?'inner':'level '+i} tier gap ${Math.round(Levels[i].gap*100)}%`);
     applyLevels();
   });
   lvRows.querySelectorAll('.delBtn').forEach(el => el.onclick = e => {
@@ -2178,33 +2228,31 @@ function specimenName(p){
 function exportSpecimenOBJ(){
   const p = focusedData();
   if (!p) return;
-  const occ = p.occ, R = p.R;
+  const R = p.R;
   const lines = [
     `# bimoblock specimen — ${specimenName(p)}`,
     `# lattice cell: ${Focus.i}, ${Focus.j}   generation: ${Mint.gen}`,
     `# group: ${GROUPS[p.sym].name}  archetype: ${ARCH_NAMES[p.arch]}  field: ${FIELD_NAMES[p.field]}`,
     `# levels: [${p.levels.map(l=>l.radix).join('×')}]  resolution: ${R}`,
+    `# gaps: [${p.levels.map(l=>l.gap.toFixed(2)).join(', ')}] (fraction of child width)`,
     `# format: v X Y Z R G B (normalized local gamut colors), vn NX NY NZ, f v1//vn1 v2//vn2 v3//vn3`,
     ""
   ];
-  let vi = 1, quads = 0;
-  for (let z = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++){
-    if (!occ[x + R*y + R*R*z]) continue;
-    for (const f of OBJ_FACES){
-      const nx = x + f.d[0], ny = y + f.d[1], nz = z + f.d[2];
-      if (nx >= 0 && nx < R && ny >= 0 && ny < R && nz >= 0 && nz < R && occ[nx + R*ny + R*R*nz]) continue;
-      for (const vt of f.v){
-        const VX = x + vt[0], VY = y + vt[1], VZ = z + vt[2];
-        const px = (VX - R/2) * (2/3) * BLOCK_NORM;
-        const py = (VY - R/2) * (2/3) * BLOCK_NORM;
-        const pz = (VZ - R/2) * (2/3) * BLOCK_NORM;
-        lines.push(`v ${px.toFixed(4)} ${py.toFixed(4)} ${pz.toFixed(4)} ${(px+0.5).toFixed(4)} ${(py+0.5).toFixed(4)} ${(pz+0.5).toFixed(4)}`);
-        lines.push(`vn ${f.d[0].toFixed(4)} ${f.d[1].toFixed(4)} ${f.d[2].toFixed(4)}`);
-      }
-      lines.push(`f ${vi}//${vi} ${vi+1}//${vi+1} ${vi+2}//${vi+2} ${vi+3}//${vi+3}`);
-      vi += 4; quads++;
+  const pos = p.geo.getAttribute('position');
+  const col = p.geo.getAttribute('color');
+  const nrm = p.geo.getAttribute('normal');
+  let vi = 1;
+  for (let k = 0; k < pos.count; k += 4){
+    for (let q = 0; q < 4; q++){
+      const n = k + q;
+      lines.push(`v ${pos.getX(n).toFixed(4)} ${pos.getY(n).toFixed(4)} ${pos.getZ(n).toFixed(4)} ` +
+                 `${col.getX(n).toFixed(4)} ${col.getY(n).toFixed(4)} ${col.getZ(n).toFixed(4)}`);
+      lines.push(`vn ${nrm.getX(n).toFixed(4)} ${nrm.getY(n).toFixed(4)} ${nrm.getZ(n).toFixed(4)}`);
     }
+    lines.push(`f ${vi}//${vi} ${vi+1}//${vi+1} ${vi+2}//${vi+2} ${vi+3}//${vi+3}`);
+    vi += 4;
   }
+  const quads = pos.count / 4;
   download(new Blob([lines.join("\n")], { type:'text/plain' }), specimenName(p) + '.obj');
   showToast(`${specimenName(p)}.obj exported (${quads} quads)`);
 }
@@ -2217,6 +2265,7 @@ function exportSheetOBJ(){
     `# generated: ${new Date().toISOString()}`,
     `# centre cell: ${Math.round(Rig.x / CFG.CELL)}, ${Math.round(-Rig.z / CFG.CELL)}   generation: ${Mint.gen}`,
     `# axes: x → ${ROLE_BY_ID[Axis.x].label}   y → ${ROLE_BY_ID[Axis.y].label}`,
+    `# levels: [${Levels.map(l=>l.radix).join('×')}]  gaps: [${Levels.map(l=>l.gap.toFixed(2)).join(', ')}]`,
     `# format: v X Y Z R G B (normalized local gamut colors), vn NX NY NZ, f v1//vn1 v2//vn2 v3//vn3`,
     ""
   ];
