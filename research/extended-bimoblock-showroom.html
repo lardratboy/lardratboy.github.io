@@ -135,6 +135,10 @@
   #levelsPanel .hd { font-size:7.5px; letter-spacing:.3em; text-transform:uppercase;
                      color:rgba(180,205,255,0.4); margin-bottom:7px; }
   .lvrow { display:grid; grid-template-columns:14px 40px 1fr 30px 18px; gap:5px; align-items:center; margin-bottom:5px; }
+  .tierMode { display:block; font-size:10px; margin:8px 0; }
+  .tierHint { font-size:9px; line-height:1.4; opacity:.65; margin-bottom:8px; }
+  .tierGroup { grid-column:2 / -1; width:100%; background:#101727; color:#bdcce8; border:1px solid #354056; border-radius:4px; font-size:10px; padding:3px; }
+  .tierGroup:disabled { opacity:.4; }
   .lvrow span.idx { font-size:8px; color:rgba(180,205,255,0.4); }
   .lvrow input[type=number] {
     width:40px; font-family:inherit; font-size:10px; font-weight:700; color:#eef4ff;
@@ -201,7 +205,10 @@
 
 <div id="levelsPanel">
   <div class="hd">tier levels (outer → inner)</div>
+  <label class="tierMode"><input id="tierSymmetry" type="checkbox"> independent tier symmetry</label>
+  <div class="tierHint">Each tier acts on its own addresses. “Inherit” follows the specimen group.</div>
   <div id="lvrows"></div>
+  <div class="rowbtns"><button id="tierMirrorSpin" title="Set outer mirror-X and inner C4 pinwheels">mirror / spin</button><button id="tierCubeFree" title="Set outer octahedral and inner unconstrained">cube / free</button></div>
   <div class="rowbtns">
     <button id="btnAddLevel" title="Add an inner tier">+ level</button>
     <button id="btnDelLevel" title="Remove the innermost tier">− level</button>
@@ -895,11 +902,36 @@ function meshArrays(occ, tier, filled, levels, R){
     timings: { mesh: meshed - started, bounds: performance.now() - meshed } };
 }
 
+// Canonicalize each mixed-radix digit triple independently. Lookup tables avoid
+// a product-group expansion and keep group operations outside the voxel loop.
+function tierFolder(P, levels, R){
+  const axes = Array.from({length:R}, (_,u)=>foldedAxis(u, levels));
+  const digits = Array.from({length:R}, (_,u)=>decomposeDigits(u, levels));
+  const tables = levels.map(l=>{
+    const r=l.radix, h=(r-1)/2, table=new Uint16Array(r*r*r);
+    const group=GROUPS[l.sym == null || l.sym < 0 ? P.sym : l.sym];
+    for(let z=0;z<r;z++) for(let y=0;y<r;y++) for(let x=0;x<r;x++){
+      const v=foldOrbit([x-h,y-h,z-h],group.els);
+      table[x+r*y+r*r*z]=(v[0]+h)+r*(v[1]+h)+r*r*(v[2]+h);
+    }
+    return table;
+  });
+  return (x,y,z)=>{
+    let a=0,b=0,c=0;
+    for(let i=0;i<levels.length;i++){
+      const r=levels[i].radix, v=tables[i][digits[x][i]+r*digits[y][i]+r*r*digits[z][i]];
+      a=a*r+v%r; b=b*r+Math.floor(v/r)%r; c=c*r+Math.floor(v/(r*r));
+    }
+    return [axes[a],axes[b],axes[c]];
+  };
+}
+
 function buildBlock(P, levels){
   const started = performance.now();
   const G = GROUPS[P.sym];
   const fmode = P.field;
   const R = levelResolution(levels);
+  const foldTier = P.tierSymmetry ? tierFolder(P, levels, R) : null;
   const pars = { conic: conicParams(P.seed), scale: [] };
   if (fmode >= NATIVE_FIELDS && fmode < LEGACY_FIELD_COUNT)
     pars.scale[fmode - NATIVE_FIELDS] = planarScale(PLANAR[fmode - NATIVE_FIELDS], pars.conic, R);
@@ -908,7 +940,7 @@ function buildBlock(P, levels){
   for (let z = 0; z < R; z++){ const sz0 = foldedAxis(z, levels);
     for (let y = 0; y < R; y++){ const sy0 = foldedAxis(y, levels);
       for (let x = 0; x < R; x++){ const sx0 = foldedAxis(x, levels);
-        const s = foldOrbit([sx0, sy0, sz0], G.els);
+        const s = foldTier ? foldTier(x,y,z) : foldOrbit([sx0, sy0, sz0], G.els);
         if (!envelope(s[0], s[1], s[2], P.arch)) continue;
         idxArr.push(x + R*y + R*R*z);
         vals.push(fmode < LEGACY_FIELD_COUNT
@@ -941,6 +973,11 @@ return { GROUPS, ARCH_NAMES, FIELD_NAMES, NATIVE_FIELDS, LEGACY_FIELD_COUNT, LIF
 }
 const Core = createBimoblockCore();
 const { GROUPS, ARCH_NAMES, FIELD_NAMES, NATIVE_FIELDS, LEGACY_FIELD_COUNT, LIFT_NAMES, levelResolution } = Core;
+let TierSymmetry = false;
+function symmetryLabel(p, short=false){
+  const name=i=>short ? GROUPS[i].name.split(':')[0] : GROUPS[i].name;
+  return p.tierSymmetry ? p.levels.map(l=>name(l.sym == null || l.sym < 0 ? p.sym : l.sym)).join(' / ') : name(p.sym);
+}
 let Levels = [{ radix:3, gap:0.30 }, { radix:3, gap:0.06 }];
 
 function geometryFromArrays(data){
@@ -1679,6 +1716,7 @@ function nextGenerationJob(){
     const key = keyOf(c.i,c.j), token = generationToken('build', key);
     if (cache.has(key) || Generation.pending.has(token) || (Generation.failures.get(token)?.tries || 0) >= 2) return null;
     const rec = cellRecipe(c.i,c.j), levels = Levels.map(l => ({...l})), R = levelResolution(levels);
+    rec.P.tierSymmetry = TierSymmetry;
     return { type:'build', i:c.i, j:c.j, key, token, rec, levels,
       // Six independent quads per cell, 32-bit indices, plus occupancy: conservative reservation.
       estimate:R*R*R*(6*168+1), payload:{recipe:rec.P, levels} };
@@ -1952,7 +1990,7 @@ function drawLabels(){
     lctx.fillText(c.i + ',' + c.j, sx, sy);
     if (detail){
       lctx.fillStyle = isFocus ? 'rgba(255,62,165,0.85)' : 'rgba(150,178,240,0.22)';
-      lctx.fillText(ARCH_NAMES[p.arch] + ' · ' + GROUPS[p.sym].name.split(':')[0], sx, sy + 11);
+      lctx.fillText(ARCH_NAMES[p.arch] + ' · ' + symmetryLabel(p,true), sx, sy + 11);
     }
     n++;
   }
@@ -2001,12 +2039,12 @@ function refreshInspector(){
 
   elInspect.innerHTML =
     `<span class="k">cell</span> <b>${Focus.i}, ${Focus.j}</b> <span class="k">· page ${px}, ${py}</span>\n` +
-    `<span class="k">group</span> <b>${g.name}</b>\n` +
+    `<span class="k">${p.tierSymmetry ? 'tiers out → in' : 'group'}</span> <b>${symmetryLabel(p)}</b>\n` +
     `<span class="k">archetype</span> <b>${ARCH_NAMES[p.arch]}</b>\n` +
     `<span class="k">field</span> <b>${FIELD_NAMES[p.field]}</b>` +
       (p.field >= NATIVE_FIELDS && p.field < LEGACY_FIELD_COUNT ? ` <span class="k">/</span> <b>${LIFT_NAMES[p.lift]}</b>` : '') + `\n` +
     `<span class="k">resolution</span> <b>${p.R}</b> <span class="k">[${p.levels.map(l=>l.radix).join('×')}]</span>\n` +
-    `<span class="k">aut-order</span> <b>${p.aut < 0 ? ((Generation.failures.get(generationToken('analyze', keyOf(Focus.i,Focus.j)))?.tries || 0) >= 2 ? 'unavailable' : 'calculating…') : p.aut}</b> <span class="k">of ${g.order}</span>\n` +
+    `<span class="k">${p.tierSymmetry ? 'whole-grid order' : 'aut-order'}</span> <b>${p.aut < 0 ? ((Generation.failures.get(generationToken('analyze', keyOf(Focus.i,Focus.j)))?.tries || 0) >= 2 ? 'unavailable' : 'calculating…') : p.aut}</b> <span class="k">${p.tierSymmetry ? 'rigid transforms' : 'of '+g.order}</span>\n` +
     `<span class="k">voxels</span> <b>${p.filled}</b> <span class="k">/ ${p.envelopeCells}</span>\n` +
     `<span class="k">density</span> <b>${(p.density * 100).toFixed(0)}%</b>\n` +
     `<span class="k">seed</span> <b>#${(p.seed >>> 0).toString(16).padStart(8,'0')}</b>\n` +
@@ -2058,7 +2096,7 @@ function setFocus(i, j, announce){
   refreshInspector();
   if (announce){
     const p = focusedData();
-    showToast(p ? `${i}, ${j} · ${ARCH_NAMES[p.arch]} · ${GROUPS[p.sym].name}` : `${i}, ${j}`);
+    showToast(p ? `${i}, ${j} · ${ARCH_NAMES[p.arch]} · ${symmetryLabel(p)}` : `${i}, ${j}`);
   }
   writeHash();
 }
@@ -2321,6 +2359,16 @@ const MAX_R = 32;  // covers every shipped preset (tower3=27, tower4=16, hetero=
 const applyLevels = applyConfiguration;
 const lvRows = document.getElementById('lvrows'), resLine = document.getElementById('resLine');
 
+document.getElementById('tierSymmetry').onchange=e=>{ TierSymmetry=e.target.checked; renderLevelRows(); applyLevels(); };
+function tierExample(outer,inner){
+  if(Levels.length<2) Levels=[{radix:3,gap:.30},{radix:3,gap:.06}];
+  Levels=Levels.map((l,i)=>({...l,sym:i===0?outer:inner}));
+  TierSymmetry=true; document.getElementById('tierSymmetry').checked=true;
+  renderLevelRows(); applyLevels();
+}
+document.getElementById('tierMirrorSpin').onclick=()=>tierExample(1,5);
+document.getElementById('tierCubeFree').onclick=()=>tierExample(9,0);
+
 function renderLevelRows(){
   lvRows.innerHTML = '';
   Levels.forEach((lv, i) => {
@@ -2331,6 +2379,14 @@ function renderLevelRows(){
       `<input type="range" min="0" max="100" value="${Math.round(lv.gap*100)}" data-i="${i}" class="gapIn" title="Sibling spacing at this tier (% of child width)">` +
       `<span class="gapv">${lv.gap.toFixed(2)}</span>` +
       `<button data-i="${i}" class="delBtn" title="remove this level">×</button>`;
+    const select=document.createElement('select');
+    select.className='tierGroup'; select.disabled=!TierSymmetry;
+    select.setAttribute('aria-label',`Tier ${i+1} symmetry`);
+    select.add(new Option('inherit specimen group', '-1'));
+    GROUPS.forEach((g,j)=>select.add(new Option(g.name+' ('+g.order+')',String(j))));
+    select.value=String(lv.sym ?? -1);
+    select.onchange=()=>{ lv.sym=+select.value; applyLevels(); };
+    row.appendChild(select);
     lvRows.appendChild(row);
   });
   const R = levelResolution(Levels);
@@ -2398,7 +2454,7 @@ document.querySelectorAll('#levelsPanel .presets button').forEach(b => b.addEven
     setStatus(`preset too large — R capped at ${MAX_R}`);
     return;
   }
-  Levels = next;
+  Levels = next.map((l,i)=>({...l,sym:Levels[i]?.sym ?? -1}));
   renderLevelRows();
   setStatus(`levels [${Levels.map(l=>l.radix).join('×')}] → R=${levelResolution(Levels)}`);
   applyLevels();
@@ -2467,7 +2523,7 @@ btnBloom.addEventListener('click', () => {
   if (Bloom.on){
     pinAt(Focus.i, Focus.j);
     const p = focusedData();
-    showToast(p ? `blooming ${Focus.i}, ${Focus.j} · ${ARCH_NAMES[p.arch]} · ${GROUPS[p.sym].name}`
+    showToast(p ? `blooming ${Focus.i}, ${Focus.j} · ${ARCH_NAMES[p.arch]} · ${symmetryLabel(p)}`
                 : `blooming ${Focus.i}, ${Focus.j}`);
   } else {
     unpin();
@@ -2561,7 +2617,7 @@ function download(blob, name){
 }
 
 function specimenName(p){
-  return `bimoblock_${GROUPS[p.sym].name.split(':')[0]}_${ARCH_NAMES[p.arch]}_${(p.seed >>> 0).toString(16).padStart(8,'0')}`;
+  return `bimoblock_${p.tierSymmetry?'tiers_':''}${symmetryLabel(p,true).replaceAll(' / ','-')}_${ARCH_NAMES[p.arch]}_${(p.seed >>> 0).toString(16).padStart(8,'0')}`;
 }
 
 function exportSpecimenOBJ(){
@@ -2571,7 +2627,8 @@ function exportSpecimenOBJ(){
   const lines = [
     `# bimoblock specimen — ${specimenName(p)}`,
     `# lattice cell: ${Focus.i}, ${Focus.j}   generation: ${Mint.gen}`,
-    `# group: ${GROUPS[p.sym].name}  archetype: ${ARCH_NAMES[p.arch]}  field: ${FIELD_NAMES[p.field]}`,
+    `# group: ${symmetryLabel(p)}  archetype: ${ARCH_NAMES[p.arch]}  field: ${FIELD_NAMES[p.field]}`,
+    `# symmetry mode: ${p.tierSymmetry ? 'independent address tiers (outer to inner)' : 'coupled whole-grid'}`,
     `# levels: [${p.levels.map(l=>l.radix).join('×')}]  resolution: ${R}`,
     `# gaps: [${p.levels.map(l=>l.gap.toFixed(2)).join(', ')}] (fraction of child width)`,
     `# format: v X Y Z R G B (normalized local gamut colors), vn NX NY NZ, f v1//vn1 v2//vn2 v3//vn3`,
@@ -2623,7 +2680,8 @@ function exportSheetOBJ(){
     if (!posAttr || posAttr.count === 0) continue;
 
     const ox = cellWorldX(c.i), oz = cellWorldZ(c.j), oy = S * 0.5 + 0.42;
-    lines.push(`o cell_${c.i}_${c.j}_${GROUPS[p.sym].name.split(':')[0]}_${ARCH_NAMES[p.arch]}`);
+    lines.push(`# symmetry mode: ${p.tierSymmetry ? 'independent address tiers' : 'coupled whole-grid'}; groups: ${symmetryLabel(p)}; radices: ${p.levels.map(l=>l.radix).join(',')}`);
+    lines.push(`o cell_${c.i}_${c.j}_${symmetryLabel(p,true).replaceAll(' / ','-')}_${ARCH_NAMES[p.arch]}`);
     for (let k = 0; k < posAttr.count; k++){
       lines.push(`v ${(posAttr.getX(k)*S+ox).toFixed(4)} ${(posAttr.getY(k)*S+oy).toFixed(4)} ${(posAttr.getZ(k)*S+oz).toFixed(4)} ` +
                  `${colAttr.getX(k).toFixed(4)} ${colAttr.getY(k).toFixed(4)} ${colAttr.getZ(k).toFixed(4)}`);
