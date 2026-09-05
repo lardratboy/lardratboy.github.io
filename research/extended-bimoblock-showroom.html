@@ -267,6 +267,9 @@
    archetype envelopes, anisotropic scalar fields, voxel packing,
    and color gamut domain mapping.
    ================================================================ */
+// Canonical numeric core. This factory is also the complete worker dependency.
+function createBimoblockCore(){
+const clamp = (v,a,b) => v < a ? a : v > b ? b : v;
 const PERM = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
 const PERM_NAME = ["XYZ","XZY","YXZ","YZX","ZXY","ZYX"];
 
@@ -429,7 +432,7 @@ const NATIVE_FIELDS = 4;
    [V] Generation was verified against a golden reference captured from the
    pre-port file across 384 (sym,arch,field) combos.
    ===================================================================== */
-let Levels = [{ radix:3, gap:0.30 }, { radix:3, gap:0.06 }];
+
 
 function levelResolution(levels){ return levels.reduce((p, l) => p * l.radix, 1); }
 function decomposeDigits(u, levels){
@@ -814,7 +817,8 @@ function siteTier(occ, filled, levels, R){
   return out;
 }
 
-function blockGeometry(occ, tier, filled, levels, R){
+function meshArrays(occ, tier, filled, levels, R){
+  const started = performance.now();
   const r0 = levels[0].radix;
   const N = tier ? r0 : R;
   const sites = tier ? siteTier(occ, filled, levels, R) : null;
@@ -876,15 +880,85 @@ function blockGeometry(occ, tier, filled, levels, R){
     }
   }
 
+  const meshed = performance.now();
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < pos.length; i += 3) for (let a = 0; a < 3; a++){
+    min[a] = Math.min(min[a], pos[i+a]); max[a] = Math.max(max[a], pos[i+a]);
+  }
+  const center = pos.length ? min.map((v,a) => (v + max[a]) / 2) : [0,0,0];
+  let radiusSq = 0;
+  for (let i = 0; i < pos.length; i += 3)
+    radiusSq = Math.max(radiusSq, (pos[i]-center[0])**2 + (pos[i+1]-center[1])**2 + (pos[i+2]-center[2])**2);
+  return { pos, col, nrm, idx, quads, tris: quads * 2,
+    bounds: { center, radius: Math.sqrt(radiusSq) },
+    bytes: pos.byteLength + col.byteLength + nrm.byteLength + idx.byteLength,
+    timings: { mesh: meshed - started, bounds: performance.now() - meshed } };
+}
+
+function buildBlock(P, levels){
+  const started = performance.now();
+  const G = GROUPS[P.sym];
+  const fmode = P.field;
+  const R = levelResolution(levels);
+  const pars = { conic: conicParams(P.seed), scale: [] };
+  if (fmode >= NATIVE_FIELDS && fmode < LEGACY_FIELD_COUNT)
+    pars.scale[fmode - NATIVE_FIELDS] = planarScale(PLANAR[fmode - NATIVE_FIELDS], pars.conic, R);
+
+  const idxArr = [], vals = [];
+  for (let z = 0; z < R; z++){ const sz0 = foldedAxis(z, levels);
+    for (let y = 0; y < R; y++){ const sy0 = foldedAxis(y, levels);
+      for (let x = 0; x < R; x++){ const sx0 = foldedAxis(x, levels);
+        const s = foldOrbit([sx0, sy0, sz0], G.els);
+        if (!envelope(s[0], s[1], s[2], P.arch)) continue;
+        idxArr.push(x + R*y + R*R*z);
+        vals.push(fmode < LEGACY_FIELD_COUNT
+          ? field(s[0], s[1], s[2], fmode, P.seed, P.lift, pars, R)
+          : tierField(s[0], s[1], s[2], fmode - LEGACY_FIELD_COUNT, P.seed, levels, R));
+      }
+    }
+  }
+
+  const evaluated = performance.now();
+  const occ = new Uint8Array(R*R*R);
+  let filled = 0;
+  if (vals.length){
+    const sorted = Float64Array.from(vals).sort();
+    const want = Math.max(1, Math.round(P.density * vals.length));
+    const cut = sorted[Math.max(0, vals.length - want)];
+    for (let k = 0; k < vals.length; k++)
+      if (vals[k] >= cut){ occ[idxArr[k]] = 1; filled++; }
+  }
+
+  const selected = performance.now();
+  const geometry = meshArrays(occ, 0, filled, levels, R);
+  return { occ, R, filled, envelopeCells: vals.length, geometry,
+    timings: { evaluate: evaluated - started, select: selected - evaluated,
+      mesh: geometry.timings.mesh, bounds: geometry.timings.bounds,
+      total: performance.now() - started } };
+}
+
+return { GROUPS, ARCH_NAMES, FIELD_NAMES, NATIVE_FIELDS, LEGACY_FIELD_COUNT, LIFT_NAMES, levelResolution, buildBlock, meshArrays, autOrder };
+}
+const Core = createBimoblockCore();
+const { GROUPS, ARCH_NAMES, FIELD_NAMES, NATIVE_FIELDS, LEGACY_FIELD_COUNT, LIFT_NAMES, levelResolution } = Core;
+let Levels = [{ radix:3, gap:0.30 }, { radix:3, gap:0.06 }];
+
+function geometryFromArrays(data){
   const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setAttribute('color',    new THREE.BufferAttribute(col, 3));
-  g.setAttribute('normal',   new THREE.BufferAttribute(nrm, 3));
-  g.setIndex(new THREE.BufferAttribute(idx, 1));
-  g.computeBoundingSphere();
-  g.userData.quads = quads;
-  g.userData.tris  = quads * 2;
+  g.setAttribute('position', new THREE.BufferAttribute(data.pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(data.col, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(data.nrm, 3));
+  g.setIndex(new THREE.BufferAttribute(data.idx, 1));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(...data.bounds.center), data.bounds.radius);
+  g.userData.quads = data.quads;
+  g.userData.tris = data.tris;
+  g.userData.bytes = data.bytes;
+  g.userData.uploaded = data.pos.length === 0;
+  g.attributes.position.onUpload(() => { g.userData.uploaded = true; });
   return g;
+}
+function blockGeometry(occ, tier, filled, levels, R){
+  return geometryFromArrays(Core.meshArrays(occ, tier, filled, levels, R));
 }
 
 /* =====================================================================
@@ -912,7 +986,7 @@ function blockGeometry(occ, tier, filled, levels, R){
       table again.  Set both axes to 'free' and it is pure roam.
 
    3. ONLY THE NEIGHBOURHOOD EXISTS.  Cells are generated on demand
-      under a per-frame time budget, nearest first, cached with LRU
+      by a bounded worker pool, nearest first, cached with LRU
       eviction, and drawn from a recycled mesh pool.  The lattice is
       unbounded; the working set is a couple of hundred blocks.
    ===================================================================== */
@@ -927,7 +1001,10 @@ const CFG = {
   CACHE_MAX:   760,     // retained generated blocks (each owns geometry)
   MAX_SPAN:    62,      // clamp on the cell box scanned per rebuild
   LOD_PX:      30,      // projected CSS-pixel size below which the 3^3 proxy is used
-  MINT_MS:     5.0      // per-frame generation budget, scaled by headroom
+  INSTALL_MS:  1.0,     // soft CPU budget for accepting worker results
+  UPLOAD_BYTES: 8 * 1048576, // newly admitted geometry per frame (one oversize allowed)
+  RESULT_BYTES: 96 * 1048576,
+  CACHE_BYTES: 256 * 1048576
 };
 
 /* ---- axis roles -------------------------------------------------------
@@ -1070,55 +1147,13 @@ function cellRecipe(i, j){
   return { P, kin: { ring, drift } };
 }
 
-/* The generation half of the old generateBlockData, split out so the
-   lattice can hand it a parameter set derived from an address instead
-   of from a rung index. */
-function buildBlock(P){
-  const G = GROUPS[P.sym];
-  const fmode = P.field;
-  const levels = Levels.map(l => ({ radix: l.radix, gap: l.gap })); // deep-copy snapshot
-  const R = levelResolution(levels);
-  const pars = { conic: conicParams(P.seed), scale: [] };
-  if (fmode >= NATIVE_FIELDS && fmode < LEGACY_FIELD_COUNT)
-    pars.scale[fmode - NATIVE_FIELDS] = planarScale(PLANAR[fmode - NATIVE_FIELDS], pars.conic, R);
-
-  const idxArr = [], vals = [];
-  for (let z = 0; z < R; z++){ const sz0 = foldedAxis(z, levels);
-    for (let y = 0; y < R; y++){ const sy0 = foldedAxis(y, levels);
-      for (let x = 0; x < R; x++){ const sx0 = foldedAxis(x, levels);
-        const s = foldOrbit([sx0, sy0, sz0], G.els);
-        if (!envelope(s[0], s[1], s[2], P.arch)) continue;
-        idxArr.push(x + R*y + R*R*z);
-        vals.push(fmode < LEGACY_FIELD_COUNT
-          ? field(s[0], s[1], s[2], fmode, P.seed, P.lift, pars, R)
-          : tierField(s[0], s[1], s[2], fmode - LEGACY_FIELD_COUNT, P.seed, levels, R));
-      }
-    }
-  }
-
-  const occ = new Uint8Array(R*R*R);
-  let filled = 0;
-  if (vals.length){
-    const sorted = Float64Array.from(vals).sort();
-    const want = Math.max(1, Math.round(P.density * vals.length));
-    const cut = sorted[Math.max(0, vals.length - want)];
-    for (let k = 0; k < vals.length; k++)
-      if (vals[k] >= cut){ occ[idxArr[k]] = 1; filled++; }
-  }
-
-  const geo = blockGeometry(occ, 0, filled, levels, R);
-  return { ...P, occ, R, levels, filled, envelopeCells: vals.length,
-           geo, geoLod: null, tris: geo.userData.tris, aut: -1, seen: 0,
-           kin: null, bytes: geo.userData.quads * 156 };
-}
-
 /* The outer-level proxy (r0^3 cells) is only meshed if something actually asks
    to draw one, which for a lattice this shallow is a minority of cells. */
 function lodOf(p){
   if (!p.geoLod){
     p.geoLod = blockGeometry(p.occ, 1, p.filled, p.levels, p.R);
     p.lodTris = p.geoLod.userData.tris;
-    const add = p.geoLod.userData.quads * 156;
+    const add = p.geoLod.userData.bytes;
     p.bytes += add; cacheBytes += add;
   }
   return p.geoLod;
@@ -1278,6 +1313,11 @@ function cellWorldX(i){ return i * CFG.CELL; }
 function cellWorldZ(j){ return -j * CFG.CELL; }
 
 function applyRig(){
+  if (labelPose.x !== Rig.x || labelPose.z !== Rig.z || labelPose.h !== Rig.h
+      || labelPose.tilt !== Rig.tilt || labelPose.yaw !== Rig.yaw){
+    labelsDirty = true;
+    labelPose.x=Rig.x; labelPose.z=Rig.z; labelPose.h=Rig.h; labelPose.tilt=Rig.tilt; labelPose.yaw=Rig.yaw;
+  }
   const horiz = Rig.h / Math.tan(Rig.tilt);
   camera.position.set(Rig.x + Math.sin(Rig.yaw) * horiz, Rig.h, Rig.z + Math.cos(Rig.yaw) * horiz);
   camera.up.set(0, 1, 0);
@@ -1327,7 +1367,6 @@ scene.add(blocksG);
 
 let visible = [];            // [{i,j,key}] nearest first
 let visKeys = new Set();
-let wanted  = [];            // visible cells with nothing generated yet
 let seenTick = 0;
 let frameTris = 0;
 
@@ -1347,7 +1386,7 @@ function takeMesh(){
   const mesh = new THREE.Mesh(placeholder, new THREE.MeshStandardMaterial({
     vertexColors: true, roughness: 0.22, metalness: 0.08
   }));
-  mesh.frustumCulled = false;
+  mesh.frustumCulled = true;
   blocksG.add(mesh);
   return mesh;
 }
@@ -1359,6 +1398,7 @@ function releaseSlot(s){
 }
 
 function computeVisible(){
+  labelsDirty = true;
   applyRig();
 
   let iMin = 1e9, iMax = -1e9, jMin = 1e9, jMax = -1e9;
@@ -1406,14 +1446,13 @@ function computeVisible(){
 
   visible = list;
   visKeys = new Set();
-  wanted  = [];
   seenTick++;
 
   for (const c of list){
     c.key = keyOf(c.i, c.j);
     visKeys.add(c.key);
     const p = cache.get(c.key);
-    if (p) p.seen = seenTick; else wanted.push(c);
+    if (p) p.seen = seenTick;
   }
 
   for (const [k, s] of slots){
@@ -1426,13 +1465,14 @@ function computeVisible(){
    recently seen goes first, so backtracking over ground already walked
    is free while a long straight run steadily recycles. */
 function evict(){
-  if (cache.size <= CFG.CACHE_MAX) return;
+  if (cache.size <= CFG.CACHE_MAX && cacheBytes <= CFG.CACHE_BYTES) return;
   const cold = [];
-  for (const [k, p] of cache) if (!visKeys.has(k)) cold.push([k, p]);
+  for (const [k, p] of cache)
+    if (!visKeys.has(k) && k !== keyOf(Focus.i, Focus.j)
+        && !(Pin.want && k === keyOf(Pin.want.i, Pin.want.j))) cold.push([k, p]);
   cold.sort((a, b) => a[1].seen - b[1].seen);
-  let n = cache.size - CFG.CACHE_MAX;
   for (const [k, p] of cold){
-    if (n-- <= 0) break;
+    if (cache.size <= CFG.CACHE_MAX && cacheBytes <= CFG.CACHE_BYTES) break;
     p.geo.dispose();
     if (p.geoLod) p.geoLod.dispose();
     cacheBytes -= p.bytes;
@@ -1440,28 +1480,282 @@ function evict(){
   }
 }
 
-function serviceMint(budgetMs){
-  if (!wanted.length) return 0;
-  const t0 = performance.now();
-  let built = 0;
-  while (wanted.length){
-    const c = wanted[0];
-    if (!cache.has(c.key)){
-      const rec = cellRecipe(c.i, c.j);
-      const p = buildBlock(rec.P);
-      p.kin = rec.kin;
-      p.seen = seenTick;
-      cache.set(c.key, p);
-      cacheBytes += p.bytes;
-      built++;
-    }
-    wanted.shift();
-    if (performance.now() - t0 >= budgetMs) break;
+/* Worker jobs contain only numeric input. Rendering objects never cross threads. */
+function runNumericJob(core, job){
+  if (job.type === 'build') return core.buildBlock(job.recipe, job.levels);
+  if (job.type === 'analyze'){
+    const started = performance.now();
+    return { aut: core.autOrder(job.occ, job.R), analysisMs: performance.now() - started };
   }
-  return built;
+  throw new Error('Unknown generation job: ' + job.type);
+}
+function bimoblockWorkerMain(){
+  const core = createBimoblockCore();
+  self.onmessage = ({data: job}) => {
+    try {
+      const result = runNumericJob(core, job);
+      const transfer = job.type === 'build'
+        ? [result.occ.buffer, result.geometry.pos.buffer, result.geometry.col.buffer,
+           result.geometry.nrm.buffer, result.geometry.idx.buffer] : [];
+      self.postMessage({ jobId: job.jobId, result }, transfer);
+    } catch (error){
+      self.postMessage({ jobId: job.jobId, error: String(error.message || error) });
+    }
+  };
+  self.postMessage({ ready: true });
+}
+
+// Bounded diagnostics, available from the console as showroomPerformance().
+const Perf = {
+  frames: new Float64Array(2048), count: 0, cursor: 0, longFrames: 0,
+  phases: {}, discarded: 0, installed: 0, maxUploadBytes:0, epochStarted: performance.now(), populationMs: null,
+  sample(name, ms){
+    const p = this.phases[name] || (this.phases[name] = { count:0, total:0, max:0 });
+    p.count++; p.total += ms; p.max = Math.max(p.max, ms);
+  },
+  frame(ms){
+    this.frames[this.cursor++ % this.frames.length] = ms;
+    this.count = Math.min(this.count + 1, this.frames.length);
+    if (ms > 50) this.longFrames++;
+  },
+  reset(){
+    this.count = this.cursor = this.longFrames = this.discarded = this.installed = this.maxUploadBytes = 0;
+    this.phases = {}; this.epochStarted = performance.now(); this.populationMs = null;
+  },
+  snapshot(){
+    const f = Array.from(this.frames.subarray(0, this.count)).sort((a,b) => a-b);
+    const phases = {};
+    for (const [name,p] of Object.entries(this.phases))
+      phases[name] = { count:p.count, meanMs:p.total/p.count, maxMs:p.max };
+    return { frames:f.length, medianMs:f[Math.floor(f.length*.5)] || 0,
+      p95Ms:f[Math.min(f.length-1, Math.floor(f.length*.95))] || 0,
+      longFrames:this.longFrames, populationMs:this.populationMs, phases,
+      discarded:this.discarded, installed:this.installed, maxUploadBytes:this.maxUploadBytes,
+      pendingUploads:[...slots.values()].filter(s => s.awaitingUpload).length,
+      workers:Generation.pool.filter(s => !s.dead).length, mode:Generation.mode,
+      pending:Generation.pending.size, readyResults:Generation.results.length,
+      readyBytes:Generation.results.reduce((n,r) => n + r.bytes, 0),
+      reservedBytes:Generation.pool.reduce((n,s) => n + (s.job ? s.job.estimate : 0), 0),
+      residentBytes:cacheBytes, cacheOverBudget:cacheBytes > CFG.CACHE_BYTES,
+      visible:visible.length, missing:visible.filter(c => !cache.has(c.key)).length,
+      drawCalls:renderer.info.render.calls, triangles:renderer.info.render.triangles };
+  }
+};
+window.showroomPerformance = () => Perf.snapshot();
+window.resetShowroomPerformance = () => Perf.reset();
+const perfOptions = new URLSearchParams(location.search);
+const forceFullGeometry = perfOptions.get('fullGeometry') === '1';
+const requestedWorkers = perfOptions.has('workers') ? Number(perfOptions.get('workers')) : null;
+const workerCount = [0,1,2,4].includes(requestedWorkers) ? requestedWorkers
+  : (navigator.hardwareConcurrency >= 4 ? 2 : 1);
+const Generation = {
+  revision:0, serial:0, paused:false, suspended:false, pool:[], pending:new Map(), results:[], failures:new Map(),
+  mode:workerCount ? 'starting workers' : 'compatibility', sourceURL:null, dispatches:0,
+  resultLimit:Math.max(4, workerCount * 16)
+};
+
+function generationToken(type, key){ return Generation.revision + '/' + type + '/' + key; }
+function jobIsCurrent(job){
+  return !Generation.paused && job.revision === Generation.revision && job.key === keyOf(job.i, job.j)
+    && (job.type !== 'analyze' || cache.get(job.key) === job.specimen);
+}
+function isDemanded(job){
+  return visKeys.has(job.key) || (job.i === Focus.i && job.j === Focus.j)
+    || (Pin.want && job.i === Pin.want.i && job.j === Pin.want.j);
+}
+function invalidateGeneration(paused){
+  Generation.revision++;
+  Generation.paused = paused;
+  Generation.pending.clear(); Generation.results.length = 0; Generation.failures.clear();
+  Perf.populationMs = null; Perf.epochStarted = performance.now();
+  // Active workers finish their one job. Revision checks discard the obsolete result.
+}
+function generationFailure(job, error){
+  if (!job) return;
+  Generation.pending.delete(job.token);
+  if (!jobIsCurrent(job)) return;
+  const tries = (Generation.failures.get(job.token)?.tries || 0) + 1;
+  Generation.failures.set(job.token, { tries, message:String(error) });
+  if (tries >= 2) console.warn('Specimen generation failed', job.key, error);
+}
+function finishGeneration(slot, message){
+  const job = slot.job;
+  if (!job || message.jobId !== job.jobId) return;
+  clearTimeout(slot.timer); slot.timer = null; slot.job = null;
+  if (message.error){
+    generationFailure(job, message.error);
+    if (slot.worker) restartGenerationWorker(slot);
+    return;
+  }
+  if (!jobIsCurrent(job) || !isDemanded(job)){
+    Generation.pending.delete(job.token); Perf.discarded++; return;
+  }
+  const result = message.result;
+  const bytes = job.type === 'build' ? result.geometry.bytes + result.occ.byteLength : 0;
+  Generation.results.push({ job, result, bytes });
+  const source = slot.worker ? 'worker.' : 'compatibility.';
+  if (result.timings) for (const [name,ms] of Object.entries(result.timings)) Perf.sample(source+name, ms);
+  if (result.analysisMs != null) Perf.sample(source+'analysis', result.analysisMs);
+}
+function restartGenerationWorker(slot){
+  clearTimeout(slot.timer);
+  if (slot.worker){ slot.worker.onmessage = slot.worker.onerror = slot.worker.onmessageerror = null; slot.worker.terminate(); }
+  slot.worker = null; slot.ready = false;
+  if (slot.restarts++ < 1) startGenerationWorker(slot);
+  else slot.dead = true;
+  if (Generation.pool.every(s => s.dead)){
+    Generation.mode = 'compatibility';
+    console.warn('Workers unavailable; using conservative main-thread generation.');
+  }
+}
+function startGenerationWorker(slot){
+  const fail = error => {
+    const job = slot.job; slot.job = null;
+    generationFailure(job, error);
+    restartGenerationWorker(slot);
+  };
+  try {
+    const worker = slot.worker = new Worker(Generation.sourceURL);
+    slot.timer = setTimeout(() => fail('Worker startup timed out'), 10000);
+    worker.onerror = event => { event.preventDefault(); fail(event.message || 'Worker error'); };
+    worker.onmessageerror = () => fail('Invalid worker message');
+    worker.onmessage = ({data}) => {
+      if (data.ready){
+        clearTimeout(slot.timer); slot.timer = null; slot.ready = true;
+        Generation.mode = 'workers';
+      } else finishGeneration(slot, data);
+      dispatchGeneration();
+    };
+    slot.fail = fail;
+  } catch (error){ fail(error.message); }
+}
+function startGeneration(){
+  if (!workerCount) return;
+  // Allocate slots first: startup failures must see the complete pool.
+  Generation.pool = Array.from({length:workerCount}, () => ({worker:null, job:null, ready:false, dead:false, restarts:0}));
+  try {
+    Generation.sourceURL = URL.createObjectURL(new Blob([
+      createBimoblockCore.toString(), '\n', runNumericJob.toString(), '\n(', bimoblockWorkerMain.toString(), ')();'
+    ], {type:'text/javascript'}));
+    for (const slot of Generation.pool) startGenerationWorker(slot);
+  } catch (error){
+    for (const slot of Generation.pool) slot.dead = true;
+    Generation.mode = 'compatibility'; console.warn('Worker setup failed', error);
+  }
+}
+window.addEventListener('pagehide', () => {
+  Generation.suspended = true;
+  for (const slot of Generation.pool){
+    clearTimeout(slot.timer);
+    if (slot.worker){
+      slot.worker.onmessage = slot.worker.onerror = slot.worker.onmessageerror = null;
+      slot.worker.terminate();
+    }
+  }
+  Generation.pool = []; Generation.pending.clear(); Generation.results.length = 0;
+  if (Generation.sourceURL) URL.revokeObjectURL(Generation.sourceURL);
+  Generation.sourceURL = null;
+});
+window.addEventListener('pageshow', event => {
+  if (!event.persisted) return;
+  // Resume a back/forward-cached page without losing its unsaved catalogue settings.
+  Generation.suspended = false;
+  Generation.mode = workerCount ? 'starting workers' : 'compatibility';
+  startGeneration();
+});
+
+function nextGenerationJob(){
+  const analyze = () => {
+    const key = keyOf(Focus.i, Focus.j), p = cache.get(key), token = generationToken('analyze', key);
+    if (!p || p.aut >= 0 || Generation.pending.has(token) || (Generation.failures.get(token)?.tries || 0) >= 2) return null;
+    return { type:'analyze', i:Focus.i, j:Focus.j, key, token, specimen:p, estimate:p.occ.byteLength,
+      // Structured cloning copies this small occupancy buffer; never detach the cached original.
+      payload:{ occ:p.occ, R:p.R } };
+  };
+  const priority = [];
+  if (Pin.want) priority.push(Pin.want);
+  priority.push(Focus);
+  const makeBuild = c => {
+    const key = keyOf(c.i,c.j), token = generationToken('build', key);
+    if (cache.has(key) || Generation.pending.has(token) || (Generation.failures.get(token)?.tries || 0) >= 2) return null;
+    const rec = cellRecipe(c.i,c.j), levels = Levels.map(l => ({...l})), R = levelResolution(levels);
+    return { type:'build', i:c.i, j:c.j, key, token, rec, levels,
+      // Six independent quads per cell, 32-bit indices, plus occupancy: conservative reservation.
+      estimate:R*R*R*(6*168+1), payload:{recipe:rec.P, levels} };
+  };
+  for (const c of priority){ const job = makeBuild(c); if (job) return job; }
+  if (Generation.dispatches % 4 === 3){ const job = analyze(); if (job) return job; }
+  for (const c of visible){ const job = makeBuild(c); if (job) return job; }
+  return analyze();
+}
+function serviceGeneration(){
+  if (Generation.paused) return;
+  const started = performance.now();
+  // Re-check demand even after a result was queued, since the camera/settings can change meanwhile.
+  Generation.results = Generation.results.filter(item => {
+    if (jobIsCurrent(item.job) && isDemanded(item.job)) return true;
+    Generation.pending.delete(item.job.token); Perf.discarded++; return false;
+  });
+  const rank = item => item.job.i === Focus.i && item.job.j === Focus.j ? -2
+    : Pin.want && item.job.i === Pin.want.i && item.job.j === Pin.want.j ? -1
+    : (cellWorldX(item.job.i)-camera.position.x)**2 + (cellWorldZ(item.job.j)-camera.position.z)**2;
+  Generation.results.sort((a,b) => rank(a)-rank(b));
+  let accepted = 0, admittedBytes = 0;
+  while (Generation.results.length && accepted < 32){
+    const item = Generation.results[0], {job,result} = item;
+    if (accepted && (performance.now()-started >= CFG.INSTALL_MS || admittedBytes+item.bytes > CFG.UPLOAD_BYTES)) break;
+    Generation.results.shift(); Generation.pending.delete(job.token); Generation.failures.delete(job.token);
+    if (job.type === 'build'){
+      const p = { ...job.rec.P, occ:result.occ, R:result.R, levels:job.levels,
+        filled:result.filled, envelopeCells:result.envelopeCells,
+        geo:geometryFromArrays(result.geometry), geoLod:null, tris:result.geometry.tris,
+        aut:-1, seen:seenTick, kin:job.rec.kin, bytes:item.bytes, revision:job.revision };
+      cache.set(job.key,p); cacheBytes += p.bytes; Perf.installed++;
+      labelsDirty = true;
+      evict();
+    } else job.specimen.aut = result.aut;
+    accepted++; admittedBytes += item.bytes;
+  }
+  Perf.sample('main.install', performance.now()-started);
+  dispatchGeneration();
+  if (Perf.populationMs === null && visible.every(c => cache.has(c.key)))
+    Perf.populationMs = performance.now() - Perf.epochStarted;
+}
+
+
+// Refill idle workers on completion, not just at RAF cadence. The bounded ready
+// queue absorbs bursts; install time and upload bytes determine admission per frame.
+function dispatchGeneration(){
+  if (Generation.paused || Generation.suspended || document.hidden) return;
+  const available = Generation.mode === 'compatibility' ? [{job:null,worker:null}]
+    : Generation.pool.filter(s => s.ready && !s.dead && !s.job);
+  for (const slot of available){
+    const active = Generation.pool.filter(s => s.job);
+    if (Generation.results.length + active.length >= Generation.resultLimit) break;
+    const reserved = active.reduce((n,s) => n+s.job.estimate, 0)
+      + Generation.results.reduce((n,r) => n+r.bytes, 0);
+    const job = nextGenerationJob();
+    if (!job) break;
+    if (reserved && reserved+job.estimate > CFG.RESULT_BYTES) break;
+    job.revision = Generation.revision; job.jobId = ++Generation.serial;
+    const message = {type:job.type, jobId:job.jobId, ...job.payload};
+    Generation.pending.set(job.token,job); Generation.dispatches++; slot.job = job;
+    if (slot.worker){
+      slot.timer = setTimeout(() => slot.fail('Worker job timed out'), 30000);
+      try { slot.worker.postMessage(message); } catch (error){ slot.fail(error.message); }
+    } else {
+      // At most one complete job per compatibility frame. A single build cannot be preempted.
+      const t0 = performance.now();
+      try { finishGeneration(slot, {jobId:job.jobId, result:runNumericJob(Core,message)}); }
+      catch (error){ finishGeneration(slot, {jobId:job.jobId,error:error.message}); }
+      Perf.sample('main.compatibility', performance.now()-t0);
+    }
+  }
 }
 
 function flushLattice(){
+  invalidateGeneration(false);
+  labelsDirty = true;
   for (const [k, s] of slots){ releaseSlot(s); }
   slots.clear();
   for (const p of cache.values()){
@@ -1470,7 +1764,6 @@ function flushLattice(){
   }
   cache.clear();
   cacheBytes = 0;
-  wanted.length = 0;
   needVis = true;
   refreshInspector();
 }
@@ -1485,10 +1778,16 @@ const _s3 = new THREE.Vector3();
 const _c3 = new THREE.Color();
 
 let podCount = 0;
+const renderFrustum = new THREE.Frustum();
+const renderProjection = new THREE.Matrix4();
 
 function layout(t, dt){
   frameTris = 0;
   podCount = 0;
+  let podMatricesChanged = false, podColorsChanged = false;
+  let uploadBytes = 0, uploadCount = 0;
+  renderProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  renderFrustum.setFromProjectionMatrix(renderProjection);
 
   // CSS pixels, so the LOD threshold means the same thing on every display
   const projK = window.innerHeight / (2 * Math.tan(camera.fov * Math.PI / 360));
@@ -1507,15 +1806,19 @@ function layout(t, dt){
             rate: (((hh >>> 10) & 255) / 255 - 0.5) * 1.4 };
       slots.set(c.key, s);
     }
+    const entering = s.age < 1;
     s.age = Math.min(1, s.age + dt * 3.4);
 
     const wx = cellWorldX(c.i), wz = cellWorldZ(c.j);
     const dist = Math.hypot(camera.position.x - wx, camera.position.y, camera.position.z - wz);
     const px = CFG.BLOCK_S * projK / Math.max(dist, 0.001);
 
-    const geo = px < CFG.LOD_PX ? lodOf(p) : p.geo;
-    if (s.mesh.geometry !== geo) s.mesh.geometry = geo;
-    frameTris += px < CFG.LOD_PX ? p.lodTris : p.tris;
+    const useLod = !forceFullGeometry && px < CFG.LOD_PX;
+    const lodStarted = useLod && !p.geoLod ? performance.now() : null;
+    const geo = useLod ? lodOf(p) : p.geo;
+    if (lodStarted !== null) Perf.sample('main.proxyMesh', performance.now() - lodStarted);
+    const previousGeo = s.mesh.geometry;
+    if (previousGeo !== geo) s.mesh.geometry = geo;
 
     const k = s.age * s.age * (3 - 2 * s.age);
     const bob = 0.10 * Math.sin(t * 0.7 + c.i * 0.9 - c.j * 0.6);
@@ -1530,26 +1833,51 @@ function layout(t, dt){
     }
     s.mesh.quaternion.setFromEuler(_e);
 
+    // Cached geometry may never have reached the GPU while offscreen. Bound
+    // first draws too, rather than assuming that cache installation uploaded it.
+    s.mesh.updateMatrixWorld(true);
+    const onScreen = renderFrustum.intersectsObject(s.mesh);
+    s.mesh.visible = true; s.awaitingUpload = false;
+    if (onScreen && !geo.userData.uploaded){
+      if (uploadCount && uploadBytes + geo.userData.bytes > CFG.UPLOAD_BYTES){
+        s.awaitingUpload = true;
+        // Preserve the old representation during a delayed LOD transition.
+        if (previousGeo.userData.uploaded) s.mesh.geometry = previousGeo;
+        else s.mesh.visible = false;
+      } else {
+        uploadBytes += geo.userData.bytes; uploadCount++;
+      }
+    }
+    if (onScreen && s.mesh.visible) frameTris += s.mesh.geometry.userData.tris || 0;
+
     const mat = s.mesh.material;
     mat.opacity = k;
     const wantTransparent = k < 0.995;
     if (mat.transparent !== wantTransparent){ mat.transparent = wantTransparent; mat.needsUpdate = true; }
 
     if (podCount < CFG.POD_MAX){
-      _s3.setScalar(CFG.CELL * 0.42);
-      _q.identity();
-      _p3.set(wx, 0.012, wz);
-      _m4.compose(_p3, _q, _s3);
-      pods.setMatrixAt(podCount, _m4);
-      _c3.copy(GROUP_RGB[p.sym % GROUP_RGB.length]).multiplyScalar(0.55 + 0.45 * k);
-      pods.setColorAt(podCount, _c3);
+      const movedIndex = s.podIndex !== podCount;
+      if (movedIndex || s.podCell !== CFG.CELL){
+        _s3.setScalar(CFG.CELL * 0.42);
+        _q.identity(); _p3.set(wx, 0.012, wz);
+        _m4.compose(_p3, _q, _s3);
+        pods.setMatrixAt(podCount, _m4);
+        podMatricesChanged = true;
+      }
+      if (movedIndex || entering || s.podSym !== p.sym){
+        _c3.copy(GROUP_RGB[p.sym % GROUP_RGB.length]).multiplyScalar(0.55 + 0.45 * k);
+        pods.setColorAt(podCount, _c3);
+        podColorsChanged = true;
+      }
+      s.podIndex = podCount; s.podCell = CFG.CELL; s.podSym = p.sym;
       podCount++;
     }
   }
 
+  Perf.maxUploadBytes = Math.max(Perf.maxUploadBytes, uploadBytes);
   pods.count = podCount;
-  pods.instanceMatrix.needsUpdate = true;
-  if (pods.instanceColor) pods.instanceColor.needsUpdate = true;
+  if (podMatricesChanged) pods.instanceMatrix.needsUpdate = true;
+  if (podColorsChanged && pods.instanceColor) pods.instanceColor.needsUpdate = true;
 
   // Floor plate rides the target; the grid stays welded to world space.
   const reach = 34 + Rig.h * 4.2;
@@ -1582,8 +1910,11 @@ function layout(t, dt){
    ===================================================================== */
 const labelCanvas = document.getElementById('labels');
 const lctx = labelCanvas.getContext('2d');
+let labelsDirty = true;
+const labelPose = { x:NaN, z:NaN, h:NaN, tilt:NaN, yaw:NaN };
 
 function sizeLabels(){
+  labelsDirty = true;
   const dpr = Math.min(window.devicePixelRatio, 2);
   labelCanvas.width  = Math.floor(window.innerWidth  * dpr);
   labelCanvas.height = Math.floor(window.innerHeight * dpr);
@@ -1594,6 +1925,8 @@ function sizeLabels(){
 sizeLabels();
 
 function drawLabels(){
+  if (!labelsDirty) return;
+  labelsDirty = false;
   lctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
   if (!State.labels || Rig.h > 30) return;
 
@@ -1658,10 +1991,10 @@ function focusedData(){ return cache.get(keyOf(Focus.i, Focus.j)) || null; }
 function refreshInspector(){
   const p = focusedData();
   if (!p){
-    elInspect.innerHTML = `<span class="k">cell</span> <b>${Focus.i}, ${Focus.j}</b>\n<span class="k">minting…</span>`;
+    elInspect.innerHTML = `<span class="k">cell</span> <b>${Focus.i}, ${Focus.j}</b>\n<span class="k">${(Generation.failures.get(generationToken('build', keyOf(Focus.i,Focus.j)))?.tries || 0) >= 2 ? 'generation failed — shuffle to retry' : 'minting…'}</span>`;
     return;
   }
-  if (p.aut < 0) p.aut = autOrder(p.occ, p.R);
+
   const g = GROUPS[p.sym];
   const px = ROLE_BY_ID[Axis.x].count ? idiv(Focus.i, ROLE_BY_ID[Axis.x].count) : Focus.i;
   const py = ROLE_BY_ID[Axis.y].count ? idiv(Focus.j, ROLE_BY_ID[Axis.y].count) : Focus.j;
@@ -1673,15 +2006,16 @@ function refreshInspector(){
     `<span class="k">field</span> <b>${FIELD_NAMES[p.field]}</b>` +
       (p.field >= NATIVE_FIELDS && p.field < LEGACY_FIELD_COUNT ? ` <span class="k">/</span> <b>${LIFT_NAMES[p.lift]}</b>` : '') + `\n` +
     `<span class="k">resolution</span> <b>${p.R}</b> <span class="k">[${p.levels.map(l=>l.radix).join('×')}]</span>\n` +
-    `<span class="k">aut-order</span> <b>${p.aut}</b> <span class="k">of ${g.order}</span>\n` +
+    `<span class="k">aut-order</span> <b>${p.aut < 0 ? ((Generation.failures.get(generationToken('analyze', keyOf(Focus.i,Focus.j)))?.tries || 0) >= 2 ? 'unavailable' : 'calculating…') : p.aut}</b> <span class="k">of ${g.order}</span>\n` +
     `<span class="k">voxels</span> <b>${p.filled}</b> <span class="k">/ ${p.envelopeCells}</span>\n` +
     `<span class="k">density</span> <b>${(p.density * 100).toFixed(0)}%</b>\n` +
     `<span class="k">seed</span> <b>#${(p.seed >>> 0).toString(16).padStart(8,'0')}</b>\n` +
     (p.kin
       ? `<span class="k">kin</span> <b>ring ${p.kin.ring}</b> <span class="k">of ${Pin.radius} · ${p.kin.drift.length ? 'drift ' + p.kin.drift.join(' ') : 'pure inheritance'}</span>\n`
       : '') +
-    `<span class="k">resident</span> <b>${cache.size}</b> <span class="k">blocks · ${(cacheBytes/1048576).toFixed(0)} MB · ${visible.length} drawn</span>\n` +
-    `<span class="k">stream tris</span> <b>${(frameTris / 1000).toFixed(0)}k</b> <span class="k">· ${fps.toFixed(0)} fps</span>`;
+    `<span class="k">resident</span> <b>${cache.size}</b> <span class="k">blocks · ${(cacheBytes/1048576).toFixed(0)} MB · ${visible.length} nearby</span>\n` +
+    `<span class="k">stream tris</span> <b>${(frameTris / 1000).toFixed(0)}k</b> <span class="k">· ${fps.toFixed(0)} fps</span>\n` +
+    `<span class="k">generation</span> <b>${Generation.mode === 'workers' ? Generation.pool.filter(s => !s.dead).length + ' workers' : Generation.mode}</b> <span class="k">· ${Generation.pending.size} pending${cacheBytes > CFG.CACHE_BYTES ? ' · visible set over cache target' : ''}</span>`;
 }
 
 function buildLegend(){
@@ -1718,6 +2052,7 @@ function unpin(){
 }
 
 function setFocus(i, j, announce){
+  labelsDirty = true;
   Focus.i = i; Focus.j = j;
   if (Bloom.on) pinAt(i, j);
   refreshInspector();
@@ -1735,6 +2070,7 @@ let needVis = true;
 let lastVisX = 1e9, lastVisZ = 1e9, lastVisH = 0, lastVisYaw = 0, lastVisTilt = 0;
 
 function markMoved(){
+  labelsDirty = true;
   if (Math.abs(Rig.x - lastVisX) > CFG.CELL * 0.34 ||
       Math.abs(Rig.z - lastVisZ) > CFG.CELL * 0.34 ||
       Math.abs(Rig.h - lastVisH) > lastVisH * 0.03 ||
@@ -1964,7 +2300,9 @@ function debounce(fn, ms){
   let h = 0;
   return (...a) => { if (h) clearTimeout(h); h = setTimeout(() => { h = 0; fn(...a); }, ms); };
 }
-const applyDensity = debounce(() => flushLattice(), 200);
+const commitConfiguration = debounce(() => flushLattice(), 200);
+function applyConfiguration(){ invalidateGeneration(true); commitConfiguration(); }
+const applyDensity = applyConfiguration;
 inDens.addEventListener('input', () => {
   Mint.density = parseInt(inDens.value, 10) / 100;
   setStatus('generation density ' + inDens.value + '%');
@@ -1980,7 +2318,7 @@ inDens.addEventListener('input', () => {
    safe ceiling here is much lower.
    ===================================================================== */
 const MAX_R = 32;  // covers every shipped preset (tower3=27, tower4=16, hetero=24) with headroom
-const applyLevels = debounce(() => flushLattice(), 200);
+const applyLevels = applyConfiguration;
 const lvRows = document.getElementById('lvrows'), resLine = document.getElementById('resLine');
 
 function renderLevelRows(){
@@ -2138,6 +2476,7 @@ btnBloom.addEventListener('click', () => {
 });
 btnLabels.addEventListener('click', () => {
   State.labels = !State.labels;
+  labelsDirty = true;
   btnLabels.classList.toggle('on', State.labels);
 });
 btnKey.addEventListener('click', () => {
@@ -2321,12 +2660,13 @@ applyRig();
 computeVisible();
 needVis = false;
 lastVisX = Rig.x; lastVisZ = Rig.z; lastVisH = Rig.h; lastVisYaw = Rig.yaw; lastVisTilt = Rig.tilt;
-// The first screenful is worth a stall; after that everything is budgeted.
-serviceMint(260);
+startGeneration();
 
 function frame(){
   requestAnimationFrame(frame);
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = clock.getDelta();
+  Perf.frame(rawDt * 1000);
+  const dt = Math.min(rawDt, 0.05);
   State.time += dt;
 
   // Inertial glide after a flick.
@@ -2339,7 +2679,9 @@ function frame(){
   }
 
   if (needVis){
+    const visibilityStarted = performance.now();
     computeVisible();
+    Perf.sample('main.visibility', performance.now() - visibilityStarted);
     needVis = false;
     lastVisX = Rig.x; lastVisZ = Rig.z; lastVisH = Rig.h;
     lastVisYaw = Rig.yaw; lastVisTilt = Rig.tilt;
@@ -2347,21 +2689,19 @@ function frame(){
     applyRig();
   }
 
-  /* Minting is the only thing in the frame that can be made to wait, so
-     it takes whatever headroom there is: generous while the horizon is
-     filling and the frame rate is holding, throttled the moment it is
-     not. */
-  serviceMint(fps > 52 ? CFG.MINT_MS * 1.8 : fps > 38 ? CFG.MINT_MS : CFG.MINT_MS * 0.5);
+  serviceGeneration();
 
   // A parked pin (from a permalink, or a bloom requested before its
   // anchor had been minted) retries until the anchor exists.
   if (Pin.want) pinAt(Pin.want.i, Pin.want.j);
 
+  const layoutStarted = performance.now();
   layout(State.time, dt);
+  Perf.sample('main.layout', performance.now() - layoutStarted);
 
   if (hashTimer > 0){ hashTimer -= dt; if (hashTimer <= 0) commitHash(); }
 
-  fps += (1 / Math.max(dt, 1e-4) - fps) * Math.min(1, dt * 3);
+  fps += (1 / Math.max(rawDt, 1e-4) - fps) * Math.min(1, dt * 3);
   hudT += dt;
   if (hudT >= 0.4){
     hudT = 0;
@@ -2378,8 +2718,12 @@ function frame(){
   }
 
   TWEEN.update();
+  const renderStarted = performance.now();
   renderer.render(scene, camera);
+  Perf.sample('main.renderSubmission', performance.now() - renderStarted);
+  const labelStarted = performance.now();
   drawLabels();
+  Perf.sample('main.labels', performance.now() - labelStarted);
 }
 
 frame();
