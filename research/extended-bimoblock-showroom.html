@@ -244,6 +244,7 @@
     <select id="sym"   title="Symmetry group held constant (unless an axis enumerates it)"></select>
     <select id="arch"  title="Archetype envelope held constant (unless an axis enumerates it)"></select>
     <select id="field" title="Scalar field held constant (unless an axis enumerates it)"></select>
+    <select id="colorMode" title="How each specimen is colored"></select>
   </div>
   <div class="bar"></div>
   <div class="grp">
@@ -361,14 +362,28 @@ const GROUPS = [
 });
 
 function foldOrbit(v, els){
-  let bx = v[0], by = v[1], bz = v[2];
+  let bx = v[0], by = v[1], bz = v[2], bi = 0;
   for (let i = 1; i < els.length; i++){
     const w = applyG(v, els[i]);
     if (w[0] < bx || (w[0] === bx && (w[1] < by || (w[1] === by && w[2] < bz)))){
-      bx = w[0]; by = w[1]; bz = w[2];
+      bx = w[0]; by = w[1]; bz = w[2]; bi = i;
     }
   }
-  return [bx, by, bz];
+  return [bx, by, bz, bi]; // bi: index into els of the winning element (existing callers only read [0..2])
+}
+/* Deterministic hue-per-orbit palette, pure math so it works identically in
+   worker threads. Evenly spaced around the wheel so |els| distinct fold
+   representatives stay maximally distinguishable regardless of group order. */
+function hslToRgb(h, s, l){
+  const c = (1 - Math.abs(2*l - 1)) * s, hp = ((h % 360) + 360) % 360 / 60;
+  const x = c * (1 - Math.abs(hp % 2 - 1));
+  const t = hp < 1 ? [c,x,0] : hp < 2 ? [x,c,0] : hp < 3 ? [0,c,x]
+          : hp < 4 ? [0,x,c] : hp < 5 ? [x,0,c] : [c,0,x];
+  const m = l - c / 2;
+  return [t[0] + m, t[1] + m, t[2] + m];
+}
+function orbitColor(bi, order){
+  return hslToRgb((bi / Math.max(1, order)) * 360, 0.62, 0.55);
 }
 
 const ARCH_NAMES = ["starship","mech","totem","crystal","orbiter","full",
@@ -824,7 +839,7 @@ function siteTier(occ, filled, levels, R){
   return out;
 }
 
-function meshArrays(occ, tier, filled, levels, R){
+function meshArrays(occ, tier, filled, levels, R, orbit, orbitOrder){
   const started = performance.now();
   const r0 = levels[0].radix;
   const N = tier ? r0 : R;
@@ -834,6 +849,10 @@ function meshArrays(occ, tier, filled, levels, R){
     : (x, y, z) => occ[x + R*y + R*R*z] !== 0;
   const axis = tierAxisLayout(levels, tier);
   const centers = axis.centers, cellSize = axis.cellSize;
+  // Orbit-index coloring only has a well-defined meaning at full resolution —
+  // the LOD proxy's cells are aggregates of several voxels that may carry
+  // different orbit indices, so it always stays on the gamut attribute.
+  const wantOrbit = !tier && !!orbit && orbitOrder > 0;
 
   // Occupied logical neighbours hide a face only when their physical cubes
   // still touch.  A non-zero gap at any crossed tier boundary exposes both
@@ -858,12 +877,21 @@ function meshArrays(occ, tier, filled, levels, R){
 
   const pos = new Float32Array(quads * 12);
   const col = new Float32Array(quads * 12);
+  const colOrbit = wantOrbit ? new Float32Array(quads * 12) : null;
   const nrm = new Float32Array(quads * 12);
   const idx = new (quads * 4 > 65535 ? Uint32Array : Uint16Array)(quads * 6);
 
   let v = 0, o = 0, io = 0;
   for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++){
     if (!at(x, y, z)) continue;
+    // One flat orbit color per voxel, not per vertex — every corner of every
+    // face on this cube shares it, so orbit boundaries land exactly on cube
+    // faces rather than fading like the gamut gradient does.
+    let ocR, ocG, ocB;
+    if (wantOrbit){
+      const oc = orbitColor(orbit[x + R*y + R*R*z], orbitOrder);
+      ocR = oc[0]; ocG = oc[1]; ocB = oc[2];
+    }
     for (const f of OBJ_FACES){
       const nx = x + f.d[0], ny = y + f.d[1], nz = z + f.d[2];
       if (occludes(x, y, z, nx, ny, nz, f)) continue;
@@ -877,6 +905,7 @@ function meshArrays(occ, tier, filled, levels, R){
         col[o]   = px + 0.5;
         col[o+1] = py + 0.5;
         col[o+2] = pz + 0.5;
+        if (wantOrbit){ colOrbit[o] = ocR; colOrbit[o+1] = ocG; colOrbit[o+2] = ocB; }
 
         nrm[o] = f.d[0]; nrm[o+1] = f.d[1]; nrm[o+2] = f.d[2];
         o += 3;
@@ -896,9 +925,9 @@ function meshArrays(occ, tier, filled, levels, R){
   let radiusSq = 0;
   for (let i = 0; i < pos.length; i += 3)
     radiusSq = Math.max(radiusSq, (pos[i]-center[0])**2 + (pos[i+1]-center[1])**2 + (pos[i+2]-center[2])**2);
-  return { pos, col, nrm, idx, quads, tris: quads * 2,
+  return { pos, col, colOrbit, nrm, idx, quads, tris: quads * 2,
     bounds: { center, radius: Math.sqrt(radiusSq) },
-    bytes: pos.byteLength + col.byteLength + nrm.byteLength + idx.byteLength,
+    bytes: pos.byteLength + col.byteLength + (colOrbit ? colOrbit.byteLength : 0) + nrm.byteLength + idx.byteLength,
     timings: { mesh: meshed - started, bounds: performance.now() - meshed } };
 }
 
@@ -907,16 +936,20 @@ function meshArrays(occ, tier, filled, levels, R){
 function tierFolder(P, levels, R){
   const axes = Array.from({length:R}, (_,u)=>foldedAxis(u, levels));
   const digits = Array.from({length:R}, (_,u)=>decomposeDigits(u, levels));
+  const orbitTables = [];
   const tables = levels.map(l=>{
-    const r=l.radix, h=(r-1)/2, table=new Uint16Array(r*r*r);
+    const r=l.radix, h=(r-1)/2, table=new Uint16Array(r*r*r), orbitTable=new Uint8Array(r*r*r);
     const group=GROUPS[l.sym == null || l.sym < 0 ? P.sym : l.sym];
     for(let z=0;z<r;z++) for(let y=0;y<r;y++) for(let x=0;x<r;x++){
       const v=foldOrbit([x-h,y-h,z-h],group.els);
-      table[x+r*y+r*r*z]=(v[0]+h)+r*(v[1]+h)+r*r*(v[2]+h);
+      const idx=x+r*y+r*r*z;
+      table[idx]=(v[0]+h)+r*(v[1]+h)+r*r*(v[2]+h);
+      orbitTable[idx]=v[3];
     }
+    orbitTables.push(orbitTable);
     return table;
   });
-  return (x,y,z)=>{
+  const fold = (x,y,z)=>{
     let a=0,b=0,c=0;
     for(let i=0;i<levels.length;i++){
       const r=levels[i].radix, v=tables[i][digits[x][i]+r*digits[y][i]+r*r*digits[z][i]];
@@ -924,6 +957,13 @@ function tierFolder(P, levels, R){
     }
     return [axes[a],axes[b],axes[c]];
   };
+  // Per-voxel orbit index for the OUTER tier only — the same tier
+  // specimenChiral() treats as the specimen's macro identity when tiers
+  // disagree. A composite index across every independent tier is future work.
+  const r0 = levels[0].radix;
+  fold.outerOrbit = (x,y,z) => orbitTables[0][digits[x][0] + r0*digits[y][0] + r0*r0*digits[z][0]];
+  fold.outerOrder = GROUPS[levels[0].sym == null || levels[0].sym < 0 ? P.sym : levels[0].sym].order;
+  return fold;
 }
 
 function buildBlock(P, levels){
@@ -932,17 +972,23 @@ function buildBlock(P, levels){
   const fmode = P.field;
   const R = levelResolution(levels);
   const foldTier = P.tierSymmetry ? tierFolder(P, levels, R) : null;
+  const orbitOrder = foldTier ? foldTier.outerOrder : G.order;
   const pars = { conic: conicParams(P.seed), scale: [] };
   if (fmode >= NATIVE_FIELDS && fmode < LEGACY_FIELD_COUNT)
     pars.scale[fmode - NATIVE_FIELDS] = planarScale(PLANAR[fmode - NATIVE_FIELDS], pars.conic, R);
 
   const idxArr = [], vals = [];
+  const orbit = new Uint8Array(R*R*R); // winning fold-element index per cell (only meaningful where occ ends up 1)
   for (let z = 0; z < R; z++){ const sz0 = foldedAxis(z, levels);
     for (let y = 0; y < R; y++){ const sy0 = foldedAxis(y, levels);
       for (let x = 0; x < R; x++){ const sx0 = foldedAxis(x, levels);
-        const s = foldTier ? foldTier(x,y,z) : foldOrbit([sx0, sy0, sz0], G.els);
+        let s, bi;
+        if (foldTier){ s = foldTier(x,y,z); bi = foldTier.outerOrbit(x,y,z); }
+        else { s = foldOrbit([sx0, sy0, sz0], G.els); bi = s[3]; }
         if (!envelope(s[0], s[1], s[2], P.arch)) continue;
-        idxArr.push(x + R*y + R*R*z);
+        const flat = x + R*y + R*R*z;
+        idxArr.push(flat);
+        orbit[flat] = bi;
         vals.push(fmode < LEGACY_FIELD_COUNT
           ? field(s[0], s[1], s[2], fmode, P.seed, P.lift, pars, R)
           : tierField(s[0], s[1], s[2], fmode - LEGACY_FIELD_COUNT, P.seed, levels, R));
@@ -962,7 +1008,7 @@ function buildBlock(P, levels){
   }
 
   const selected = performance.now();
-  const geometry = meshArrays(occ, 0, filled, levels, R);
+  const geometry = meshArrays(occ, 0, filled, levels, R, orbit, orbitOrder);
   return { occ, R, filled, envelopeCells: vals.length, geometry,
     timings: { evaluate: evaluated - started, select: selected - evaluated,
       mesh: geometry.timings.mesh, bounds: geometry.timings.bounds,
@@ -978,12 +1024,28 @@ function symmetryLabel(p, short=false){
   const name=i=>short ? GROUPS[i].name.split(':')[0] : GROUPS[i].name;
   return p.tierSymmetry ? p.levels.map(l=>name(l.sym == null || l.sym < 0 ? p.sym : l.sym)).join(' / ') : name(p.sym);
 }
+/* Chirality is a property of a whole subgroup (every element has det>0 or it
+   doesn't), never a per-voxel quantity, so this resolves to one flag per
+   specimen. In independent-tier mode that's the OUTER tier's group, since the
+   outer tier sets the macro silhouette a glance at the specimen actually
+   shows — the same "inherit specimen group" sentinel used by symmetryLabel. */
+function specimenChiral(p){
+  if (p.tierSymmetry && p.levels && p.levels.length){
+    const l0 = p.levels[0];
+    const gi = (l0.sym == null || l0.sym < 0) ? p.sym : l0.sym;
+    return GROUPS[gi].chiral;
+  }
+  return GROUPS[p.sym].chiral;
+}
 let Levels = [{ radix:3, gap:0.30 }, { radix:3, gap:0.06 }];
 
 function geometryFromArrays(data){
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(data.pos, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(data.col, 3));
+  const colGamut = new THREE.BufferAttribute(data.col, 3);
+  g.setAttribute('colorGamut', colGamut);
+  g.setAttribute('color', colGamut); // default binding — identical to prior behavior
+  if (data.colOrbit) g.setAttribute('colorOrbit', new THREE.BufferAttribute(data.colOrbit, 3));
   g.setAttribute('normal', new THREE.BufferAttribute(data.nrm, 3));
   g.setIndex(new THREE.BufferAttribute(data.idx, 1));
   g.boundingSphere = new THREE.Sphere(new THREE.Vector3(...data.bounds.center), data.bounds.radius);
@@ -991,6 +1053,7 @@ function geometryFromArrays(data){
   g.userData.tris = data.tris;
   g.userData.bytes = data.bytes;
   g.userData.uploaded = data.pos.length === 0;
+  g.userData.colorBound = 'gamut';
   g.attributes.position.onUpload(() => { g.userData.uploaded = true; });
   return g;
 }
@@ -1533,7 +1596,8 @@ function bimoblockWorkerMain(){
       const result = runNumericJob(core, job);
       const transfer = job.type === 'build'
         ? [result.occ.buffer, result.geometry.pos.buffer, result.geometry.col.buffer,
-           result.geometry.nrm.buffer, result.geometry.idx.buffer] : [];
+           result.geometry.nrm.buffer, result.geometry.idx.buffer,
+           ...(result.geometry.colOrbit ? [result.geometry.colOrbit.buffer] : [])] : [];
       self.postMessage({ jobId: job.jobId, result }, transfer);
     } catch (error){
       self.postMessage({ jobId: job.jobId, error: String(error.message || error) });
@@ -1718,8 +1782,9 @@ function nextGenerationJob(){
     const rec = cellRecipe(c.i,c.j), levels = Levels.map(l => ({...l})), R = levelResolution(levels);
     rec.P.tierSymmetry = TierSymmetry;
     return { type:'build', i:c.i, j:c.j, key, token, rec, levels,
-      // Six independent quads per cell, 32-bit indices, plus occupancy: conservative reservation.
-      estimate:R*R*R*(6*168+1), payload:{recipe:rec.P, levels} };
+      // Six independent quads per cell, 32-bit indices, occupancy, plus the
+      // colOrbit buffer alongside the existing gamut one: conservative reservation.
+      estimate:R*R*R*(6*216+1), payload:{recipe:rec.P, levels} };
   };
   for (const c of priority){ const job = makeBuild(c); if (job) return job; }
   if (Generation.dispatches % 4 === 3){ const job = analyze(); if (job) return job; }
@@ -1858,6 +1923,17 @@ function layout(t, dt){
     const previousGeo = s.mesh.geometry;
     if (previousGeo !== geo) s.mesh.geometry = geo;
 
+    // Orbit-index coloring lives on a second attribute (colorOrbit) rather than
+    // overwriting colorGamut, so this only swaps which one the material reads
+    // as 'color' — cheap, and a no-op once every visible geometry has caught up
+    // to the current mode. Geometries without colorOrbit (LOD proxies, or any
+    // specimen generated before this mode existed) simply stay on gamut.
+    const wantAttr = (State.colorMode === 'orbit' && geo.attributes.colorOrbit) ? 'orbit' : 'gamut';
+    if (geo.userData.colorBound !== wantAttr){
+      geo.setAttribute('color', wantAttr === 'orbit' ? geo.attributes.colorOrbit : geo.attributes.colorGamut);
+      geo.userData.colorBound = wantAttr;
+    }
+
     const k = s.age * s.age * (3 - 2 * s.age);
     const bob = 0.10 * Math.sin(t * 0.7 + c.i * 0.9 - c.j * 0.6);
     s.mesh.position.set(wx, hover + bob + (1 - k) * 1.4, wz);
@@ -1892,6 +1968,17 @@ function layout(t, dt){
     mat.opacity = k;
     const wantTransparent = k < 0.995;
     if (mat.transparent !== wantTransparent){ mat.transparent = wantTransparent; mat.needsUpdate = true; }
+
+    // Additive tint, not a replacement: material.color multiplies the baked-in
+    // gamut vertex colors, so 'gamut' mode (white, i.e. ×1) leaves them exactly
+    // as before, and 'chiral' mode shifts the whole specimen toward one of two
+    // accents without touching the underlying geometry or its color attribute.
+    if (State.colorMode === 'chiral'){
+      const chiral = specimenChiral(p);
+      mat.color.setRGB(chiral ? 1.00 : 0.62, chiral ? 0.82 : 0.72, chiral ? 0.42 : 0.88);
+    } else {
+      mat.color.setRGB(1, 1, 1);
+    }
 
     if (podCount < CFG.POD_MAX){
       const movedIndex = s.podIndex !== podCount;
@@ -2001,7 +2088,8 @@ function drawLabels(){
    ===================================================================== */
 const State = {
   align: false, labels: true, legend: true,
-  spin: 0.34, haze: 0.42, time: 0
+  spin: 0.34, haze: 0.42, time: 0,
+  colorMode: 'gamut'   // 'gamut' | 'chiral' — see specimenChiral() below
 };
 const Bloom = { on: false };
 const Focus = { i:0, j:0 };
@@ -2288,6 +2376,7 @@ const selAxY  = document.getElementById('axY');
 const selSym  = document.getElementById('sym');
 const selArch = document.getElementById('arch');
 const selFld  = document.getElementById('field');
+const selColor = document.getElementById('colorMode');
 
 ROLES.forEach(r => opt(selAxX, r.id, 'x axis: ' + r.label, r.id === Axis.x));
 ROLES.forEach(r => opt(selAxY, r.id, 'y axis: ' + r.label, r.id === Axis.y));
@@ -2298,6 +2387,14 @@ opt(selArch, '-1', 'archetype: roam', true);
 ARCH_NAMES.forEach((n, i) => opt(selArch, String(i), 'archetype: ' + n));
 opt(selFld, '-1', 'field: roam', true);
 FIELD_NAMES.forEach((n, i) => opt(selFld, String(i), 'field: ' + n));
+
+// Additive display modes only — never touch generation, so switching never
+// invalidates the cache or needs flushLattice(). Specimens built before this
+// mode existed (or LOD proxies, which never carry orbit data) just have no
+// colorOrbit attribute and layout() below falls back to gamut for them.
+opt(selColor, 'gamut', 'color: gamut position', true);
+opt(selColor, 'chiral', 'color: chirality');
+opt(selColor, 'orbit', 'color: orbit index');
 
 function syncFilterEnablement(){
   selSym.disabled  = (Axis.x === 'sym'   || Axis.y === 'sym');
@@ -2324,6 +2421,13 @@ selAxY.addEventListener('change', () => setAxis('y', selAxY.value));
 selSym.addEventListener('change',  () => { Filter.sym   = parseInt(selSym.value, 10);  flushLattice(); });
 selArch.addEventListener('change', () => { Filter.arch  = parseInt(selArch.value, 10); flushLattice(); });
 selFld.addEventListener('change',  () => { Filter.field = parseInt(selFld.value, 10);  flushLattice(); });
+selColor.addEventListener('change', () => {
+  State.colorMode = selColor.value;
+  const label = State.colorMode === 'chiral' ? 'chirality (amber = chiral, blue = achiral)'
+    : State.colorMode === 'orbit' ? 'orbit index (hue = which symmetric copy folded here)'
+    : 'gamut position';
+  setStatus('color mode: ' + label);
+});
 
 const inDens  = document.getElementById('dens');
 const inPitch = document.getElementById('pitch');
