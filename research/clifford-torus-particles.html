@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clifford torus — volume flow in S³</title>
+<style>
+  :root{
+    --bg:#0f0d18; --panel:#171327; --panel-2:#1e1932; --line:#332a4d;
+    --ink:#d7d1e6; --ink-dim:#8e86a8;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI",Helvetica,Arial,sans-serif;overflow:hidden}
+  canvas{display:block;position:fixed;inset:0}
+  .num{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+
+  #panel{position:fixed;top:0;left:0;bottom:0;width:336px;background:var(--panel);
+    border-right:1px solid var(--line);overflow-y:auto;overscroll-behavior:contain;
+    padding:14px 16px 40px;transition:transform .18s ease}
+  #panel.hidden{transform:translateX(-100%)}
+  #panel h1{font-size:15px;font-weight:600;margin:0 0 2px}
+  #panel p.sub{margin:0 0 14px;color:var(--ink-dim);font-size:12px}
+  fieldset{border:0;border-top:1px solid var(--line);margin:16px 0 0;padding:12px 0 0}
+  legend{padding:0 8px 0 0;color:var(--ink-dim);font-size:12px}
+  .note{margin:8px 0 0;color:var(--ink-dim);font-size:11.5px}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  label.f{display:block;color:var(--ink-dim);font-size:11.5px;margin-bottom:3px}
+  input[type=number]{width:100%;background:var(--panel-2);border:1px solid var(--line);
+    color:var(--ink);border-radius:4px;padding:5px 7px;font:inherit}
+  input[type=range]{width:100%;accent-color:#7c6cf0;height:16px;margin:0}
+  input[type=checkbox]{accent-color:#7c6cf0}
+  select{background:var(--panel-2);border:1px solid var(--line);color:var(--ink);
+    border-radius:4px;padding:4px 6px;font:inherit;width:100%}
+  button{background:var(--panel-2);border:1px solid var(--line);color:var(--ink);
+    border-radius:4px;padding:5px 9px;font:inherit;cursor:pointer}
+  button:hover{border-color:#584a7d}
+  button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #7c6cf0;outline-offset:1px}
+
+  .rot{display:grid;grid-template-columns:34px 1fr 1fr;gap:6px;align-items:center;margin-bottom:5px}
+  .rot .tag{font-family:ui-monospace,monospace;font-size:12px}
+  .rot.slide .tag{color:var(--ink-dim)}
+  .rot.shape .tag{color:#b9a6ff}
+  .hdr{display:grid;grid-template-columns:34px 1fr 1fr;gap:6px;color:var(--ink-dim);
+    font-size:11px;margin-bottom:4px}
+
+  .srow{display:grid;grid-template-columns:86px 1fr 50px;gap:8px;align-items:center;margin-bottom:6px}
+  .srow span:first-child{color:var(--ink-dim);font-size:11.5px}
+  .srow .v{text-align:right;font-size:11.5px;color:var(--ink-dim)}
+  .crow{display:flex;gap:6px;align-items:center;font-size:11.5px;color:var(--ink-dim);margin-bottom:5px}
+
+  .lrow{display:grid;grid-template-columns:16px 1fr 60px 40px;gap:8px;align-items:center;margin-bottom:5px}
+  .sw{width:10px;height:10px;border-radius:2px}
+
+  #readout{position:fixed;right:0;top:0;padding:12px 16px;text-align:right;
+    color:var(--ink-dim);font-size:12px;pointer-events:none}
+  #readout b{color:var(--ink);font-weight:600}
+  #readout .warn{color:#f2a33c}
+  #toggle{position:fixed;left:12px;top:12px;z-index:5;display:none}
+  #panel.hidden ~ #toggle{display:block}
+  #hint{position:fixed;left:352px;bottom:12px;color:var(--ink-dim);font-size:11.5px}
+  #panel.hidden ~ #hint{left:12px}
+  @media (max-width:720px){ #panel{width:100%} #hint{display:none} }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="panel">
+  <h1>Clifford torus in R<sup>4</sup></h1>
+  <p class="sub">Surface, Villarceau circles, and a particle gas filling the solid torus in S<sup>3</sup>.</p>
+
+  <fieldset>
+    <legend>Ratio s : S</legend>
+    <div class="grid2">
+      <div><label class="f" for="mIn">M (minor)</label><input id="mIn" type="number" min="1" max="32" step="1" value="1"></div>
+      <div><label class="f" for="nIn">N (major)</label><input id="nIn" type="number" min="1" max="32" step="1" value="1"></div>
+    </div>
+    <div id="derived" class="num" style="margin-top:8px;color:var(--ink-dim);font-size:11.5px"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Particles</legend>
+    <div id="parts"></div>
+    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+      <button id="bSeed">Reseed</button>
+      <button id="bLam">Pure Hopf flow</button>
+      <button id="bGas">Bouncing gas</button>
+    </div>
+    <p class="note">Motion is exact geodesic flow on S<sup>3</sup>. At alignment 1 every particle rides a
+      Hopf fibre and orbits at fixed radius forever; below that it sweeps in χ and reflects off the wall.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>SO(4) rotation</legend>
+    <div class="hdr"><span>plane</span><span>angle</span><span>spin</span></div>
+    <div id="rots"></div>
+    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+      <button id="bZero">Zero angles</button>
+      <button id="bStop">Stop spins</button>
+      <button id="bIso">Left-isoclinic</button>
+    </div>
+    <p class="note">xy and zw fix the surface and slide the parametrisation. The other four deform
+      the projection into a Dupin cyclide. The rotation is applied at draw time, so it never
+      disturbs the simulation.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Surface and curves</legend>
+    <div id="lines"></div>
+    <div id="surf" style="margin-top:8px"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>View</legend>
+    <div id="view"></div>
+    <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+      <button id="bReset">Reset camera</button>
+      <button id="bHide">Hide panel</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Presets</legend>
+    <div id="presets" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+  </fieldset>
+</div>
+
+<button id="toggle">Show panel</button>
+<div id="readout" class="num"></div>
+<div id="hint">drag orbit · shift-drag pan · wheel zoom · space pause · h panel</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+'use strict';
+const TAU = Math.PI * 2;
+
+/* ---------------------------------------------------------------- state */
+const S = {
+  M: 1, N: 1,
+  ang:  [0,0,0,0,0,0],   // xy, zw, xz, xw, yz, yw
+  rate: [0,0,0,0,0,0],
+  paused: false,
+  scale: 1, clip: 14, opacity: 0.30, checker: false, surfOn: true,
+  lines: {
+    theta: { on:false, n:24, res:192, col:0x8fa8ff },
+    phi:   { on:false, n:32, res:192, col:0xe07bb0 },
+    vp:    { on:false, n:20, res:256, col:0xf2a33c },
+    vm:    { on:false, n:20, res:256, col:0x5fd8c0 }
+  },
+  P: { count:30000, speed:0.55, align:0.55, size:0.016, glow:1.5,
+       streaks:true, streak:0.05, region:1, on:true }
+};
+const PLANES = [
+  {tag:'xy', i:0, j:1, kind:'slide'},
+  {tag:'zw', i:2, j:3, kind:'slide'},
+  {tag:'xz', i:0, j:2, kind:'shape'},
+  {tag:'xw', i:0, j:3, kind:'shape'},
+  {tag:'yz', i:1, j:2, kind:'shape'},
+  {tag:'yw', i:1, j:3, kind:'shape'}
+];
+
+/* ------------------------------------------------- 4x4 math, column-major */
+const ID4 = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+const mA = new Float32Array(16), mB = new Float32Array(16), mR = new Float32Array(16);
+function planeRot(out, i, j, a){
+  out.set(ID4);
+  const c = Math.cos(a), s = Math.sin(a);
+  out[i*4+i] = c; out[i*4+j] = s; out[j*4+i] = -s; out[j*4+j] = c;
+}
+function mul(out, A, B){
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++){
+    let v = 0;
+    for (let k = 0; k < 4; k++) v += A[k*4+r] * B[c*4+k];
+    out[c*4+r] = v;
+  }
+}
+function buildRot(){
+  mR.set(ID4);
+  for (let p = 0; p < 6; p++){
+    planeRot(mA, PLANES[p].i, PLANES[p].j, S.ang[p]);
+    mul(mB, mR, mA); mR.set(mB);
+  }
+}
+
+/* ------------------------------------------------------------------ three */
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(0x0f0d18, 1);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 4000);
+
+const U = {
+  uS:       { value: 0 },   // S = cos X0
+  uT:       { value: 0 },   // s = sin X0
+  uRot:     { value: new THREE.Matrix4() },
+  uScale:   { value: S.scale },
+  uClip:    { value: S.clip },
+  uOpacity: { value: S.opacity },
+  uChecker: { value: 0 },
+  uPt:      { value: S.P.size },
+  uPx:      { value: 600 },
+  uGlow:    { value: S.P.glow }
+};
+
+const COMMON = `
+uniform float uS; uniform float uT; uniform mat4 uRot;
+uniform float uScale; uniform float uClip;
+vec4 p4(vec2 a){ return vec4(uS*cos(a.x), uS*sin(a.x), uT*cos(a.y), uT*sin(a.y)); }
+vec3 mapPt(vec2 a){ vec4 p = uRot * p4(a); return uScale * p.xyz / (1.0 + p.w); }`;
+
+/* ------------------------------------------------------------- materials */
+const surfMat = new THREE.ShaderMaterial({
+  uniforms: U, side: THREE.DoubleSide, transparent: true, depthWrite: false,
+  vertexShader: COMMON + `
+    varying vec3 vN; varying vec3 vP; varying vec2 vTP; varying float vR;
+    void main(){
+      vec2 a = position.xy;
+      vec3 P = mapPt(a);
+      float h = 0.0015;
+      vec3 Pu = mapPt(a + vec2(h,0.0)) - P;
+      vec3 Pv = mapPt(a + vec2(0.0,h)) - P;
+      vN = cross(Pu,Pv); vP = P; vTP = a; vR = length(P);
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(P,1.0);
+    }`,
+  fragmentShader: `
+    uniform float uClip; uniform float uOpacity; uniform float uChecker;
+    varying vec3 vN; varying vec3 vP; varying vec2 vTP; varying float vR;
+    const float TAU = 6.28318530718;
+    void main(){
+      if (vR > uClip) discard;
+      vec3 n = normalize(vN);
+      vec3 V = normalize(cameraPosition - vP);
+      if (dot(n,V) < 0.0) n = -n;
+      vec3 L1 = normalize(vec3(0.45,0.80,0.55));
+      float d1 = max(dot(n,L1),0.0);
+      float sp = pow(max(dot(n, normalize(L1+V)),0.0), 56.0);
+      float fr = pow(1.0 - max(dot(n,V),0.0), 2.2);
+      vec3 base = vec3(0.30,0.33,0.72);
+      if (uChecker > 0.5){
+        float c = step(0.5, fract(vTP.x*8.0/TAU)) + step(0.5, fract(vTP.y*8.0/TAU));
+        base = mix(base, vec3(0.62,0.35,0.66), mod(c,2.0));
+      }
+      vec3 col = base*(0.16+0.78*d1) + vec3(1.0)*sp*0.45 + vec3(0.52,0.44,0.95)*fr*0.7;
+      gl_FragColor = vec4(col, uOpacity);
+    }`
+});
+
+function lineMaterial(hex){
+  return new THREE.ShaderMaterial({
+    uniforms: Object.assign({}, U, { uColor: { value: new THREE.Color(hex) } }),
+    transparent: true,
+    vertexShader: COMMON + `
+      varying float vR;
+      void main(){ vec3 P = mapPt(position.xy); vR = length(P);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(P,1.0); }`,
+    fragmentShader: `
+      uniform float uClip; uniform vec3 uColor; varying float vR;
+      void main(){ if (vR > uClip) discard; gl_FragColor = vec4(uColor, 0.95); }`
+  });
+}
+
+// Particles carry the raw R^4 point: xyz in `position`, w in `aW`.
+// rho = length(position.xy) is the untouched S^3 radial coordinate, so the
+// colour ramp is rotation-invariant.
+const PART_VS = `
+uniform float uS; uniform mat4 uRot; uniform float uScale;
+uniform float uPt; uniform float uPx;
+attribute float aW;
+varying float vR; varying float vT; varying float vCon;
+void main(){
+  vec4 p = uRot * vec4(position, aW);
+  float d = max(1.0 + p.w, 1e-4);
+  vec3 P = uScale * p.xyz / d;
+  vR  = length(P);
+  vCon = uScale / d;                                  // conformal scale factor
+  float rho = length(position.xy);
+  vT = clamp((rho - uS) / max(1.0 - uS, 1e-4), 0.0, 1.0);
+  vec4 mv = modelViewMatrix * vec4(P, 1.0);
+  gl_PointSize = clamp(uPt * vCon * uPx / max(-mv.z, 0.01), 1.0, 48.0);
+  gl_Position = projectionMatrix * mv;
+}`;
+
+const pointMat = new THREE.ShaderMaterial({
+  uniforms: U, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: PART_VS,
+  fragmentShader: `
+    uniform float uClip; uniform float uGlow;
+    varying float vR; varying float vT; varying float vCon;
+    void main(){
+      if (vR > uClip) discard;
+      vec2 q = gl_PointCoord - 0.5;
+      float d2 = dot(q,q);
+      if (d2 > 0.25) discard;
+      float a = smoothstep(0.25, 0.02, d2);
+      vec3 col = mix(vec3(0.25,0.80,1.00), vec3(1.00,0.80,0.42), vT*vT);
+      gl_FragColor = vec4(col * a * uGlow, a);
+    }`
+});
+
+const streakMat = new THREE.ShaderMaterial({
+  uniforms: U, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: PART_VS,
+  fragmentShader: `
+    uniform float uClip; uniform float uGlow;
+    varying float vR; varying float vT;
+    void main(){
+      if (vR > uClip) discard;
+      vec3 col = mix(vec3(0.25,0.80,1.00), vec3(1.00,0.80,0.42), vT*vT);
+      gl_FragColor = vec4(col * uGlow * 0.5, 0.8);
+    }`
+});
+
+/* --------------------------------------------------------------- surface */
+const NT = 256, NP = 168;
+function surfaceGeometry(){
+  const g = new THREE.BufferGeometry();
+  const v = new Float32Array((NT+1)*(NP+1)*3);
+  for (let i = 0; i <= NT; i++) for (let j = 0; j <= NP; j++){
+    const k = (i*(NP+1)+j)*3;
+    v[k] = TAU*i/NT; v[k+1] = TAU*j/NP; v[k+2] = 0;
+  }
+  const idx = new Uint32Array(NT*NP*6);
+  let p = 0;
+  for (let i = 0; i < NT; i++) for (let j = 0; j < NP; j++){
+    const a = i*(NP+1)+j, b = a+(NP+1);
+    idx[p++]=a; idx[p++]=b; idx[p++]=a+1;
+    idx[p++]=b; idx[p++]=b+1; idx[p++]=a+1;
+  }
+  g.setAttribute('position', new THREE.BufferAttribute(v,3));
+  g.setIndex(new THREE.BufferAttribute(idx,1));
+  return g;
+}
+const surface = new THREE.Mesh(surfaceGeometry(), surfMat);
+surface.frustumCulled = false; surface.renderOrder = 2;
+scene.add(surface);
+
+function polylines(list){
+  const segs = list.reduce((n,p) => n + p.length - 1, 0);
+  const v = new Float32Array(segs*6);
+  let p = 0;
+  for (const poly of list) for (let i = 0; i < poly.length-1; i++){
+    v[p++]=poly[i][0];   v[p++]=poly[i][1];   v[p++]=0;
+    v[p++]=poly[i+1][0]; v[p++]=poly[i+1][1]; v[p++]=0;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(v,3));
+  return g;
+}
+const family = {
+  theta: (n,res) => Array.from({length:n},(_,k)=>Array.from({length:res+1},(_,i)=>[TAU*i/res, TAU*k/n])),
+  phi:   (n,res) => Array.from({length:n},(_,k)=>Array.from({length:res+1},(_,i)=>[TAU*k/n, TAU*i/res])),
+  vp:    (n,res) => Array.from({length:n},(_,k)=>Array.from({length:res+1},(_,i)=>[TAU*i/res,  TAU*i/res+TAU*k/n])),
+  vm:    (n,res) => Array.from({length:n},(_,k)=>Array.from({length:res+1},(_,i)=>[TAU*i/res, -TAU*i/res+TAU*k/n]))
+};
+const lineObj = {};
+for (const key of Object.keys(S.lines)){
+  const o = new THREE.LineSegments(new THREE.BufferGeometry(), lineMaterial(S.lines[key].col));
+  o.frustumCulled = false; o.renderOrder = 1;
+  lineObj[key] = o; scene.add(o); rebuildFamily(key);
+}
+function rebuildFamily(key){
+  const cfg = S.lines[key], o = lineObj[key];
+  o.geometry.dispose();
+  o.geometry = polylines(family[key](cfg.n, cfg.res));
+  o.visible = cfg.on;
+}
+
+/* ------------------------------------------------------------- particles */
+// State lives in R^4 on the unit 3-sphere. P4[4i..] is the position,
+// V4[4i..] the unit tangent, CS[2i..] the precomputed (cos, sin) of the
+// per-particle step angle. The step is an exact rotation of the frame.
+const DT = 1/120;
+let N = 0, P4, V4, CS, W4;
+let ptGeom = new THREE.BufferGeometry(), stGeom = new THREE.BufferGeometry();
+const points  = new THREE.Points(ptGeom, pointMat);
+const streaks = new THREE.LineSegments(stGeom, streakMat);
+points.frustumCulled = false; streaks.frustumCulled = false;
+points.renderOrder = 3; streaks.renderOrder = 3;
+scene.add(points, streaks);
+
+function allocate(n){
+  N = n;
+  P4 = new Float32Array(n*4);
+  V4 = new Float32Array(n*4);
+  CS = new Float32Array(n*2);
+  W4 = new Float32Array(n);          // per-particle angular speed
+
+  ptGeom.dispose();
+  ptGeom = new THREE.BufferGeometry();
+  ptGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n*3), 3).setUsage(THREE.DynamicDrawUsage));
+  ptGeom.setAttribute('aW',       new THREE.BufferAttribute(new Float32Array(n),   1).setUsage(THREE.DynamicDrawUsage));
+  points.geometry = ptGeom;
+
+  stGeom.dispose();
+  stGeom = new THREE.BufferGeometry();
+  stGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n*6), 3).setUsage(THREE.DynamicDrawUsage));
+  stGeom.setAttribute('aW',       new THREE.BufferAttribute(new Float32Array(n*2), 1).setUsage(THREE.DynamicDrawUsage));
+  streaks.geometry = stGeom;
+}
+
+function gauss(){
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2*Math.log(u)) * Math.cos(TAU*v);
+}
+
+function seedParticles(){
+  const S0 = U.uS.value, s0 = U.uT.value, al = S.P.align, inside = S.P.region > 0;
+  for (let i = 0; i < N; i++){
+    // uniform in the solid torus: volume element is sin(X) cos(X) dX, so
+    // sin^2(X) is uniform on the allowed interval.
+    const u = Math.random();
+    const s2 = inside ? s0*s0*u : s0*s0 + (1 - s0*s0)*u;
+    const sig = Math.sqrt(Math.max(s2, 1e-8));
+    const rho = Math.sqrt(Math.max(1 - s2, 1e-8));
+    const th = Math.random()*TAU, ph = Math.random()*TAU;
+    const ct = Math.cos(th), st = Math.sin(th), cp = Math.cos(ph), sp = Math.sin(ph);
+    const x = rho*ct, y = rho*st, z = sig*cp, w = sig*sp;
+
+    // orthonormal tangent frame at p
+    const ex0 = -y/rho, ex1 = x/rho;                 // e_theta  (xy part)
+    const ep2 = -w/sig, ep3 = z/sig;                 // e_phi    (zw part)
+    const A = sig/rho, B = rho/sig;
+    const n0 = A*x, n1 = A*y, n2 = -B*z, n3 = -B*w;  // e_chi
+
+    // Hopf direction (constant chi) mixed with an isotropic direction
+    const sgn = Math.random() < 0.5 ? 1 : -1;
+    let ga = gauss(), gb = gauss(), gc = gauss();
+    const gl = 1/Math.sqrt(ga*ga + gb*gb + gc*gc + 1e-12);
+    ga *= gl; gb *= gl; gc *= gl;
+    let a = al*rho + (1-al)*ga;
+    let b = al*sgn*sig + (1-al)*gb;
+    let c = (1-al)*gc;
+    const L = 1/Math.sqrt(a*a + b*b + c*c + 1e-12);
+    a *= L; b *= L; c *= L;
+
+    const k = i*4;
+    P4[k]=x; P4[k+1]=y; P4[k+2]=z; P4[k+3]=w;
+    V4[k]   = a*ex0 + c*n0;
+    V4[k+1] = a*ex1 + c*n1;
+    V4[k+2] = b*ep2 + c*n2;
+    V4[k+3] = b*ep3 + c*n3;
+
+    W4[i] = S.P.speed * (0.65 + 0.7*Math.random());
+  }
+  retune();
+}
+
+function retune(){                       // refresh the per-particle step rotation
+  for (let i = 0; i < N; i++){
+    const d = W4[i] * (S.P.speed / (S.P.speedRef || S.P.speed)) * DT;
+    CS[i*2] = Math.cos(d); CS[i*2+1] = Math.sin(d);
+  }
+}
+function setSpeed(v){
+  const scaleBy = v / (S.P.speed || 1);
+  S.P.speed = v;
+  for (let i = 0; i < N; i++) W4[i] *= scaleBy;
+  for (let i = 0; i < N; i++){
+    const d = W4[i]*DT;
+    CS[i*2] = Math.cos(d); CS[i*2+1] = Math.sin(d);
+  }
+}
+
+function stepParticles(){
+  const S0 = U.uS.value, s0 = U.uT.value, S2 = S0*S0, side = S.P.region;
+  for (let i = 0; i < N; i++){
+    const k = i*4, c = CS[i*2], sn = CS[i*2+1];
+    let px = P4[k], py = P4[k+1], pz = P4[k+2], pw = P4[k+3];
+    let vx = V4[k], vy = V4[k+1], vz = V4[k+2], vw = V4[k+3];
+
+    // exact rotation of the (p, v) frame: motion along a great circle
+    const ax = px*c + vx*sn, ay = py*c + vy*sn, az = pz*c + vz*sn, aw = pw*c + vw*sn;
+    const bx = vx*c - px*sn, by = vy*c - py*sn, bz = vz*c - pz*sn, bw = vw*c - pw*sn;
+    px=ax; py=ay; pz=az; pw=aw; vx=bx; vy=by; vz=bz; vw=bw;
+
+    const r2 = px*px + py*py;
+    if ((r2 - S2) * side < 0){                       // crossed the wall
+      const rho = Math.sqrt(Math.max(r2, 1e-10));
+      const sig = Math.sqrt(Math.max(1 - r2, 1e-10));
+      const A = sig/rho, B = rho/sig;
+      const n0 = A*px, n1 = A*py, n2 = -B*pz, n3 = -B*pw;   // unit normal, |n| = 1
+      const d = 2*(vx*n0 + vy*n1 + vz*n2 + vw*n3);
+      vx -= d*n0; vy -= d*n1; vz -= d*n2; vw -= d*n3;
+      const f = S0/rho, g = s0/sig;                          // clamp back to the wall
+      px *= f; py *= f; pz *= g; pw *= g;
+      const dp = vx*px + vy*py + vz*pz + vw*pw;              // re-orthogonalise
+      vx -= dp*px; vy -= dp*py; vz -= dp*pz; vw -= dp*pw;
+      const vl = 1/Math.sqrt(vx*vx + vy*vy + vz*vz + vw*vw + 1e-20);
+      vx *= vl; vy *= vl; vz *= vl; vw *= vl;
+    }
+    P4[k]=px; P4[k+1]=py; P4[k+2]=pz; P4[k+3]=pw;
+    V4[k]=vx; V4[k+1]=vy; V4[k+2]=vz; V4[k+3]=vw;
+  }
+}
+
+function renormalise(){                  // mop up float drift, cheap and rare
+  for (let i = 0; i < N; i++){
+    const k = i*4;
+    let l = 1/Math.sqrt(P4[k]*P4[k] + P4[k+1]*P4[k+1] + P4[k+2]*P4[k+2] + P4[k+3]*P4[k+3]);
+    P4[k]*=l; P4[k+1]*=l; P4[k+2]*=l; P4[k+3]*=l;
+    const dp = V4[k]*P4[k] + V4[k+1]*P4[k+1] + V4[k+2]*P4[k+2] + V4[k+3]*P4[k+3];
+    V4[k]-=dp*P4[k]; V4[k+1]-=dp*P4[k+1]; V4[k+2]-=dp*P4[k+2]; V4[k+3]-=dp*P4[k+3];
+    l = 1/Math.sqrt(V4[k]*V4[k] + V4[k+1]*V4[k+1] + V4[k+2]*V4[k+2] + V4[k+3]*V4[k+3] + 1e-20);
+    V4[k]*=l; V4[k+1]*=l; V4[k+2]*=l; V4[k+3]*=l;
+  }
+}
+
+function uploadParticles(){
+  if (S.P.streaks){
+    const pos = stGeom.attributes.position.array, wa = stGeom.attributes.aW.array;
+    const t = S.P.streak, ct = Math.cos(t), st = Math.sin(t);
+    for (let i = 0; i < N; i++){
+      const k = i*4, a = i*6, b = i*2;
+      pos[a]   = P4[k];   pos[a+1] = P4[k+1]; pos[a+2] = P4[k+2]; wa[b]   = P4[k+3];
+      pos[a+3] = P4[k]*ct - V4[k]*st;          // trailing point on the same geodesic
+      pos[a+4] = P4[k+1]*ct - V4[k+1]*st;
+      pos[a+5] = P4[k+2]*ct - V4[k+2]*st;
+      wa[b+1]  = P4[k+3]*ct - V4[k+3]*st;
+    }
+    stGeom.attributes.position.needsUpdate = true;
+    stGeom.attributes.aW.needsUpdate = true;
+  } else {
+    const pos = ptGeom.attributes.position.array, wa = ptGeom.attributes.aW.array;
+    for (let i = 0; i < N; i++){
+      const k = i*4, a = i*3;
+      pos[a] = P4[k]; pos[a+1] = P4[k+1]; pos[a+2] = P4[k+2]; wa[i] = P4[k+3];
+    }
+    ptGeom.attributes.position.needsUpdate = true;
+    ptGeom.attributes.aW.needsUpdate = true;
+  }
+  points.visible  = S.P.on && !S.P.streaks;
+  streaks.visible = S.P.on &&  S.P.streaks;
+}
+
+/* ----------------------------------------------------------------- camera */
+const cam = { theta: 0.7, phi: 1.15, dist: 6.5, target: new THREE.Vector3() };
+function placeCamera(){
+  const sp = Math.sin(cam.phi);
+  camera.position.set(
+    cam.target.x + cam.dist*sp*Math.sin(cam.theta),
+    cam.target.y + cam.dist*Math.cos(cam.phi),
+    cam.target.z + cam.dist*sp*Math.cos(cam.theta));
+  camera.lookAt(cam.target);
+}
+let drag = null;
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId);
+  drag = { x:e.clientX, y:e.clientY, pan: e.shiftKey || e.button === 1 || e.button === 2 };
+});
+canvas.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.pan){
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+    const up    = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+    const k = cam.dist*0.0018;
+    cam.target.addScaledVector(right, -dx*k).addScaledVector(up, dy*k);
+  } else {
+    cam.theta -= dx*0.006;
+    cam.phi = Math.min(Math.PI-0.001, Math.max(0.001, cam.phi - dy*0.006));
+  }
+});
+addEventListener('pointerup', () => { drag = null; });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  cam.dist = Math.min(400, Math.max(0.3, cam.dist*Math.exp(e.deltaY*0.0012)));
+}, { passive:false });
+
+function resize(){
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w/h; camera.updateProjectionMatrix();
+  U.uPx.value = renderer.getContext().drawingBufferHeight /
+                (2*Math.tan(camera.fov*Math.PI/360));
+}
+addEventListener('resize', resize);
+resize();
+
+/* -------------------------------------------------------------------- ui */
+const $ = id => document.getElementById(id);
+const el = (tag, cls, html) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (html !== undefined) n.innerHTML = html;
+  return n;
+};
+const fmt = (x, d = 4) => (x < 0 ? '' : ' ') + x.toFixed(d);
+
+function slider(parent, label, min, max, step, val, fn, fmtv = v => v.toFixed(2)){
+  const row = el('div', 'srow');
+  row.appendChild(el('span', null, label));
+  const r = el('input'); r.type='range'; r.min=min; r.max=max; r.step=step; r.value=val;
+  const v = el('span', 'v num', fmtv(val));
+  r.addEventListener('input', () => { const x = +r.value; v.textContent = fmtv(x); fn(x); });
+  row.append(r, v); parent.appendChild(row);
+  return r;
+}
+function check(parent, label, val, fn){
+  const w = el('label', 'crow');
+  const c = el('input'); c.type = 'checkbox'; c.checked = val;
+  c.addEventListener('input', () => fn(c.checked));
+  w.append(c, el('span', null, label)); parent.appendChild(w);
+  return c;
+}
+
+// ratio
+$('mIn').addEventListener('input', onRatio);
+$('nIn').addEventListener('input', onRatio);
+function onRatio(){
+  S.M = Math.max(1, Math.min(32, Math.round(+$('mIn').value || 1)));
+  S.N = Math.max(1, Math.min(32, Math.round(+$('nIn').value || 1)));
+  updateRatio();
+}
+function updateRatio(){
+  const h = Math.hypot(S.M, S.N);
+  U.uS.value = S.N/h; U.uT.value = S.M/h;
+  const r = S.M/S.N, R = Math.sqrt(r*r + 1);
+  $('derived').innerHTML =
+    `S =${fmt(U.uS.value)} &nbsp; s =${fmt(U.uT.value)}<br>` +
+    `R = 1/S =${fmt(R)} &nbsp; r = s/S =${fmt(r)}<br>` +
+    `R&sup2; &minus; r&sup2; =${fmt(R*R - r*r, 6)}`;
+}
+
+// particles
+const pv = $('parts');
+check(pv, 'show particles', S.P.on, v => { S.P.on = v; });
+const cntRow = el('div', 'srow');
+cntRow.appendChild(el('span', null, 'count'));
+const cntR = el('input'); cntR.type='range'; cntR.min=1000; cntR.max=80000; cntR.step=1000; cntR.value=S.P.count;
+const cntV = el('span', 'v num', (S.P.count/1000) + 'k');
+cntR.addEventListener('change', () => {
+  S.P.count = +cntR.value; allocate(S.P.count); seedParticles();
+});
+cntR.addEventListener('input', () => { cntV.textContent = (+cntR.value/1000) + 'k'; });
+cntRow.append(cntR, cntV); pv.appendChild(cntRow);
+
+slider(pv, 'speed',      0.02, 2.5, 0.01, S.P.speed, v => setSpeed(v));
+slider(pv, 'alignment',  0,    1,   0.01, S.P.align, v => { S.P.align = v; seedParticles(); });
+slider(pv, 'size',       0.002,0.06,0.001,S.P.size,  v => { S.P.size = v; U.uPt.value = v; }, v => v.toFixed(3));
+slider(pv, 'brightness', 0.2,  4,   0.01, S.P.glow,  v => { S.P.glow = v; U.uGlow.value = v; });
+check(pv, 'draw as streaks', S.P.streaks, v => { S.P.streaks = v; });
+slider(pv, 'streak arc',  0.005, 0.3, 0.001, S.P.streak, v => { S.P.streak = v; }, v => v.toFixed(3));
+
+const regRow = el('div', 'srow');
+regRow.appendChild(el('span', null, 'region'));
+const reg = el('select');
+reg.innerHTML = '<option value="1">inside the tube</option><option value="-1">outside (unbounded)</option>';
+reg.addEventListener('input', () => { S.P.region = +reg.value; seedParticles(); });
+regRow.append(reg, el('span','v',''));
+pv.appendChild(regRow);
+
+$('bSeed').onclick = () => seedParticles();
+$('bLam').onclick  = () => { S.P.align = 1; S.P.streaks = true; syncParts(); seedParticles(); };
+$('bGas').onclick  = () => { S.P.align = 0.1; S.P.streaks = false; syncParts(); seedParticles(); };
+function syncParts(){
+  const ins = pv.querySelectorAll('input');
+  ins[2].value = S.P.align;                          // alignment slider
+  ins[2].nextElementSibling.textContent = S.P.align.toFixed(2);
+  pv.querySelectorAll('input[type=checkbox]')[1].checked = S.P.streaks;
+}
+
+// rotations
+const rotUI = [];
+PLANES.forEach((pl, p) => {
+  const row = el('div', 'rot ' + pl.kind);
+  row.appendChild(el('span', 'tag', pl.tag));
+  const a = el('input'); a.type='range'; a.min=-Math.PI; a.max=Math.PI; a.step=0.001; a.value=0; a.title='angle';
+  const s = el('input'); s.type='range'; s.min=-0.6; s.max=0.6; s.step=0.001; s.value=0; s.title='spin rate';
+  a.addEventListener('input', () => { S.ang[p] = +a.value; });
+  s.addEventListener('input', () => { S.rate[p] = +s.value; });
+  row.append(a, s); $('rots').appendChild(row); rotUI.push({a, s});
+});
+function syncRot(){ rotUI.forEach((u,p) => { u.a.value = S.ang[p]; u.s.value = S.rate[p]; }); }
+$('bZero').onclick = () => { S.ang.fill(0); syncRot(); };
+$('bStop').onclick = () => { S.rate.fill(0); syncRot(); };
+$('bIso').onclick  = () => { S.rate.fill(0); S.rate[0]=0.35; S.rate[1]=0.35; syncRot(); };
+
+// curve families
+const LABEL = { theta:'θ lines (φ const)', phi:'φ lines (θ const)',
+                vp:'Villarceau  φ = θ + c', vm:'Villarceau  φ = −θ + c' };
+const lineCB = {};
+for (const key of Object.keys(S.lines)){
+  const cfg = S.lines[key];
+  const row = el('div', 'lrow');
+  const cb = el('input'); cb.type='checkbox'; cb.checked = cfg.on;
+  const sw = el('span', 'sw'); sw.style.background = '#' + cfg.col.toString(16).padStart(6,'0');
+  const nm = el('span'); nm.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:11.5px';
+  nm.append(sw, LABEL[key]);
+  const rg = el('input'); rg.type='range'; rg.min=2; rg.max=64; rg.step=1; rg.value=cfg.n;
+  const vv = el('span', 'v num', cfg.n);
+  cb.addEventListener('input', () => { cfg.on = cb.checked; lineObj[key].visible = cfg.on; });
+  rg.addEventListener('input', () => { cfg.n = +rg.value; vv.textContent = cfg.n; rebuildFamily(key); });
+  row.append(cb, nm, rg, vv); $('lines').appendChild(row);
+  lineCB[key] = cb;
+}
+const sv = $('surf');
+check(sv, 'show surface', S.surfOn, v => { S.surfOn = v; surface.visible = v; });
+slider(sv, 'opacity', 0, 1, 0.01, S.opacity, v => { U.uOpacity.value = v; });
+check(sv, '(θ,φ) checker', false, v => { U.uChecker.value = v ? 1 : 0; });
+
+// view
+const vv2 = $('view');
+slider(vv2, 'scale',       0.1, 4,   0.01, S.scale, v => { U.uScale.value = v; });
+slider(vv2, 'clip radius', 1,   200, 0.5,  S.clip,  v => { U.uClip.value = v; }, v => v.toFixed(0));
+
+$('bReset').onclick = () => { cam.theta=0.7; cam.phi=1.15; cam.dist=6.5; cam.target.set(0,0,0); };
+$('bHide').onclick  = () => $('panel').classList.add('hidden');
+$('toggle').onclick = () => $('panel').classList.remove('hidden');
+
+// presets
+const PRESETS = {
+  'Hopf fibration': { M:1,N:1, ang:[0,0,0,0,0,0], rate:[0,0,0,0,0,0],
+    lines:{vp:false,vm:false,theta:false,phi:false}, part:{align:1, streaks:true, speed:0.5, region:1}, op:0.16 },
+  'Gas in a torus':  { M:1,N:2, ang:[0,0,0,0,0,0], rate:[0,0,0,0,0,0],
+    lines:{vp:false,vm:false,theta:false,phi:false}, part:{align:0.05, streaks:false, speed:0.7, region:1}, op:0.22 },
+  'Cyclide':         { M:1,N:1, ang:[0,0,0,0,0.62,0], rate:[0,0,0,0,0,0],
+    lines:{vp:true,vm:false,theta:false,phi:false}, part:{align:0.9, streaks:true, speed:0.5, region:1}, op:0.30 },
+  'Outside flow':    { M:2,N:3, ang:[0,0,0,0,0.35,0], rate:[0,0,0,0,0,0],
+    lines:{vp:false,vm:false,theta:true,phi:false}, part:{align:0.85, streaks:true, speed:0.5, region:-1}, op:0.45 },
+  'Tumble':          { M:2,N:3, ang:[0,0,0,0,0,0], rate:[0,0,0.09,0,0.13,0.05],
+    lines:{vp:false,vm:false,theta:false,phi:false}, part:{align:0.6, streaks:true, speed:0.6, region:1}, op:0.20 },
+  'Curves only':     { M:1,N:1, ang:[0,0,0,0,0,0], rate:[0.3,0.3,0,0,0,0],
+    lines:{vp:true,vm:true,theta:false,phi:false}, part:null, op:0.35 }
+};
+for (const [name, p] of Object.entries(PRESETS)){
+  const b = el('button', null, name);
+  b.onclick = () => {
+    S.M = p.M; S.N = p.N; $('mIn').value = p.M; $('nIn').value = p.N; updateRatio();
+    S.ang = p.ang.slice(); S.rate = p.rate.slice(); syncRot();
+    for (const [k,on] of Object.entries(p.lines)){ S.lines[k].on = on; lineObj[k].visible = on; lineCB[k].checked = on; }
+    U.uOpacity.value = p.op;
+    vv2.parentElement.querySelector('input');           // no-op, keeps sliders as-is
+    if (p.part){
+      S.P.on = true; S.P.align = p.part.align; S.P.streaks = p.part.streaks; S.P.region = p.part.region;
+      reg.value = String(p.part.region);
+      setSpeed(p.part.speed);
+      syncParts(); seedParticles();
+    } else { S.P.on = false; }
+    pv.querySelector('input[type=checkbox]').checked = S.P.on;
+  };
+  $('presets').appendChild(b);
+}
+
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.code === 'Space'){ S.paused = !S.paused; e.preventDefault(); }
+  if (e.key === 'h') $('panel').classList.toggle('hidden');
+  if (e.key === 'r') $('bReset').click();
+});
+
+/* ----------------------------------------------------------------- loop */
+const readout = $('readout');
+let last = performance.now(), acc = 0, uiAcc = 0, frames = 0, fps = 0, renorm = 0;
+
+function frame(now){
+  const dt = Math.min(0.05, (now - last)/1000); last = now;
+
+  if (!S.paused){
+    for (let p = 0; p < 6; p++) if (S.rate[p]){
+      S.ang[p] += S.rate[p]*dt;
+      if (S.ang[p] >  Math.PI) S.ang[p] -= TAU;
+      if (S.ang[p] < -Math.PI) S.ang[p] += TAU;
+      rotUI[p].a.value = S.ang[p];
+    }
+    acc += dt;
+    let steps = 0;
+    while (acc >= DT && steps < 4){ stepParticles(); acc -= DT; steps++; }
+    if (acc > DT) acc = 0;
+    if (++renorm >= 400){ renorm = 0; renormalise(); }
+  }
+  if (S.P.on) uploadParticles(); else { points.visible = false; streaks.visible = false; }
+
+  buildRot();
+  U.uRot.value.fromArray(mR);
+
+  frames++; uiAcc += dt;
+  if (uiAcc > 0.25){
+    fps = frames/uiAcc; frames = 0; uiAcc = 0;
+    const v0 = -mR[3], v1 = -mR[7];
+    const d = Math.abs(Math.hypot(v0, v1) - U.uS.value);
+    readout.innerHTML =
+      `pole distance <b>${d.toFixed(4)}</b>` + (d < 0.02 ? ' <span class="warn">unbounded</span>' : '') +
+      `<br>${(N/1000).toFixed(0)}k particles &nbsp; ${fps.toFixed(0)} fps` +
+      (S.paused ? '<br>paused' : '');
+  }
+
+  placeCamera();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+updateRatio();
+allocate(S.P.count);
+seedParticles();
+surface.visible = S.surfOn;
+U.uOpacity.value = S.opacity;
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
