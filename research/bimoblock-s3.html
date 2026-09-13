@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bimoblock S³ — eight spherical cells, 216 voxels</title>
+<style>
+  html,body{ height:100%; margin:0; background:#000; overflow:hidden; }
+  canvas{ display:block; width:100%; height:100%; touch-action:none; }
+  #hud{
+    position:fixed; right:10px; bottom:8px; text-align:right;
+    font:10px/1.55 ui-monospace, Menlo, Consolas, monospace;
+    color:#5a5a66; letter-spacing:.08em; user-select:none; white-space:pre;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hud"></div>
+
+<script>
+"use strict";
+
+/* =========================================================================
+   Eight bimoblocks tiling the 3-sphere.
+
+   A block is placed by the gnomonic chart  q(l) = normalize(p + eps*T*l),
+   so its shape-space faces  l_a = K  become
+
+       (e_a - eps*K*p) . q = 0
+
+   hyperplanes through the origin of R^4, i.e. great 2-spheres in S^3. With
+   eps = 1 and the eight centres at +/- the coordinate axes, those faces are
+   exactly the bisecting hyperplanes q_i = +/- q_j: the eight cells of the
+   tesseract, radially projected. They tile S^3 with no gap and no overlap,
+   216 spherical voxels in total. The 3x3x3 cut constants are unchanged,
+   K = -1 + 2q/3, because tan(45 deg) = 1 = eps.
+
+   The camera ray lives in the projected R^3. Stereographic projection is
+   inversion in the sphere of radius^2 = 2 about C = (0,0,0,-1), and that
+   inversion is an involution, so the ray pulls back to a circle on S^3:
+
+       Q(t) = C + 2*(a + t*d)/L,   a = o - C,  L = |a + t*d|^2
+
+   Substituting into n.Q = 0 gives, with kappa = n.C = -n_w,
+
+       kappa*t^2 + 2*(kappa*(a.d) + n.d)*t + (kappa*|a|^2 + 2*n.a) = 0
+
+   an honest quadratic, homogeneous in n so the face normals never need
+   normalising. kappa = 0 is the great sphere through the projection pole,
+   whose image in R^3 is a genuine flat plane -- the same degenerate branch
+   as the Mobius build, and here it fires for every cell wall not involving
+   the w axis.
+
+   Surface normals are exact too: the great sphere n.q = 0 projects to the
+   R^3 sphere of centre n_xyz/n_w, so the normal at y is just y - centre.
+
+   The mask is canonicalised under the full octahedral group, and any Oh
+   rotation of a block's frame maps its spherical cube to itself, so per
+   block orientation carries no information the mask does not already have.
+   There is nothing to tumble.
+   ========================================================================= */
+
+const NB   = 8;              // tesseract cells
+const RHO2 = 3.0;
+
+/* ---------------------- the octahedral rotation group --------------------- */
+
+const PERMS = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+const PSGN  = [ 1, -1, -1, 1, 1, -1 ];
+
+const OCTA = [];
+for (let pi = 0; pi < 6; ++pi){
+  const p = PERMS[pi];
+  for (let b = 0; b < 8; ++b){
+    const s = [ (b & 1) ? -1 : 1, (b & 2) ? -1 : 1, (b & 4) ? -1 : 1 ];
+    if (PSGN[pi] * s[0] * s[1] * s[2] !== 1) continue;
+    const M = new Float64Array(9);
+    for (let c = 0; c < 3; ++c) M[c*3 + p[c]] = s[c];
+    OCTA.push(M);
+  }
+}
+
+const CPERM = OCTA.map(M => {
+  const p = new Int32Array(27);
+  for (let i = 0; i < 27; ++i){
+    const v = [ i%3 - 1, ((i/3)|0)%3 - 1, ((i/9)|0) - 1 ];
+    const x = Math.round(M[0]*v[0] + M[3]*v[1] + M[6]*v[2]);
+    const y = Math.round(M[1]*v[0] + M[4]*v[1] + M[7]*v[2]);
+    const z = Math.round(M[2]*v[0] + M[5]*v[1] + M[8]*v[2]);
+    p[i] = (x+1) + 3*(y+1) + 9*(z+1);
+  }
+  return p;
+});
+
+function actMask(g, m){
+  const p = CPERM[g];
+  let o = 0;
+  for (let i = 0; i < 27; ++i) if ((m >>> i) & 1) o |= (1 << p[i]);
+  return o >>> 0;
+}
+function canonical(m){
+  let best = 0xffffffff;
+  for (let g = 0; g < 24; ++g){ const v = actMask(g, m); if (v < best) best = v; }
+  let stab = 0;
+  for (let g = 0; g < 24; ++g) if (actMask(g, best) === best) stab++;
+  return { canon: best >>> 0, orbit: 24 / stab };
+}
+
+function hash32(a, b){
+  let h = (Math.imul(a, 0x9e3779b9) ^ Math.imul(b, 0x85ebca6b)) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0; h = Math.imul(h, 0x7feb352d) >>> 0;
+  h = (h ^ (h >>> 15)) >>> 0; h = Math.imul(h, 0x846ca68b) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+function rawMask(j, seed, dense){
+  const a = hash32(j, seed) & 0x7ffffff;
+  return dense ? a : (a & hash32(j + 997, seed)) & 0x7ffffff;
+}
+
+/* ------------------------------ 4x4, column-major ------------------------- */
+
+const ID4 = new Float64Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+const tA = new Float64Array(16), tB = new Float64Array(16), ROT = new Float64Array(16);
+
+function planeRot(out, i, j, ang){
+  out.set(ID4);
+  const c = Math.cos(ang), s = Math.sin(ang);
+  out[i*4+i] = c; out[i*4+j] = s; out[j*4+i] = -s; out[j*4+j] = c;
+}
+function mul4(out, A, B){
+  for (let c = 0; c < 4; ++c) for (let r = 0; r < 4; ++r){
+    let v = 0;
+    for (let k = 0; k < 4; ++k) v += A[k*4+r] * B[c*4+k];
+    out[c*4+r] = v;
+  }
+}
+function apply4(M, v){
+  return [ M[0]*v[0] + M[4]*v[1] + M[8]*v[2]  + M[12]*v[3],
+           M[1]*v[0] + M[5]*v[1] + M[9]*v[2]  + M[13]*v[3],
+           M[2]*v[0] + M[6]*v[1] + M[10]*v[2] + M[14]*v[3],
+           M[3]*v[0] + M[7]*v[1] + M[11]*v[2] + M[15]*v[3] ];
+}
+
+/* -------------------------- the tesseract cell table ---------------------- */
+// centre +/- e_k, frame = the other three coordinate axes. Any orthonormal
+// frame of p-perp gives the same walls, because the face set {e_a -+ p} is
+// exactly the bisecting hyperplanes between neighbouring centres.
+
+const CELL = [];
+for (let k = 0; k < 4; ++k) for (const sg of [1, -1]){
+  const p = [0,0,0,0]; p[k] = sg;
+  const f = [];
+  for (let i = 0; i < 4; ++i) if (i !== k){ const e = [0,0,0,0]; e[i] = 1; f.push(e); }
+  CELL.push({ p, f });
+}
+
+/* ------------------------------- shaders ---------------------------------- */
+
+const VERT = `#version 300 es
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+precision highp int;
+
+uniform vec3  iResolution;
+uniform vec3  uCamO, uCamU, uCamV, uCamW;
+uniform vec4  uP[8];          // cell centre on S^3, already rotated
+uniform vec4  uE[24];         // tangent frame, 3 per cell, already rotated
+uniform vec4  uBS[8];         // projected bounding sphere, w < 0 => unbounded
+uniform uint  uMask[8];
+uniform float uEps, uClip, uS, uBandW;
+uniform int   uMode, uShade, uBandOn;
+
+out vec4 fragColor;
+#define AA 2
+
+const vec4 CPOLE = vec4(0.0, 0.0, 0.0, -1.0);
+
+bool occ(ivec3 c, uint m){
+  if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, ivec3(3)))) return false;
+  return ((m >> uint(c.x + 3 * c.y + 9 * c.z)) & 1u) != 0u;
+}
+
+// the great sphere n.q = 0 projects to a sphere of centre n.xyz/n.w
+// (a plane through the origin when n.w = 0). Scale-invariant in n.
+vec3 faceNormal(vec4 n, vec3 y){
+  if (abs(n.w) < 1e-6) return normalize(n.xyz);
+  return normalize(y - n.xyz / n.w);
+}
+
+void traceCell(int j, vec4 a, vec4 d4, float a2, float ad,
+               inout float m, inout vec3 lp, inout vec4 hq, inout vec3 hn){
+  uint mask = uMask[j];
+  vec4 p  = uP[j];
+  vec4 E0 = uE[j*3], E1 = uE[j*3+1], E2 = uE[j*3+2];
+
+  for (int ax = 0; ax < 3; ++ax){
+    vec4 e = (ax == 0) ? E0 : (ax == 1) ? E1 : E2;
+
+    for (int qi = 0; qi < 4; ++qi){
+      float K = -1.0 + float(qi) * (2.0 / 3.0);
+      vec4  n = e - (uEps * K) * p;          // great-sphere hyperplane
+      float kap = -n.w;                      // n . CPOLE
+
+      float A  = kap;
+      float B  = 2.0 * (kap * ad + dot(n, d4));
+      float Cc = kap * a2 + 2.0 * dot(n, a);
+
+      vec2 roots = vec2(-1.0);
+      int  nr = 0;
+      if (abs(A) < 1e-7){                    // wall through the pole: flat in R^3
+        if (abs(B) > 1e-12){ roots.x = -Cc / B; nr = 1; }
+      } else {
+        float ds = B * B - 4.0 * A * Cc;
+        if (ds >= 0.0){
+          float sq = sqrt(ds);
+          float qq = -0.5 * (B + (B >= 0.0 ? sq : -sq));
+          float r0 = qq / A;
+          float r1 = (abs(qq) > 1e-20) ? Cc / qq : r0;
+          roots = vec2(min(r0, r1), max(r0, r1));
+          nr = 2;
+        }
+      }
+
+      for (int s = 0; s < 2; ++s){
+        if (s >= nr) break;
+        float t = roots[s];
+        if (t <= 1e-4 || t >= m) continue;
+
+        vec4  v = a + t * d4;
+        float L = dot(v, v);
+        if (L < 1e-12) continue;
+        vec4  Q = CPOLE + (2.0 / L) * v;     // the point on S^3
+
+        float pq = dot(p, Q);
+        if (pq < 1e-3) continue;             // gnomonic chart is one hemisphere
+
+        float sc = 1.0 / (uEps * pq);
+        vec3  l  = vec3(dot(E0, Q), dot(E1, Q), dot(E2, Q)) * sc;
+
+        // d(n.Q)/dt has the sign of F'(t) = 2At + B, and n.Q = eps*pq*(l_a - K)
+        bool  pos = (2.0 * A * t + B) > 0.0;
+
+        ivec3 ci = ivec3(floor(l * 1.5 + 1.5));
+        ivec3 ce = ci;
+        ci[ax] = pos ? qi     : qi - 1;
+        ce[ax] = pos ? qi - 1 : qi;
+
+        if (occ(ci, mask) && !occ(ce, mask)){
+          m = t; lp = l; hq = Q;
+          hn = faceNormal(n, uCamO + t * d4.xyz);
+        }
+      }
+    }
+  }
+}
+
+vec3 hsv(float h, float s, float v){
+  vec3 k = fract(vec3(h) + vec3(0.0, 2.0/3.0, 1.0/3.0));
+  return v * mix(vec3(1.0), clamp(abs(k * 6.0 - 3.0) - 1.0, 0.0, 1.0), s);
+}
+
+vec3 render(vec2 uv){
+  vec3 o = uCamO;
+  vec3 d = normalize(uv.x * uCamU + uv.y * uCamV + 1.8 * uCamW);
+
+  vec4  a  = vec4(o, 1.0);                   // o - CPOLE
+  vec4  d4 = vec4(d, 0.0);
+  float a2 = dot(a, a), ad = dot(a, d4);
+
+  float m = uClip;
+  vec3  l  = vec3(0.0), nrm = vec3(0.0);
+  vec4  hq = vec4(0.0);
+  bool  hit = false;
+
+  for (int j = 0; j < 8; ++j){
+    if (uMask[j] == 0u) continue;
+
+    vec4 bs = uBS[j];
+    if (bs.w > 0.0){
+      vec3  oc = o - bs.xyz;
+      float b  = dot(oc, d);
+      float c  = dot(oc, oc) - bs.w * bs.w;
+      float ds = b * b - c;
+      if (ds < 0.0) continue;
+      float sq = sqrt(ds);
+      if (-b + sq < 0.0 || -b - sq >= m) continue;
+    }
+
+    float before = m;
+    traceCell(j, a, d4, a2, ad, m, l, hq, nrm);
+    if (m < before) hit = true;
+  }
+  if (!hit) return vec3(0.0);
+
+  // Clifford coordinates of the hit, read straight off the S^3 point
+  float rho = length(hq.xy);
+  float th  = atan(hq.y, hq.x);
+  float ph  = atan(hq.w, hq.z);
+
+  vec3 col;
+  if (uMode == 0){
+    col = l * 0.5 + 0.5;                                  // shape-space gamut
+  } else if (uMode == 1){
+    float u = clamp(rho, 0.0, 1.0);
+    col = mix(vec3(0.16, 0.42, 0.95), vec3(1.0, 0.74, 0.30), u * u);
+  } else {
+    col = hsv(fract((th - ph) / 6.28318530718), 0.72,
+              0.55 + 0.45 * cos(th + ph));                // Hopf invariants
+  }
+
+  if (uShade == 1){
+    vec3 nn = normalize(nrm);
+    if (dot(nn, d) > 0.0) nn = -nn;
+    vec3 L1 = normalize(vec3(0.5, 0.75, 0.45));
+    float df = max(dot(nn, L1), 0.0);
+    float sp = pow(max(dot(nn, normalize(L1 - d)), 0.0), 40.0);
+    col = col * (0.30 + 0.78 * df) + vec3(sp * 0.35);
+  }
+
+  if (uBandOn == 1){
+    float b = 1.0 - smoothstep(0.0, uBandW, abs(rho - uS));
+    col += vec3(0.95, 0.30, 0.55) * b * 0.9;
+  }
+  return col;
+}
+
+void mainImage(out vec4 O, in vec2 F){
+  vec3 acc = vec3(0.0);
+  for (int j = 0; j < AA; ++j)
+    for (int i = 0; i < AA; ++i){
+      vec2 off = (vec2(float(i), float(j)) + 0.5) / float(AA);
+      vec2 v = ((F + off - 0.5) * 2.0 - iResolution.xy) / iResolution.y;
+      acc += render(v);
+    }
+  O = vec4(acc / float(AA * AA), 1.0);
+}
+void main(){ mainImage(fragColor, gl_FragCoord.xy); }`;
+
+/* ------------------------------- uniform build ---------------------------- */
+
+const P_BUF  = new Float32Array(NB * 4);
+const E_BUF  = new Float32Array(NB * 12);
+const BS_BUF = new Float32Array(NB * 4);
+const M_BUF  = new Uint32Array(NB);
+const orbitOf = new Int32Array(NB).fill(24);
+const live    = new Array(NB).fill(true);
+
+function buildMasks(seed, dense){
+  let sum = 0, vox = 0;
+  for (let j = 0; j < NB; ++j){
+    const c = canonical(rawMask(j, seed, dense));
+    M_BUF[j] = live[j] ? c.canon : 0;
+    orbitOf[j] = c.orbit;
+    sum += c.orbit;
+    for (let i = 0; i < 27; ++i) if ((c.canon >>> i) & 1) vox++;
+  }
+  return { orbitAvg: sum / NB, vox };
+}
+
+function buildCells(eps){
+  const cosA = 1 / Math.sqrt(1 + 3 * eps * eps);   // corner half-angle of the cell
+  let unbounded = 0;
+  for (let j = 0; j < NB; ++j){
+    const p = apply4(ROT, CELL[j].p);
+    P_BUF.set(p, j * 4);
+    for (let a = 0; a < 3; ++a) E_BUF.set(apply4(ROT, CELL[j].f[a]), j * 12 + a * 4);
+
+    // the cap p.q >= cosA projects to the sphere centre p_xyz/(p_w + cosA)
+    const den = p[3] + cosA;
+    if (den <= 1e-3){
+      BS_BUF.set([0, 0, 0, -1], j * 4);            // cap swallows the pole
+      unbounded++;
+    } else {
+      const m2 = p[0]*p[0] + p[1]*p[1] + p[2]*p[2];
+      const r2 = m2 / (den * den) + (p[3] - cosA) / den;
+      BS_BUF.set([p[0]/den, p[1]/den, p[2]/den, Math.sqrt(Math.max(r2, 0))], j * 4);
+    }
+  }
+  return unbounded;
+}
+
+/* ------------------------------------ host -------------------------------- */
+
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, depth: false });
+
+function compile(type, src){
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(sh));
+    console.error(src.split("\n").map((l, i) => (i + 1) + "| " + l).join("\n"));
+    return null;
+  }
+  return sh;
+}
+
+function main(){
+  const vs = compile(gl.VERTEX_SHADER, VERT);
+  const fs = compile(gl.FRAGMENT_SHADER, FRAG);
+  if (!vs || !fs) return;
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(prog)); return; }
+  gl.useProgram(prog);
+  gl.bindVertexArray(gl.createVertexArray());
+
+  const U = n => gl.getUniformLocation(prog, n);
+  const uRes=U("iResolution"), uO=U("uCamO"), uU=U("uCamU"), uV=U("uCamV"), uW=U("uCamW");
+  const uPl=U("uP[0]"), uEl=U("uE[0]"), uBl=U("uBS[0]"), uMl=U("uMask[0]");
+  const uEps=U("uEps"), uClip=U("uClip"), uS=U("uS"), uBandW=U("uBandW");
+  const uMode=U("uMode"), uShade=U("uShade"), uBandOn=U("uBandOn");
+  const hud = document.getElementById("hud");
+
+  let M = 1, Nn = 1;
+  let eps = 1.0, clip = 40, mode = 0, shade = 1, bandOn = 1, dense = false, seed = 1;
+  let drift = true, running = true;
+  let ang = [0,0,0,0,0,0];                 // xy, zw, xz, xw, yz, yw
+  const RATE = [0, 0, 0.055, 0.037, 0.081, 0.023];
+
+  let camTh = 0.8, camPh = 1.12, camD = 4.4;
+  let T = 0, last = performance.now(), acc = 0, frames = 0, fps = 0;
+  let stats = { orbitAvg: 24, vox: 0 }, unbounded = 0;
+  stats = buildMasks(seed, dense);
+
+  function resize(){
+    const dpr = Math.min(devicePixelRatio || 1, 1.75);
+    const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h){
+      canvas.width = w; canvas.height = h;
+      gl.viewport(0, 0, w, h);
+      gl.uniform3f(uRes, w, h, 1);
+    }
+  }
+
+  /* ---- pointer: drag orbits the R^3 camera, shift-drag rotates in S0(4) --- */
+  let drag = null;
+  canvas.addEventListener("pointerdown", ev => {
+    canvas.setPointerCapture(ev.pointerId);
+    drag = { x: ev.clientX, y: ev.clientY, four: ev.shiftKey || ev.button === 2 };
+  });
+  canvas.addEventListener("pointermove", ev => {
+    if (!drag) return;
+    const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+    drag.x = ev.clientX; drag.y = ev.clientY;
+    if (drag.four){
+      ang[3] += dx * 0.004;                 // xw
+      ang[5] += dy * 0.004;                 // yw
+    } else {
+      camTh -= dx * 0.006;
+      camPh = Math.min(Math.PI - 0.01, Math.max(0.01, camPh - dy * 0.006));
+    }
+  });
+  addEventListener("pointerup", () => { drag = null; });
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
+  canvas.addEventListener("wheel", ev => {
+    ev.preventDefault();
+    camD = Math.min(60, Math.max(0.25, camD * Math.exp(ev.deltaY * 0.0012)));
+  }, { passive: false });
+
+  addEventListener("keydown", ev => {
+    const k = ev.key.toLowerCase();
+    if (k === " "){ ev.preventDefault(); running = !running; }
+    else if (k === "c"){ mode = (mode + 1) % 3; }
+    else if (k === "b"){ bandOn ^= 1; }
+    else if (k === "l"){ shade ^= 1; }
+    else if (k === "s"){ drift = !drift; }
+    else if (k === "z"){ ang = [0,0,0,0,0,0]; }
+    else if (k === "r"){ seed++; stats = buildMasks(seed, dense); }
+    else if (k === "d"){ dense = !dense; stats = buildMasks(seed, dense); }
+    else if (k === "["){ eps = Math.max(0.25, eps - 0.02); }
+    else if (k === "]"){ eps = Math.min(1.60, eps + 0.02); }
+    else if (k === "m"){ M = M % 8 + 1; }
+    else if (k === "n"){ Nn = Nn % 8 + 1; }
+    else if (k >= "1" && k <= "8"){
+      const j = k.charCodeAt(0) - 49;
+      live[j] = !live[j];
+      stats = buildMasks(seed, dense);
+    } else return;
+    ev.preventDefault();
+  });
+
+  function frame(now){
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    if (running) T += dt;
+    if (running && drift) for (let i = 0; i < 6; ++i) ang[i] += RATE[i] * dt;
+
+    resize();
+
+    ROT.set(ID4);
+    const PL = [[0,1],[2,3],[0,2],[0,3],[1,2],[1,3]];
+    for (let i = 0; i < 6; ++i){
+      planeRot(tA, PL[i][0], PL[i][1], ang[i]);
+      mul4(tB, ROT, tA); ROT.set(tB);
+    }
+    unbounded = buildCells(eps);
+
+    const sp = Math.sin(camPh);
+    const o = [ camD * sp * Math.sin(camTh), camD * Math.cos(camPh), camD * sp * Math.cos(camTh) ];
+    const L = Math.hypot(o[0], o[1], o[2]) || 1;
+    const w = [-o[0]/L, -o[1]/L, -o[2]/L];
+    let u = [ w[2], 0, -w[0] ];
+    const ul = Math.hypot(u[0], u[1], u[2]) || 1;
+    u = [u[0]/ul, u[1]/ul, u[2]/ul];
+    const v = [ u[1]*w[2]-u[2]*w[1], u[2]*w[0]-u[0]*w[2], u[0]*w[1]-u[1]*w[0] ];
+
+    const h = Math.hypot(M, Nn), Sv = Nn / h;
+
+    gl.uniform3fv(uO, o); gl.uniform3fv(uU, u); gl.uniform3fv(uV, v); gl.uniform3fv(uW, w);
+    gl.uniform4fv(uPl, P_BUF);
+    gl.uniform4fv(uEl, E_BUF);
+    gl.uniform4fv(uBl, BS_BUF);
+    gl.uniform1uiv(uMl, M_BUF);
+    gl.uniform1f(uEps, eps);
+    gl.uniform1f(uClip, clip);
+    gl.uniform1f(uS, Sv);
+    gl.uniform1f(uBandW, 0.012);
+    gl.uniform1i(uMode, mode);
+    gl.uniform1i(uShade, shade);
+    gl.uniform1i(uBandOn, bandOn);
+
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    acc += dt; frames++;
+    if (acc >= 0.5){ fps = Math.round(frames / acc); acc = 0; frames = 0; }
+
+    const cells = live.reduce((n, x) => n + (x ? 1 : 0), 0);
+    const tiling = Math.abs(eps - 1) < 0.005 ? "exact tesseract" :
+                   eps < 1 ? "gapped" : "overlapping";
+    const MODE = ["gamut", "clifford ρ", "hopf phase"][mode];
+    hud.textContent =
+      fps + " fps\n" +
+      "ε " + eps.toFixed(2) + "   " + tiling + "\n" +
+      cells + "/8 cells   " + stats.vox + " voxels   orbit " + stats.orbitAvg.toFixed(1) + "/24\n" +
+      (unbounded ? "unbounded cells " + unbounded + "\n" : "") +
+      "clifford " + M + ":" + Nn + "   S " + Sv.toFixed(4) + (bandOn ? "   band on" : "") + "\n" +
+      "colour " + MODE + (shade ? " + shading" : "") + (drift ? "   so(4) drift" : "") + "\n" +
+      "drag orbit  shift-drag so(4)  wheel zoom\n" +
+      "[ ] ε   m n ratio   c colour  b band  l light\n" +
+      "s drift  z reset  r reroll  d density  1-8 cells  space pause";
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  console.log("bimoblock S³ — 8 tesseract cells, 216 spherical voxels, exact analytic trace");
+}
+
+if (gl) main();
+else {
+  console.error("WebGL2 unavailable.");
+  document.getElementById("hud").textContent = "needs WebGL2";
+}
+</script>
+</body>
+</html>
