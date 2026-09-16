@@ -51,6 +51,11 @@
   .meter { height:4px; background:rgba(180,190,255,0.14); border-radius:2px; overflow:hidden; margin:2px 0 6px; }
   .meter i { display:block; height:100%; width:100%; transform-origin:left center; }
   #hullBar { background:linear-gradient(90deg, var(--warn), var(--gold) 45%, var(--accent2)); }
+  #hullBar { transition:transform .12s linear; }
+  #hullBar.regen { animation:regen 0.7s ease-in-out infinite alternate; }
+  @keyframes regen { from { filter:brightness(1); } to { filter:brightness(1.8) drop-shadow(0 0 4px var(--accent2)); } }
+  #regen { font-size:8.5px; letter-spacing:.1em; color:rgba(180,205,255,0.4); min-height:14px; margin:-3px 0 4px; }
+  #regen.on { color:var(--accent2); }
   .pips { display:flex; gap:4px; margin:3px 0 6px; }
   .pips i { width:18px; height:5px; border-radius:1px; border:1px solid rgba(255,62,165,0.55); }
   .pips i.full { background:var(--accent); box-shadow:0 0 8px rgba(255,62,165,0.7); }
@@ -113,6 +118,7 @@
   }
   @media (prefers-reduced-motion: reduce){
     #sheen { animation:none; }
+    #hullBar.regen { animation:none; }
   }
 </style>
 </head>
@@ -133,6 +139,7 @@
   <div class="k">score</div><b id="score">0</b> &nbsp;<span class="k">best</span> <b id="best">0</b>
   <div class="k" style="margin-top:4px">hull <b id="hullPct">100%</b> &nbsp; <span class="lives" id="lives">◆◆◆</span></div>
   <div class="meter"><i id="hullBar"></i></div>
+  <div id="regen"></div>
   <div class="k">orbit lance</div>
   <div class="pips" id="lance"></div>
   <div class="k">kills <b id="kills">0</b> &nbsp; orbits <b id="orbits">0</b></div>
@@ -143,7 +150,7 @@
 <div id="banner"></div>
 
 <div id="hint">WASD move &nbsp;·&nbsp; mouse aim &nbsp;·&nbsp; click / space fire &nbsp;·&nbsp; right-click / shift orbit lance
-<br>Q E aim by key &nbsp;·&nbsp; C orbit colours &nbsp;·&nbsp; M sound &nbsp;·&nbsp; P pause &nbsp;·&nbsp; R restart</div>
+<br>stop firing to regrow the hull &nbsp;·&nbsp; Q E aim by key &nbsp;·&nbsp; C orbit colours &nbsp;·&nbsp; M sound &nbsp;·&nbsp; P pause &nbsp;·&nbsp; R restart</div>
 
 <div id="title">
   <div class="box">
@@ -151,6 +158,7 @@
     <h1>Citadel</h1>
     <p>You hold the centre. Three rings of specimens orbit you, and each ring is one row of the showroom wrapped into a circle: one seed, one trait stepping around the loop.</p>
     <p>Inner rings soak up fire from the rings behind them. Clear the inner ring and everything closes in, with a fresh ring minted at the edge.</p>
+    <p>Your hull regrows whenever you stop shooting for a moment, so pick your windows: firing and healing don't mix.</p>
     <p>The orbit lance deletes every voxel that shares a symmetry orbit with what it hits. It shreds octahedral specimens and barely scratches asymmetric ones.</p>
     <div class="keys"><b>WASD</b> move · <b>mouse</b> aim · <b>click / space</b> fire<br><b>right-click / shift</b> orbit lance · <b>C</b> show orbits · <b>P</b> pause</div>
     <button id="startBtn">Start siege</button>
@@ -962,6 +970,11 @@ const CFG = {
   LANCE_COST: 100,
   LANCE_MAX:  300,
   BUILD_MS:   5,
+  REGEN_WAIT: 1.1,                  // seconds without firing or being hit before the hull regrows
+  REGEN_BASE: 5,                    // voxels per second once regrowth starts
+  REGEN_RAMP: 9,                    // added voxels per second, per second of continued calm
+  REGEN_MAX:  20,
+  REGEN_STALL: 0.4,                 // a hit pauses regrowth briefly without restarting the wait
   FIT_R:      16.4,
   TILT:       1.08,
   PARTS:      1600,
@@ -1183,6 +1196,7 @@ const S = {
   lance:CFG.LANCE_COST, rings:[], divers:[], pshots:[], eshots:[], parts:[],
   player:null, invuln:0, pendingLife:false, fireCd:0, altGun:false,
   diveTimer:5, shake:0, flash:0, colorMode:'gamut',
+  lastFire:-99, regenStall:0, regenAcc:0, regenOn:false, regenTick:0,
   pointerFire:false, mouseAim:false, ndc:new THREE.Vector2(0, 0),
   aimPt:new THREE.Vector3(0, CFG.HOVER, -3), camX:0, camZ:0, t:0
 };
@@ -1435,6 +1449,7 @@ function makePlayer(){
   const P = { sym:1, arch:0, field:2, lift:0, density:0.52, seed:0x5eed1234, tierSymmetry:false };
   const sp = makeSpecimen(P, CFG.SHIP_S, 'player');
   buildSpecimen(sp);
+  sp.occ0 = sp.occ.slice();
   sp.rot = Math.PI;
   return { sp, x:0, z:0, vx:0, vz:0, ax:0, az:-1 };
 }
@@ -1482,10 +1497,82 @@ function updatePlayer(dt){
   if (S.invuln > 0) S.invuln -= dt;
 }
 
+
+/* ---- hull regrowth ---------------------------------------------------
+   Holding fire lets the ship grow back.  Regrowth follows the hull's own
+   symmetry: a missing orbit comes back whole (mirror pairs for the Cs
+   hull), and only orbits touching surviving voxels are eligible, nearest
+   the centre first, so the ship refills from the core outward instead of
+   sprouting floating cubes.  Only firing restarts the wait; a hit just
+   stalls regrowth for a moment, otherwise steady incoming fire would
+   lock healing out entirely and holding fire would never pay off. */
+const FACE6 = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+function regrowOrbit(sp){
+  let best = -1, bestD = Infinity;
+  const seen = new Set();
+  for (let f = 0; f < NCELL; f++){
+    if (!sp.occ0[f] || sp.occ[f]) continue;
+    const o = sp.orb.of[f];
+    if (seen.has(o)) continue;
+    const X = f % R, Y = ((f / R) | 0) % R, Z = (f / R2) | 0;
+    let touching = false;
+    for (const d of FACE6){
+      const x = X + d[0], y = Y + d[1], z = Z + d[2];
+      if (x < 0 || y < 0 || z < 0 || x >= R || y >= R || z >= R) continue;
+      if (sp.occ[x + R * y + R2 * z]){ touching = true; break; }
+    }
+    if (!touching) continue;
+    seen.add(o);
+    const d = AX.centers[X] ** 2 + AX.centers[Y] ** 2 + AX.centers[Z] ** 2;
+    if (d < bestD){ bestD = d; best = o; }
+  }
+  if (best < 0){
+    // nothing touches the surviving hull (it was cut apart): regrow the innermost gap
+    for (let f = 0; f < NCELL; f++){
+      if (!sp.occ0[f] || sp.occ[f]) continue;
+      const d = AX.centers[f % R] ** 2 + AX.centers[((f / R) | 0) % R] ** 2 + AX.centers[(f / R2) | 0] ** 2;
+      if (d < bestD){ bestD = d; best = sp.orb.of[f]; }
+    }
+  }
+  if (best < 0) return 0;
+  let n = 0;
+  for (const g of sp.orb.members[best]){
+    if (!sp.occ0[g] || sp.occ[g]) continue;
+    sp.occ[g] = 1; sp.alive++; n++;
+    if (sp.orbLive[best]++ === 0) sp.orbitsAlive++;
+    voxelWorld(sp, g, _w);
+    spawnPart(_w.x + rand(-0.4, 0.4), _w.y + rand(0.3, 0.8), _w.z + rand(-0.4, 0.4),
+              0, -1.5, 0, AX.cellSize * sp.dispS * 0.5, 0.35, 1, 0.85, 0.35);
+  }
+  sp.dirty = true;
+  return n;
+}
+
+function updateRegen(dt){
+  const sp = S.player.sp;
+  const calm = S.t - S.lastFire - CFG.REGEN_WAIT;
+  S.regenOn = calm > 0 && sp.alive < sp.total && !S.pendingLife;
+  if (!S.regenOn){ S.regenAcc = 0; return; }
+  if (S.regenStall > 0){ S.regenStall -= dt; return; }
+  S.regenAcc += Math.min(CFG.REGEN_MAX, CFG.REGEN_BASE + calm * CFG.REGEN_RAMP) * dt;
+  let grew = 0;
+  while (S.regenAcc >= 1 && sp.alive < sp.total){
+    const n = regrowOrbit(sp);
+    if (!n){ S.regenAcc = 0; break; }
+    S.regenAcc -= n;
+    grew += n;
+  }
+  if (grew){
+    sp.flash = Math.max(sp.flash, 0.35);
+    if (S.t - S.regenTick > 0.12){ S.regenTick = S.t; sfx('regen'); }
+  }
+}
+
 function fireGun(dt){
   S.fireCd -= dt;
   if (!(keys.has(' ') || S.pointerFire) || S.fireCd > 0) return;
   S.fireCd = CFG.FIRE_DT;
+  S.lastFire = S.t;
   const pl = S.player;
   S.altGun = !S.altGun;
   const side = S.altGun ? 0.2 : -0.2;
@@ -1500,6 +1587,7 @@ function fireLance(){
   if (!S.started || S.paused || S.over || !S.player) return;
   if (S.lance < CFG.LANCE_COST){ sfx('empty'); return; }
   S.lance -= CFG.LANCE_COST;
+  S.lastFire = S.t;
   const pl = S.player;
   S.pshots.push({ x: pl.x + pl.ax * 0.8, z: pl.z + pl.az * 0.8, y: CFG.HOVER + 0.05,
                   vx: pl.ax * CFG.LANCE_V, vz: pl.az * CFG.LANCE_V,
@@ -1514,6 +1602,7 @@ function chipPlayer(f, rad, cause){
   // a shot takes the struck voxel and its face neighbours; a ram takes the full 3x3x3
   blast(sp, f, 1, false, 10, rad > 1 ? 3 : 1);
   HitLog[cause] = (HitLog[cause] || 0) + 1;
+  S.regenStall = CFG.REGEN_STALL;
   S.flash = Math.min(1, S.flash + 0.55);
   S.shake = Math.max(S.shake, rad > 1 ? 1.4 : 0.7);
   sfx('hurt');
@@ -1827,6 +1916,7 @@ function sfx(name){
       case 'hurt':   tone('sine', 120, 40, 0.28, 0.25); noise(0.12, 0.2, 400); break;
       case 'boom':   tone('sawtooth', 90, 25, 0.9, 0.25); noise(0.8, 0.35, 300); break;
       case 'dive':   tone('triangle', 700, 260, 0.45, 0.06); break;
+      case 'regen':  tone('sine', 1320 + Math.random() * 400, 1800, 0.07, 0.018); break;
       case 'ring':   [392, 523, 659, 784].forEach((f, i) => tone('triangle', f, f, 0.22, 0.08, i * 0.08)); break;
     }
   } catch (e){ console.log('sfx error', e); }
@@ -1887,6 +1977,7 @@ function step(dt){
   if (live){
     updatePlayer(dt);
     fireGun(dt);
+    updateRegen(dt);
     enemyFire(dt);
     S.diveTimer -= dt;
     if (S.diveTimer <= 0){
@@ -1930,7 +2021,10 @@ function syncSpecimen(sp, t){
   const tr = op < 0.995;
   if (mat.transparent !== tr){ mat.transparent = tr; mat.needsUpdate = true; }
   const f = sp.flash;
-  if (sp.kind === 'player') mat.emissive.setRGB(f * 0.9, f * 0.1, f * 0.2);
+  if (sp.kind === 'player'){
+    if (S.regenOn) mat.emissive.setRGB(f * 0.05, f * 0.9, f * 0.7);
+    else mat.emissive.setRGB(f * 0.9, f * 0.1, f * 0.2);
+  }
   else mat.emissive.setRGB(f * 0.8, f * 0.55, f * 0.9);
   sp.flash = Math.max(0, f - (1 / 60) * 5);
   if (sp.kind === 'player') sp.mesh.visible = S.invuln <= 0 || (Math.floor(t * 12) & 1) === 0;
@@ -1971,6 +2065,9 @@ function syncScene(dt, t){
     syncSpecimen(pl.sp, t);
     shipRing.visible = true;
     shipRing.position.set(pl.x, 0.02, pl.z);
+    const pulse = S.regenOn ? 0.5 + 0.5 * Math.sin(t * 9) : 0;
+    shipRing.material.color.setRGB(pulse * 0.6, 0.96, 0.83 + pulse * 0.17);
+    shipRing.scale.setScalar(1 + pulse * 0.12);
     const lp = aimLine.geometry.attributes.position;
     lp.setXYZ(0, pl.x + pl.ax * 0.9, 0.05, pl.z + pl.az * 0.9);
     lp.setXYZ(1, pl.x + pl.ax * 7.5, 0.05, pl.z + pl.az * 7.5);
@@ -2084,7 +2181,7 @@ const $ = id => document.getElementById(id);
 const el = {
   pageVal:$('pageVal'), pageSub:$('pageSub'), perf:$('perf'), score:$('score'), best:$('best'),
   hullPct:$('hullPct'), hullBar:$('hullBar'), lives:$('lives'), lance:$('lance'),
-  kills:$('kills'), orbits:$('orbits'), inspect:$('inspect'), rings:$('rings'),
+  kills:$('kills'), regen:$('regen'), orbits:$('orbits'), inspect:$('inspect'), rings:$('rings'),
   banner:$('banner'), flash:$('flash')
 };
 let bannerUntil = 0;
@@ -2123,6 +2220,9 @@ function hud(now){
   const hull = sp && sp.total ? sp.alive / sp.total : 1;
   const hullShown = clamp((hull - CFG.HULL_FAIL) / (1 - CFG.HULL_FAIL), 0, 1);
   el.hullPct.textContent = `${Math.round(hullShown * 100)}%`;
+  el.regen.textContent = S.regenOn ? 'regrowing' : (hull < 1 && S.started && !S.over ? 'hold fire to regrow' : '');
+  el.regen.className = S.regenOn ? 'on' : '';
+  el.hullBar.classList.toggle('regen', S.regenOn);
   el.hullBar.style.transform = `scaleX(${hullShown.toFixed(3)})`;
   el.lives.textContent = '◆'.repeat(Math.max(0, S.lives)) + '◇'.repeat(Math.max(0, 3 - S.lives));
   el.kills.textContent = S.kills;
