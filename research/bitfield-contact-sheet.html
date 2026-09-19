@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bitfield contact sheet — one bit per unique quantized point</title>
+<style>
+  html,body{ height:100%; margin:0; background:#07070a; overflow:hidden;
+    font:10px/1.4 ui-monospace, Menlo, Consolas, monospace; color:#6a6a7a; letter-spacing:.05em; }
+  canvas{ display:block; position:absolute; left:0; top:0; }
+  .lbl{ position:absolute; user-select:none; pointer-events:none; white-space:nowrap; }
+  .col{ color:#8a8a9e; }
+  .row{ color:#8a8a9e; text-align:right; }
+  #sel{ position:absolute; border:1px solid rgba(180,200,255,.75); pointer-events:none;
+        display:none; box-shadow:0 0 0 1px rgba(0,0,0,.6) inset; }
+  #hud{ position:fixed; right:10px; bottom:8px; text-align:right; white-space:pre;
+        background:rgba(0,0,0,.5); padding:8px 12px; border-radius:6px;
+        border:1px solid rgba(255,255,255,.07); pointer-events:none; }
+  #hud b{ color:#a0a0b2; font-weight:normal; }
+  #hud .sec{ color:#3e3e4c; }
+  #hud .warn{ color:#c8a050; }
+  #toast{ position:fixed; left:50%; top:16px; transform:translateX(-50%);
+    background:rgba(20,20,28,.88); color:#c8c8dc; border:1px solid rgba(255,255,255,.15);
+    padding:6px 14px; border-radius:4px; opacity:0; transition:opacity .25s ease; pointer-events:none; }
+  #busy{ position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+    background:rgba(16,16,22,.94); color:#b8b8cc; border:1px solid rgba(255,255,255,.14);
+    padding:14px 22px; border-radius:6px; display:none; text-align:center; white-space:pre; }
+  #drop{ position:fixed; inset:0; background:rgba(40,60,120,.28); display:none;
+    border:2px dashed rgba(160,190,255,.6); pointer-events:none; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="labels"></div>
+<div id="sel"></div>
+<div id="hud"></div>
+<div id="toast"></div>
+<div id="busy"></div>
+<div id="drop"></div>
+
+<script>
+"use strict";
+
+/* ============================================================================
+   BITFIELD CONTACT SHEET
+
+   The tower sheet renders a predicate over cell addresses. This renders a
+   BITMAP over cell addresses, with the bitmap produced by the dedup stage of
+   the extraction pipeline -- the `tupleBitArray` that quantizeProcessDataAs
+   already builds and then discards.
+
+   pipeline:  bytes -> tuples -> normalize -> quantize B bits/axis
+                    -> MORTON interleave -> set one bit
+                    -> OR-reduce into an occupancy pyramid
+                    -> hierarchical skip march, one texel fetch per node
+
+   Three things differ from the tower:
+     radix 2, not 3   -- so a digit is 3 bits and a brick is a byte
+     morton, not concat -- key bit-triples ARE the octree path (see partBy2)
+     fetched, not evaluated -- classify() reads the pyramid instead of a rule
+
+   Everything else (viewport tiling, skip semantics, AO, orbit) is unchanged
+   from the tower, which is the point: the tracer did not need to know that
+   the occupancy source became real data.
+   ========================================================================= */
+
+const STEP_CAP = 512;
+const TEX_W    = 4096;                 // pyramid words per texture row
+const MEM_CAP  = 320 * 1024 * 1024;    // total GPU budget for all rows
+
+/* ==========================================================================
+   1. DTYPES + FLOAT DECODERS  (BPT's floatEnhancedQuantizeAs.js, verbatim)
+   ========================================================================== */
+const DATA_TYPES = {
+  int8:     { size:1, min:-128, max:127, method:'getInt8',  isFloat:false },
+  uint8:    { size:1, min:0, max:255,    method:'getUint8', isFloat:false },
+  int16:    { size:2, min:-32768, max:32767, method:'getInt16',  isFloat:false },
+  uint16:   { size:2, min:0, max:65535,     method:'getUint16', isFloat:false },
+  int32:    { size:4, min:-2147483648, max:2147483647, method:'getInt32',  isFloat:false },
+  uint32:   { size:4, min:0, max:4294967295,           method:'getUint32', isFloat:false },
+  fp8_e4m3: { size:1, method:'getFloat8E4M3', isFloat:true },
+  fp8_e5m2: { size:1, method:'getFloat8E5M2', isFloat:true },
+  fp16:     { size:2, method:'getFloat16',  isFloat:true },
+  bf16:     { size:2, method:'getBFloat16', isFloat:true },
+  fp32:     { size:4, method:'getFloat32',  isFloat:true },
+  tf32:     { size:4, method:'getTensorFloat32', isFloat:true },
+  fp64:     { size:8, method:'getFloat64',  isFloat:true }
+};
+const NORMALIZERS = Object.fromEntries(
+  Object.entries(DATA_TYPES).filter(([, c]) => !c.isFloat)
+    .map(([t, c]) => [t, { multiplier: 2 / (c.max - c.min), offset: c.min }]));
+
+function fp16ToFloat32(u){
+  const s = (u & 0x8000) >> 15, e = (u & 0x7C00) >> 10, m = u & 0x03FF;
+  if (e === 0)  return m === 0 ? (s ? -0 : 0) : (s ? -1 : 1) * Math.pow(2,-14) * (m/1024);
+  if (e === 31) return m === 0 ? (s ? -Infinity : Infinity) : NaN;
+  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + m/1024);
+}
+function bf16ToFloat32(u){
+  const s = (u & 0x8000) >> 15, e = (u & 0x7F80) >> 7, m = u & 0x007F;
+  if (e === 0)   return m === 0 ? (s ? -0 : 0) : (s ? -1 : 1) * Math.pow(2,-126) * (m/128);
+  if (e === 255) return m === 0 ? (s ? -Infinity : Infinity) : NaN;
+  return (s ? -1 : 1) * Math.pow(2, e - 127) * (1 + m/128);
+}
+function fp8e4m3ToFloat32(u){
+  const s = (u & 0x80) >> 7, e = (u & 0x78) >> 3, m = u & 0x07;
+  if (e === 0)    return m === 0 ? (s ? -0 : 0) : (s ? -1 : 1) * Math.pow(2,-6) * (m/8);
+  if (e === 0xF)  return m === 0 ? (s ? -Infinity : Infinity) : NaN;
+  return (s ? -1 : 1) * Math.pow(2, e - 7) * (1 + m/8);
+}
+function fp8e5m2ToFloat32(u){
+  const s = (u & 0x80) >> 7, e = (u & 0x7C) >> 2, m = u & 0x03;
+  if (e === 0)    return m === 0 ? (s ? -0 : 0) : (s ? -1 : 1) * Math.pow(2,-14) * (m/4);
+  if (e === 0x1F) return m === 0 ? (s ? -Infinity : Infinity) : NaN;
+  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + m/4);
+}
+function tf32ToFloat32(u){
+  const s = (u & 0x80000000) >>> 31, e = (u & 0x7F800000) >>> 23, m = (u & 0x007FE000) >>> 13;
+  if (e === 0)   return m === 0 ? (s ? -0 : 0) : (s ? -1 : 1) * Math.pow(2,-126) * (m/1024);
+  if (e === 255) return m === 0 ? (s ? -Infinity : Infinity) : NaN;
+  return (s ? -1 : 1) * Math.pow(2, e - 127) * (1 + m/1024);
+}
+function createExtendedDataView(buffer){
+  const v = new DataView(buffer);
+  v.getFloat16       = function(o, le=false){ return fp16ToFloat32(this.getUint16(o, le)); };
+  v.getBFloat16      = function(o, le=false){ return bf16ToFloat32(this.getUint16(o, le)); };
+  v.getFloat8E4M3    = function(o){ return fp8e4m3ToFloat32(this.getUint8(o)); };
+  v.getFloat8E5M2    = function(o){ return fp8e5m2ToFloat32(this.getUint8(o)); };
+  v.getTensorFloat32 = function(o, le=false){ return tf32ToFloat32(this.getUint32(o, le)); };
+  return v;
+}
+
+/* ==========================================================================
+   2. MORTON
+   The one substantive change to the key. Concatenation (qz<<2B)|(qy<<B)|qx
+   dedups identically -- same set, and refactorization invariance says the
+   leaf geometry does not care -- but a +1 in z becomes a 2^2B-bit stride, so
+   every descent step is a cache miss and the key is no longer the tree path.
+   Interleaved, the key's 3-bit groups ARE the octree digits, coarsest first.
+   ========================================================================== */
+function part1by2(n){                     // spread 10 bits to every 3rd bit
+  n &= 0x3ff;
+  n = (n | (n << 16)) & 0x030000FF;
+  n = (n | (n <<  8)) & 0x0300F00F;
+  n = (n | (n <<  4)) & 0x030C30C3;
+  n = (n | (n <<  2)) & 0x09249249;
+  return n;
+}
+const morton3 = (x, y, z) => (part1by2(x) | (part1by2(y) << 1) | (part1by2(z) << 2)) >>> 0;
+
+/* ==========================================================================
+   3. EXTRACTION -> DENSE BITMAP
+   This is quantizeProcessDataAs with the point/colour allocation deleted and
+   the bit array kept. That allocation was the memory problem: points+colors
+   are sized maxTuples*3 BEFORE dedup, so 24 bytes/tuple is committed whether
+   1% or 100% survive. The bitmap is 2^3B bits total, independent of tuples --
+   at B=9 that is 16 MiB against 192 MiB for the same data as points.
+   `stride` and `offset` are new, and they are the whole reason for the sheet.
+   ========================================================================== */
+function extractBitfield(buffer, opt){
+  const cfg = DATA_TYPES[opt.dtype];
+  if (!cfg) throw new Error("unsupported dtype " + opt.dtype);
+  const B = opt.B, ts = cfg.size, tuple = ts * 3;
+  const step   = opt.stride > 0 ? opt.stride : tuple;
+  const offset = opt.offset | 0;
+  const le     = !!opt.littleEndian;
+  const gain   = opt.gain > 0 ? opt.gain : 1;
+
+  const view = createExtendedDataView(buffer);
+  const read = view[cfg.method].bind(view);
+
+  let normalize;
+  if (cfg.isFloat){
+    normalize = v => {
+      if (!isFinite(v)) return isNaN(v) ? 0 : (v > 0 ? 1 : -1);
+      return Math.tanh(gain * v);
+    };
+  } else {
+    const { multiplier, offset: off } = NORMALIZERS[opt.dtype];
+    normalize = v => Math.max(-1, Math.min(1, gain * (((v - off) * multiplier) - 1)));
+  }
+
+  const cells = Math.pow(8, B);
+  const bits  = new Uint32Array(cells / 32);
+  const qMax  = (1 << B) - 1, qHalf = (1 << B) / 2;
+  const last  = buffer.byteLength - tuple;
+
+  let unique = 0, total = 0, nonFinite = 0;
+  for (let o = offset; o <= last; o += step){
+    const x = normalize(read(o, le));
+    const y = normalize(read(o + ts, le));
+    const z = normalize(read(o + ts * 2, le));
+    if (!(isFinite(x) && isFinite(y) && isFinite(z))){ nonFinite++; total++; continue; }
+    const qx = Math.max(0, Math.min(qMax, Math.floor((x + 1) * qHalf)));
+    const qy = Math.max(0, Math.min(qMax, Math.floor((y + 1) * qHalf)));
+    const qz = Math.max(0, Math.min(qMax, Math.floor((z + 1) * qHalf)));
+    const m  = morton3(qx, qy, qz);
+    const wi = m >>> 5, mask = 1 << (m & 31);
+    if ((bits[wi] & mask) === 0){ bits[wi] |= mask; unique++; }
+    total++;
+  }
+  return { bits, B, unique, total, nonFinite, cells };
+}
+
+/* ==========================================================================
+   4. OCCUPANCY PYRAMID
+   Level l holds 8^l bits, one per cell at resolution 2^l. A parent bit is the
+   OR of its 8 children -- and because 8 children are 8 CONSECUTIVE bits
+   starting at a multiple of 8, each parent is one byte read. Overhead is
+   sum 8^-k = 1/7, so a 16 MiB leaf field becomes an 18.3 MiB pyramid.
+   The pyramid is the LOD: rendering at depth L < B just stops descending.
+   ========================================================================== */
+function pyramidLayout(B){
+  const off = new Int32Array(16);
+  let total = 0;
+  for (let l = 1; l <= B; l++){
+    off[l] = total;
+    total += Math.max(1, Math.pow(8, l) / 32);
+  }
+  return { off, total };
+}
+function buildPyramid(leafBits, B){
+  const { off, total } = pyramidLayout(B);
+  const buf = new Uint32Array(total);
+  buf.set(leafBits, off[B]);
+  for (let l = B - 1; l >= 1; l--){
+    const n = Math.pow(8, l), co = off[l + 1], mo = off[l];
+    for (let i = 0; i < n; i++){
+      const base = i << 3;                        // child bit index, byte-aligned
+      const byte = (buf[co + (base >>> 5)] >>> (base & 31)) & 0xff;
+      if (byte !== 0) buf[mo + (i >>> 5)] |= (1 << (i & 31));
+    }
+  }
+  return { buf, off, total };
+}
+// count set bits at a pyramid level (HUD: fill per LOD)
+function levelPop(pyr, B, l){
+  const off = pyr.off[l], n = Math.max(1, Math.pow(8, l) / 32);
+  let c = 0;
+  for (let i = 0; i < n; i++){
+    let v = pyr.buf[off + i];
+    v = v - ((v >>> 1) & 0x55555555);
+    v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+    c += (((v + (v >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24;
+  }
+  return c;
+}
+
+/* --- self-test: OR-reduction against brute force on a small random field --- */
+function selfTest(){
+  const B = 4, cells = Math.pow(8, B);
+  const leaf = new Uint32Array(cells / 32);
+  let h = 12345;
+  for (let i = 0; i < leaf.length; i++){
+    h = (Math.imul(h, 1103515245) + 12345) >>> 0;
+    leaf[i] = (h & 0x01010101) >>> 0;              // sparse-ish
+  }
+  const p = buildPyramid(leaf, B);
+  const bit = (l, i) => (p.buf[p.off[l] + (i >>> 5)] >>> (i & 31)) & 1;
+  for (let l = 1; l < B; l++){
+    for (let i = 0; i < Math.pow(8, l); i++){
+      let any = 0;
+      for (let k = 0; k < 8; k++) any |= bit(l + 1, i * 8 + k);
+      if (any !== bit(l, i)){
+        console.error(`pyramid self-test FAILED at level ${l} cell ${i}`);
+        return false;
+      }
+    }
+  }
+  // morton round-trip
+  for (let t = 0; t < 512; t++){
+    const x = (Math.random() * 1024) | 0, y = (Math.random() * 1024) | 0, z = (Math.random() * 1024) | 0;
+    const m = morton3(x, y, z);
+    let ux = 0, uy = 0, uz = 0;
+    for (let b = 0; b < 10; b++){
+      ux |= ((m >>> (3 * b))     & 1) << b;
+      uy |= ((m >>> (3 * b + 1)) & 1) << b;
+      uz |= ((m >>> (3 * b + 2)) & 1) << b;
+    }
+    if (ux !== x || uy !== y || uz !== z){ console.error("morton round-trip FAILED", x, y, z); return false; }
+  }
+  console.log("self-test ok: pyramid OR-reduction + morton round-trip");
+  return true;
+}
+
+/* ==========================================================================
+   5. SYNTHETIC CORPORA
+   Each returns an ArrayBuffer meant to be read as a stream of typed triples.
+   `records` is the important one: the coordinates live in a 32-byte record
+   with 26 bytes of junk, so the shape is invisible at every stride except 32.
+   That is the stride-sweep demo, and it is the class of defect a sheet finds
+   by eye rather than by inference.
+   ========================================================================== */
+function f32ToF16(val){
+  const fb = new Float32Array(1), ib = new Int32Array(fb.buffer);
+  fb[0] = val; const x = ib[0];
+  let bits = (x >> 16) & 0x8000;
+  let m = (x >> 12) & 0x07ff;
+  const e = (x >> 23) & 0xff;
+  if (e < 103) return bits;
+  if (e > 142){ bits |= 0x7c00; bits |= ((e === 255) ? 0 : 1) && (x & 0x007fffff); return bits; }
+  if (e < 113){ m |= 0x0800; bits |= (m >> (114 - e)) + ((m >> (113 - e)) & 1); return bits; }
+  bits |= ((e - 112) << 10) | (m >> 1);
+  bits += m & 1;
+  return bits;
+}
+function rng(seed){
+  let h = seed >>> 0 || 1;
+  return () => { h ^= h << 13; h >>>= 0; h ^= h >>> 17; h ^= h << 5; h >>>= 0; return h / 4294967296; };
+}
+function gauss(r){
+  const u = Math.max(1e-9, r()), v = r();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+const CORPORA = {
+  "torus knot": (bytes, seed) => {
+    const n = Math.floor(bytes / 6), r = rng(seed);
+    const out = new DataView(new ArrayBuffer(n * 6));
+    for (let i = 0; i < n; i++){
+      const t = (i / n) * Math.PI * 2 * 3, p = 2, q = 3;
+      const cr = Math.cos(q * t) + 2;
+      let x = cr * Math.cos(p * t) * 0.28, y = cr * Math.sin(p * t) * 0.28, z = Math.sin(q * t) * 0.28;
+      const j = 0.02;
+      x += gauss(r) * j; y += gauss(r) * j; z += gauss(r) * j;
+      out.setUint16(i * 6,     f32ToF16(x), true);
+      out.setUint16(i * 6 + 2, f32ToF16(y), true);
+      out.setUint16(i * 6 + 4, f32ToF16(z), true);
+    }
+    return out.buffer;
+  },
+
+  "records/32": (bytes, seed) => {
+    const REC = 32, n = Math.floor(bytes / REC), r = rng(seed);
+    const buf = new ArrayBuffer(n * REC), dv = new DataView(buf), u8 = new Uint8Array(buf);
+    for (let i = 0; i < n; i++){
+      const o = i * REC;
+      // a sphere shell, so the "locked" row is unmistakable
+      const th = Math.acos(2 * r() - 1), ph = r() * Math.PI * 2, rad = 0.62 + gauss(r) * 0.015;
+      dv.setUint16(o,     f32ToF16(rad * Math.sin(th) * Math.cos(ph)), true);
+      dv.setUint16(o + 2, f32ToF16(rad * Math.sin(th) * Math.sin(ph)), true);
+      dv.setUint16(o + 4, f32ToF16(rad * Math.cos(th)), true);
+      for (let k = 6; k < REC; k++) u8[o + k] = (r() * 256) | 0;   // payload junk
+    }
+    return buf;
+  },
+
+  "weights fp16": (bytes, seed) => {
+    const n = Math.floor(bytes / 2), r = rng(seed);
+    const out = new DataView(new ArrayBuffer(n * 2));
+    for (let i = 0; i < n; i++){
+      let v = gauss(r) * 0.02;                       // realistic weight scale
+      if (r() < 0.001) v = (r() < 0.5 ? -1 : 1) * (1.5 + r() * 2);   // outliers
+      out.setUint16(i * 2, f32ToF16(v), true);
+    }
+    return out.buffer;
+  },
+
+  "q-lattice": (bytes, seed) => {
+    const n = Math.floor(bytes / 6), r = rng(seed), L = 15;   // 4-bit-ish levels
+    const out = new DataView(new ArrayBuffer(n * 6));
+    for (let i = 0; i < n; i++){
+      const scale = 0.55 + 0.4 * Math.sin(i * 0.00013);        // drifting block scale
+      for (let a = 0; a < 3; a++){
+        const q = Math.round(r() * L) / L * 2 - 1;
+        out.setUint16(i * 6 + a * 2, f32ToF16(q * scale), true);
+      }
+    }
+    return out.buffer;
+  },
+
+  "cluster mix": (bytes, seed) => {
+    const n = Math.floor(bytes / 6), r = rng(seed), K = 11, C = [];
+    for (let k = 0; k < K; k++) C.push([r() * 1.4 - 0.7, r() * 1.4 - 0.7, r() * 1.4 - 0.7, 0.03 + r() * 0.09]);
+    const out = new DataView(new ArrayBuffer(n * 6));
+    for (let i = 0; i < n; i++){
+      const c = C[(r() * K) | 0];
+      for (let a = 0; a < 3; a++) out.setUint16(i * 6 + a * 2, f32ToF16(c[a] + gauss(r) * c[3]), true);
+    }
+    return out.buffer;
+  }
+};
+const CORPUS_NAMES = Object.keys(CORPORA);
+
+/* ==========================================================================
+   6. SHADER
+   classify() is the tower's, with three edits: radix 2, a morton prefix
+   accumulated down the descent, and a texelFetch where the rule word was.
+   The return contract is identical -- 0 means occupied, otherwise the extent
+   of the empty subcube the ray may skip -- so the march is unchanged.
+   ========================================================================== */
+const VERT = `#version 300 es
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp usampler2D;
+
+uniform vec3  iResolution;
+uniform vec2  uOrigin;
+uniform float iTime;
+uniform vec4  iMouse;
+uniform usampler2D uPyr;
+uniform int   uTexW;
+uniform int   uOff[16];     // word offset of pyramid level l
+uniform int   uLevels;      // render depth (<= B)
+uniform int   uPalette;
+uniform int   uAO;
+uniform int   uAA;
+uniform int   uSteps;
+uniform int   uCut;         // 1 = remove the +++ octant
+
+out vec4 fragColor;
+
+#define TAU 6.28318530718
+#define ORBIT_SPAN 1000.0
+#define ORBIT_LIMIT 1.45
+#define CUT_SHADE 0.30
+#define MAXB 12
+#define STEP_CAP ${STEP_CAP}
+
+bool bitAt(int level, int idx){
+  int w = uOff[level] + (idx >> 5);
+  uint word = texelFetch(uPyr, ivec2(w % uTexW, w / uTexW), 0).r;
+  return ((word >> uint(idx & 31)) & 1u) != 0u;
+}
+
+/* 0 = occupied; else the cell-extent of the empty subcube to skip.
+   One texel fetch per level, and a fetch at level l settles 8^(B-l) cells. */
+int classify(ivec3 c, int S){
+  if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, ivec3(S)))) return S;
+  int size = S, m = 0;
+  for (int l = 1; l <= MAXB; ++l){
+    if (l > uLevels) break;
+    size >>= 1;
+    int dx = (c.x / size) & 1;
+    int dy = (c.y / size) & 1;
+    int dz = (c.z / size) & 1;
+    int d  = dx | (dy << 1) | (dz << 2);
+    m = (m << 3) | d;
+    if (uCut == 1 && l == 1 && d == 7) return size;   // hierarchical cutaway
+    if (!bitAt(l, m)) return size;
+  }
+  return 0;
+}
+bool occCell(ivec3 c, int S){ return classify(c, S) == 0; }
+
+vec3 safeDir(vec3 d){
+  vec3 s = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(d, vec3(0.0)));
+  return s * max(abs(d), vec3(1e-6));
+}
+
+bool trace(vec3 o, vec3 d, int S, out float tOut, out vec3 nOut, out ivec3 cOut, out int steps){
+  tOut = 0.0; nOut = vec3(0.0, 1.0, 0.0); cOut = ivec3(0); steps = 0;
+  vec3 inv = 1.0 / d;
+  vec3 ta = (vec3(-1.0) - o) * inv, tb = (vec3(1.0) - o) * inv;
+  vec3 tn = min(ta, tb), tf = max(ta, tb);
+  float tEnter = max(max(tn.x, tn.y), tn.z);
+  float tExit  = min(min(tf.x, tf.y), tf.z);
+  float t = max(tEnter, 0.0);
+  if (t >= tExit) return false;
+
+  int ax = (tn.x > tn.y) ? ((tn.x > tn.z) ? 0 : 2) : ((tn.y > tn.z) ? 1 : 2);
+  vec3 nrm = vec3(0.0); nrm[ax] = (d[ax] > 0.0) ? -1.0 : 1.0;
+
+  float eps = 2.0 / float(S) * 1e-3;
+  t += eps;
+
+  for (int i = 0; i < STEP_CAP; ++i){
+    if (i >= uSteps) break;
+    steps = i;
+    if (t >= tExit) return false;
+    vec3 p = o + t * d;
+    ivec3 c = clamp(ivec3(floor((p * 0.5 + 0.5) * float(S))), ivec3(0), ivec3(S - 1));
+
+    int size = classify(c, S);
+    if (size == 0){ tOut = t; nOut = nrm; cOut = c; return true; }
+
+    ivec3 lo = (c / size) * size;
+    vec3 wlo = vec3(lo) / float(S) * 2.0 - 1.0;
+    vec3 whi = vec3(lo + ivec3(size)) / float(S) * 2.0 - 1.0;
+    vec3 tbd = (mix(wlo, whi, step(vec3(0.0), d)) - o) * inv;
+    float te = min(min(tbd.x, tbd.y), tbd.z);
+    int ea = (tbd.x < tbd.y) ? ((tbd.x < tbd.z) ? 0 : 2) : ((tbd.y < tbd.z) ? 1 : 2);
+    nrm = vec3(0.0); nrm[ea] = (d[ea] > 0.0) ? -1.0 : 1.0;
+    t = te + eps;
+  }
+  return false;
+}
+
+vec3 colorize(vec3 W, ivec3 c, int S, float t, int steps){
+  if (uPalette == 0) return W * 0.5 + 0.5;          // position == the value itself
+  if (uPalette == 1){                                // octant of the coarsest digits
+    ivec3 q = (c * 4) / S;
+    return vec3(q) / 3.0 * 0.85 + 0.12;
+  }
+  if (uPalette == 2){                                // FNV over the morton address
+    uint h = 2166136261u; int size = S;
+    for (int l = 1; l <= MAXB; ++l){
+      if (l > uLevels) break;
+      size >>= 1;
+      int d = ((c.x / size) & 1) | (((c.y / size) & 1) << 1) | (((c.z / size) & 1) << 2);
+      h = (h ^ uint(d)) * 16777619u;
+    }
+    return vec3(float(h & 255u), float((h >> 8) & 255u), float((h >> 16) & 255u)) / 255.0 * 0.8 + 0.12;
+  }
+  if (uPalette == 3){                                // radial: distance from origin
+    float r = clamp(length(W), 0.0, 1.0);
+    return vec3(0.25 + 0.75 * r, 0.55 - 0.3 * r, 1.0 - 0.7 * r);
+  }
+  if (uPalette == 4){                                // march cost heat map
+    float k = clamp(float(steps) / 96.0, 0.0, 1.0);
+    return vec3(k, k * k * 0.8, 1.0 - k);
+  }
+  return vec3(0.82);                                 // plain
+}
+
+vec3 camera(){
+  float t  = iTime * 0.4;
+  float h  = 0.7 + 0.3 * sin(t * 0.6);
+  float az = t;
+  float el = atan(h);
+  float R  = 2.85 * sqrt(1.0 + h * h);
+  vec2 drag = (iMouse.xy - abs(iMouse.zw)) / ORBIT_SPAN;
+  az -= TAU * drag.x;
+  el  = clamp(el - TAU * drag.y, -ORBIT_LIMIT, ORBIT_LIMIT);
+  return R * vec3(cos(el) * sin(az), sin(el), cos(el) * cos(az));
+}
+
+vec3 render(vec2 v, int S){
+  vec3 o  = camera();
+  vec3 fw = normalize(-o);
+  vec3 rt = normalize(cross(fw, vec3(0.0, 1.0, 0.0)));
+  vec3 d  = safeDir(normalize(v.x * rt + v.y * cross(rt, fw) + 1.8 * fw));
+
+  float t; vec3 n; ivec3 c; int steps;
+  if (!trace(o, d, S, t, n, c, steps)) return vec3(0.0);
+  vec3 W = o + t * d;
+
+  float ao = 1.0;
+  if (uAO == 1){
+    ivec3 n3 = ivec3(round(n));
+    ivec3 f  = c + n3;
+    ivec3 a1 = (abs(n.x) > 0.5) ? ivec3(0, 1, 0) : ivec3(1, 0, 0);
+    ivec3 a2 = ivec3(round(cross(vec3(n3), vec3(a1))));
+    float nb = 0.0;
+    for (int i = -1; i <= 1; ++i)
+      for (int k = -1; k <= 1; ++k){
+        if (i == 0 && k == 0) continue;
+        if (occCell(f + a1 * i + a2 * k, S)) nb += 1.0;
+      }
+    ao = 1.0 - 0.5 * (nb / 8.0);
+  }
+  float key  = 0.55 + 0.45 * max(dot(n, normalize(vec3(0.45, 0.82, 0.36))), 0.0);
+  float view = mix(1.0 - CUT_SHADE, 1.0, max(dot(n, -d), 0.0));
+  return colorize(W, c, S, t, steps) * (key * view * ao);
+}
+
+void main(){
+  int S = 1 << uLevels;
+  vec3 acc = vec3(0.0); float cnt = 0.0;
+  for (int j = 0; j < 2; ++j){
+    if (j >= uAA) break;
+    for (int i = 0; i < 2; ++i){
+      if (i >= uAA) break;
+      vec2 off = (vec2(float(i), float(j)) + 0.5) / float(uAA);
+      acc += render(((gl_FragCoord.xy - uOrigin + off - 0.5) * 2.0 - iResolution.xy) / iResolution.y, S);
+      cnt += 1.0;
+    }
+  }
+  fragColor = vec4(acc / max(cnt, 1.0), 1.0);
+}`;
+
+/* ==========================================================================
+   7. SWEEPS -- the row axis
+   ========================================================================== */
+const SWEEPS = {
+  stride: { label:"stride",  values:[6, 8, 12, 16, 20, 24, 32, 48],
+            apply:(p, v) => ({ ...p, stride:v }), fmt:v => `stride ${v}` },
+  offset: { label:"offset",  values:[0, 1, 2, 3, 4, 5, 6, 7],
+            apply:(p, v) => ({ ...p, offset:v }), fmt:v => `offset ${v}` },
+  dtype:  { label:"dtype",   values:["fp16","bf16","fp8_e4m3","uint8","int8","uint16","int16","fp32"],
+            apply:(p, v) => ({ ...p, dtype:v, stride:0 }), fmt:v => v },
+  gain:   { label:"gain",    values:[0.25, 0.5, 1, 2, 4, 8, 16, 40],
+            apply:(p, v) => ({ ...p, gain:v }), fmt:v => `gain ${v}` },
+  endian: { label:"endian",  values:[true, false],
+            apply:(p, v) => ({ ...p, littleEndian:v }), fmt:v => v ? "little" : "big" },
+  single: { label:"single",  values:[null], apply:p => p, fmt:() => "as configured" }
+};
+const SWEEP_NAMES = Object.keys(SWEEPS);
+
+/* ========================== HOST ========================================= */
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", { antialias:false, alpha:false, depth:false,
+                                         preserveDrawingBuffer:true });
+
+function compile(type, src){
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(sh));
+    console.error(src.split("\n").map((l, i) => (i + 1) + "| " + l).join("\n"));
+    return null;
+  }
+  return sh;
+}
+function showToast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.opacity = "1";
+  clearTimeout(t._timer); t._timer = setTimeout(() => { t.style.opacity = "0"; }, 2400);
+}
+const busyEl = document.getElementById("busy");
+const setBusy = msg => { busyEl.style.display = msg ? "block" : "none"; if (msg) busyEl.textContent = msg; };
+const yieldFrame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+function bytesStr(n){
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KiB";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MiB";
+  return (n / 1073741824).toFixed(2) + " GiB";
+}
+const numStr = n => Number.isFinite(n) ? Math.round(n).toLocaleString("en-US") : "-";
+
+function main(){
+  selfTest();
+
+  const vs = compile(gl.VERTEX_SHADER, VERT), fs = compile(gl.FRAGMENT_SHADER, FRAG);
+  if (!vs || !fs) return;
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(prog)); return; }
+  gl.useProgram(prog);
+  gl.bindVertexArray(gl.createVertexArray());
+
+  const U = n => gl.getUniformLocation(prog, n);
+  const uRes = U("iResolution"), uOrigin = U("uOrigin"), uTime = U("iTime"), uMouse = U("iMouse");
+  const uPyr = U("uPyr"), uTexW = U("uTexW"), uOffL = U("uOff[0]"), uLevels = U("uLevels");
+  const uPalette = U("uPalette"), uAO = U("uAO"), uAA = U("uAA"), uSteps = U("uSteps"), uCut = U("uCut");
+  gl.uniform1i(uPyr, 0);
+  gl.uniform1i(uTexW, TEX_W);
+
+  const MAXTEX = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+
+  const hud = document.getElementById("hud");
+  const labels = document.getElementById("labels");
+  const selBox = document.getElementById("sel");
+
+  const PAL_NAMES = ["value (pos=rgb)", "octant", "address hash", "radial", "march cost", "plain"];
+  const QUALITY   = [STEP_CAP / 4, STEP_CAP / 2, STEP_CAP];
+  const GUTTER_L = 108, GUTTER_T = 26, PAD = 10, GAP = 3;
+
+  // ---- state
+  let corpusIdx = 1, corpusMB = 16, seed = 1337;
+  let sweepIdx  = 0;                    // stride
+  let B = 8, LMIN = 3;
+  let base = { dtype:"fp16", littleEndian:true, stride:0, offset:0, gain:1, B };
+  let palette = 0, ao = true, cut = false, qualityIdx = 1, running = true;
+  let corpus = null, corpusName = "", rows = [], ROWS = 0, COLS = 1;
+  let layoutInfo = pyramidLayout(B);
+  let dpr = 1, cell = 60, fps = 0, buildMs = 0;
+  let sel = null, zoom = null, building = false;
+
+  const mouse = { x:0, y:0, ax:0, ay:0, ox:0, oy:0, down:false, clicked:false, moved:false, x0:0, y0:0 };
+  let iTime = 0;
+
+  const levelOf = c => LMIN + c;
+
+  /* ---- corpus ---------------------------------------------------------- */
+  async function makeCorpus(){
+    corpusName = CORPUS_NAMES[corpusIdx];
+    setBusy(`synthesizing ${corpusName}\n${corpusMB} MiB`);
+    await yieldFrame();
+    const t0 = performance.now();
+    corpus = CORPORA[corpusName](corpusMB * 1024 * 1024, seed);
+    console.log(`corpus "${corpusName}" ${bytesStr(corpus.byteLength)} in ${(performance.now() - t0).toFixed(0)} ms`);
+  }
+  function loadCorpus(buffer, name){
+    corpus = buffer; corpusName = name; corpusIdx = -1;
+    showToast(`loaded ${name} — ${bytesStr(buffer.byteLength)}`);
+  }
+
+  /* ---- rows ------------------------------------------------------------ */
+  function releaseRows(){ for (const r of rows) if (r.tex) gl.deleteTexture(r.tex); rows = []; }
+
+  function uploadPyramid(pyr){
+    const h = Math.ceil(pyr.total / TEX_W);
+    if (h > MAXTEX) return null;
+    const data = new Uint32Array(TEX_W * h);
+    data.set(pyr.buf);
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32UI, TEX_W, h, 0, gl.RED_INTEGER, gl.UNSIGNED_INT, data);
+    return { tex, bytes: TEX_W * h * 4 };
+  }
+
+  async function rebuild(){
+    if (building) return;
+    building = true;
+    const t0 = performance.now();
+    if (!corpus) await makeCorpus();
+
+    base.B = B;
+    layoutInfo = pyramidLayout(B);
+    const perRow = layoutInfo.total * 4;
+    const sweep = SWEEPS[SWEEP_NAMES[sweepIdx]];
+    let vals = sweep.values.slice();
+    const maxRows = Math.max(1, Math.floor(MEM_CAP / perRow));
+    let trimmed = 0;
+    if (vals.length > maxRows){ trimmed = vals.length - maxRows; vals = vals.slice(0, maxRows); }
+
+    releaseRows();
+    for (let i = 0; i < vals.length; i++){
+      setBusy(`building ${sweep.label} row ${i + 1}/${vals.length}\nB=${B}  ${bytesStr(perRow)} each`);
+      await yieldFrame();
+      const p = sweep.apply({ ...base }, vals[i]);
+      p.B = B;
+      let ex;
+      try { ex = extractBitfield(corpus, p); }
+      catch (e){ console.error(e); continue; }
+      const pyr = buildPyramid(ex.bits, B);
+      const up = uploadPyramid(pyr);
+      if (!up){ showToast(`B=${B} pyramid exceeds max texture size`); break; }
+      const pops = [];
+      for (let l = 1; l <= B; l++) pops.push(levelPop(pyr, B, l));
+      rows.push({ label: sweep.fmt(vals[i]), params: p, tex: up.tex, gpuBytes: up.bytes,
+                  unique: ex.unique, total: ex.total, nonFinite: ex.nonFinite,
+                  cells: ex.cells, pops, pyrBytes: pyr.total * 4 });
+    }
+    ROWS = rows.length;
+    COLS = Math.max(1, B - LMIN + 1);
+    buildMs = performance.now() - t0;
+    setBusy(null);
+    if (trimmed) showToast(`${trimmed} row(s) dropped — GPU budget ${bytesStr(MEM_CAP)}`);
+    gl.uniform1iv(uOffL, layoutInfo.off);
+    if (sel && (sel.r >= ROWS || sel.c >= COLS)) sel = null;
+    if (zoom && (zoom.r >= ROWS || zoom.c >= COLS)) zoom = null;
+    building = false;
+    layout(); paintHud();
+  }
+
+  /* ---- layout ---------------------------------------------------------- */
+  function layout(){
+    const W = innerWidth, H = innerHeight;
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+    const cw = Math.round(W * dpr), ch = Math.round(H * dpr);
+    if (canvas.width !== cw || canvas.height !== ch){ canvas.width = cw; canvas.height = ch; }
+    if (!ROWS){ labels.innerHTML = ""; return; }
+    cell = Math.max(28, Math.floor(Math.min((W - GUTTER_L - PAD) / COLS, (H - GUTTER_T - PAD) / ROWS)));
+
+    if (zoom){
+      const r = rows[zoom.r], L = levelOf(zoom.c);
+      labels.innerHTML =
+        `<div class="lbl col" style="left:0;top:8px;width:${W}px;text-align:center">` +
+        `<span style="color:#b8b8cc">${corpusName} · ${r.label}</span>` +
+        `<span style="color:#4c4c5c"> — depth ${L}, ${1 << L}³, ` +
+        `${numStr(r.pops[L - 1])} occupied nodes</span></div>` +
+        `<div class="lbl col" style="left:0;bottom:8px;width:${W}px;text-align:center;color:#3e3e4c">` +
+        `click or esc to return &nbsp;·&nbsp; arrows to move &nbsp;·&nbsp; drag to orbit</div>`;
+      selBox.style.display = "none";
+      canvas.style.cursor = "zoom-out";
+      return;
+    }
+    canvas.style.cursor = "zoom-in";
+    const out = [];
+    for (let c = 0; c < COLS; c++){
+      const L = levelOf(c);
+      out.push(`<div class="lbl col" style="left:${GUTTER_L + c*cell}px;top:5px;width:${cell}px;` +
+               `text-align:center;overflow:hidden">B=${L}<br><span style="color:#4c4c5c">${1 << L}³` +
+               `${L === B ? " leaf" : ""}</span></div>`);
+    }
+    for (let r = 0; r < ROWS; r++){
+      const row = rows[r], fill = 100 * row.unique / row.cells;
+      out.push(`<div class="lbl row" style="left:0;top:${GUTTER_T + r*cell + cell/2 - 14}px;` +
+               `width:${GUTTER_L - 8}px">${row.label}<br>` +
+               `<span style="color:#4c4c5c">${numStr(row.unique)} pts</span><br>` +
+               `<span style="color:#3e3e4c">${fill < 0.01 ? fill.toFixed(4) : fill.toFixed(2)}% fill</span></div>`);
+    }
+    labels.innerHTML = out.join("");
+  }
+
+  const cellRect = (r, c) => ({ x: GUTTER_L + c*cell, y: GUTTER_T + r*cell, w: cell - GAP, h: cell - GAP });
+  function zoomRect(){
+    const W = innerWidth, H = innerHeight;
+    const side = Math.max(64, Math.min(W - 2*PAD, H - GUTTER_T - 3*PAD));
+    return { x: (W - side) / 2, y: GUTTER_T + (H - GUTTER_T - side) / 2, w: side, h: side };
+  }
+  function pick(mx, my){
+    if (!ROWS) return null;
+    const c = Math.floor((mx - GUTTER_L) / cell), r = Math.floor((my - GUTTER_T) / cell);
+    return (r >= 0 && r < ROWS && c >= 0 && c < COLS) ? { r, c } : null;
+  }
+
+  /* ---- pointer --------------------------------------------------------- */
+  const restoreCursor = () => { canvas.style.cursor = zoom ? "zoom-out" : "zoom-in"; };
+  canvas.addEventListener("pointerdown", ev => {
+    if (ev.button !== 0) return;
+    const px = ev.clientX * dpr, py = canvas.height - ev.clientY * dpr;
+    mouse.x = mouse.x0 = px; mouse.y = mouse.y0 = py;
+    mouse.ax = px - mouse.ox; mouse.ay = py - mouse.oy;
+    mouse.down = true; mouse.clicked = true; mouse.moved = false;
+    canvas.setPointerCapture(ev.pointerId);
+    canvas.style.cursor = "grabbing";
+  });
+  canvas.addEventListener("pointermove", ev => {
+    if (!mouse.down) return;
+    mouse.x = ev.clientX * dpr; mouse.y = canvas.height - ev.clientY * dpr;
+    if (Math.hypot(mouse.x - mouse.x0, mouse.y - mouse.y0) > 4 * dpr) mouse.moved = true;
+  });
+  function endDrag(){
+    if (!mouse.down) return;
+    mouse.down = false;
+    mouse.ox = mouse.x - mouse.ax; mouse.oy = mouse.y - mouse.ay;
+    restoreCursor();
+  }
+  canvas.addEventListener("pointerup", ev => { if (ev.button === 0) endDrag(); });
+  canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("click", ev => {
+    if (mouse.moved) return;
+    if (zoom){ zoom = null; layout(); paintHud(); return; }
+    const p = pick(ev.clientX, ev.clientY);
+    if (p){ zoom = { r:p.r, c:p.c }; sel = { r:p.r, c:p.c }; layout(); paintHud(); }
+  });
+  addEventListener("mousemove", ev => {
+    if (mouse.down || zoom || !ROWS) return;
+    const p = pick(ev.clientX, ev.clientY);
+    if (p && (!sel || sel.r !== p.r || sel.c !== p.c)){
+      const q = cellRect(p.r, p.c);
+      selBox.style.cssText = `display:block;left:${q.x}px;top:${q.y}px;width:${q.w}px;height:${q.h}px`;
+      sel = { r:p.r, c:p.c }; paintHud();
+    } else if (!p && sel){ sel = null; selBox.style.display = "none"; paintHud(); }
+  });
+
+  /* ---- drag & drop a real file ----------------------------------------- */
+  const dropEl = document.getElementById("drop");
+  addEventListener("dragover", ev => { ev.preventDefault(); dropEl.style.display = "block"; });
+  addEventListener("dragleave", () => { dropEl.style.display = "none"; });
+  addEventListener("drop", async ev => {
+    ev.preventDefault(); dropEl.style.display = "none";
+    const f = ev.dataTransfer.files && ev.dataTransfer.files[0];
+    if (!f) return;
+    setBusy(`reading ${f.name}\n${bytesStr(f.size)}`);
+    const buf = await f.arrayBuffer();
+    loadCorpus(buf, f.name);
+    rebuild();
+  });
+
+  /* ---- hud ------------------------------------------------------------- */
+  function paintHud(){
+    const R = [];
+    R.push("<span class='sec'>--- CORPUS ---</span>");
+    R.push("source".padEnd(9) + (corpusName || "-").slice(0, 18).padEnd(18) + "c");
+    R.push("size".padEnd(9) + (corpus ? bytesStr(corpus.byteLength) : "-").padEnd(18) + "[ ]");
+    R.push("seed".padEnd(9) + ("#" + seed).padEnd(18) + "n");
+    R.push("<span class='sec'>drop a file to load it</span>");
+    R.push("");
+    R.push("<span class='sec'>--- PIPELINE ---</span>");
+    R.push("sweep".padEnd(9) + SWEEPS[SWEEP_NAMES[sweepIdx]].label.padEnd(18) + "a");
+    R.push("dtype".padEnd(9) + base.dtype.padEnd(18) + "w");
+    R.push("gain".padEnd(9) + String(base.gain).padEnd(18) + "e/E");
+    R.push("endian".padEnd(9) + (base.littleEndian ? "little" : "big").padEnd(18) + "i");
+    R.push("bits/axis".padEnd(9) + `${B}  (${1 << B}³)`.padEnd(18) + "-/=");
+    R.push("levels".padEnd(9) + `${LMIN}..${B}`.padEnd(18) + "[/]");
+    R.push("build".padEnd(9) + (buildMs.toFixed(0) + " ms").padEnd(18) + "r");
+    const perRow = layoutInfo.total * 4;
+    R.push("pyramid".padEnd(9) + bytesStr(perRow).padEnd(18));
+    R.push("gpu".padEnd(9) + bytesStr(rows.reduce((a, x) => a + x.gpuBytes, 0)).padEnd(18));
+    if (rows.length){
+      const asPoints = rows[0].unique * 24;
+      R.push("<span class='sec'>vs point cloud: " + bytesStr(asPoints) + "</span>");
+    }
+    R.push("");
+    R.push("<span class='sec'>--- VIEW ---</span>");
+    R.push("palette".padEnd(9) + PAL_NAMES[palette].padEnd(18) + "k");
+    R.push("ao".padEnd(9) + (ao ? "on" : "off").padEnd(18) + "l");
+    R.push("cutaway".padEnd(9) + (cut ? "on" : "off").padEnd(18) + "x");
+    R.push("steps".padEnd(9) + String(QUALITY[qualityIdx]).padEnd(18) + "q");
+    R.push("orbit".padEnd(9) + (mouse.down ? "drag" : running ? "run" : "hold").padEnd(18) + "space");
+    R.push("png".padEnd(9) + "".padEnd(18) + "y");
+
+    const t = zoom || sel;
+    if (t && rows[t.r]){
+      const r = rows[t.r], L = levelOf(t.c), nodes = r.pops[L - 1], amb = Math.pow(8, L);
+      R.push("");
+      R.push("<span class='sec'>--- " + (zoom ? "ISOLATED" : "CELL") + " ---</span>");
+      R.push(r.label + "  ×  B=" + L);
+      R.push("side".padEnd(9) + `${1 << L}³`.padEnd(18));
+      R.push("nodes".padEnd(9) + numStr(nodes).padEnd(18));
+      R.push("ambient".padEnd(9) + numStr(amb).padEnd(18));
+      R.push("fill".padEnd(9) + ((100 * nodes / amb).toFixed(3) + "%").padEnd(18));
+      R.push("tuples".padEnd(9) + numStr(r.total).padEnd(18));
+      R.push("unique".padEnd(9) + numStr(r.unique).padEnd(18));
+      const dedup = r.total ? (100 * r.unique / r.total) : 0;
+      R.push("survival".padEnd(9) + (dedup.toFixed(2) + "%").padEnd(18));
+      if (r.nonFinite) R.push("<span class='warn'>" + numStr(r.nonFinite) + " non-finite</span>");
+      if (r.unique / r.cells > 0.35) R.push("<span class='warn'>saturated — raise B</span>");
+      if (r.unique / r.cells < 0.0005) R.push("<span class='warn'>very sparse — lower B or raise gain</span>");
+    }
+    hud.innerHTML = R.join("\n") + "\n\n<b>" + fps + " fps</b>";
+  }
+
+  /* ---- keys ------------------------------------------------------------ */
+  addEventListener("keydown", ev => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey || building) return;
+    const k = ev.key;
+    const lk = k.toLowerCase();
+    if (lk === "escape"){ if (zoom){ zoom = null; layout(); paintHud(); } return; }
+    if (lk.startsWith("arrow") && ROWS){
+      ev.preventDefault();
+      const b = zoom || sel || { r:0, c:0 };
+      const dr = (lk === "arrowdown") - (lk === "arrowup");
+      const dc = (lk === "arrowright") - (lk === "arrowleft");
+      const r = (b.r + dr + ROWS) % ROWS, c = (b.c + dc + COLS) % COLS;
+      sel = { r, c };
+      if (zoom){ zoom = { r, c }; layout(); }
+      else {
+        const q = cellRect(r, c);
+        selBox.style.cssText = `display:block;left:${q.x}px;top:${q.y}px;width:${q.w}px;height:${q.h}px`;
+      }
+      paintHud(); return;
+    }
+    if (k === " " || ev.code === "Space"){ ev.preventDefault(); running = !running; paintHud(); return; }
+    switch (k){
+      case "c": corpusIdx = ((corpusIdx < 0 ? 0 : corpusIdx) + 1) % CORPUS_NAMES.length;
+                corpus = null; rebuild(); return;
+      case "n": seed = (seed + 1) & 0xffff; corpus = null; rebuild(); return;
+      case "a": sweepIdx = (sweepIdx + 1) % SWEEP_NAMES.length; rebuild(); return;
+      case "w": {
+        const ks = Object.keys(DATA_TYPES);
+        base.dtype = ks[(ks.indexOf(base.dtype) + 1) % ks.length];
+        rebuild(); return;
+      }
+      case "e": base.gain = Math.min(256, base.gain * 2); rebuild(); return;
+      case "E": base.gain = Math.max(1 / 64, base.gain / 2); rebuild(); return;
+      case "i": base.littleEndian = !base.littleEndian; rebuild(); return;
+      case "-": case "_": if (B > Math.max(LMIN, 3)){ B--; rebuild(); } return;
+      case "=": case "+": if (B < 10){ B++; rebuild(); } return;
+      case "[": if (LMIN > 1){ LMIN--; COLS = B - LMIN + 1; layout(); paintHud(); } return;
+      case "]": if (LMIN < B){ LMIN++; COLS = B - LMIN + 1; layout(); paintHud(); } return;
+      case "r": corpus = null; rebuild(); return;
+      case "k": palette = (palette + 1) % PAL_NAMES.length; gl.uniform1i(uPalette, palette); paintHud(); return;
+      case "l": ao = !ao; gl.uniform1i(uAO, ao ? 1 : 0); paintHud(); return;
+      case "x": cut = !cut; gl.uniform1i(uCut, cut ? 1 : 0); paintHud(); return;
+      case "q": qualityIdx = (qualityIdx + 1) % QUALITY.length; gl.uniform1i(uSteps, QUALITY[qualityIdx]); paintHud(); return;
+      case "y": canvas.toBlob(b => {
+                  if (!b) return showToast("png encode failed");
+                  const a = document.createElement("a");
+                  a.href = URL.createObjectURL(b);
+                  a.download = `bitfield_${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.png`;
+                  document.body.appendChild(a); a.click();
+                  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+                }, "image/png"); return;
+    }
+  });
+  addEventListener("resize", () => { layout(); });
+
+  /* ---- draw ------------------------------------------------------------ */
+  function drawOne(rect, row, L, aa){
+    const Hpx = canvas.height;
+    const vx = Math.round(rect.x * dpr), vw = Math.round(rect.w * dpr), vh = Math.round(rect.h * dpr);
+    const vy = Hpx - Math.round((rect.y + rect.h) * dpr);
+    if (vw <= 0 || vh <= 0) return;
+    gl.viewport(vx, vy, vw, vh);
+    gl.uniform3f(uRes, vw, vh, 1);
+    gl.uniform2f(uOrigin, vx, vy);
+    gl.uniform1i(uLevels, L);
+    gl.uniform1i(uAA, aa);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, row.tex);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  function draw(){
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.027, 0.027, 0.039, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    if (!ROWS) return;
+    if (zoom){ drawOne(zoomRect(), rows[zoom.r], levelOf(zoom.c), 2); return; }
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++)
+        drawOne(cellRect(r, c), rows[r], levelOf(c), 1);
+  }
+
+  gl.uniform1i(uPalette, palette);
+  gl.uniform1i(uAO, ao ? 1 : 0);
+  gl.uniform1i(uCut, cut ? 1 : 0);
+  gl.uniform1i(uSteps, QUALITY[qualityIdx]);
+  layout();
+  rebuild();
+
+  let last = performance.now(), acc = 0, frames = 0;
+  function frame(now){
+    const dt = Math.min((now - last) / 1000, 0.05); last = now;
+    if (running && !mouse.down) iTime += dt;
+    gl.uniform1f(uTime, iTime);
+    gl.uniform4f(uMouse, mouse.x, mouse.y,
+                 mouse.down    ? mouse.ax : -mouse.ax,
+                 mouse.clicked ? mouse.ay : -mouse.ay);
+    draw();
+    mouse.clicked = false;
+    acc += dt; frames++;
+    if (acc >= 0.5){ fps = Math.round(frames / acc); acc = 0; frames = 0; paintHud(); }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+if (gl) main();
+else { console.error("WebGL2 unavailable."); document.getElementById("hud").textContent = "needs WebGL2"; }
+</script>
+</body>
+</html>
