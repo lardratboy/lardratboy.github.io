@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Cube Game</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        
+        #score {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: white;
+            font-size: 24px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        
+        #level {
+            position: absolute;
+            top: 40px;
+            right: 10px;
+            color: white;
+            font-size: 20px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        
+        #reset {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 8px 16px;
+            background-color: rgba(255, 255, 255, 0.7);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.3s;
+        }
+        
+        #reset:hover {
+            background-color: rgba(255, 255, 255, 0.9);
+        }
+        
+        #gameOver {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            font-size: 36px;
+            text-align: center;
+            line-height: 1.5;
+            cursor: pointer;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            padding: 15px;
+            background-color: rgba(0, 0, 0, 0.6);
+            color: white;
+            border-radius: 8px;
+            max-width: 300px;
+            font-size: 14px;
+            line-height: 1.4;
+            text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+        }
+    </style>
+</head>
+<body>
+    <div id="score">Score: 0</div>
+    <div id="level">Level: 1</div>
+    <button id="reset">Reset</button>
+    <div id="gameOver">Game Over<br>Click to restart</div>
+    <div id="instructions">
+        <strong>Instructions:</strong><br>
+        - Move the green cube with your mouse<br>
+        - Collect blue spheres for points (+10)<br>
+        - Blue spheres increase your size by 10%<br>
+        - Magenta spheres decrease your size by 25%<br>
+        - Avoid red cubes (instant game over)<br>
+        - Yellow cubes are dangerous 50% of the time
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.min.js"></script>
+    
+    <script>
+        class Game {
+            constructor() {
+                this.score = 0;
+                this.level = 1;
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.objects = [];
+                this.player = null;
+                this.gameActive = true;
+                this.mouse = new THREE.Vector2();
+                this.raycaster = new THREE.Raycaster();
+                this.mousePlane = null;
+                this.spawnRates = {
+                    red: 1000,
+                    blue: 2000,
+                    yellow: 3000,
+                    magenta: 5000
+                };
+                this.timers = {
+                    red: null,
+                    blue: null,
+                    yellow: null,
+                    magenta: null
+                };
+                this.playerBaseScale = 1;
+                
+                this.init();
+            }
+            
+            init() {
+                // Setup renderer
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setClearColor(0x111133);
+                document.body.appendChild(this.renderer.domElement);
+                
+                // Setup camera
+                this.camera.position.set(0, 0, 15);
+                this.camera.lookAt(0, 0, 0);
+                
+                // Add lights
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+                this.scene.add(ambientLight);
+                
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(1, 1, 1);
+                this.scene.add(directionalLight);
+                
+                // Create invisible mouse plane
+                this.mousePlane = new THREE.Mesh(
+                    new THREE.PlaneGeometry(30, 30),
+                    new THREE.MeshBasicMaterial({ visible: false })
+                );
+                this.scene.add(this.mousePlane);
+                
+                // Create player
+                this.createPlayer();
+                
+                // Start object spawning
+                this.startSpawning();
+                
+                // Event listeners
+                window.addEventListener('resize', this.handleResize.bind(this));
+                window.addEventListener('mousemove', this.handleMouseMove.bind(this));
+                document.getElementById('reset').addEventListener('click', this.resetGame.bind(this));
+                document.getElementById('gameOver').addEventListener('click', this.resetGame.bind(this));
+                
+                // Start game loop
+                this.animate();
+            }
+            
+            createPlayer() {
+                const geometry = new THREE.BoxGeometry(1, 1, 1);
+                const material = new THREE.MeshStandardMaterial({ color: 0x00ff00, emissive: 0x003300 });
+                this.player = new THREE.Mesh(geometry, material);
+                this.scene.add(this.player);
+                
+                // Add pop-in effect
+                this.player.scale.set(0.01, 0.01, 0.01);
+                new TWEEN.Tween(this.player.scale)
+                    .to({ x: this.playerBaseScale, y: this.playerBaseScale, z: this.playerBaseScale }, 1000)
+                    .easing(TWEEN.Easing.Elastic.Out)
+                    .start();
+            }
+            
+            spawnRedCube() {
+                const geometry = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+                const material = new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0x330000 });
+                const cube = new THREE.Mesh(geometry, material);
+                
+                // Random position at the top of the screen
+                const x = Math.random() * 20 - 10;
+                cube.position.set(x, 10, 0);
+                
+                // Random speed
+                const speed = 0.02 + Math.random() * 0.03;
+                
+                // Add to scene
+                this.scene.add(cube);
+                
+                // Pop-in effect
+                cube.scale.set(0.01, 0.01, 0.01);
+                new TWEEN.Tween(cube.scale)
+                    .to({ x: 1, y: 1, z: 1 }, 500)
+                    .easing(TWEEN.Easing.Back.Out)
+                    .start();
+                
+                // Add to objects array
+                this.objects.push({
+                    mesh: cube,
+                    type: 'red',
+                    speed: speed,
+                    rotationSpeed: {
+                        x: Math.random() * 0.05,
+                        y: Math.random() * 0.05,
+                        z: Math.random() * 0.05
+                    }
+                });
+            }
+            
+            spawnBlueSphere() {
+                const geometry = new THREE.SphereGeometry(0.5, 16, 16);
+                const material = new THREE.MeshStandardMaterial({ color: 0x0088ff, emissive: 0x003366 });
+                const sphere = new THREE.Mesh(geometry, material);
+                
+                // Random position at the top of the screen
+                const x = Math.random() * 20 - 10;
+                sphere.position.set(x, 10, 0);
+                
+                // Random speed
+                const speed = 0.01 + Math.random() * 0.02;
+                
+                // Add to scene
+                this.scene.add(sphere);
+                
+                // Pop-in effect
+                sphere.scale.set(0.01, 0.01, 0.01);
+                new TWEEN.Tween(sphere.scale)
+                    .to({ x: 1, y: 1, z: 1 }, 500)
+                    .easing(TWEEN.Easing.Back.Out)
+                    .start();
+                
+                // Add to objects array
+                this.objects.push({
+                    mesh: sphere,
+                    type: 'blue',
+                    speed: speed,
+                    rotationSpeed: {
+                        x: Math.random() * 0.03,
+                        y: Math.random() * 0.03,
+                        z: Math.random() * 0.03
+                    }
+                });
+            }
+            
+            spawnYellowCube() {
+                const geometry = new THREE.BoxGeometry(0.7, 0.7, 0.7);
+                const material = new THREE.MeshStandardMaterial({ color: 0xffff00, emissive: 0x333300 });
+                const cube = new THREE.Mesh(geometry, material);
+                
+                // Random position at the top of the screen
+                const x = Math.random() * 20 - 10;
+                cube.position.set(x, 10, 0);
+                
+                // Random speed and zigzag properties
+                const speed = 0.015 + Math.random() * 0.02;
+                const zigZagSpeed = 0.1 + Math.random() * 0.1;
+                const zigZagWidth = 1 + Math.random() * 3;
+                
+                // Add to scene
+                this.scene.add(cube);
+                
+                // Pop-in effect
+                cube.scale.set(0.01, 0.01, 0.01);
+                new TWEEN.Tween(cube.scale)
+                    .to({ x: 1, y: 1, z: 1 }, 500)
+                    .easing(TWEEN.Easing.Back.Out)
+                    .start();
+                
+                // Add to objects array
+                this.objects.push({
+                    mesh: cube,
+                    type: 'yellow',
+                    speed: speed,
+                    rotationSpeed: {
+                        x: Math.random() * 0.04,
+                        y: Math.random() * 0.04,
+                        z: Math.random() * 0.04
+                    },
+                    zigzag: {
+                        speed: zigZagSpeed,
+                        width: zigZagWidth,
+                        offset: Math.random() * Math.PI * 2
+                    }
+                });
+            }
+            
+            spawnMagentaSphere() {
+                const geometry = new THREE.SphereGeometry(0.4, 16, 16);
+                const material = new THREE.MeshStandardMaterial({ color: 0xff00ff, emissive: 0x330033 });
+                const sphere = new THREE.Mesh(geometry, material);
+                
+                // Random position at the top of the screen
+                const x = Math.random() * 20 - 10;
+                sphere.position.set(x, 10, 0);
+                
+                // Random speed
+                const speed = 0.01 + Math.random() * 0.015;
+                
+                // Add to scene
+                this.scene.add(sphere);
+                
+                // Pop-in effect
+                sphere.scale.set(0.01, 0.01, 0.01);
+                new TWEEN.Tween(sphere.scale)
+                    .to({ x: 1, y: 1, z: 1 }, 500)
+                    .easing(TWEEN.Easing.Back.Out)
+                    .start();
+                
+                // Add to objects array
+                this.objects.push({
+                    mesh: sphere,
+                    type: 'magenta',
+                    speed: speed,
+                    rotationSpeed: {
+                        x: Math.random() * 0.03,
+                        y: Math.random() * 0.03,
+                        z: Math.random() * 0.03
+                    }
+                });
+            }
+            
+            startSpawning() {
+                this.timers.red = setInterval(() => {
+                    if (this.gameActive) this.spawnRedCube();
+                }, this.spawnRates.red);
+                
+                this.timers.blue = setInterval(() => {
+                    if (this.gameActive) this.spawnBlueSphere();
+                }, this.spawnRates.blue);
+                
+                this.timers.yellow = setInterval(() => {
+                    if (this.gameActive) this.spawnYellowCube();
+                }, this.spawnRates.yellow);
+                
+                this.timers.magenta = setInterval(() => {
+                    if (this.gameActive) this.spawnMagentaSphere();
+                }, this.spawnRates.magenta);
+            }
+            
+            stopSpawning() {
+                clearInterval(this.timers.red);
+                clearInterval(this.timers.blue);
+                clearInterval(this.timers.yellow);
+                clearInterval(this.timers.magenta);
+            }
+            
+            handleResize() {
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+            
+            handleMouseMove(event) {
+                // Calculate mouse position in normalized device coordinates (-1 to +1)
+                this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                
+                // Update the raycaster with the mouse position and camera
+                this.raycaster.setFromCamera(this.mouse, this.camera);
+                
+                // Check for intersections with the mouse plane
+                const intersects = this.raycaster.intersectObject(this.mousePlane);
+                
+                if (intersects.length > 0 && this.player && this.gameActive) {
+                    // Move player directly to intersection point for responsive control
+                    this.player.position.x = intersects[0].point.x;
+                    this.player.position.y = intersects[0].point.y;
+                }
+            }
+            
+            checkCollisions() {
+                if (!this.player) return;
+                
+                const playerBox = new THREE.Box3().setFromObject(this.player);
+                
+                for (let i = 0; i < this.objects.length; i++) {
+                    const object = this.objects[i];
+                    const objectBox = new THREE.Box3().setFromObject(object.mesh);
+                    
+                    if (playerBox.intersectsBox(objectBox)) {
+                        // Collision detected
+                        this.handleCollision(object, i);
+                    }
+                }
+            }
+            
+            handleCollision(object, index) {
+                switch (object.type) {
+                    case 'red':
+                        // Game over
+                        this.gameOver();
+                        break;
+                    case 'blue':
+                        // Collect blue sphere (grow player)
+                        this.score += 10;
+                        this.playerBaseScale *= 1.1; // Increase base scale by 10%
+                        
+                        // Apply scale with animation
+                        new TWEEN.Tween(this.player.scale)
+                            .to({ 
+                                x: this.playerBaseScale, 
+                                y: this.playerBaseScale, 
+                                z: this.playerBaseScale 
+                            }, 500)
+                            .easing(TWEEN.Easing.Elastic.Out)
+                            .start();
+                        
+                        // Pop-out effect for collected object
+                        this.popOutEffect(object.mesh);
+                        
+                        // Remove from scene and array
+                        this.removeObject(index);
+                        
+                        // Update level
+                        this.updateLevel();
+                        break;
+                    case 'yellow':
+                        // 50% chance to harm player
+                        if (Math.random() < 0.5) {
+                            this.gameOver();
+                        } else {
+                            // Just remove the object
+                            this.popOutEffect(object.mesh);
+                            this.removeObject(index);
+                            this.score += 5;
+                        }
+                        break;
+                    case 'magenta':
+                        // Shrink player by 25%
+                        this.score += 15;
+                        this.playerBaseScale *= 0.75;
+                        
+                        // Apply scale with animation
+                        new TWEEN.Tween(this.player.scale)
+                            .to({ 
+                                x: this.playerBaseScale, 
+                                y: this.playerBaseScale, 
+                                z: this.playerBaseScale 
+                            }, 500)
+                            .easing(TWEEN.Easing.Elastic.Out)
+                            .start();
+                        
+                        // Pop-out effect for collected object
+                        this.popOutEffect(object.mesh);
+                        
+                        // Remove from scene and array
+                        this.removeObject(index);
+                        break;
+                }
+                
+                // Update score display
+                document.getElementById('score').textContent = `Score: ${this.score}`;
+            }
+            
+            popOutEffect(mesh) {
+                // Scale up and fade out
+                new TWEEN.Tween(mesh.scale)
+                    .to({ x: 2, y: 2, z: 2 }, 300)
+                    .easing(TWEEN.Easing.Back.In)
+                    .start();
+                
+                // Create a new material to avoid affecting other objects
+                if (mesh.material) {
+                    const newMaterial = mesh.material.clone();
+                    mesh.material = newMaterial;
+                    
+                    new TWEEN.Tween(newMaterial)
+                        .to({ opacity: 0 }, 300)
+                        .onStart(() => {
+                            newMaterial.transparent = true;
+                        })
+                        .start();
+                }
+            }
+            
+            removeObject(index) {
+                // Remove from scene
+                this.scene.remove(this.objects[index].mesh);
+                
+                // Remove from array
+                this.objects.splice(index, 1);
+            }
+            
+            updateLevel() {
+                // Increase level every 50 points
+                const newLevel = Math.floor(this.score / 50) + 1;
+                
+                if (newLevel > this.level) {
+                    this.level = newLevel;
+                    document.getElementById('level').textContent = `Level: ${this.level}`;
+                    
+                    // Increase difficulty by reducing spawn intervals
+                    this.spawnRates.red = Math.max(200, this.spawnRates.red - 100);
+                    this.spawnRates.blue = Math.max(500, this.spawnRates.blue - 150);
+                    this.spawnRates.yellow = Math.max(700, this.spawnRates.yellow - 200);
+                    this.spawnRates.magenta = Math.max(1000, this.spawnRates.magenta - 300);
+                    
+                    // Reset timers with new intervals
+                    this.stopSpawning();
+                    this.startSpawning();
+                }
+            }
+            
+            gameOver() {
+                this.gameActive = false;
+                document.getElementById('gameOver').style.display = 'flex';
+                
+                // Pop-out effect for player
+                if (this.player) {
+                    new TWEEN.Tween(this.player.scale)
+                        .to({ x: 0.01, y: 0.01, z: 0.01 }, 800)
+                        .easing(TWEEN.Easing.Back.In)
+                        .start();
+                    
+                    new TWEEN.Tween(this.player.position)
+                        .to({ y: this.player.position.y - 2 }, 800)
+                        .easing(TWEEN.Easing.Cubic.In)
+                        .start();
+                    
+                    new TWEEN.Tween(this.player.rotation)
+                        .to({ 
+                            x: this.player.rotation.x + Math.PI * 4,
+                            y: this.player.rotation.y + Math.PI * 4
+                        }, 800)
+                        .start();
+                }
+                
+                this.stopSpawning();
+            }
+            
+            resetGame() {
+                // Clear objects
+                for (let i = this.objects.length - 1; i >= 0; i--) {
+                    this.scene.remove(this.objects[i].mesh);
+                }
+                this.objects = [];
+                
+                // Remove old player
+                if (this.player) {
+                    this.scene.remove(this.player);
+                }
+                
+                // Reset variables
+                this.score = 0;
+                this.level = 1;
+                this.playerBaseScale = 1;
+                this.gameActive = true;
+                this.spawnRates = {
+                    red: 1000,
+                    blue: 2000,
+                    yellow: 3000,
+                    magenta: 5000
+                };
+                
+                // Update UI
+                document.getElementById('score').textContent = 'Score: 0';
+                document.getElementById('level').textContent = 'Level: 1';
+                document.getElementById('gameOver').style.display = 'none';
+                
+                // Create new player
+                this.createPlayer();
+                
+                // Start spawning again
+                this.startSpawning();
+            }
+            
+            updateObjects() {
+                const time = Date.now() * 0.001;
+                
+                for (let i = this.objects.length - 1; i >= 0; i--) {
+                    const object = this.objects[i];
+                    const mesh = object.mesh;
+                    
+                    // Apply rotation
+                    mesh.rotation.x += object.rotationSpeed.x;
+                    mesh.rotation.y += object.rotationSpeed.y;
+                    mesh.rotation.z += object.rotationSpeed.z;
+                    
+                    // Move down based on speed
+                    mesh.position.y -= object.speed;
+                    
+                    // Apply zigzag for yellow cubes
+                    if (object.type === 'yellow' && object.zigzag) {
+                        mesh.position.x += Math.sin(time * object.zigzag.speed + object.zigzag.offset) * object.zigzag.width * 0.02;
+                    }
+                    
+                    // Remove if out of bounds
+                    if (mesh.position.y < -10) {
+                        this.scene.remove(mesh);
+                        this.objects.splice(i, 1);
+                    }
+                }
+            }
+            
+            animate() {
+                requestAnimationFrame(this.animate.bind(this));
+                
+                if (this.gameActive) {
+                    this.updateObjects();
+                    this.checkCollisions();
+                }
+                
+                TWEEN.update();
+                this.renderer.render(this.scene, this.camera);
+            }
+        }
+        
+        // Start the game when the window loads
+        window.onload = () => new Game();
+    </script>
+</body>
+</html>
