@@ -1,7 +1,7 @@
 /* Wavefront OBJ exporters. Both take their live collaborators as a
    parameter object rather than reaching into main.js: `specimen` is the
-   focused block's cached data, `rig`/`visible`/`cache` the camera target and
-   the on-screen set, `toast` the HUD notifier.
+   focused block's cached data, `rig` the camera target, `cells` the
+   `{ i, j, p }` specimens a sheet holds, `toast` the HUD notifier.
 
    OBJ wants independent triangles, which a resident specimen no longer
    carries: it holds the instance record, and the renderer expands cubes on
@@ -64,11 +64,30 @@ export function exportSpecimenOBJ({ specimen, toast }){
   toast(`${specimenName(p)}.obj exported (${quads} quads)`);
 }
 
-/* Everything currently standing in the showroom, exported flat on the
-   lattice at full resolution regardless of the LOD used on screen. */
-export function exportSheetOBJ({ rig, visible, cache, toast }){
+/* Where each specimen of a sheet stands, as world { x, z }. The visible
+   sheet keeps every specimen at its own lattice cell. A marked set is
+   scattered across the lattice, so it is repacked into the squarest grid
+   that holds it — ceil(sqrt(n)) columns, row by row in marking order, one
+   lattice pitch apart and centred on the origin: 16 marks make a 4 × 4,
+   5 make a 3 × 2 with one slot empty. */
+export function sheetLayout(cells, marked){
+  if (!marked) return cells.map(({ i, j }) => ({ x: cellWorldX(i), z: cellWorldZ(j) }));
+  const cols = Math.ceil(Math.sqrt(cells.length)), rows = Math.ceil(cells.length / cols);
+  return cells.map((_, n) => ({
+    x: (n % cols - (cols - 1) / 2) * CFG.CELL,
+    z: (Math.floor(n / cols) - (rows - 1) / 2) * CFG.CELL
+  }));
+}
+
+/* A set of specimens exported flat, at full resolution regardless of the
+   LOD used on screen. `marked` says whether `cells` is the marked set
+   (packed into a square grid) or everything currently standing in view
+   (left where it stands); see sheetLayout(). */
+export function exportSheetOBJ({ rig, cells, marked, toast }){
+  const cols = Math.ceil(Math.sqrt(cells.length));
   const lines = [
-    `# bimoblock showroom — visible lattice sheet`,
+    marked ? `# bimoblock showroom — marked specimens (${cells.length}) in a ${cols} × ${Math.ceil(cells.length / cols)} grid, in marking order`
+           : `# bimoblock showroom — visible lattice sheet`,
     `# generated: ${new Date().toISOString()}`,
     `# centre cell: ${Math.round(rig.x / CFG.CELL)}, ${Math.round(-rig.z / CFG.CELL)}   generation: ${Mint.gen}`,
     `# axes: x → ${ROLE_BY_ID[Axis.x].label}   y → ${ROLE_BY_ID[Axis.y].label}`,
@@ -79,10 +98,9 @@ export function exportSheetOBJ({ rig, visible, cache, toast }){
 
   let vCount = 1, tris = 0, blocks = 0;
   const S = CFG.BLOCK_S;
+  const at = sheetLayout(cells, marked);
 
-  for (const c of visible){
-    const p = cache.get(c.key);
-    if (!p) continue;
+  for (const [n, { i, j, p }] of cells.entries()){
     // Expanded per specimen and dropped again, so the sheet never holds more
     // than one baked mesh at a time however many cells are standing.
     const mesh = Core.expandInstances(p.inst);
@@ -91,9 +109,9 @@ export function exportSheetOBJ({ rig, visible, cache, toast }){
     const verts = pos.length / 3;
     if (!verts) continue;
 
-    const ox = cellWorldX(c.i), oz = cellWorldZ(c.j), oy = S * 0.5 + 0.42;
+    const ox = at[n].x, oz = at[n].z, oy = S * 0.5 + 0.42;
     lines.push(`# symmetry mode: ${p.tierSymmetry ? 'independent address tiers' : 'coupled whole-grid'}; groups: ${symmetryLabel(p)}; radices: ${p.levels.map(l=>l.radix).join(',')}`);
-    lines.push(`o cell_${c.i}_${c.j}_${symmetryLabel(p,true).replaceAll(' / ','-')}_${ARCH_NAMES[p.arch]}`);
+    lines.push(`o cell_${i}_${j}_${symmetryLabel(p,true).replaceAll(' / ','-')}_${ARCH_NAMES[p.arch]}`);
     for (let k = 0; k < verts; k++){
       const o = k * 3;
       lines.push(`v ${(pos[o]*S+ox).toFixed(4)} ${(pos[o+1]*S+oy).toFixed(4)} ${(pos[o+2]*S+oz).toFixed(4)} ` +
@@ -109,7 +127,7 @@ export function exportSheetOBJ({ rig, visible, cache, toast }){
     blocks++;
   }
 
-  const filename = `bimoblock_sheet_${Math.round(rig.x / CFG.CELL)}_${Math.round(-rig.z / CFG.CELL)}_g${Mint.gen}.obj`;
+  const filename = `bimoblock_${marked ? 'marked' : 'sheet'}_${Math.round(rig.x / CFG.CELL)}_${Math.round(-rig.z / CFG.CELL)}_g${Mint.gen}.obj`;
   download(new Blob([lines.join("\n")], { type:'text/plain' }), filename);
   toast(`${filename} — ${blocks} specimens, ${tris.toLocaleString()} triangles`);
 }
