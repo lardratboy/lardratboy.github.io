@@ -10,13 +10,15 @@ import { createCarryCore } from './carry-core.js';
 import { createClaudegenCore } from './claudegen-core.js';
 import { createNestCore } from './nest-core.js';
 import { createSpacetimeCore } from './spacetime-core.js';
+import { createMirrorCore } from './mirror-core.js';
 
 /** @param {ReturnType<typeof createBimoblockCore>} [bimo] reuse an existing instance (the main thread's `Core`) */
 export function createCores(bimo = createBimoblockCore()){
   const neo = createNeoblockCore(bimo), field = createFieldCore(bimo), digit = createDigitCore(bimo), carry = createCarryCore(bimo);
   const claudegen = createClaudegenCore(bimo), nest = createNestCore(bimo), spacetime = createSpacetimeCore(bimo);
+  const mirror = createMirrorCore(bimo);
   return {
-    bimo, neo, field, digit, carry, claudegen, nest, spacetime,
+    bimo, neo, field, digit, carry, claudegen, nest, spacetime, mirror,
     /** @type {Object<string, (recipe:any, levels:import('../types.js').Level[]) => import('../types.js').BuildResult>} */
     build: {
       bimo: bimo.buildBlock,
@@ -26,7 +28,8 @@ export function createCores(bimo = createBimoblockCore()){
       carry: carry.buildCarry,
       claudegen: claudegen.buildClaudegen,
       nest: nest.buildNest,
-      spacetime: spacetime.buildSpacetime
+      spacetime: spacetime.buildSpacetime,
+      mirror: mirror.buildMirror
     }
   };
 }

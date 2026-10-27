@@ -25,6 +25,10 @@ export const Claudegen = { motif:-1, flaw:-1, strength:-1, spacing:-1, view:-1 }
 export const Nest = { outer:-1, inner:-1, carve:-1, twist:-1 };
 /* Spacetime dials held constant from the spacetime tab, likewise. */
 export const Spacetime = { ca:-1, start:-1, time:-1, draw:-1 };
+/* Bimomirror dials held from the mirror tab, likewise; seat -2 roams over
+   the aligned seats. `child` is where the child's fold comes from on roam:
+   0 the bimoblock at the address, 1 a roam of its own (mirror-recipe.js). */
+export const Mirror = { group:-1, seat:-1, child:0 };
 export const Filter = { sym:-1, arch:-1, field:-1 };
 export const Mint   = { gen:0, density:0.25 };
 

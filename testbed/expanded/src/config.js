@@ -10,6 +10,7 @@ import { RULE_NAMES, STENCILS, STEPS, PRIMES } from './core/carry-core.js';
 import { MOTIF_NAMES, FLAW_NAMES, STRENGTHS, PERIODS, VIEW_NAMES } from './core/claudegen-core.js';
 import { RULE_NAMES as NEST_RULES, INNER_NAMES, CARVE_NAMES, TWIST_NAMES } from './core/nest-core.js';
 import { RULE_NAMES as CA_RULES, SEED_NAMES, TIME_NAMES, DRAW_NAMES } from './core/spacetime-core.js';
+import { ARRANGEMENT_NAMES, SEAT_NAMES } from './core/mirror-core.js';
 
 const { GROUPS, ARCH_NAMES, FIELD_NAMES, LIFT_NAMES } = Core;
 
@@ -103,6 +104,12 @@ export const SPACETIME_ROLES = [
   { id:'time',     label:'time',              count:TIME_NAMES.length },
   { id:'draw',     label:'draw',              count:DRAW_NAMES.length }
 ];
+/* Bimomirror dials as roles (?g=mirror). Every bimoblock role stays: they
+   are the child's traits, and symmetry is the child's fold. */
+export const MIRROR_ROLES = [
+  { id:'group',    label:'arrangement',       count:ARRANGEMENT_NAMES.length },
+  { id:'seat',     label:'seat (corner in)',  count:SEAT_NAMES.length }
+];
 /* The roles each generator's axis menus offer, in menu order. */
 export const GENERATOR_ROLES = {
   bimo:  ROLES,
@@ -112,10 +119,11 @@ export const GENERATOR_ROLES = {
   carry: [...ROLES.filter(r => r.id !== 'field' && r.id !== 'lift' && r.id !== 'dens'), ...CARRY_ROLES],
   claudegen: [...ROLES.filter(r => r.id !== 'field' && r.id !== 'lift'), ...CLAUDEGEN_ROLES],
   nest:  [...ROLES.filter(r => r.id !== 'field' && r.id !== 'lift' && r.id !== 'dens'), ...NEST_ROLES],
-  spacetime: [...ROLES.filter(r => r.id !== 'field' && r.id !== 'lift' && r.id !== 'dens'), ...SPACETIME_ROLES]
+  spacetime: [...ROLES.filter(r => r.id !== 'field' && r.id !== 'lift' && r.id !== 'dens'), ...SPACETIME_ROLES],
+  mirror: [...ROLES, ...MIRROR_ROLES]
 };
 export const ROLE_BY_ID = {};
-for (const r of [...ROLES, ...NEO_ROLES, ...FIELD_ROLES, ...DIGIT_ROLES, ...CARRY_ROLES, ...CLAUDEGEN_ROLES, ...NEST_ROLES, ...SPACETIME_ROLES]) ROLE_BY_ID[r.id] = r;
+for (const r of [...ROLES, ...NEO_ROLES, ...FIELD_ROLES, ...DIGIT_ROLES, ...CARRY_ROLES, ...CLAUDEGEN_ROLES, ...NEST_ROLES, ...SPACETIME_ROLES, ...MIRROR_ROLES]) ROLE_BY_ID[r.id] = r;
 
 export const GROUP_COLORS = ['#ff3ea5','#ff8a3d','#ffd23d','#9bff3d','#3dff8a',
                              '#00f5d4','#3dc9ff','#6f7dff','#b46cff','#ff5edb'];

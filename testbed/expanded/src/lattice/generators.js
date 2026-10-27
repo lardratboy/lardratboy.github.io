@@ -12,6 +12,7 @@ import { RULE_NAMES, STENCIL_NAMES, LEVEL_NAMES, POWER_STENCILS } from '../core/
 import { MOTIFS, FLAWS, STRENGTH_NAMES, PERIODS, VIEWS } from '../core/claudegen-core.js';
 import { RULE_NAMES as NEST_RULES, CARVE_NAMES, TWIST_NAMES, ruleClasses } from '../core/nest-core.js';
 import { RULES as CA_RULES, NEIGHBOURHOODS, SEED_NAMES, CENTRED_SEEDS, SOUP_SIZE, TIME_NAMES, DRAW_NAMES, ruleCode, ruleBS } from '../core/spacetime-core.js';
+import { ARRANGEMENTS, SEAT_NAMES, WHOLE_NOTES, groupName } from '../core/mirror-core.js';
 import { Generator, Axis, Tier, Mint } from '../state.js';
 import { cellRecipe, symmetryLabel } from './recipe.js';
 import { neoCellRecipe } from './neo-recipe.js';
@@ -21,6 +22,7 @@ import { carryCellRecipe } from './carry-recipe.js';
 import { claudegenCellRecipe } from './claudegen-recipe.js';
 import { nestCellRecipe } from './nest-recipe.js';
 import { spacetimeCellRecipe } from './spacetime-recipe.js';
+import { mirrorCellRecipe } from './mirror-recipe.js';
 
 const { ARCH_NAMES, FIELD_NAMES, NATIVE_FIELDS, LEGACY_FIELD_COUNT, LIFT_NAMES } = Core;
 const k = text => `<span class="k">${text}</span>`;
@@ -170,6 +172,31 @@ const DRAW_NOTES = ['', 'alive this generation', 'alive this generation or the o
 const drawNote = p => p.draw ? DRAW_NOTES[p.draw] : p.meta ? `${p.meta.draw}, the rule's pick ${p.time === 1 ? 'mirrored' : 'forward'}` : '';
 const stFold = p => p.meta?.fold ?? symmetryLabel({ sym: p.sym });
 const stFoldNote = p => p.meta?.moved ? `${symmetryLabel({ sym: p.sym })} moves y; time keeps this part` : '';
+
+/* A bimomirror's lines: the arrangement and its group, the seat, the
+   children (one kind at an even radix; at an odd one the cells on the
+   mirror planes and axes are folded by their stabilisers too, so the
+   kinds are listed by fold), and the whole's group, predicted from the
+   recipe by the build. The child's traits are the bimoblock ones. */
+const arrangement = p => ARRANGEMENTS[p.group] ?? ARRANGEMENTS[1];
+const groupText = p => {
+  const g = groupName(arrangement(p).els);
+  return p.group ? `${g.name} (${g.hm}) · ${arrangement(p).note}` : arrangement(p).note;
+};
+const seatNote = p => p.meta?.aligned ? "lines the child's 3-fold axis up with the diagonal" : '';
+const childrenText = p => {
+  const m = p.meta;
+  if (!m) return '';
+  const kinds = m.kinds.length === 1 ? m.kinds[0][0] : m.kinds.map(([f, n]) => `${n} ${f}`).join(' · ');
+  return `${m.cells} × ${m.childR}³ · ${kinds}`;
+};
+const wholeText = p => p.meta ? `${p.meta.whole} (${p.meta.hm})` : '';
+const wholeNote = p => {
+  const m = p.meta;
+  if (!m) return '';
+  return `${m.wholeOrder} symmetr${m.wholeOrder === 1 ? 'y' : 'ies'}` + (WHOLE_NOTES[m.whole] ? ' · ' + WHOLE_NOTES[m.whole] : '');
+};
+const mirrorShort = p => `${arrangement(p).name} · ${symmetryLabel({ sym: p.sym }, true)}${p.meta ? ' → ' + p.meta.whole : ''}`;
 
 /* The composite part of a neoblock's description, or null when it is a
    plain bimoblock source. A composite asked for on a layout with nothing
@@ -363,6 +390,35 @@ export const GENERATORS = {
     brief: p => `${caName(p)} · ${SEED_NAMES[p.start]} · ${stFold(p)} · ${TIME_NAMES[p.time]} · draw ${DRAW_NAMES[p.draw]}`,
     objTraits: p => `rule: ${caName(p)} (${caNote(p)})  seed: ${SEED_NAMES[p.start]}${seedNote(p) ? ' (' + seedNote(p) + ')' : ''}  ` +
       `time: ${TIME_NAMES[p.time]}  draw: ${DRAW_NAMES[p.draw]}${p.meta ? ' (' + p.meta.draw + ')' : ''}  fold: ${stFold(p)}  clip: ${ARCH_NAMES[p.arch]}`
+  },
+  mirror: {
+    id:'mirror', label:'bimomirror', cellRecipe: mirrorCellRecipe,
+    /* The default view is a contact sheet: each arrangement (copy, then
+       the four groups) against each child fold, the table in
+       bimomirror.md §4. */
+    axes: { x:'group', y:'sym' },
+    /* R = 18: the octants, each a classic two-tier 9³ child. The levels
+       panel sets the gap: 0 fuses the copies into a kaleidoscope. */
+    levels: [{ radix:2, gap:0.35 }, { radix:3, gap:0.3 }, { radix:3, gap:0.06 }],
+    pinTraits: ['group', 'seat'],
+    /* The aut-order is out of the whole's predicted group. */
+    foldOrder: p => p.meta?.wholeOrder,
+    describe: p => p.meta?.fallback
+      ? `${k('generator')} <b>bimomirror</b> ${k('· one tier has nothing inside to mirror — showing the bimoblock')}\n`
+      : `${k('generator')} <b>bimomirror</b> ${k('· one bimoblock, mirrored into its cells')}\n` +
+        `${k('arrangement')} <b>${arrangement(p).name}</b> ${k('· ' + groupText(p))}\n` +
+        `${k('seat')} <b>${SEAT_NAMES[p.seat]} in</b> ${k(seatNote(p) ? '· ' + seatNote(p) : '')}\n` +
+        (p.meta ? `${k('children')} <b>${childrenText(p)}</b>\n` : '') +
+        (p.meta ? `${k('whole')} <b>${wholeText(p)}</b> ${k('· ' + wholeNote(p))}\n` : ''),
+    traits: p =>
+      `${k('child fold')} <b>${symmetryLabel({ sym: p.sym })}</b>\n` +
+      `${k('archetype')} <b>${ARCH_NAMES[p.arch]}</b>\n` +
+      `${k('field')} <b>${FIELD_NAMES[p.field]}</b>` +
+        (p.field >= NATIVE_FIELDS && p.field < LEGACY_FIELD_COUNT ? ` ${k('/')} <b>${LIFT_NAMES[p.lift]}</b>` : '') + `\n`,
+    labelText: mirrorShort,
+    brief: p => `${arrangement(p).name} · seat ${SEAT_NAMES[p.seat]} · child ${symmetryLabel({ sym: p.sym })} ${ARCH_NAMES[p.arch]}${p.meta ? ' · whole ' + wholeText(p) : ''}`,
+    objTraits: p => `arrangement: ${arrangement(p).name}  seat: ${SEAT_NAMES[p.seat]} in  children: ${childrenText(p)}  whole: ${wholeText(p)}  ` +
+      `child fold: ${symmetryLabel({ sym: p.sym })}  archetype: ${ARCH_NAMES[p.arch]}  field: ${FIELD_NAMES[p.field]}  density: ${(p.density * 100).toFixed(0)}%`
   }
 };
 

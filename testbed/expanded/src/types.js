@@ -160,6 +160,20 @@
  */
 
 /**
+ * A bimomirror recipe (`?g=mirror`): the bimoblock Recipe, which is the
+ * child's, plus two dials. See core/mirror-core.js and bimomirror.md.
+ * @typedef {Recipe & {
+ *   group: number,
+ *   seat: number
+ * }} MirrorRecipe
+ * `sym`, `arch`, `field`, `lift`, `density` and the seed shape the child,
+ * an ordinary bimoblock on the inner tiers (Oh becomes Td on roam).
+ * `group` indexes `ARRANGEMENTS` (0 is the `copy` control, never on roam)
+ * and `seat` is the sign change (Oh element 0–7) that flips the child
+ * before it is placed, named by `SEAT_NAMES`.
+ */
+
+/**
  * How a district cell relates to its pin (`cellRecipe()` in lattice/recipe.js).
  * `null` outside a district.
  * @typedef {Object} Kin
@@ -246,7 +260,9 @@
  *                                   `{a, periods, detail}`, nestblocks: `{tiers,
  *                                   dimension, fill}`, spacetime: `{gens,
  *                                   population, extinct, fold, foldOrder, moved, offset,
- *                                   seedCells, draw, fill}`); carried to BlockData.
+ *                                   seedCells, draw, fill}`, bimomirrors: `{whole, hm,
+ *                                   wholeOrder, aligned, childR, cells, kinds,
+ *                                   fallback}`); carried to BlockData.
  */
 
 /**

@@ -11,8 +11,9 @@ import { RULE_NAMES, STENCIL_NAMES, LEVEL_NAMES, STEPS } from '../core/carry-cor
 import { MOTIF_NAMES, FLAW_NAMES, PERIODS, VIEW_NAMES } from '../core/claudegen-core.js';
 import { RULE_NAMES as NEST_RULES, INNER_NAMES, CARVE_NAMES, TWIST_NAMES } from '../core/nest-core.js';
 import { RULE_NAMES as CA_RULES, SEED_NAMES, TIME_NAMES, DRAW_NAMES } from '../core/spacetime-core.js';
+import { ARRANGEMENT_NAMES, SEAT_NAMES } from '../core/mirror-core.js';
 import { CFG, clamp } from '../config.js';
-import { Axis, Filter, Mint, Pin, State, Bloom, Focus, Marks, Neo, Easy, Digit, Carry, Claudegen, Nest, Spacetime, Generator } from '../state.js';
+import { Axis, Filter, Mint, Pin, State, Bloom, Focus, Marks, Neo, Easy, Digit, Carry, Claudegen, Nest, Spacetime, Mirror, Generator } from '../state.js';
 import { symmetryLabel, cellWorldX, cellWorldZ, axisRoles } from '../lattice/recipe.js';
 import { GENERATORS, generatorURL, activeGenerator } from '../lattice/generators.js';
 import { exportSpecimenOBJ, exportSheetOBJ } from '../export/obj.js';
@@ -48,6 +49,7 @@ export class Controls {
     if (Generator.id !== 'claudegen'){ $('claudegenTab').remove(); $('claudegenPage').remove(); }
     if (Generator.id !== 'nest'){ $('nestTab').remove(); $('nestPage').remove(); }
     if (Generator.id !== 'spacetime'){ $('spacetimeTab').remove(); $('spacetimePage').remove(); }
+    if (Generator.id !== 'mirror'){ $('mirrorTab').remove(); $('mirrorPage').remove(); }
     initTabs($('panel'));
 
     /* ---- selects ---------------------------------------------------- */
@@ -77,8 +79,8 @@ export class Controls {
     ARCH_NAMES.forEach((n, i) => opt(selArch, String(i), 'archetype: ' + n));
     opt(selFld, '-1', 'field: roam', true);
     FIELD_NAMES.forEach((n, i) => opt(selFld, String(i), 'field: ' + n));
-    // Only bimoblocks and neoblocks have a bimoblock field; elsewhere the archetype is a clip.
-    if (Generator.id !== 'bimo' && Generator.id !== 'neo'){
+    // Only bimoblocks, neoblocks and bimomirrors have a bimoblock field; elsewhere the archetype is a clip.
+    if (Generator.id !== 'bimo' && Generator.id !== 'neo' && Generator.id !== 'mirror'){
       selFld.style.display = 'none';
       selArch.options[0].textContent = 'clip: roam';
       ARCH_NAMES.forEach((n, i) => { selArch.options[i + 1].textContent = 'clip: ' + n; });
@@ -89,6 +91,11 @@ export class Controls {
     if (Generator.id === 'nest') selSym.options[0].textContent = 'fold: roam (Oh … C2v)';
     // Likewise a spacetime fold, over the three that keep its copies architectural.
     if (Generator.id === 'spacetime') selSym.options[0].textContent = 'fold: roam (C4v, C4, C2v)';
+    // A bimomirror's symmetry is its child's fold; the arrangement is the mirror tab's.
+    if (Generator.id === 'mirror'){
+      selSym.options[0].textContent = 'child fold: roam';
+      GROUPS.forEach((g, i) => { selSym.options[i + 1].textContent = 'child fold: ' + g.name; });
+    }
 
     // Additive display modes only — never touch generation, so switching never
     // invalidates the cache or needs flushLattice(). Specimens built before this
@@ -346,6 +353,23 @@ export class Controls {
       dial('stDraw', 'draw', DRAW_NAMES, 'draw');
     }
 
+    /* ---- bimomirror dials (mirror pages only) ------------------------ */
+    if (Generator.id === 'mirror'){
+      // Each select: [value, label] options; roam is any negative value.
+      const dial = (id, key, options, what) => {
+        const sel = this['sel_' + key] = $(id);
+        for (const [v, label] of options) opt(sel, String(v), what + ': ' + label, v === Mirror[key]);
+        sel.addEventListener('change', () => {
+          Mirror[key] = parseInt(sel.value, 10);
+          setStatus(what + ' ' + sel.options[sel.selectedIndex].textContent.slice(what.length + 2));
+          actions.flushLattice();
+        });
+      };
+      dial('mirrorGroup', 'group', [[-1, 'roam (mirror, turn, pinwheel, twist)'], ...ARRANGEMENT_NAMES.map((n, i) => [i, n])], 'arrangement');
+      dial('mirrorSeat', 'seat', [[-1, 'roam, any'], [-2, 'roam, aligned'], ...SEAT_NAMES.map((n, i) => [i, n + ' in'])], 'seat');
+      dial('mirrorChild', 'child', [[0, 'the bimoblock here'], [1, 'roam, low folds']], 'child');
+    }
+
     /* ---- buttons ---------------------------------------------------- */
     const btnHome   = $('home');
     const btnWarp   = $('warp');
@@ -488,6 +512,11 @@ export class Controls {
       for (const key of ['ca', 'start', 'time', 'draw'])
         this['sel_' + key].disabled = Axis.x === key || Axis.y === key;
       this.inDens.disabled = true;   // the rule decides every cell
+    }
+    if (Generator.id === 'mirror'){
+      for (const key of ['group', 'seat'])
+        this['sel_' + key].disabled = Axis.x === key || Axis.y === key;
+      this.sel_child.disabled = Axis.x === 'sym' || Axis.y === 'sym';   // an axis walks the fold
     }
   }
 

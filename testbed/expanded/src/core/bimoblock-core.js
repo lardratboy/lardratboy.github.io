@@ -942,7 +942,10 @@ function tierFolder(P, levels, R){
 /** The evaluate + select half of a build: occupancy and the winning fold
  *  element per cell, with no instance record. Neoblock composites build
  *  their children this way, since a child never needs one of its own.
- *  @param {import('../types.js').Recipe} P @param {import('../types.js').Level[]} levels
+ *  `P.foldEls`, when present, is the fold as a closed list of Oh element
+ *  codes (identity included) in place of `GROUPS[P.sym].els`: bimomirrors
+ *  fold a child by its own group and its seat's stabiliser together.
+ *  @param {import('../types.js').Recipe & {foldEls?: number[]}} P @param {import('../types.js').Level[]} levels
  *  @returns {import('../types.js').OccResult} */
 function bimoblockOcc(P, levels){
   const started = performance.now();
@@ -950,7 +953,8 @@ function bimoblockOcc(P, levels){
   const fmode = P.field;
   const R = levelResolution(levels);
   const foldTier = P.tierSymmetry ? tierFolder(P, levels, R) : null;
-  const orbitOrder = foldTier ? foldTier.outerOrder : G.order;
+  const foldEls = P.foldEls || G.els;
+  const orbitOrder = foldTier ? foldTier.outerOrder : foldEls.length;
   const S = seedWords(P.seed);
   const pars = { conic: conicParams(S.mix), scale: [] };
   if (fmode >= NATIVE_FIELDS && fmode < LEGACY_FIELD_COUNT)
@@ -988,7 +992,7 @@ function bimoblockOcc(P, levels){
     const half = (R - 1) / 2;
     const ax = new Float64Array(R);
     for (let u = 0; u < R; u++) ax[u] = foldedAxis(u, levels);
-    const els = G.els, nE = els.length;
+    const els = foldEls, nE = els.length;
     const { MUL, INV } = groupTables(els);
     const visited = new Uint8Array(R*R*R);
     // NOTE: half is a half-integer when R is even, so orbit members carry
