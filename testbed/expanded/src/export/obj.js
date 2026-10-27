@@ -14,8 +14,13 @@ import { CFG, ROLE_BY_ID } from '../config.js';
 import { Axis, Mint, Tier, Focus, State } from '../state.js';
 import { symmetryLabel, cellWorldX, cellWorldZ, seedHex } from '../lattice/recipe.js';
 import { activeGenerator } from '../lattice/generators.js';
+import { textSink } from './text-sink.js';
 
 const { ARCH_NAMES, FIELD_NAMES } = Core;
+
+/* One trip through the event loop, so the page repaints and the toast
+   shows progress between specimens. */
+const pause = () => new Promise(r => setTimeout(r, 0));
 
 export function download(blob, name){
   const a = document.createElement('a');
@@ -33,7 +38,8 @@ export function exportSpecimenOBJ({ specimen, toast }){
   const p = specimen;
   if (!p) return;
   const R = p.R;
-  const lines = [
+  const lines = textSink();
+  lines.push(
     `# ${activeGenerator().label} specimen — ${specimenName(p)}`,
     `# lattice cell: ${Focus.i}, ${Focus.j}   generation: ${Mint.gen}`,
     `# ${activeGenerator().objTraits?.(p) ?? `group: ${symmetryLabel(p)}  archetype: ${ARCH_NAMES[p.arch]}  field: ${FIELD_NAMES[p.field]}`}`,
@@ -42,7 +48,7 @@ export function exportSpecimenOBJ({ specimen, toast }){
     `# gaps: [${p.levels.map(l=>l.gap.toFixed(2)).join(', ')}] (fraction of child width)`,
     `# format: v X Y Z R G B (normalized local gamut colors), vn NX NY NZ, f v1//vn1 v2//vn2 v3//vn3`,
     ""
-  ];
+  );
   const mesh = Core.expandInstances(p.inst);
   const pos = mesh.pos, nrm = mesh.nrm;
   // Whichever colouring is on screen, as before: the exporter took the
@@ -61,7 +67,7 @@ export function exportSpecimenOBJ({ specimen, toast }){
     vi += 4;
   }
   const quads = verts / 4;
-  download(new Blob([lines.join("\n")], { type:'text/plain' }), specimenName(p) + '.obj');
+  download(lines.blob(), specimenName(p) + '.obj');
   toast(`${specimenName(p)}.obj exported (${quads} quads)`);
 }
 
@@ -83,30 +89,52 @@ export function sheetLayout(cells, marked){
 /* A set of specimens exported flat, at full resolution regardless of the
    LOD used on screen. `marked` says whether `cells` is the marked set
    (packed into a square grid) or everything currently standing in view
-   (left where it stands); see sheetLayout(). */
-export function exportSheetOBJ({ rig, cells, marked, toast }){
+   (left where it stands); see sheetLayout().
+
+   It pauses between specimens, so the page stays live and the toast counts
+   up; everything the file reads from shared state (camera, generation,
+   axes, colour mode) is taken before the first pause, so the file is the
+   sheet as it stood when the export began. One export runs at a time. */
+let sheetBusy = false;
+export async function exportSheetOBJ({ rig, cells, marked, toast }){
+  if (sheetBusy){ toast('an export is already running'); return; }
+  sheetBusy = true;
+  try { await writeSheetOBJ({ rig, cells, marked, toast }); }
+  catch (err){ console.error('sheet export failed:', err); toast(`export failed — ${err.message}`); }
+  finally { sheetBusy = false; }
+}
+
+async function writeSheetOBJ({ rig, cells, marked, toast }){
   const cols = Math.ceil(Math.sqrt(cells.length));
-  const lines = [
+  const ci = Math.round(rig.x / CFG.CELL), cj = Math.round(-rig.z / CFG.CELL), gen = Mint.gen;
+  const orbitColor = State.colorMode === 'orbit';
+  const lines = textSink();
+  lines.push(
     marked ? `# endless-lattice — marked specimens (${cells.length}) in a ${cols} × ${Math.ceil(cells.length / cols)} grid, in marking order`
            : `# endless-lattice — visible lattice sheet`,
     `# generated: ${new Date().toISOString()}`,
-    `# centre cell: ${Math.round(rig.x / CFG.CELL)}, ${Math.round(-rig.z / CFG.CELL)}   generation: ${Mint.gen}`,
+    `# centre cell: ${ci}, ${cj}   generation: ${gen}`,
     `# axes: x → ${ROLE_BY_ID[Axis.x].label}   y → ${ROLE_BY_ID[Axis.y].label}`,
     `# levels: [${Tier.levels.map(l=>l.radix).join('×')}]  gaps: [${Tier.levels.map(l=>l.gap.toFixed(2)).join(', ')}]`,
     `# format: v X Y Z R G B (normalized local gamut colors), vn NX NY NZ, f v1//vn1 v2//vn2 v3//vn3`,
     ""
-  ];
+  );
+  const filename = `${activeGenerator().label}_${marked ? 'marked' : 'sheet'}_${ci}_${cj}_g${gen}.obj`;
 
   let vCount = 1, tris = 0, blocks = 0;
   const S = CFG.BLOCK_S;
   const at = sheetLayout(cells, marked);
 
   for (const [n, { i, j, p }] of cells.entries()){
+    if (n){
+      toast(`exporting ${filename} — ${n} / ${cells.length} specimens`);
+      await pause();
+    }
     // Expanded per specimen and dropped again, so the sheet never holds more
     // than one baked mesh at a time however many cells are standing.
     const mesh = Core.expandInstances(p.inst);
     const pos = mesh.pos, nrm = mesh.nrm, idx = mesh.idx;
-    const col = (State.colorMode === 'orbit' && mesh.colOrbit) ? mesh.colOrbit : mesh.col;
+    const col = (orbitColor && mesh.colOrbit) ? mesh.colOrbit : mesh.col;
     const verts = pos.length / 3;
     if (!verts) continue;
 
@@ -128,8 +156,7 @@ export function exportSheetOBJ({ rig, cells, marked, toast }){
     blocks++;
   }
 
-  const filename = `${activeGenerator().label}_${marked ? 'marked' : 'sheet'}_${Math.round(rig.x / CFG.CELL)}_${Math.round(-rig.z / CFG.CELL)}_g${Mint.gen}.obj`;
-  download(new Blob([lines.join("\n")], { type:'text/plain' }), filename);
+  download(lines.blob(), filename);
   toast(`${filename} — ${blocks} specimens, ${tris.toLocaleString()} triangles`);
 }
 
