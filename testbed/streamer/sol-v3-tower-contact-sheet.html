@@ -1,0 +1,1737 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>tower contact sheet — ((3³)³)³… at arbitrary level</title>
+<style>
+  html,body{ height:100%; margin:0; background:#07070a; overflow:hidden;
+    font:10px/1.4 ui-monospace, Menlo, Consolas, monospace; color:#6a6a7a; letter-spacing:.05em; }
+  canvas{ display:block; position:absolute; left:0; top:0; touch-action:none; }
+  .lbl{ position:absolute; user-select:none; pointer-events:none; white-space:nowrap; }
+  .col{ color:#8a8a9e; }
+  .row{ color:#8a8a9e; text-align:right; }
+  #sel{ position:absolute; border:1px solid rgba(180,200,255,.75); pointer-events:none;
+        display:none; box-shadow:0 0 0 1px rgba(0,0,0,.6) inset; }
+  #hud{ position:fixed; right:10px; bottom:8px; text-align:right; white-space:pre;
+        background:rgba(0,0,0,.5); padding:8px 12px; border-radius:6px;
+        border:1px solid rgba(255,255,255,.07); pointer-events:none; }
+  #hud b{ color:#a0a0b2; font-weight:normal; }
+  #hud .sec{ color:#3e3e4c; }
+  #menu{ position:fixed; display:none; z-index:10; min-width:196px;
+    background:rgba(18,18,24,.97); border:1px solid rgba(255,255,255,.14);
+    border-radius:5px; padding:4px; box-shadow:0 6px 24px rgba(0,0,0,.55); }
+  #menu button{ display:block; width:100%; text-align:left; background:none; border:0;
+    color:#b8b8cc; font:inherit; padding:5px 10px; border-radius:3px; cursor:pointer; }
+  #menu button:hover{ background:rgba(120,140,220,.22); color:#e6e6f2; }
+  #menu .hdr{ color:#4c4c5c; padding:4px 10px 6px; border-bottom:1px solid rgba(255,255,255,.08);
+    margin-bottom:4px; white-space:nowrap; }
+  #toast{ position:fixed; left:50%; top:16px; transform:translateX(-50%);
+    background:rgba(20,20,28,.88); color:#c8c8dc; border:1px solid rgba(255,255,255,.15);
+    padding:6px 14px; border-radius:4px; opacity:0; transition:opacity .25s ease; pointer-events:none; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="labels"></div>
+<div id="sel"></div>
+<div id="menu"></div>
+<div id="hud"></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+/* =========================== TOWER CORE ==================================
+   T(0) = one voxel.  T(n) = 27 copies of T(n-1) in a 3x3x3.  So |T(n)| =
+   27^n and the side is 3^n.  T(2) is the 9^3 bimoblock; this file is the
+   same operator at any depth.
+
+   The occupancy model is what makes arbitrary depth affordable.  Rather
+   than storing 3^(3n) bits, a cell is addressed by n base-27 digits and is
+   occupied iff every digit survives that level's 27-bit RULE:
+
+       occ(c) = AND over levels l of  bit(rule[l], digit_l(c))
+
+   Storage is O(levels), not O(cells). Rendering compiles pairs of levels
+   into 9x9x9 occupancy bricks (23 uint words / 92 bytes each), while keeping
+   the first-level masks for coarse skips. Graph bricks also cache successors.
+   The tracer, colors and census all use the same underlying grammar.
+   ========================================================================= */
+
+/* Hard iteration cap in the tracer loop. GLSL needs a constant bound, so this
+   is injected into the shader below AND used to build the quality options --
+   one constant, so the two can never disagree. (They did: the loop said 512
+   while the quality control offered 768, silently clamping.)               */
+const STEP_CAP = 768;
+
+const VERT = `#version 300 es
+void main(){
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+precision highp int;
+
+uniform vec3  iResolution;
+uniform vec2  uOrigin;
+uniform vec3  uEye;
+uniform vec3  uForward;
+uniform vec3  uRight;
+uniform vec3  uUp;
+uniform uint  uRules[8];     // per-level 27-bit keep masks, index 0 = coarsest
+uniform int   uLevels;       // L
+uniform int   uSteps;        // skip-iteration budget
+uniform ivec4 uPlanes[12];   // convex half-spaces (A,B,C,T), integer
+uniform int   uPlaneCount;   // 0 = no polyhedron clip
+uniform uint  uGraphKeep[8]; // graph-directed: per-state 27-bit keep mask
+uniform uint  uGraphNext[32];// per-state successor, 4 bits/digit, 8 digits/word
+uniform int   uGraphStates;  // 0 = use the per-level rule stack instead
+uniform highp usampler2D uBrickBits; // 23 words/row; rule pair or starting state
+uniform highp usampler2D uBrickNext; // graph successors: 8 four-bit states/word
+uniform uint uSolidTail[9]; // bit per state: all descendants from this level are solid
+
+out vec4 fragColor;
+
+#define TAU 6.28318530718
+#define CUT_SHADE 0.30
+#define MAXL 8
+#define STEP_CAP ${STEP_CAP}
+
+int sideOf(){ int s = 1; for (int i = 0; i < MAXL; ++i){ if (i >= uLevels) break; s *= 3; } return s; }
+
+int graphNext(int st, int d){
+  uint w = uGraphNext[st * 4 + d / 8];
+  return int((w >> uint((d % 8) * 4)) & 15u);
+}
+
+// Two levels per lookup. A rejected bit still distinguishes a rejected parent
+// from a rejected grandchild, preserving the original largest-empty-cube skip.
+int classifyBricks(ivec3 c, int S){
+  int size = S, gs = 0;
+  for (int pair = 0; pair < MAXL / 2; ++pair){
+    if (pair >= uLevels / 2) break;
+    int fineSize = size / 9;
+    ivec3 q = (c / fineSize) % 9;
+    int b = q.x + 9*q.y + 81*q.z;
+    int row = (uGraphStates > 0) ? gs : pair;
+    uint word = texelFetch(uBrickBits, ivec2(b / 32, row), 0).r;
+    if (((word >> uint(b % 32)) & 1u) == 0u){
+      ivec3 parent = q / 3;
+      int d = parent.x + 3*parent.y + 9*parent.z;
+      uint keep = (uGraphStates > 0) ? uGraphKeep[gs] : uRules[2*pair];
+      return (((keep >> uint(d)) & 1u) == 0u) ? fineSize * 3 : fineSize;
+    }
+    if (uGraphStates > 0 && 2*pair + 2 < uLevels){
+      uint next = texelFetch(uBrickNext, ivec2(b / 8, gs), 0).r;
+      gs = int((next >> uint((b % 8) * 4)) & 15u);
+    }
+    size = fineSize;
+  }
+  // Odd depths end with one ordinary digit; no successor is needed afterward.
+  if ((uLevels % 2) != 0){
+    size /= 3;
+    ivec3 q = (c / size) % 3;
+    int d = q.x + 3*q.y + 9*q.z;
+    uint keep = (uGraphStates > 0) ? uGraphKeep[gs] : uRules[uLevels - 1];
+    if (((keep >> uint(d)) & 1u) == 0u) return size;
+  }
+  return 0;
+}
+
+/* One classifier for everything.  Returns 0 when the cell is occupied, else
+   the cell-extent of the empty subcube the ray may skip over.
+
+   Three occupancy sources, ANDed:
+     - per-level rule stack   (product of per-digit masks: self-similar sets)
+     - graph-directed states  (an automaton over the digits: strictly larger)
+     - convex half-spaces     (integer residual per plane)
+
+   The half-space recursion is exact.  A cell centre is x = 2*sum e_l 3^-l, so
+   A.x+B.y+C.z <= T becomes S_l = 3 S_{l-1} - 2(A ex + B ey + C ez) with accept
+   iff S_L >= 0.  The untouched tail is bounded by U = |A|+|B|+|C|, so |S| > U
+   already decides the outcome; clamping to +-(U+1) gives self-sustaining
+   absorbing states and keeps everything inside 32-bit ints at any depth.
+   Reaching the reject sentinel means the WHOLE subcube is outside the plane,
+   which is exactly the hierarchical skip the tracer already exploits.        */
+int classify(ivec3 c, int S, out int rejPlane){
+  rejPlane = -1;
+  if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, ivec3(S)))) return S;
+  // Plane residuals depend on the address prefix; retain the exact classifier
+  // for clipped geometry. Rule-only and graph-only rows use cached bricks.
+  if (uPlaneCount == 0) return classifyBricks(c, S);
+  int size = S;
+  int sres[12];
+  for (int p = 0; p < 12; ++p){
+    if (p >= uPlaneCount) break;
+    sres[p] = uPlanes[p].w;
+  }
+  int gs = 0;
+  for (int l = 0; l < MAXL; ++l){
+    if (l >= uLevels) break;
+    size /= 3;
+    ivec3 q = (c / size) % 3;
+    ivec3 e = q - 1;
+    int d = q.x + 3 * q.y + 9 * q.z;
+
+    if (uGraphStates > 0){
+      if (((uGraphKeep[gs] >> uint(d)) & 1u) == 0u) return size;
+      gs = graphNext(gs, d);
+    } else {
+      if (((uRules[l] >> uint(d)) & 1u) == 0u) return size;
+    }
+
+    for (int p = 0; p < 12; ++p){
+      if (p >= uPlaneCount) break;
+      ivec3 A = uPlanes[p].xyz;
+      int U = abs(A.x) + abs(A.y) + abs(A.z);
+      int v = 3 * sres[p] - 2 * (A.x * e.x + A.y * e.y + A.z * e.z);
+      v = clamp(v, -(U + 1), U + 1);
+      sres[p] = v;
+      if (v < -U){ rejPlane = p; return size; }
+    }
+  }
+  for (int p = 0; p < 12; ++p){
+    if (p >= uPlaneCount) break;
+    if (sres[p] < 0){ rejPlane = p; return 1; }
+  }
+  return 0;
+}
+
+vec3 safeDir(vec3 d){
+  vec3 s = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(d, vec3(0.0)));
+  return s * max(abs(d), vec3(1e-6));
+}
+
+// Called only while exiting material containing the eye. Skip an entire solid
+// subtree when its grammar tail is full and every clipping plane accepts it.
+int solidExtent(ivec3 c, int S){
+  int size = S, gs = 0;
+  int residual[12];
+  for (int p = 0; p < 12; ++p){
+    if (p >= uPlaneCount) break;
+    residual[p] = uPlanes[p].w;
+  }
+  for (int l = 0; l < MAXL; ++l){
+    if (l >= uLevels) break;
+    bool full = ((uSolidTail[l] >> uint(gs)) & 1u) != 0u;
+    for (int p = 0; p < 12; ++p){
+      if (p >= uPlaneCount) break;
+      ivec3 A = uPlanes[p].xyz;
+      int U = abs(A.x) + abs(A.y) + abs(A.z);
+      if (residual[p] < U) full = false;
+    }
+    if (full) return size;
+    size /= 3;
+    ivec3 q = (c / size) % 3;
+    int d = q.x + 3*q.y + 9*q.z;
+    if (uGraphStates > 0) gs = graphNext(gs, d);
+    for (int p = 0; p < 12; ++p){
+      if (p >= uPlaneCount) break;
+      ivec3 A = uPlanes[p].xyz;
+      int U = abs(A.x) + abs(A.y) + abs(A.z);
+      ivec3 e = q - 1;
+      residual[p] = clamp(3*residual[p] - 2*(A.x*e.x + A.y*e.y + A.z*e.z), -(U + 1), U + 1);
+    }
+  }
+  return 1;
+}
+
+/* Hierarchical skip march.  At each step the point is classified down the
+   address; the COARSEST level that rejects names an empty subcube of extent
+   'size' cells, and the ray jumps straight to that subcube's exit.  A whole
+   empty 3^k block therefore costs one iteration, not 3^k.
+
+   Measured over 40k rays per case: plain rule stacks stay under ~65 steps.
+   Convex rows are cheap in the bulk (median 0, p99 ~17, p99.9 ~49) but have a
+   thin tail where a ray grazes a slanted face almost parallel to it and
+   staircases; worst observed 1214 at L=7. Only ~0.003% of rays exceed 384, so
+   the default budget truncates on the order of one pixel in 30,000.        */
+bool traceTower(vec3 o, vec3 d, int S, out float tOut, out vec3 nOut, out ivec3 cOut){
+  tOut = 0.0; nOut = vec3(0.0, 1.0, 0.0); cOut = ivec3(0);   // never leave these undefined
+  vec3 inv = 1.0 / d;
+  vec3 ta = (vec3(-1.0) - o) * inv, tb = (vec3(1.0) - o) * inv;
+  vec3 tn = min(ta, tb), tf = max(ta, tb);
+  float tEnter = max(max(tn.x, tn.y), tn.z);
+  float tExit  = min(min(tf.x, tf.y), tf.z);
+  float t = max(tEnter, 0.0);
+  if (t >= tExit) return false;
+
+  int ax = (tn.x > tn.y) ? ((tn.x > tn.z) ? 0 : 2) : ((tn.y > tn.z) ? 1 : 2);
+  vec3 nrm = vec3(0.0); nrm[ax] = (d[ax] > 0.0) ? -1.0 : 1.0;
+
+  float eps = 2.0 / float(S) * 1e-3;
+  bool exitSolid = false;
+  ivec3 solidCell = ivec3(0);
+  if (tEnter < 0.0){
+    vec3 grid = (o * 0.5 + 0.5) * float(S);
+    solidCell = ivec3(floor(grid));
+    for (int a = 0; a < 3; ++a)
+      if (d[a] < 0.0 && grid[a] == float(solidCell[a])) solidCell[a]--;
+    solidCell = clamp(solidCell, ivec3(0), ivec3(S - 1));
+    int rp;
+    exitSolid = classify(solidCell, S, rp) == 0;
+  }
+  if (!exitSolid) t += eps;
+
+  for (int i = 0; i < STEP_CAP; ++i){
+    if (i >= uSteps) break;
+    if (t >= tExit || (exitSolid && (any(lessThan(solidCell, ivec3(0))) ||
+                                    any(greaterThanEqual(solidCell, ivec3(S)))))){
+      if (exitSolid){
+        // The epsilon can cross the outer face just after an internal cell
+        // boundary. Use the box's actual exit face, not that internal normal.
+        int exitAxis = (tf.x < tf.y) ? ((tf.x < tf.z) ? 0 : 2) : ((tf.y < tf.z) ? 1 : 2);
+        tOut = tExit; nOut = vec3(0.0); nOut[exitAxis] = (d[exitAxis] > 0.0) ? 1.0 : -1.0;
+        return true;
+      }
+      return false;
+    }
+    vec3 p = o + t * d;
+    ivec3 c = exitSolid ? solidCell
+      : clamp(ivec3(floor((p * 0.5 + 0.5) * float(S))), ivec3(0), ivec3(S - 1));
+
+    int rp;
+    int size = classify(c, S, rp);
+    if (exitSolid){
+      if (size != 0){ tOut = t; nOut = -nrm; return true; }
+      cOut = c;
+      size = solidExtent(c, S);
+    } else if (size == 0){ tOut = t; nOut = nrm; cOut = c; return true; }
+
+    ivec3 lo = (c / size) * size;
+    vec3 wlo = vec3(lo) / float(S) * 2.0 - 1.0;
+    vec3 whi = vec3(lo + ivec3(size)) / float(S) * 2.0 - 1.0;
+    vec3 tbd = (mix(wlo, whi, step(vec3(0.0), d)) - o) * inv;
+    float te = min(min(tbd.x, tbd.y), tbd.z);
+    int ea = (tbd.x < tbd.y) ? ((tbd.x < tbd.z) ? 0 : 2) : ((tbd.y < tbd.z) ? 1 : 2);
+    nrm = vec3(0.0); nrm[ea] = (d[ea] > 0.0) ? -1.0 : 1.0;
+
+    /* Convexity shortcut. If a half-space rejected, the ray may jump toward
+       that plane instead of staircasing along a slanted face.
+
+       The subtlety: occupancy is decided at cell CENTRES, but this test is on
+       the ray point, so a cell whose centre is inside can be entered outside.
+       Jumping to A.p = T would skip such cells (measured: 3.2% wrong hits).
+       Offsetting the target plane outward by the half-cell extent U/S, where
+       U = |A|_1, makes the skip conservative: if A.p > T + U/S then every
+       centre within that cell has A.c > T, so the cell really is rejected.
+       Only applied when the ray heads into the half-space, and only when it
+       advances past the subcube exit -- so it can never lose an intersection.
+       Grazing cost at L=7 drops from 215 steps to single digits.            */
+    if (rp >= 0){
+      vec3 An = vec3(uPlanes[rp].xyz);
+      float dn = dot(An, d);
+      if (dn < -1e-9){
+        float U = abs(An.x) + abs(An.y) + abs(An.z);
+        float tp = (float(uPlanes[rp].w) + U / float(S) - dot(An, o)) / dn;
+        if (tp > te){ te = tp; nrm = normalize(An); }
+      }
+    }
+    if (exitSolid){
+      // Carry the crossed cell explicitly: near-parallel rays can otherwise
+      // round back into the same solid cell even after adding an epsilon.
+      vec3 grid = ((o + te*d) * 0.5 + 0.5) * float(S);
+      solidCell = ivec3(floor(grid));
+      for (int a = 0; a < 3; ++a){
+        if (tbd[a] <= te) solidCell[a] = d[a] > 0.0 ? lo[a] + size : lo[a] - 1;
+        else {
+          if (d[a] < 0.0 && grid[a] == float(solidCell[a])) solidCell[a]--;
+          solidCell[a] = clamp(solidCell[a], lo[a], lo[a] + size - 1);
+        }
+      }
+      t = te;
+    } else t = te + eps;
+  }
+  return false;
+}
+
+// Gamut: map the hit position in [-1,1] directly into RGB.
+vec3 colorize(vec3 W){
+  return clamp(W, -1.0, 1.0) * 0.5 + 0.5;
+}
+
+vec3 render(vec2 v, int S){
+  vec3 o = uEye;
+  vec3 d = safeDir(normalize(v.x * uRight + v.y * uUp + 1.8 * uForward));
+
+  float t; vec3 n; ivec3 c;
+  if (!traceTower(o, d, S, t, n, c)) return vec3(0.0);
+  vec3 W = o + t * d;
+
+  float key  = 0.55 + 0.45 * max(dot(n, normalize(vec3(0.45, 0.82, 0.36))), 0.0);
+  float view = mix(1.0 - CUT_SHADE, 1.0, max(dot(n, -d), 0.0));
+  return colorize(W) * (key * view);
+}
+
+void main(){
+  int S = sideOf();
+  vec2 v = ((gl_FragCoord.xy - uOrigin) * 2.0 - iResolution.xy) / iResolution.y;
+  fragColor = vec4(render(v, S), 1.0);
+}`;
+
+/* ==========================================================================
+   THE GROUP: 48 signed permutations of Oh
+   element e in 0..47:  p = e>>3 (permutation), s = e&7 (sign bits)
+   ========================================================================== */
+const PERM = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+const PERM_NAME = ["XYZ","XZY","YXZ","YZX","ZXY","ZYX"];
+
+function applyG(v, e){
+  const P = PERM[e >> 3], s = e & 7;
+  return [ v[P[0]] * ((s & 1) ? -1 : 1),
+           v[P[1]] * ((s & 2) ? -1 : 1),
+           v[P[2]] * ((s & 4) ? -1 : 1) ];
+}
+const MATS = [];
+for (let e = 0; e < 48; e++){
+  const P = PERM[e >> 3], s = e & 7, M = [[0,0,0],[0,0,0],[0,0,0]];
+  for (let i = 0; i < 3; i++) M[i][P[i]] = (s >> i & 1) ? -1 : 1;
+  MATS.push(M);
+}
+function eOf(M){
+  for (let e = 0; e < 48; e++){
+    const A = MATS[e]; let ok = true;
+    for (let i = 0; i < 3 && ok; i++) for (let j = 0; j < 3; j++) if (A[i][j] !== M[i][j]){ ok = false; break; }
+    if (ok) return e;
+  }
+  return -1;
+}
+function mulE(e1, e2){
+  const A = MATS[e1], B = MATS[e2], C = [[0,0,0],[0,0,0],[0,0,0]];
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++){
+    let t = 0; for (let k = 0; k < 3; k++) t += A[i][k] * B[k][j]; C[i][j] = t;
+  }
+  return eOf(C);
+}
+function detE(e){
+  const M = MATS[e];
+  return M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])
+       - M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])
+       + M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
+}
+function closure(gens){
+  const set = new Set([0]);
+  let grew = true;
+  while (grew){
+    grew = false;
+    for (const a of [...set]) for (const g of gens){
+      const c = mulE(a, g);
+      if (!set.has(c)){ set.add(c); grew = true; }
+    }
+  }
+  return [...set].sort((a, b) => a - b);
+}
+const GEN = {
+  Mx:    eOf([[-1,0,0],[0,1,0],[0,0,1]]),
+  Mz:    eOf([[1,0,0],[0,1,0],[0,0,-1]]),
+  R180y: eOf([[-1,0,0],[0,1,0],[0,0,-1]]),
+  R90y:  eOf([[0,0,1],[0,1,0],[-1,0,0]]),
+  cyc:   eOf([[0,1,0],[0,0,1],[1,0,0]]),
+  negI:  eOf([[-1,0,0],[0,-1,0],[0,0,-1]]),
+  Sxy:   eOf([[0,1,0],[1,0,0],[0,0,1]]),
+  MxMy:  eOf([[-1,0,0],[0,-1,0],[0,0,1]])
+};
+const GROUPS = [
+  { name:"C1:free",      gens:[] },
+  { name:"Cs:mirror-X",  gens:[GEN.Mx] },
+  { name:"C2:rot180-Y",  gens:[GEN.R180y] },
+  { name:"C2v:bi-axial", gens:[GEN.Mx, GEN.Mz] },
+  { name:"C3:diag-3",    gens:[GEN.cyc] },
+  { name:"C4:pinwheel",  gens:[GEN.R90y] },
+  { name:"C4v:quad-4",   gens:[GEN.R90y, GEN.Mx] },
+  { name:"S6:diag-6",    gens:[GEN.cyc, GEN.negI] },
+  { name:"Td:tetra-24",  gens:[GEN.Sxy, GEN.cyc, GEN.MxMy] },
+  { name:"Oh:octa-48",   gens:[GEN.Mx, GEN.Sxy, GEN.cyc] }
+].map(g => {
+  g.els = closure(g.gens);
+  g.order = g.els.length;
+  g.chiral = g.els.every(e => detE(e) > 0);
+  return g;
+});
+function foldOrbit(v, els){
+  let bx = v[0], by = v[1], bz = v[2];
+  for (let i = 1; i < els.length; i++){
+    const w = applyG(v, els[i]);
+    if (w[0] < bx || (w[0] === bx && (w[1] < by || (w[1] === by && w[2] < bz)))){
+      bx = w[0]; by = w[1]; bz = w[2];
+    }
+  }
+  return [bx, by, bz];
+}
+const formatG48 = e => `${PERM_NAME[e >> 3]}${(e & 1) ? "-" : "+"}${(e & 2) ? "-" : "+"}${(e & 4) ? "-" : "+"}`;
+
+/* ---- shells: the 1/6/12/8 Burnside decomposition of the 27 sub-cells ----- */
+const SHELL_OF = new Int8Array(27);
+for (let d = 0; d < 27; d++){
+  const dx = d % 3, dy = (d / 3 | 0) % 3, dz = d / 9 | 0;
+  SHELL_OF[d] = (dx !== 1) + (dy !== 1) + (dz !== 1);
+}
+const SHELL_SIZES = [1, 6, 12, 8];
+const SHELL_CHAR  = ["O", "F", "E", "V"];   // origin / face / edge / vertex
+
+const popcount = m => { let n = 0; for (let i = 0; i < 27; i++) n += (m >>> i) & 1; return n; };
+function ruleFromShells(sub){
+  let m = 0;
+  for (let d = 0; d < 27; d++) if ((sub >> SHELL_OF[d]) & 1) m |= (1 << d);
+  return m >>> 0;
+}
+const shellLabel = sub => [0,1,2,3].map(i => (sub >> i & 1) ? SHELL_CHAR[i] : "·").join("");
+
+// push a rule through a group element: bit at digit d moves to digit g(d)
+function transformRule(mask, e){
+  let out = 0;
+  for (let d = 0; d < 27; d++){
+    if (!((mask >>> d) & 1)) continue;
+    const w = applyG([d % 3 - 1, (d / 3 | 0) % 3 - 1, (d / 9 | 0) - 1], e);
+    out |= 1 << ((w[0] + 1) + 3 * (w[1] + 1) + 9 * (w[2] + 1));
+  }
+  return out >>> 0;
+}
+function stabOrder(mask){
+  let n = 0;
+  for (let e = 0; e < 48; e++) if (transformRule(mask, e) === mask) n++;
+  return n;
+}
+
+/* ---- the Td axis: the smallest departure from Oh-invariance ---------------
+   Every shell subset above has stabiliser 48, so no depth transform can move
+   it (a transform is inert exactly when its element lies in the stabiliser).
+   To make depth modes bite, the rule must give up some symmetry -- and the
+   most symmetric way to do that is Td, the unique maximal subgroup of Oh that
+   SPLITS a shell: it breaks the 8 corners into the two inscribed tetrahedra.
+
+   So the minimal departure is "keep one corner-tetrahedron and not the other".
+   That yields 16 rules, in 16/2 = 8 chiral pairs; a pair's two members give
+   exact mirror-image towers under every depth mode, so only one per pair is
+   carried here.  The label extends the O/F/E/V scheme with T = half the
+   vertices, and k determines the row uniquely: 4,5,10,11,16,17,22,23.        */
+const TD = GROUPS.find(g => g.name.startsWith("Td"));
+function tdOrbits(){
+  const seen = new Array(27).fill(false), out = [];
+  for (let d = 0; d < 27; d++){
+    if (seen[d]) continue;
+    const o = new Set();
+    for (const e of TD.els){
+      const w = applyG([d % 3 - 1, (d / 3 | 0) % 3 - 1, (d / 9 | 0) - 1], e);
+      o.add((w[0] + 1) + 3 * (w[1] + 1) + 9 * (w[2] + 1));
+    }
+    for (const x of o) seen[x] = true;
+    out.push([...o].sort((a, b) => a - b));
+  }
+  return out;
+}
+function tdLabel(mask){
+  let hasO = false, hasF = false, hasE = false;
+  for (let d = 0; d < 27; d++){
+    if (!((mask >>> d) & 1)) continue;
+    if (SHELL_OF[d] === 0) hasO = true;
+    else if (SHELL_OF[d] === 1) hasF = true;
+    else if (SHELL_OF[d] === 2) hasE = true;
+  }
+  return (hasO ? "O" : "·") + (hasF ? "F" : "·") + (hasE ? "E" : "·") + "T";
+}
+const TD_RULES = (() => {
+  const orbs = tdOrbits(), exact = [];
+  for (let s = 0; s < (1 << orbs.length); s++){
+    let m = 0;
+    orbs.forEach((o, i) => { if ((s >> i) & 1) for (const d of o) m |= 1 << d; });
+    m = m >>> 0;
+    if (stabOrder(m) === 24) exact.push(m);
+  }
+  // one canonical representative per chiral pair; k identifies the pair
+  const byK = new Map();
+  for (const m of exact){
+    const k = popcount(m);
+    if (!byK.has(k) || m < byK.get(k)) byK.set(k, m);
+  }
+  return [...byK.entries()].sort((a, b) => b[0] - a[0]).map(([k, m]) => ({ k, base: m }));
+})();
+
+/* ==========================================================================
+   AUTOMATON LAYER
+   The rule stack represents occ(c) = AND_l R_l(d_l): a product of independent
+   per-digit tests, which is exactly the self-similar (Moran) class.  That is
+   why an implicit surface such as a gyroid is not merely hard here but
+   impossible -- at L=4 a rule stack spans 2^108 sets out of 2^531441.
+
+   Letting a small automaton carry state down the address widens the class to
+   the prefix-REGULAR sets, and buys two families:
+
+     - convex polyhedra, exactly, at any depth (integer half-space residuals)
+     - graph-directed fractals, whose dimension is log(Perron root)/log 3 and
+       so is no longer confined to the 27 values log(k)/log 3
+   ========================================================================== */
+
+const MAXPLANES = 12, MAXSTATES = 8;
+
+// ---- convex polyhedra as integer half-space intersections ------------------
+const SGN8 = (() => { const o = [];
+  for (const a of [1,-1]) for (const b of [1,-1]) for (const c of [1,-1]) o.push([a,b,c]);
+  return o; })();
+const POLYHEDRA = [
+  { name:"octahedron",       planes: SGN8.map(v => [v[0], v[1], v[2], 1]) },
+  { name:"tetrahedron",      planes: [[1,1,1,1],[-1,-1,1,1],[-1,1,-1,1],[1,-1,-1,1]] },
+  { name:"cuboctahedron",    planes: SGN8.map(v => [v[0], v[1], v[2], 2]) },
+  { name:"trunc octahedron", planes: SGN8.map(v => [2*v[0], 2*v[1], 2*v[2], 3]) },
+  { name:"rhombic dodeca",   planes: [[1,1,0,1],[1,-1,0,1],[-1,1,0,1],[-1,-1,0,1],
+                                      [0,1,1,1],[0,1,-1,1],[0,-1,1,1],[0,-1,-1,1],
+                                      [1,0,1,1],[1,0,-1,1],[-1,0,1,1],[-1,0,-1,1]] },
+  { name:"square pyramid",   planes: [[1,0,1,1],[-1,0,1,1],[0,1,1,1],[0,-1,1,1],[0,0,-1,1]] },
+  { name:"tri prism",        planes: [[1,1,0,1],[-1,1,0,1],[0,-1,0,1]] },
+  { name:"hex prism",        planes: [[2,0,0,1],[-2,0,0,1],[1,2,0,1],[1,-2,0,1],[-1,2,0,1],[-1,-2,0,1]] }
+];
+
+/* ---- graph-directed systems ------------------------------------------------
+   Each state carries its own keep-mask AND its own successor map, so the set
+   is no longer a product over levels.  Verified: the 23.7123 system below has
+   11,640 voxels at L=3 while the smallest product set containing it has
+   14,580 -- no rule stack, twisted or otherwise, can express it.
+   Voxel growth is a transfer-matrix power, and the listed dimensions are
+   log(lambda)/log 3 for irrational Perron roots lambda.                       */
+function shellSystem(keepA, nextA, keepB, nextB){
+  const mk = (keep, nxt) => {
+    let m = 0; const succ = new Array(27);
+    for (let d = 0; d < 27; d++){
+      const sh = SHELL_OF[d];
+      if ((keep >> sh) & 1) m |= 1 << d;
+      succ[d] = nxt[sh] === "A" ? 0 : 1;
+    }
+    return { keep: m >>> 0, succ };
+  };
+  return [mk(keepA, nextA), mk(keepB, nextB)];
+}
+const GRAPH_SYSTEMS = [
+  { lam:26.9642, dim:2.99879, keepA:14, nextA:"ABBB", keepB:15, nextB:"ABBB" },
+  { lam:23.7123, dim:2.88181, keepA:12, nextA:"AABB", keepB:15, nextB:"ABAA" },
+  { lam:21.1706, dim:2.77861, keepA:11, nextA:"BBAB", keepB:15, nextB:"BBAA" },
+  { lam:18.4659, dim:2.65419, keepA:3,  nextA:"ABAA", keepB:15, nextB:"ABAB" },
+  { lam:14.6467, dim:2.44328, keepA:10, nextA:"ABAB", keepB:11, nextB:"BBAA" },
+  { lam: 2.4495, dim:0.81546, keepA:1,  nextA:"BAAA", keepB:2,  nextB:"AAAA" }
+].map(g => { g.states = shellSystem(g.keepA, g.nextA, g.keepB, g.nextB);
+             g.label = shellLabel(g.keepA) + "/" + shellLabel(g.keepB); return g; });
+
+// pack a graph system for the shader: 27 successors, 4 bits each, 8 per word
+function packGraph(states){
+  const keep = new Uint32Array(MAXSTATES), next = new Uint32Array(MAXSTATES * 4);
+  for (let i = 0; i < states.length; i++){
+    keep[i] = states[i].keep >>> 0;
+    for (let d = 0; d < 27; d++)
+      next[i * 4 + (d / 8 | 0)] |= (states[i].succ[d] & 15) << ((d % 8) * 4);
+  }
+  return { keep, next, count: states.length };
+}
+function packPlanes(planes){
+  const out = new Int32Array(MAXPLANES * 4);
+  for (let i = 0; i < planes.length && i < MAXPLANES; i++)
+    for (let j = 0; j < 4; j++) out[i*4+j] = planes[i][j];
+  return out;
+}
+
+const BRICK_WORDS = Math.ceil(729 / 32); // 23 uints = 92 bytes
+const BRICK_NEXT_WORDS = Math.ceil(729 / 8); // 4-bit graph successors
+const RULE_BRICK_CACHE = new Map();
+const GRAPH_BRICK_CACHE = new WeakMap();
+
+// Convert two base-27 digits to a spatial index in the flattened 9^3 brick.
+function brickIndex(parent, child){
+  const x = 3*(parent % 3) + child % 3;
+  const y = 3*((parent / 3 | 0) % 3) + (child / 3 | 0) % 3;
+  const z = 3*(parent / 9 | 0) + (child / 9 | 0);
+  return x + 9*y + 81*z;
+}
+
+function compileRuleBrick(first, second){
+  const key = `${first >>> 0},${second >>> 0}`;
+  if (RULE_BRICK_CACHE.has(key)) return RULE_BRICK_CACHE.get(key);
+  const bits = new Uint32Array(BRICK_WORDS);
+  for (let d0 = 0; d0 < 27; d0++){
+    if (!((first >>> d0) & 1)) continue;
+    for (let d1 = 0; d1 < 27; d1++){
+      if (!((second >>> d1) & 1)) continue;
+      const b = brickIndex(d0, d1);
+      bits[b >>> 5] |= 1 << (b & 31);
+    }
+  }
+  // Bound CPU cache growth when exploring new seeds or importing new stacks.
+  if (RULE_BRICK_CACHE.size >= 128)
+    RULE_BRICK_CACHE.delete(RULE_BRICK_CACHE.keys().next().value);
+  RULE_BRICK_CACHE.set(key, bits);
+  return bits;
+}
+
+function compileRuleBricks(rules, L){
+  const height = Math.max(1, Math.floor(L / 2));
+  const bits = new Uint32Array(BRICK_WORDS * height);
+  for (let pair = 0; pair < Math.floor(L / 2); pair++)
+    bits.set(compileRuleBrick(rules[2*pair], rules[2*pair + 1]), pair * BRICK_WORDS);
+  return { bits, next: null, height };
+}
+
+function compileGraphBricks(states){
+  if (GRAPH_BRICK_CACHE.has(states)) return GRAPH_BRICK_CACHE.get(states);
+  const bits = new Uint32Array(BRICK_WORDS * states.length);
+  const next = new Uint32Array(BRICK_NEXT_WORDS * states.length);
+  for (let gs = 0; gs < states.length; gs++){
+    const first = states[gs];
+    for (let d0 = 0; d0 < 27; d0++){
+      if (!((first.keep >>> d0) & 1)) continue;
+      const second = states[first.succ[d0]];
+      for (let d1 = 0; d1 < 27; d1++){
+        if (!((second.keep >>> d1) & 1)) continue;
+        const b = brickIndex(d0, d1);
+        bits[gs * BRICK_WORDS + (b >>> 5)] |= 1 << (b & 31);
+        next[gs * BRICK_NEXT_WORDS + (b >>> 3)] |= second.succ[d1] << ((b & 7) * 4);
+      }
+    }
+  }
+  const brick = { bits, next, height: states.length };
+  GRAPH_BRICK_CACHE.set(states, brick);
+  return brick;
+}
+
+function solidTails(rules, L, graph){
+  const tails = new Uint32Array(9);
+  tails[L] = graph ? (1 << graph.length) - 1 : 1;
+  for (let l = L - 1; l >= 0; l--){
+    if (!graph){ tails[l] = rules[l] === 0x7ffffff ? tails[l + 1] : 0; continue; }
+    for (let gs = 0; gs < graph.length; gs++){
+      const state = graph[gs];
+      if (state.keep !== 0x7ffffff) continue;
+      if (state.succ.every(next => (tails[l + 1] >>> next) & 1)) tails[l] |= 1 << gs;
+    }
+  }
+  return tails;
+}
+
+// Perspective orbit camera with the example's target-advance dolly. Camera
+// math runs once per frame; the ray shader receives a shared orthonormal basis.
+class PushThroughCamera {
+  constructor(){ this.threshold = 0.5; this.maxRadius = 50; this.reset(); }
+  reset(){
+    this.target = [0, 0, 0];
+    this.radius = 2.85 * Math.sqrt(1 + 0.7*0.7);
+    this.azimuth = 0; this.elevation = Math.atan(0.7);
+    this.pendingLog = 0;
+  }
+  basis(){
+    const sa = Math.sin(this.azimuth), ca = Math.cos(this.azimuth);
+    const se = Math.sin(this.elevation), ce = Math.cos(this.elevation);
+    const forward = [-ce*sa, -se, -ce*ca];
+    const right = [ca, 0, -sa], up = [-se*sa, ce, -se*ca];
+    const eye = this.target.map((v, i) => v - this.radius*forward[i]);
+    return { eye, forward, right, up };
+  }
+  orbit(dx, dy, height){
+    const speed = 2*Math.PI / Math.max(height, 1);
+    this.azimuth -= dx * speed;
+    this.elevation = Math.max(-Math.PI/2 + 0.01,
+      Math.min(Math.PI/2 - 0.01, this.elevation + dy * speed));
+  }
+  pan(dx, dy, height){
+    const { right, up } = this.basis();
+    const scale = 2*this.radius / (1.8*Math.max(height, 1));
+    this.target = this.target.map((v, i) => v + scale*(-dx*right[i] + dy*up[i]));
+  }
+  dolly(logScale){
+    if (Number.isFinite(logScale))
+      this.pendingLog = Math.max(-8, Math.min(8, this.pendingLog + logScale));
+  }
+  dollyNow(logScale){
+    const forward = this.basis().forward;
+    let nextRadius = Math.min(this.maxRadius, this.radius * Math.exp(logScale));
+    if (nextRadius < this.threshold){
+      const excess = this.threshold - nextRadius;
+      this.target = this.target.map((v, i) => v + forward[i]*excess);
+      nextRadius = this.threshold;
+    }
+    this.radius = nextRadius;
+  }
+  update(dt){
+    if (this.pendingLog === 0) return;
+    let step = this.pendingLog * (1 - Math.exp(-8*dt));
+    if (Math.abs(this.pendingLog - step) < 1e-5) step = this.pendingLog;
+    this.pendingLog -= step;
+    this.dollyNow(step);
+  }
+}
+
+/* CPU mirror of the GLSL classifier -- used for voxel counts, OBJ export and
+   the headless harness. Must stay byte-for-byte equivalent in behaviour. */
+function classifyCPU(c, S, cfg, out){
+  if (out) out.rejPlane = -1;
+  const planes = cfg.planes || [], graph = cfg.graph, rules = cfg.rules, L = cfg.levels;
+  let size = S;
+  const sres = new Int32Array(MAXPLANES);
+  for (let p = 0; p < planes.length; p++) sres[p] = planes[p][3];
+  let gs = 0;
+  for (let l = 0; l < L; l++){
+    size = (size / 3) | 0;
+    const qx = ((c[0]/size)|0) % 3, qy = ((c[1]/size)|0) % 3, qz = ((c[2]/size)|0) % 3;
+    const d = qx + 3*qy + 9*qz, ex = qx-1, ey = qy-1, ez = qz-1;
+    if (graph){
+      if (!((graph[gs].keep >>> d) & 1)) return size;
+      gs = graph[gs].succ[d];
+    } else if (rules){
+      if (!((rules[l] >>> d) & 1)) return size;
+    }
+    for (let p = 0; p < planes.length; p++){
+      const A = planes[p], U = Math.abs(A[0]) + Math.abs(A[1]) + Math.abs(A[2]);
+      let v = 3*sres[p] - 2*(A[0]*ex + A[1]*ey + A[2]*ez);
+      if (v >  U+1) v =  U+1;
+      if (v < -(U+1)) v = -(U+1);
+      sres[p] = v;
+      if (v < -U){ if (out) out.rejPlane = p; return size; }
+    }
+  }
+  for (let p = 0; p < planes.length; p++)
+    if (sres[p] < 0){ if (out) out.rejPlane = p; return 1; }
+  return 0;
+}
+function countVoxels(S, cfg, cap){
+  let n = 0;
+  for (let z = 0; z < S; z++) for (let y = 0; y < S; y++) for (let x = 0; x < S; x++){
+    if (classifyCPU([x,y,z], S, cfg) === 0){ n++; if (cap && n > cap) return n; }
+  }
+  return n;
+}
+
+// Exact graph counts: each accepted digit contributes its successor's tail.
+// Cost is O(levels * states * 27), independent of the ambient voxel grid.
+function countGraphVoxels(states, L){
+  let counts = states.map(() => 1); // depth zero is one occupied cell
+  for (let l = 0; l < L; l++){
+    counts = states.map(st => {
+      let n = 0;
+      for (let d = 0; d < 27; d++)
+        if ((st.keep >>> d) & 1) n += counts[st.succ[d]];
+      return n;
+    });
+  }
+  return counts[0];
+}
+
+// At fixed x/y, convex half-spaces admit a contiguous integer z interval.
+// Cell centres use coordinates (2*c + 1 - S)/S, matching classifyCPU exactly.
+// Intersect those intervals instead of classifying S^3 individual cells.
+function countPolyhedronVoxels(planes, L){
+  const S = Math.pow(3, L);
+  let n = 0;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++){
+    let lo = 0, hi = S - 1;
+    for (const [A, B, C, T] of planes){
+      const bound = T*S - A*(2*x + 1 - S) - B*(2*y + 1 - S) - C*(1 - S);
+      if (C > 0) hi = Math.min(hi, Math.floor(bound / (2*C)));
+      else if (C < 0) lo = Math.max(lo, Math.ceil(bound / (2*C)));
+      else if (bound < 0){ hi = -1; break; }
+      if (lo > hi) break;
+    }
+    if (lo <= hi) n += hi - lo + 1;
+  }
+  return n;
+}
+
+// Survives row rebuilds; keys include the geometry and depth, not the label.
+const HUD_VOXEL_COUNTS = new Map();
+function hudVoxelCount(row, L, rules){
+  if (!row.planes && !row.graph) return voxelCount(rules, L);
+  if (row.planes && L > 4) return NaN;
+  const key = JSON.stringify([L, row.planes || null, row.graph || null]);
+  if (!HUD_VOXEL_COUNTS.has(key))
+    HUD_VOXEL_COUNTS.set(key, row.graph
+      ? countGraphVoxels(row.graph, L)
+      : countPolyhedronVoxels(row.planes, L));
+  return HUD_VOXEL_COUNTS.get(key);
+}
+
+/* ---- fields, evaluated on the 27 folded sub-cell centres ------------------
+   Signed and anisotropic on purpose: a field invariant under all sign flips
+   would silently re-impose mirrors on the "C1:free" row.                    */
+const FIELD_NAMES = ["hash","radial","diamond","conic","cubic","product","trefoil"];
+function conicParams(seed){
+  let h = seed >>> 0;
+  const nxt = () => {
+    h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d) >>> 0;
+    h = Math.imul(h ^ (h >>> 12), 0x297a2d39) >>> 0;
+    return h;
+  };
+  const r = () => (nxt() % 7) - 3;
+  const p = { a:r(), b:r(), c:r(), d:r(), e:r() };
+  if (p.d === 0 && p.e === 0) p.d = 1;
+  if (p.a === 0 && p.b === 0 && p.c === 0) p.b = 1;
+  return p;
+}
+function fieldAt(a, b, c, mode, seed, p){
+  if (mode === 0){
+    const ux = a + 1, uy = b + 1, uz = c + 1;
+    let h = ((ux * 73856093) ^ (uy * 19349663) ^ (uz * 83492791) ^ Math.imul(seed, 0x9e3779b9)) >>> 0;
+    h ^= h >>> 13; h = Math.imul(h, 0x5bd1e995) >>> 0; h ^= h >>> 15;
+    return (h >>> 8) / 16777216 - 0.5;
+  }
+  if (mode === 1) return -(1.00*a*a + 1.37*b*b + 0.71*c*c) + 0.55*a - 0.31*b + 0.83*c;
+  if (mode === 2) return -(Math.abs(a) + 1.31*Math.abs(b) + 0.73*Math.abs(c)) + 0.47*a + 0.91*b - 0.29*c;
+  if (mode === 3) return (p.a*a*a + p.b*a*b + p.c*b*b + p.d*a + p.e*b) / 3 + 0.37*c;
+  if (mode === 4) return (a*a*a + b*b*b + c*c*c) * 0.5 + 0.21*a - 0.13*b;
+  if (mode === 5) return a*b + b*c + c*a + 0.29*a - 0.17*c;
+  return (a*a*a - 3*a*b*b) + 0.31*c + 0.11*b;
+}
+
+/* A rule folded under G is G-invariant only if EVERY step downstream of the
+   fold is a function of the folded point.  Two traps, both hit in testing:
+
+   1. a tie-break jitter keyed on the raw digit d gives orbit-mates different
+      values, so a quantile cut can slice an orbit in half.  The jitter is
+      therefore keyed on the folded coordinate, making it orbit-constant.
+   2. once values are orbit-constant, orbit-mates tie exactly, so a cut at a
+      fixed rank can still land mid-orbit.  The threshold is instead snapped
+      to the tie boundary nearest the requested count -- the kept set is then
+      a union of level sets, hence a union of orbits, hence G-invariant.
+
+   The price is that density is a target rather than an exact count: a
+   G-invariant rule simply cannot have arbitrary popcount.  The HUD reports
+   the k that actually resulted.                                             */
+function ruleForGroup(gi, fieldMode, seed, density, g48, pars){
+  const els = GROUPS[gi].els, vals = new Float64Array(27);
+  for (let d = 0; d < 27; d++){
+    const v = [d % 3 - 1, (d / 3 | 0) % 3 - 1, (d / 9 | 0) - 1];
+    const f = foldOrbit(applyG(v, g48), els);
+    let t = ((f[0] + 1) * 9 + (f[1] + 1) * 3 + (f[2] + 1) + 1) ^ seed;
+    t = Math.imul(t >>> 0, 0x9e3779b9) >>> 0; t = (t ^ (t >>> 16)) >>> 0;
+    vals[d] = fieldAt(f[0], f[1], f[2], fieldMode, seed, pars) + 1e-7 * (t / 4294967296);
+  }
+  const want = Math.max(1, Math.min(27, Math.round(density * 27)));
+  const order = Array.from({ length: 27 }, (_, i) => i).sort((a, b) => vals[b] - vals[a]);
+  let take = 27, err = Infinity, i = 0;
+  while (i < 27){
+    let j = i;
+    while (j < 27 && vals[order[j]] === vals[order[i]]) j++;
+    if (Math.abs(j - want) < err){ err = Math.abs(j - want); take = j; }
+    i = j;
+  }
+  let m = 0;
+  for (let n = 0; n < take; n++) m |= 1 << order[n];
+  return m >>> 0;
+}
+function ruleRandom(seed, row, want){
+  let h = ((seed ^ Math.imul(row + 1, 0x9e3779b9)) >>> 0) || 1;
+  const nxt = () => { h ^= h << 13; h >>>= 0; h ^= h >>> 17; h ^= h << 5; h >>>= 0; return h; };
+  const idx = Array.from({ length: 27 }, (_, i) => i);
+  for (let i = 26; i > 0; i--){ const j = nxt() % (i + 1); const t = idx[i]; idx[i] = idx[j]; idx[j] = t; }
+  let m = 0;
+  for (let i = 0; i < Math.max(1, Math.min(27, want)); i++) m |= 1 << idx[i];
+  return m >>> 0;
+}
+
+/* ---- how the rule varies with depth --------------------------------------
+   'uniform' is the pure self-similar IFS.  The others give each level its own
+   frame, which is the wreath-product picture: an element of Oh wr Oh wr ...
+   rather than a single global Oh.  Voxel count is k^L either way, because
+   every transform is a bijection on the 27 digits -- only the shape moves.  */
+const DEPTH_NAMES = ["uniform", "twist g48", "alternate", "cascade"];
+function rulesFor(base, depthMode, L, g48, seed){
+  const out = new Uint32Array(8);
+  let cur = base >>> 0;
+  for (let l = 0; l < L; l++){
+    if (depthMode === 0) out[l] = base >>> 0;
+    else if (depthMode === 1){ out[l] = cur; cur = transformRule(cur, g48); }
+    else if (depthMode === 2) out[l] = (l & 1) ? transformRule(base, GEN.negI) : base >>> 0;
+    else {
+      // every intermediate is forced back to unsigned: '^' yields a SIGNED
+      // int32, and a negative h would index off the end of the group table
+      let h = Math.imul((seed ^ Math.imul(l + 1, 0x9e3779b9)) >>> 0, 0x85ebca6b) >>> 0;
+      h = (h ^ (h >>> 13)) >>> 0;
+      out[l] = transformRule(base, h % 48);
+    }
+  }
+  return out;
+}
+
+/* ---- voxel enumeration (export only) -------------------------------------
+   Walks only the kept subcubes, so the cost is the voxel count k^L, never
+   the ambient 27^L.                                                         */
+function enumerateVoxels(rules, L, cap){
+  const S = Math.pow(3, L), out = [];
+  let overflow = false;
+  (function rec(l, ox, oy, oz, size){
+    if (overflow) return;
+    const m = rules[l];
+    for (let d = 0; d < 27; d++){
+      if (!((m >>> d) & 1)) continue;
+      const nx = ox + (d % 3) * size, ny = oy + ((d / 3 | 0) % 3) * size, nz = oz + (d / 9 | 0) * size;
+      if (l === L - 1){
+        if (out.length >= cap){ overflow = true; return; }
+        out.push(nx, ny, nz);
+      } else rec(l + 1, nx, ny, nz, size / 3);
+      if (overflow) return;
+    }
+  })(0, 0, 0, 0, S / 3);
+  return { xyz: out, S, overflow };
+}
+
+const OBJ_FACES = [
+  { d:[ 1,0,0], n:1, v:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
+  { d:[-1,0,0], n:2, v:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
+  { d:[0, 1,0], n:3, v:[[0,1,0],[0,1,1],[1,1,1],[1,1,0]] },
+  { d:[0,-1,0], n:4, v:[[0,0,1],[0,0,0],[1,0,0],[1,0,1]] },
+  { d:[0,0, 1], n:5, v:[[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
+  { d:[0,0,-1], n:6, v:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]] }
+];
+function encodeOBJ(rules, L, headerLines, cap){
+  const E = enumerateVoxels(rules, L, cap);
+  if (E.overflow) return null;
+  const S = E.S, xyz = E.xyz, occ = new Set();
+  for (let i = 0; i < xyz.length; i += 3) occ.add(xyz[i] + S * (xyz[i+1] + S * xyz[i+2]));
+
+  const lines = headerLines.concat([
+    "# unit cube spans [-1,1]; one quad per exposed voxel face", "",
+    "vn  1.0000  0.0000  0.0000", "vn -1.0000  0.0000  0.0000",
+    "vn  0.0000  1.0000  0.0000", "vn  0.0000 -1.0000  0.0000",
+    "vn  0.0000  0.0000  1.0000", "vn  0.0000  0.0000 -1.0000", ""
+  ]);
+  const k = 2 / S;
+  let vi = 1, quads = 0;
+  for (let i = 0; i < xyz.length; i += 3){
+    const x = xyz[i], y = xyz[i+1], z = xyz[i+2];
+    for (const f of OBJ_FACES){
+      const nx = x + f.d[0], ny = y + f.d[1], nz = z + f.d[2];
+      if (nx >= 0 && nx < S && ny >= 0 && ny < S && nz >= 0 && nz < S &&
+          occ.has(nx + S * (ny + S * nz))) continue;
+      for (const vt of f.v)
+        lines.push(`v ${((x + vt[0]) * k - 1).toFixed(5)} ${((y + vt[1]) * k - 1).toFixed(5)} ${((z + vt[2]) * k - 1).toFixed(5)}`);
+      lines.push(`f ${vi}//${f.n} ${vi+1}//${f.n} ${vi+2}//${f.n} ${vi+3}//${f.n}`);
+      vi += 4; quads++;
+    }
+  }
+  return { text: lines.join("\n"), quads, voxels: xyz.length / 3 };
+}
+
+/* ---- permalink: the rule stack is only 27 bits per level ----------------- */
+function encodeStack(rules, L){
+  const parts = [];
+  for (let l = 0; l < L; l++) parts.push(rules[l].toString(36));
+  return L + "." + parts.join(".");
+}
+function decodeStack(str){
+  if (!str) return null;
+  const parts = String(str).trim().split(".");
+  const L = parseInt(parts[0], 10);
+  if (!(L >= 1 && L <= 8) || parts.length !== L + 1) return null;
+  const rules = new Uint32Array(8);
+  for (let l = 0; l < L; l++){
+    const v = parseInt(parts[l + 1], 36);
+    if (!Number.isFinite(v) || v < 0 || v > 0x7ffffff) return null;
+    rules[l] = v >>> 0;
+  }
+  return { rules, L };
+}
+function stackFromLocation(){
+  try {
+    const m = /[?&]t=([^&]+)/.exec((typeof location !== "undefined" && location.search) || "");
+    return m ? decodeURIComponent(m[1]) : null;
+  } catch (_){ return null; }
+}
+function permalinkFor(code){
+  try { const u = new URL(location.href); u.search = "?t=" + code; u.hash = ""; return u.href; }
+  catch (_){ return "?t=" + code; }
+}
+function copyToClipboard(text, onDone, onFail){
+  console.log(text);
+  const fallback = () => {
+    let done = false;
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      done = document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch (_){ done = false; }
+    done ? onDone() : onFail();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText)
+    navigator.clipboard.writeText(text).then(onDone, fallback);
+  else fallback();
+}
+function download(blob, name){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+/* Voxel count is the PRODUCT of the per-level popcounts.  It collapses to k^L
+   only when every level keeps the same number of sub-cells, which is true for
+   the depth modes here but not for a hand-written or imported stack.         */
+function voxelCount(rules, L){
+  let v = 1;
+  for (let l = 0; l < L; l++) v *= popcount(rules[l]);
+  return v;
+}
+
+/* ---- numbers for the HUD -------------------------------------------------- */
+function bigNum(x){
+  if (!Number.isFinite(x)) return "inf";
+  if (x < 1e7) return Math.round(x).toLocaleString("en-US");
+  return x.toExponential(3);
+}
+const dimOf = k => (k > 0 ? Math.log(k) / Math.log(3) : 0);
+
+/* ================================= HOST =================================== */
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", { antialias:false, alpha:false, depth:false,
+                                         preserveDrawingBuffer:true });
+
+function compile(type, src){
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(sh));
+    console.error(src.split("\n").map((l, i) => (i + 1) + "| " + l).join("\n"));
+    return null;
+  }
+  return sh;
+}
+function showToast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.opacity = "1";
+  clearTimeout(t._timer); t._timer = setTimeout(() => { t.style.opacity = "0"; }, 2100);
+}
+
+function main(){
+  const vs = compile(gl.VERTEX_SHADER, VERT), fs = compile(gl.FRAGMENT_SHADER, FRAG);
+  if (!vs || !fs) return;
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(prog)); return; }
+  gl.useProgram(prog);
+  gl.bindVertexArray(gl.createVertexArray());
+
+  const uRes     = gl.getUniformLocation(prog, "iResolution");
+  const uOrigin  = gl.getUniformLocation(prog, "uOrigin");
+  const uEye     = gl.getUniformLocation(prog, "uEye");
+  const uForward = gl.getUniformLocation(prog, "uForward");
+  const uRight   = gl.getUniformLocation(prog, "uRight");
+  const uUp      = gl.getUniformLocation(prog, "uUp");
+  const uRules   = gl.getUniformLocation(prog, "uRules[0]");
+  const uLevels  = gl.getUniformLocation(prog, "uLevels");
+  const uSteps   = gl.getUniformLocation(prog, "uSteps");
+  const uPlanes      = gl.getUniformLocation(prog, "uPlanes[0]");
+  const uPlaneCount  = gl.getUniformLocation(prog, "uPlaneCount");
+  const uGraphKeep   = gl.getUniformLocation(prog, "uGraphKeep[0]");
+  const uGraphNext   = gl.getUniformLocation(prog, "uGraphNext[0]");
+  const uGraphStates = gl.getUniformLocation(prog, "uGraphStates");
+  const uBrickBits   = gl.getUniformLocation(prog, "uBrickBits");
+  const uBrickNext   = gl.getUniformLocation(prog, "uBrickNext");
+  const uSolidTail   = gl.getUniformLocation(prog, "uSolidTail[0]");
+  gl.uniform1i(uBrickBits, 0);
+  gl.uniform1i(uBrickNext, 1);
+
+  function wordTexture(width, height, words){
+    const texture = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32UI, width, height, 0,
+                  gl.RED_INTEGER, gl.UNSIGNED_INT, words);
+    return texture;
+  }
+  const EMPTY_WORD_TEXTURE = wordTexture(1, 1, new Uint32Array(1));
+  const EMPTY_BRICKS = { bits: EMPTY_WORD_TEXTURE, next: EMPTY_WORD_TEXTURE };
+  function uploadBricks(compiled){
+    return {
+      bits: wordTexture(BRICK_WORDS, compiled.height, compiled.bits),
+      next: compiled.next
+        ? wordTexture(BRICK_NEXT_WORDS, compiled.height, compiled.next)
+        : EMPTY_WORD_TEXTURE
+    };
+  }
+  function deleteBricks(bricks){
+    if (!bricks || bricks === EMPTY_BRICKS) return;
+    gl.deleteTexture(bricks.bits);
+    if (bricks.next !== EMPTY_WORD_TEXTURE) gl.deleteTexture(bricks.next);
+  }
+
+  const hud    = document.getElementById("hud");
+  const labels = document.getElementById("labels");
+  const selBox = document.getElementById("sel");
+  const menu   = document.getElementById("menu");
+
+  const AXIS_NAMES = ["shell subsets", "Td tetrahedra", "convex polyhedra",
+                      "graph-directed", "symmetry groups", "seed scan"];
+  const ZERO_PLANES = new Int32Array(MAXPLANES * 4);
+  const ZERO_KEEP   = new Uint32Array(MAXSTATES);
+  const ZERO_NEXT   = new Uint32Array(MAXSTATES * 4);
+  const DENSITIES  = [0.12, 0.22, 0.33, 0.44, 0.55, 0.74];
+  // Derived from STEP_CAP so the control can never promise more than the
+  // shader loop can deliver: the top option IS the hard cap.
+  const QUALITY    = [STEP_CAP / 6, STEP_CAP / 2, STEP_CAP];
+  const SEED_ROWS  = 12;
+  const GUTTER_L = 104, GUTTER_T = 26, PAD = 10, GAP = 3;
+  const OBJ_CAP = 40000;
+
+  let axis = 0, depthMode = 0, densityIdx = 3, fieldMode = 0;
+  let g48 = 0, seed = 42, LMIN = 1, LMAX = 6, qualityIdx = 1;
+  let running = true;
+  let dpr = 1, cell = 60, fps = 0, buildMs = 0;
+  let sel = null, zoom = null, imported = null;
+  let rows = [], ROWS = 0, COLS = 6;
+
+  const camera = new PushThroughCamera();
+  const pointers = new Map();
+  let gestureMoved = false;
+
+  /* ---- rows ------------------------------------------------------------- */
+  // the 15 non-empty Oh-invariant shell subsets, heaviest first
+  const SHELL_ROWS = Array.from({ length: 16 }, (_, s) => s)
+    .filter(s => s !== 0)
+    .map(s => ({ sub:s, k:[0,1,2,3].reduce((a, i) => a + ((s >> i & 1) ? SHELL_SIZES[i] : 0), 0) }))
+    .sort((a, b) => b.k - a.k || a.sub - b.sub);
+
+  function buildRows(){
+    const t0 = performance.now();
+    const pars = conicParams(seed);
+    const want = Math.max(1, Math.round(DENSITIES[densityIdx] * 27));
+    for (const r of rows) deleteBricks(r.bricks);
+    rows = [];
+    if (axis === 0){
+      for (const r of SHELL_ROWS){
+        const base = ruleFromShells(r.sub);
+        rows.push({ label: shellLabel(r.sub), sub: r.sub, base,
+                    note: `k=${popcount(base)}` });
+      }
+    } else if (axis === 1){
+      for (const r of TD_RULES)
+        rows.push({ label: tdLabel(r.base), base: r.base, note: `k=${r.k}` });
+    } else if (axis === 2){
+      for (const poly of POLYHEDRA)
+        rows.push({ label: poly.name, base: 0, planes: poly.planes,
+                    note: `${poly.planes.length} planes` });
+    } else if (axis === 3){
+      for (const g of GRAPH_SYSTEMS)
+        rows.push({ label: g.label, base: 0, graph: g.states, graphMeta: g,
+                    note: `\u03bb=${g.lam.toFixed(3)}` });
+    } else if (axis === 4){
+      for (let gi = 0; gi < GROUPS.length; gi++){
+        const base = ruleForGroup(gi, fieldMode, seed, DENSITIES[densityIdx], g48, pars);
+        rows.push({ label: GROUPS[gi].name, base, groupIdx: gi,
+                    note: `|G|=${GROUPS[gi].order}${GROUPS[gi].chiral ? " chiral" : ""}` });
+      }
+    } else {
+      for (let i = 0; i < SEED_ROWS; i++){
+        const base = ruleRandom(seed, i, want);
+        rows.push({ label: `#${seed}.${i}`, base, note: `k=${popcount(base)}` });
+      }
+    }
+    for (const r of rows){
+      if (r.planes){
+        // a polyhedron is solid: dimension 3, and its "k" is not a popcount
+        r.k = 27; r.stab = 48; r.dim = 3; r.solid = true;
+      } else if (r.graph){
+        // growth is a transfer-matrix power, so dim = log(lambda)/log 3
+        r.k = 0; r.stab = 1; r.dim = Math.log(r.graphMeta.lam) / Math.log(3);
+      } else {
+        r.k = popcount(r.base);
+        r.stab = stabOrder(r.base);
+        r.dim = dimOf(r.k);
+      }
+      r.stacks = [];
+      const SOLID = 0x7ffffff;   // all 27 bits: rule stack passes everything
+      for (let L = LMIN; L <= LMAX; L++)
+        r.stacks.push((r.planes || r.graph)
+          ? Uint32Array.from({ length: 8 }, () => SOLID)
+          : rulesFor(r.base, depthMode, L, g48, seed));
+      r.voxelCounts = r.stacks.map((rules, c) => hudVoxelCount(r, LMIN + c, rules));
+      r.solidTails = [];
+      r.stacks.forEach((rules, c) => { r.solidTails[LMIN + c] = solidTails(rules, LMIN + c, r.graph); });
+      // Every shorter rule stack is a prefix of the deepest stack, so one
+      // texture serves all columns in this row. Graph rows index by state.
+      r.bricks = r.planes ? EMPTY_BRICKS : uploadBricks(r.graph
+        ? compileGraphBricks(r.graph)
+        : compileRuleBricks(r.stacks[r.stacks.length - 1], LMAX));
+      r.graphPacked = r.graph ? packGraph(r.graph) : null;
+      r.planesPacked = r.planes ? packPlanes(r.planes) : null;
+      // A depth transform can only move a rule that its group element does not
+      // already fix, so it is inert exactly when g48 lies in the stabiliser.
+      // Every shell subset has stabiliser 48, hence the whole shells axis is
+      // inert under all depth modes -- worth saying rather than looking broken.
+      const deep = r.stacks[r.stacks.length - 1];
+      r.inert = (r.planes || r.graph)
+        ? true                       // occupancy comes from the automaton, not the stack
+        : deep.every((v, l) => l >= LMAX || v === r.base);
+    }
+    ROWS = rows.length;
+    COLS = LMAX - LMIN + 1;
+    buildMs = performance.now() - t0;
+    if (sel && (sel.r >= ROWS || sel.c >= COLS)) sel = null;
+    if (zoom && (zoom.r >= ROWS || zoom.c >= COLS)) zoom = null;
+  }
+  const levelOf = c => LMIN + c;
+
+  /* ---- layout ----------------------------------------------------------- */
+  function layout(){
+    const W = innerWidth, H = innerHeight;
+    cell = Math.max(28, Math.floor(Math.min((W - GUTTER_L - PAD) / COLS, (H - GUTTER_T - PAD) / ROWS)));
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+    const cw = Math.round(W * dpr), ch = Math.round(H * dpr);
+    if (canvas.width !== cw || canvas.height !== ch){ canvas.width = cw; canvas.height = ch; }
+
+    if (imported){
+      labels.innerHTML =
+        `<div class="lbl col" style="left:0;top:8px;width:${W}px;text-align:center">` +
+        `<span style="color:#b8b8cc">imported rule stack</span>` +
+        `<span style="color:#4c4c5c">   L=${imported.L}   side ${Math.pow(3, imported.L)}³` +
+        `   ${bigNum(imported.voxels)} voxels</span></div>` +
+        `<div class="lbl col" style="left:0;bottom:8px;width:${W}px;text-align:center;color:#3e3e4c">` +
+        `click or esc to return to the sheet &nbsp;·&nbsp; right-click to copy or export</div>`;
+      selBox.style.display = "none";
+      canvas.style.cursor = "zoom-out";
+      return;
+    }
+    if (zoom){
+      const r = rows[zoom.r], L = levelOf(zoom.c);
+      labels.innerHTML =
+        `<div class="lbl col" style="left:0;top:8px;width:${W}px;text-align:center">` +
+        `<span style="color:#b8b8cc">${r.label}</span><span style="color:#4c4c5c"> × </span>` +
+        `<span style="color:#b8b8cc">L=${L}</span>` +
+        `<span style="color:#4c4c5c">   ${Math.pow(3, L)}³   k=${r.k}   dim ${r.dim.toFixed(4)}` +
+        `   ${bigNum(Math.pow(r.k, L))} voxels${L === 2 ? "   ← bimoblock scale" : ""}</span></div>` +
+        `<div class="lbl col" style="left:0;bottom:8px;width:${W}px;text-align:center;color:#3e3e4c">` +
+        `click or esc to return &nbsp;·&nbsp; arrows to move &nbsp;·&nbsp; right-click to export</div>`;
+      selBox.style.display = "none";
+      canvas.style.cursor = "zoom-out";
+      return;
+    }
+    canvas.style.cursor = "zoom-in";
+
+    const out = [];
+    for (let c = 0; c < COLS; c++){
+      const L = levelOf(c), S = Math.pow(3, L);
+      out.push(`<div class="lbl col" style="left:${GUTTER_L + c*cell}px;top:5px;width:${cell}px;` +
+               `text-align:center;overflow:hidden">L=${L}<br><span style="color:#4c4c5c">${S}³` +
+               `${L === 2 ? " bimo" : ""}</span></div>`);
+    }
+    for (let r = 0; r < ROWS; r++)
+      out.push(`<div class="lbl row" style="left:0;top:${GUTTER_T + r*cell + cell/2 - 11}px;` +
+               `width:${GUTTER_L - 8}px">${rows[r].label}<br>` +
+               `<span style="color:#4c4c5c">${rows[r].note}</span><br>` +
+               `<span style="color:#3e3e4c">dim ${rows[r].dim.toFixed(3)}</span></div>`);
+    labels.innerHTML = out.join("");
+  }
+
+  const cellRect = (r, c) => ({ x: GUTTER_L + c*cell, y: GUTTER_T + r*cell, w: cell - GAP, h: cell - GAP });
+  function zoomRect(){
+    const W = innerWidth, H = innerHeight;
+    const side = Math.max(64, Math.min(W - 2*PAD, H - GUTTER_T - 3*PAD));
+    return { x: (W - side) / 2, y: GUTTER_T + (H - GUTTER_T - side) / 2, w: side, h: side };
+  }
+  function pick(mx, my){
+    const c = Math.floor((mx - GUTTER_L) / cell), r = Math.floor((my - GUTTER_T) / cell);
+    return (r >= 0 && r < ROWS && c >= 0 && c < COLS) ? { r, c } : null;
+  }
+
+  /* ---- shared push-through camera controls ------------------------------ */
+  const restoreCursor = () => { canvas.style.cursor = (zoom || imported) ? "zoom-out" : "zoom-in"; };
+  const viewHeight = () => (zoom || imported) ? zoomRect().h : innerHeight;
+  function pauseOrbit(){
+    if (running){ running = false; paintHud(); }
+  }
+  function touchPair(){
+    const touches = [...pointers.values()].filter(p => p.touch);
+    if (touches.length !== 2) return null;
+    const [a, b] = touches;
+    return { x:(a.x + b.x)/2, y:(a.y + b.y)/2, distance:Math.hypot(a.x - b.x, a.y - b.y) };
+  }
+  canvas.addEventListener("wheel", ev => {
+    ev.preventDefault(); hideMenu(); pauseOrbit();
+    const unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? innerHeight : 1;
+    camera.dolly(ev.deltaY * unit * 0.001);
+  }, { passive:false });
+  canvas.addEventListener("pointerdown", ev => {
+    if (ev.pointerType !== "touch" && ev.button > 2) return;
+    if (ev.button === 1) ev.preventDefault();
+    if (pointers.size === 0) gestureMoved = false;
+    camera.pendingLog = 0;
+    pointers.set(ev.pointerId, {
+      x:ev.clientX, y:ev.clientY, startX:ev.clientX, startY:ev.clientY,
+      touch:ev.pointerType === "touch",
+      mode:ev.button === 1 ? "dolly" : (ev.button === 2 || ev.shiftKey) ? "pan" : "orbit"
+    });
+    if (pointers.size > 1) gestureMoved = true;
+    pauseOrbit();
+    canvas.setPointerCapture(ev.pointerId);
+    canvas.style.cursor = "grabbing";
+    paintHud();
+  });
+  canvas.addEventListener("pointermove", ev => {
+    const p = pointers.get(ev.pointerId);
+    if (!p) return;
+    const before = touchPair(), dx = ev.clientX - p.x, dy = ev.clientY - p.y;
+    p.x = ev.clientX; p.y = ev.clientY;
+    if (Math.hypot(p.x - p.startX, p.y - p.startY) > 4) gestureMoved = true;
+    if (!gestureMoved) return;
+    hideMenu();
+    const after = touchPair();
+    if (before && after){
+      if (before.distance > 0 && after.distance > 0)
+        camera.dolly(Math.log(before.distance / after.distance));
+      camera.pan(after.x - before.x, after.y - before.y, viewHeight());
+    } else if (pointers.size === 1){
+      if (p.mode === "dolly") camera.dolly(-dy * 0.005);
+      else if (p.mode === "pan") camera.pan(dx, dy, viewHeight());
+      else camera.orbit(dx, dy, viewHeight());
+    }
+  });
+  function endPointer(ev){
+    if (!pointers.has(ev.pointerId)) return;
+    if (ev.type === "pointercancel" || ev.type === "lostpointercapture") gestureMoved = true;
+    pointers.delete(ev.pointerId);
+    if (canvas.hasPointerCapture?.(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
+    if (pointers.size === 0) restoreCursor();
+    paintHud();
+  }
+  canvas.addEventListener("pointerup", endPointer);
+  canvas.addEventListener("pointercancel", endPointer);
+  canvas.addEventListener("lostpointercapture", endPointer);
+  canvas.addEventListener("auxclick", ev => { if (ev.button === 1) ev.preventDefault(); });
+
+  canvas.addEventListener("click", ev => {
+    if (gestureMoved || (ev.button !== undefined && ev.button !== 0)) return;
+    hideMenu();
+    if (imported){ deleteBricks(imported.bricks); imported = null; layout(); paintHud(); return; }
+    if (zoom){ zoom = null; layout(); paintHud(); return; }
+    const p = pick(ev.clientX, ev.clientY);
+    if (p){ zoom = { r:p.r, c:p.c }; sel = { r:p.r, c:p.c }; layout(); paintHud(); }
+  });
+
+  addEventListener("mousemove", ev => {
+    if (pointers.size || zoom || imported || menu.style.display === "block") return;
+    const p = pick(ev.clientX, ev.clientY);
+    if (p && (!sel || sel.r !== p.r || sel.c !== p.c)){
+      const q = cellRect(p.r, p.c);
+      selBox.style.cssText = `display:block;left:${q.x}px;top:${q.y}px;width:${q.w}px;height:${q.h}px`;
+      sel = { r:p.r, c:p.c }; paintHud();
+    } else if (!p && sel){ sel = null; selBox.style.display = "none"; paintHud(); }
+  });
+
+  /* ---- context menu ------------------------------------------------------ */
+  function hideMenu(){ menu.style.display = "none"; }
+  function copyAs(text, label){
+    copyToClipboard(text, () => showToast(`${label} copied (${text.length} chars)`),
+                          () => showToast(`${label} logged to console — clipboard blocked`));
+  }
+  function activeStack(){
+    if (imported) return { rules: imported.rules, L: imported.L, label: "imported" };
+    const t = zoom || sel;
+    if (!t) return null;
+    const r = rows[t.r], L = levelOf(t.c);
+    return { rules: r.stacks[t.c], L, label: `${r.label}_L${L}`, row: r };
+  }
+  addEventListener("contextmenu", ev => {
+    ev.preventDefault();
+    if (gestureMoved) return;
+    const A = activeStack();
+    if (!A) return;
+    const items = [
+      ["copy rule stack", () => (A.row && (A.row.planes || A.row.graph))
+          ? showToast("automaton rows have no rule-stack encoding")
+          : copyAs(encodeStack(A.rules, A.L), "rule stack")],
+      ["copy permalink",  () => (A.row && (A.row.planes || A.row.graph))
+          ? showToast("automaton rows have no rule-stack encoding")
+          : copyAs(permalinkFor(encodeStack(A.rules, A.L)), "permalink")],
+      ["export .obj",     () => exportOBJ()],
+      ["export .png",     () => exportPNG()]
+    ];
+    menu.innerHTML = `<div class="hdr">${A.label}</div>`;
+    for (const [name, fn] of items){
+      const b = document.createElement("button");
+      b.textContent = name;
+      b.onclick = () => { hideMenu(); fn(); };
+      menu.appendChild(b);
+    }
+    menu.style.display = "block";
+    menu.style.left = Math.min(ev.clientX, innerWidth - menu.offsetWidth - 8) + "px";
+    menu.style.top  = Math.min(ev.clientY, innerHeight - menu.offsetHeight - 8) + "px";
+  });
+  addEventListener("pointerdown", ev => { if (!menu.contains(ev.target)) hideMenu(); }, true);
+
+  /* ---- exports ----------------------------------------------------------- */
+  const stamp = () => new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  function exportPNG(){
+    canvas.toBlob(b => {
+      if (!b) return showToast("png encode failed");
+      download(b, `tower_${stamp()}.png`);
+      showToast(`tower_${stamp()}.png`);
+    }, "image/png");
+  }
+  function exportOBJ(){
+    const A = activeStack();
+    if (!A) return showToast("hover or isolate a cell first");
+    if (A.row && (A.row.planes || A.row.graph))
+      return showToast("obj/permalink encode rule stacks only \u2014 this row is an automaton");
+    const voxels = voxelCount(A.rules, A.L);
+    if (!(voxels <= OBJ_CAP))
+      return showToast(`${bigNum(voxels)} voxels exceeds the ${OBJ_CAP.toLocaleString("en-US")} cap`);
+    const res = encodeOBJ(A.rules, A.L, [
+      `# tower ${A.label}`,
+      `# levels ${A.L}   side ${Math.pow(3, A.L)}   k ${popcount(A.rules[0])}`,
+      `# stack ${encodeStack(A.rules, A.L)}`
+    ], OBJ_CAP);
+    if (!res) return showToast("voxel cap hit during enumeration");
+    download(new Blob([res.text], { type:"text/plain" }), `${A.label}_${stamp()}.obj`);
+    showToast(`${res.voxels.toLocaleString("en-US")} voxels, ${res.quads.toLocaleString("en-US")} quads`);
+  }
+  function exportJSON(){
+    const doc = {
+      tool: "tower contact sheet",
+      generated: new Date().toISOString(),
+      axis: AXIS_NAMES[axis],
+      levels: { min: LMIN, max: LMAX },
+      shared: { depth: DEPTH_NAMES[depthMode], palette: "gamut",
+                density: DENSITIES[densityIdx], field: FIELD_NAMES[fieldMode],
+                g48, g48Label: formatG48(g48), seed },
+      shells: { names: SHELL_CHAR, sizes: SHELL_SIZES },
+      rows: rows.map(r => ({
+        label: r.label, k: r.k, dimension: r.dim, baseRule: "0x" + r.base.toString(16).padStart(7, "0"),
+        stabiliserOrder: r.stab, orbitSize: 48 / r.stab,
+        levels: r.stacks.map((st, i) => {
+          const L = levelOf(i);
+          return { L, side: Math.pow(3, L), voxels: Math.pow(r.k, L),
+                   fill: Math.pow(r.k / 27, L),
+                   stack: encodeStack(st, L) };
+        })
+      }))
+    };
+    download(new Blob([JSON.stringify(doc, null, 2)], { type:"application/json" }), `tower_${stamp()}.json`);
+    showToast(`tower_${stamp()}.json — ${rows.length} rows × ${COLS} levels`);
+  }
+
+  /* ---- hud --------------------------------------------------------------- */
+  function paintHud(){
+    const R = [];
+    R.push("<span class='sec'>--- SHEET ---</span>");
+    R.push("axis".padEnd(9) + AXIS_NAMES[axis].padEnd(18) + "a");
+    R.push("grid".padEnd(9) + `${ROWS} × ${COLS}`.padEnd(18));
+    R.push("levels".padEnd(9) + `${LMIN}..${LMAX}`.padEnd(18) + "-/=");
+    const allInert = rows.length > 0 && rows.every(r => r.inert);
+    R.push("depth".padEnd(9) + DEPTH_NAMES[depthMode].padEnd(18) + "t");
+    if (allInert && depthMode !== 0)
+      R.push("<span class='sec'>  inert: g48 fixes every row</span>");
+    if (axis === 4) R.push("field".padEnd(9) + FIELD_NAMES[fieldMode].padEnd(18) + "f");
+    if (axis === 4 || axis === 5) R.push("density".padEnd(9) + DENSITIES[densityIdx].toFixed(2).padEnd(18) + "d");
+    R.push("g48".padEnd(9) + formatG48(g48).padEnd(18) + "g/h");
+    R.push("seed".padEnd(9) + ("#" + seed).padEnd(18) + "n/p");
+    R.push("build".padEnd(9) + (buildMs.toFixed(1) + " ms").padEnd(18));
+    R.push("");
+    R.push("<span class='sec'>--- VIEW ---</span>");
+    R.push("steps".padEnd(9) + String(QUALITY[qualityIdx]).padEnd(18) + "q");
+    R.push("orbit".padEnd(9) + (pointers.size ? "drag" : running ? "run" : "hold").padEnd(18) + "space");
+    R.push("<span class='sec'>left-drag: orbit · right/shift-drag: pan</span>");
+    R.push("<span class='sec'>wheel / middle-drag / pinch: move through</span>");
+    R.push("<span class='sec'>home / 0: reset camera</span>");
+    R.push("random".padEnd(9) + "".padEnd(18) + "r");
+    R.push("");
+    R.push("<span class='sec'>--- EXPORT ---</span>");
+    R.push(".png / .json".padEnd(27) + "y/j");
+    R.push(".obj  selected".padEnd(27) + "o");
+    R.push("<span class='sec'>right-click to copy stack</span>");
+
+    const t = zoom || sel;
+    if (t && rows[t.r]){
+      const r = rows[t.r], L = levelOf(t.c);
+      const amb = Math.pow(27, L);
+      // Counts are prepared once per row build; hovering/FPS updates only read.
+      const voxels = r.voxelCounts[t.c];
+      R.push("");
+      R.push("<span class='sec'>--- " + (zoom ? "ISOLATED" : "CELL") + " ---</span>");
+      R.push(r.label + "  ×  L=" + L + (L === 2 ? "  (bimoblock)" : ""));
+      R.push("side".padEnd(9) + `${Math.pow(3, L)}³`.padEnd(18));
+      if (r.planes){
+        R.push("kind".padEnd(9) + "convex polyhedron".padEnd(18));
+        R.push("planes".padEnd(9) + String(r.planes.length).padEnd(18));
+        R.push("dim".padEnd(9) + "3 (solid)".padEnd(18));
+      } else if (r.graph){
+        R.push("kind".padEnd(9) + "graph-directed".padEnd(18));
+        R.push("states".padEnd(9) + String(r.graph.length).padEnd(18));
+        R.push("lambda".padEnd(9) + r.graphMeta.lam.toFixed(4).padEnd(18));
+        R.push("dim".padEnd(9) + r.dim.toFixed(5).padEnd(18));
+      } else {
+        R.push("k".padEnd(9) + `${r.k}/27`.padEnd(18));
+        R.push("dim".padEnd(9) + r.dim.toFixed(5).padEnd(18));
+      }
+      R.push("voxels".padEnd(9) + bigNum(voxels).padEnd(18));
+      R.push("ambient".padEnd(9) + bigNum(amb).padEnd(18));
+      R.push("fill".padEnd(9) + (Number.isFinite(voxels)
+        ? (100 * voxels / amb).toFixed(3) + "%"
+        : "-").padEnd(18));
+      if (!r.planes && !r.graph){
+        R.push("stab".padEnd(9) + `${r.stab}/48`.padEnd(18));
+        R.push("orbit".padEnd(9) + `${48 / r.stab}`.padEnd(18));
+      }
+      if (r.inert && depthMode !== 0)
+        R.push("<span class='sec'>depth inert here</span>");
+      R.push("<span class='sec'>" + (zoom ? "click / esc to go back" : "click to isolate") + "</span>");
+    }
+    hud.innerHTML = R.join("\n") + "\n\n<b>" + fps + " fps</b>";
+  }
+
+  /* ---- input -------------------------------------------------------------- */
+  function rerun(){ buildRows(); layout(); paintHud(); }
+  addEventListener("keydown", ev => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const k = ev.key.toLowerCase();
+    if (menu.style.display === "block" && k !== "escape") hideMenu();
+    if (k === "escape"){
+      hideMenu();
+      if (imported){ deleteBricks(imported.bricks); imported = null; layout(); paintHud(); }
+      else if (zoom){ zoom = null; layout(); paintHud(); }
+      return;
+    }
+    if (k === "home" || k === "0"){
+      ev.preventDefault(); camera.reset(); running = false; paintHud(); return;
+    }
+    if (imported && "atfdghnpr-=".includes(k)){
+      showToast("imported stack — esc to return to the sheet");
+      return;
+    }
+    if (k.startsWith("arrow")){
+      ev.preventDefault();
+      const base = zoom || sel || { r:0, c:0 };
+      const dr = (k === "arrowdown") - (k === "arrowup");
+      const dc = (k === "arrowright") - (k === "arrowleft");
+      const r = (base.r + dr + ROWS) % ROWS, c = (base.c + dc + COLS) % COLS;
+      sel = { r, c };
+      if (zoom){ zoom = { r, c }; layout(); }
+      else {
+        const q = cellRect(r, c);
+        selBox.style.cssText = `display:block;left:${q.x}px;top:${q.y}px;width:${q.w}px;height:${q.h}px`;
+      }
+      paintHud(); return;
+    }
+    if (k === " " || ev.code === "Space"){
+      ev.preventDefault(); camera.pendingLog = 0; running = !running; paintHud(); return;
+    }
+    switch (k){
+      case "a": axis = (axis + 1) % AXIS_NAMES.length; rerun(); return;
+      case "t": depthMode = (depthMode + 1) % DEPTH_NAMES.length; rerun(); return;
+      case "f": fieldMode = (fieldMode + 1) % FIELD_NAMES.length; rerun(); return;
+      case "d": densityIdx = (densityIdx + 1) % DENSITIES.length; rerun(); return;
+      case "g": g48 = (g48 + 1) % 48; rerun(); return;
+      case "h": g48 = (g48 + 47) % 48; rerun(); return;
+      case "n": seed = (seed + 1) & 0xffff; rerun(); return;
+      case "p": seed = (seed + 0xffff) & 0xffff; rerun(); return;
+      case "-": case "_":
+        if (LMAX > Math.max(LMIN, 2)){ LMAX--; rerun(); } return;
+      case "=": case "+":
+        if (LMAX < 7){ LMAX++; rerun(); } return;
+      case "q": qualityIdx = (qualityIdx + 1) % QUALITY.length; gl.uniform1i(uSteps, QUALITY[qualityIdx]); paintHud(); return;
+      case "r":
+        depthMode = Math.floor(Math.random() * DEPTH_NAMES.length);
+        fieldMode = Math.floor(Math.random() * FIELD_NAMES.length);
+        densityIdx = Math.floor(Math.random() * DENSITIES.length);
+        seed = Math.floor(Math.random() * 0x10000);
+        rerun(); return;
+      case "y": exportPNG(); return;
+      case "o": exportOBJ(); return;
+      case "j": exportJSON(); return;
+    }
+  });
+  addEventListener("resize", () => { layout(); });
+
+  /* ---- draw --------------------------------------------------------------- */
+  // one row may carry a rule stack, a polyhedron, a graph system, or a
+  // combination; whatever is absent is uploaded as zeros so the shader skips it
+  function drawOne(rect, rules, L, row){
+    const Hpx = canvas.height;
+    const vx = Math.round(rect.x * dpr), vw = Math.round(rect.w * dpr), vh = Math.round(rect.h * dpr);
+    const vy = Hpx - Math.round((rect.y + rect.h) * dpr);
+    if (vw <= 0 || vh <= 0) return;
+    gl.viewport(vx, vy, vw, vh);
+    gl.uniform3f(uRes, vw, vh, 1);
+    gl.uniform2f(uOrigin, vx, vy);
+    gl.uniform1uiv(uRules, rules);
+    gl.uniform1i(uLevels, L);
+    gl.uniform1uiv(uSolidTail, row.solidTails[L]);
+    const bricks = (row && row.bricks) || EMPTY_BRICKS;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, bricks.bits);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, bricks.next);
+
+    if (row && row.planes){
+      gl.uniform4iv(uPlanes, row.planesPacked);
+      gl.uniform1i(uPlaneCount, Math.min(row.planes.length, MAXPLANES));
+    } else {
+      gl.uniform4iv(uPlanes, ZERO_PLANES);
+      gl.uniform1i(uPlaneCount, 0);
+    }
+    if (row && row.graph){
+      const g = row.graphPacked;
+      gl.uniform1uiv(uGraphKeep, g.keep);
+      gl.uniform1uiv(uGraphNext, g.next);
+      gl.uniform1i(uGraphStates, g.count);
+    } else {
+      gl.uniform1uiv(uGraphKeep, ZERO_KEEP);
+      gl.uniform1uiv(uGraphNext, ZERO_NEXT);
+      gl.uniform1i(uGraphStates, 0);
+    }
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  function draw(){
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.027, 0.027, 0.039, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+
+    if (imported){ drawOne(zoomRect(), imported.rules, imported.L, imported); return; }
+    if (zoom){ drawOne(zoomRect(), rows[zoom.r].stacks[zoom.c], levelOf(zoom.c), rows[zoom.r]); return; }
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++)
+        drawOne(cellRect(r, c), rows[r].stacks[c], levelOf(c), rows[r]);
+  }
+
+  gl.uniform1i(uSteps, QUALITY[qualityIdx]);
+  buildRows();
+  layout();
+
+  {
+    const q = stackFromLocation();
+    if (q){
+      const d = decodeStack(q);
+      if (d){
+        imported = { rules: d.rules, L: d.L, voxels: voxelCount(d.rules, d.L) };
+        imported.bricks = uploadBricks(compileRuleBricks(d.rules, d.L));
+        imported.solidTails = [];
+        imported.solidTails[d.L] = solidTails(d.rules, d.L, null);
+        layout();
+        showToast(`imported L=${d.L} stack — ${bigNum(imported.voxels)} voxels`);
+      } else showToast("malformed ?t= stack ignored");
+    }
+  }
+  paintHud();
+
+  let last = performance.now(), acc = 0, frames = 0;
+  function frame(now){
+    const dt = Math.min((now - last) / 1000, 0.05); last = now;
+    if (running && pointers.size === 0) camera.azimuth = (camera.azimuth + 0.4*dt) % (2*Math.PI);
+    camera.update(dt);
+    const basis = camera.basis();
+    gl.uniform3fv(uEye, basis.eye);
+    gl.uniform3fv(uForward, basis.forward);
+    gl.uniform3fv(uRight, basis.right);
+    gl.uniform3fv(uUp, basis.up);
+    draw();
+    acc += dt; frames++;
+    if (acc >= 0.5){ fps = Math.round(frames / acc); acc = 0; frames = 0; paintHud(); }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+if (gl) main();
+else { console.error("WebGL2 unavailable."); document.getElementById("hud").textContent = "needs WebGL2"; }
+</script>
+</body>
+</html>
