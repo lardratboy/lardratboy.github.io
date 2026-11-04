@@ -1,0 +1,2381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>stream viewer — the chunk virtualiser</title>
+<style>
+  html,body{ height:100%; margin:0; background:#07070a; overflow:hidden;
+    font:10px/1.4 ui-monospace, Menlo, Consolas, monospace; color:#6a6a7a; letter-spacing:.05em; }
+  canvas{ display:block; position:absolute; left:0; top:0; touch-action:none; outline:none; }
+  #hud{ position:fixed; right:10px; bottom:8px; text-align:right; white-space:pre;
+        background:rgba(0,0,0,.55); padding:8px 12px; border-radius:6px;
+        border:1px solid rgba(255,255,255,.07); pointer-events:none; }
+  #hud b{ color:#a0a0b2; font-weight:normal; }
+  #hud .sec{ color:#3e3e4c; }
+  #hud .warn{ color:#d08a5a; }
+  #hud .bench{ color:#c8c8d8; pointer-events:auto; user-select:text; -webkit-user-select:text; cursor:text; }
+  #ctl{ position:fixed; left:10px; top:8px; background:rgba(0,0,0,.55); padding:8px 12px;
+        border-radius:6px; border:1px solid rgba(255,255,255,.07); max-width:330px; }
+  #ctl label{ display:block; margin:3px 0; color:#8a8a9e; }
+  #ctl select, #ctl input{ background:#14141c; color:#b8b8cc; border:1px solid rgba(255,255,255,.14);
+        font:inherit; border-radius:3px; margin-left:6px; }
+  #ctl select#world{ max-width:230px; }
+  #ctl input[type=range]{ width:110px; vertical-align:middle; }
+  #ctl .keys{ color:#3e3e4c; margin-top:6px; white-space:pre; }
+  #ctl [hidden]{ display:none; }   /* #ctl label's display:block would show a hidden label */
+  #ctl input[type=number]{ width:38px; }
+  #ctl input.n3{ margin-left:2px; }
+  #latticeCtl{ border-left:2px solid rgba(255,255,255,.08); padding-left:8px; margin:4px 0; }
+  #latBudget{ color:#4e4e5e; white-space:pre-wrap; }
+  #latBudget .warn{ color:#d08a5a; }
+  #kitCtl{ border-left:2px solid rgba(255,255,255,.08); padding-left:8px; margin:4px 0; }
+  #ctl input#kitLibs{ width:96px; }
+  #kitInfo{ color:#4e4e5e; white-space:pre-wrap; }
+  #kitInfo .warn{ color:#d08a5a; }
+  /* The build toast (docs/lattice3d-plan.md): what is being built, and how
+     far along, while the old world keeps drawing. */
+  #toast{ position:fixed; left:50%; top:10px; transform:translateX(-50%); min-width:300px; max-width:70vw;
+          background:rgba(0,0,0,.75); color:#b8b8cc; padding:7px 12px 9px; border-radius:6px;
+          border:1px solid rgba(255,255,255,.1); pointer-events:none; text-align:center; }
+  #toast[hidden]{ display:none; }
+  #toastBar{ height:3px; margin-top:6px; background:rgba(255,255,255,.08); border-radius:2px; overflow:hidden; }
+  #toastBar > div{ height:100%; width:0; background:#7a8ad0; transition:width .2s; }
+  /* Signs of life (asked for 2026-11-03): a spinner and the seconds so
+     far. The spinner and the busy bar animate transform only, which the
+     compositor runs on its own thread, so they keep moving while the
+     main thread is held (a shape's fromField, the world's counts and
+     snapshot after a build). The busy bar used to slide by margin-left,
+     a layout property, and stopped dead whenever the page was busy,
+     which is exactly when it was shown. */
+  #toastBar.busy > div{ width:30%; animation:slide 1.2s ease-in-out infinite; }
+  @keyframes slide{ from{ transform:translateX(-100%); } to{ transform:translateX(334%); } }
+  #toastSpin{ display:inline-block; width:9px; height:9px; margin-right:7px; vertical-align:-1px; border-radius:50%;
+              border:2px solid rgba(122,138,208,.25); border-top-color:#7a8ad0; animation:spin .8s linear infinite; }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+  #toastTime{ color:#6e6e86; margin-left:6px; font-variant-numeric:tabular-nums; }
+</style>
+</head>
+<body>
+<canvas id="gl" tabindex="0"></canvas>
+<div id="ctl">
+  <label>world <select id="world"></select></label>
+  <label id="depthL">depth <select id="depth"></select></label>
+  <div id="latticeCtl" hidden>
+    <label>R <input id="latR" type="range" min="5" max="64" step="1"> <span id="latRV"></span></label>
+    <label>size <input id="latX" type="number" min="1" max="128"> ×<input id="latY" class="n3" type="number" min="1" max="128"> ×<input id="latZ" class="n3" type="number" min="1" max="128"></label>
+    <label>gap <input id="latGap" type="number" min="0" max="128"> voxels</label>
+    <label>pitch <select id="latAlign"><option value="0">R + gap</option><option value="1">a power of two (gap rounded up)</option></select></label>
+    <label>turns <select id="latRot"><option value="0">upright</option><option value="1">one of 24 rotations</option></select></label>
+    <label>axes <select id="latAxes"><option value="random">random, all unique</option><option value="traits">traits: group × density × field</option></select></label>
+    <div id="latBudget"></div>
+  </div>
+  <div id="kitCtl" hidden>
+    <label>libraries <input id="kitLibs" type="text" spellcheck="false" title="assemblies per level, bottom up, e.g. 8,6,4,3 (the top level is always 1, the world)"></label>
+    <label>ornaments <input id="kitOrn" type="number" min="0" max="16"> specimens</label>
+    <label>ground <select id="kitGround"><option value="1">ground and gravity</option><option value="0">floating</option></select></label>
+    <label>colour frame <select id="kitColourLevel"></select></label>
+    <div id="kitInfo"></div>
+  </div>
+  <label>detail <input id="detail" type="range" min="1" max="4" step="0.25"> <span id="detailV"></span></label>
+  <label>max chunks <select id="max"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option></select></label>
+  <label>lod rule <select id="rule"><option value="adaptive">adaptive (lod ≥ 1)</option><option value="any">any</option></select></label>
+  <label>colour <select id="color"><option value="8">attribute (step 6)</option><option value="0">lod</option><option value="1">pose (8³ brick)</option>
+    <option value="2">chunk</option><option value="3">gamut</option><option value="4">plain</option><option value="6">path (raster / ray)</option></select></label>
+  <label>cache <select id="cache"><option value="256">256 MB</option><option value="64">64 MB</option><option value="16">16 MB</option><option value="0">tiny (1 byte)</option></select></label>
+  <label>path <select id="ray"><option value="density">by density (raster or ray per chunk)</option><option value="off">raster only</option>
+    <option value="0">ray only</option><option value="1">ray from lod 1</option><option value="2">ray from lod 2</option><option value="3">ray from lod 3</option>
+    <option value="4">ray from lod 4</option><option value="5">ray from lod 5</option><option value="6">ray from lod 6</option>
+    <option value="checker">checkerboard (self-test)</option></select></label>
+  <label>seams <select id="seams"><option value="1">open sides + tail</option><option value="0">off (cracks)</option></select></label>
+  <label>cut <select id="freeze"><option value="0">follows the eye</option><option value="1">frozen</option></select></label>
+  <div class="keys">drag: look   WASD: move   E/Q: up/down
+shift: ×4   wheel: speed   F: freeze cut
+pad: L stick move, R stick look, RT/LT up/down
+     A or L3 ×4, RB/LB speed ×2/÷2, Y freeze cut
+?world=&amp;depth=&amp;detail=&amp;max=&amp;workers=&amp;eye=x,y,z
+?world=lattice:1&amp;lattice=R,nx,ny,nz,gap,turns,axes,align
+?world=kit:1&amp;kit=D,libs,ornaments,ground,colour
+?quiet draws once converged   ?selftest runs streamSelftest()
+?ray=density|off|0..6   ?density=0.27,0.025   ?stencil=0   ?raymiss=discard   ?bench   raySelftest()</div>
+</div>
+<div id="hud"></div>
+<div id="toast" hidden><span id="toastSpin"></span><span id="toastText"></span><span id="toastTime"></span><div id="toastBar"><div></div></div></div>
+
+<script type="module">
+/* STREAM VIEWER
+   ---------------------------------------------------------------------
+   Step 4 of ifsandwhats.md §8.5, on the GPU side (docs/stream-plan.md).
+   A world is a dag-core DAG: a testbed row built from its automaton (up
+   to L = 8, 65,536³ voxels in a few hundred nodes), or a simple shape
+   built top-down by store.fromField (up to D = 12). stream-core.js's
+   streamer decides which (chunk, lod) pairs the eye wants and what to
+   draw while they arrive; stream-pool.js's module workers expand them
+   (chunk-worker.js); this page uploads the records and draws each
+   resident chunk the way chunk-viewer.html does, one instanced draw of a
+   cube over its 4-byte records, with GLSL_DECODE from chunk-glsl.js.
+
+   What's new against chunk-viewer:
+   - origins are camera-relative. The eye is a double in voxels and every
+     chunk's origin is (origin − eye) in f32, so a 65,536³ world keeps
+     sub-voxel precision next to the eye (ifsandwhats.md §2's "integer
+     addresses; camera-relative float math");
+   - uOpenSides: a chunk whose same-lod neighbour isn't drawn shows its
+     boundary faces, and the seam tail after `count` is drawn too
+     (chunk-core.js, "seams between lods"). seams=0 turns both off, to
+     show the cracks they close;
+   - speed and the near plane follow §9.3's local scale: the distance to
+     the nearest voxel, found in the DAG (stream-core's clearance), so a
+     2^16 world crosses in seconds and a voxel-sized gap is still flyable.
+
+   The decisions live in stream-core.js and are tested in Node; the page's
+   own check is streamSelftest() (test/browser/stream.test.js).
+
+   Step 6 (docs/attrs-plan.md): every world names a colour field
+   (colours.js), the workers compute an attribute word per shown cell, and
+   colour mode "attribute" (the default) draws them. A records chunk's
+   buffer holds its records and then its words, read as a second integer
+   attribute; a ray page's words go into the attribute heap, found through
+   the pageAttr texture (ray-core.js's header).
+
+   The ray fix (docs/ray-depth-plan.md): the raster pass draws offscreen,
+   and each ray stops at the raster's depth (rasterTarget, GLSL_RAY_BOUND),
+   so a covered pixel no longer marches its whole ray. And the default
+   path is "by density": the streamer traces a chunk when its cubes are
+   dense for its size on screen, and draws it as cubes otherwise
+   (stream-core §2b), switching a chunk's kind without a blank frame. A
+   full chunk needs fewer cubes a pixel to be traced than a sparse one,
+   since its rays stop sooner (docs/path-occupancy.md).
+
+   The stencil (docs/stencil-pass.md): the ray pass runs only on the
+   pixels of the traced chunks. Their boxes are drawn into a stencil
+   first (markTraced), and the full-screen pass is stencil-tested, so a
+   pixel whose ray meets no traced chunk never runs the march. */
+import { createStore, createClasses, createCounts, OH48 } from './dag-core.js';
+import { mortonXYZ } from './chunk-core.js';
+import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
+import { createWorld, createStreamer, worldSnapshot, keyOf, DEFAULTS, clearance as clearanceOf } from './stream-core.js';
+import { StreamPool } from './stream-pool.js';
+import { GLSL_RAY, GLSL_RAY_ATTR, TREE_TEXELS, TREE_W, BRICK_ROW } from './ray-glsl.js';
+import { createBrickPool, installPage, releasePage, buildCoverTree, KIND_RAY, KIND_RASTER, PAGE_WORDS, BRICK_WORDS,
+         TREE_WORDS, classifyPagesCPU, traceCPU, hitAttrCPU, createHeap, ATTR_NONE, HEAP_W } from './ray-core.js';
+import { attrRGB } from './attr-core.js';
+import { readPad, pickPad, PAD } from './pad-core.js';
+import { SHAPES, fieldOf } from './experiments/shapes.mjs';
+import { sliceCore, rowsOf, automatonOf, AXIS_NAMES } from './testbed-rows.js';
+import { scatterDesc, groundOf } from './scatter-core.js';
+import { buildScatterInWorkers, isAbort } from './scatter-build.js';
+import { latticeDesc, latticeFromParam, latticeParam, budgetOf, maxCube, stackOf, gapOf } from './lattice-core.js';
+import { kitDesc, kitFromParam, kitParam, buildKit, sideOf, KIT_LIMITS } from './kit-core.js';
+
+const $ = id => document.getElementById(id);
+const canvas = $('gl');
+// No MSAA: the frame is drawn offscreen and blitted here (rasterTarget).
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
+if (!gl) throw new Error('WebGL2 is required');
+const params = new URLSearchParams(location.search);
+
+/* ---- shaders --------------------------------------------------------- */
+const FACE_OFF = [
+  [.5,-.5,-.5],[.5,.5,-.5],[.5,.5,.5],[.5,-.5,.5],   [-.5,-.5,.5],[-.5,.5,.5],[-.5,.5,-.5],[-.5,-.5,-.5],
+  [-.5,.5,-.5],[-.5,.5,.5],[.5,.5,.5],[.5,.5,-.5],   [-.5,-.5,.5],[-.5,-.5,-.5],[.5,-.5,-.5],[.5,-.5,.5],
+  [.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5],[-.5,-.5,.5],   [-.5,-.5,-.5],[-.5,.5,-.5],[.5,.5,-.5],[.5,-.5,-.5]];
+const glslVec3s = a => a.map(v => `vec3(${v.map(x => x.toFixed(1)).join(',')})`).join(',\n  ');
+
+const VS = `#version 300 es
+precision highp float;
+precision highp int;
+${GLSL_DECODE}
+layout(location = 0) in uint aRec;
+layout(location = 1) in uint aAttr;   // the record's attribute word (step 6)
+uniform mat4 uViewProj;    // rotation and projection only: positions are eye-relative
+uniform vec3 uEyeN;        // the eye over the world side, for gamut colour
+uniform float uInvSide;
+const vec3 CORNER[24] = vec3[24](
+  ${glslVec3s(FACE_OFF)});
+const vec3 NORMAL[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
+out vec3 vRel;
+out vec3 vNormal;
+out vec3 vGamut;
+flat out uint vPose;
+flat out uint vAttr;
+flat out int vInst;
+void main(){
+  vInst = gl_InstanceID;
+  vAttr = aAttr;
+  uint corner = uint(gl_VertexID), face = corner / 4u;
+  vec3 p = recCentre(aRec) + CORNER[corner] * uCellSize;
+  vRel = p;
+  vGamut = uEyeN + p * uInvSide;
+  vNormal = NORMAL[face];
+  vPose = recPose(aRec);
+  gl_Position = uViewProj * vec4(p, 1.0);
+  if (!faceShown(aRec, face)) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}`;
+
+/* Shading both passes share, so a voxel looks the same drawn either way.
+   Colour mode 5 writes the distance to the eye as a 24-bit number instead
+   of a colour: raySelftest() renders a view both ways and compares them
+   pixel by pixel. Mode 6 tints by path (raster warm, ray cool).
+   Mode 8 is the attribute word (step 6), shaded; mode 9 writes the word's
+   6-bit channels unshaded, times 4, so raySelftest can compare the two
+   paths' words exactly (255 in red marks a ray hit with no word). */
+const GLSL_SHADE = `
+uniform int uColorMode;
+uniform float uFog;        // 1 / fog distance, voxels
+uniform float uDepthScale; // mode 5: distance × this in [0, 1]
+out vec4 outColor;
+vec4 shadeOut(vec3 base, vec3 normal, vec3 rel){
+  if (uColorMode == 5){
+    float v = clamp(length(rel) * uDepthScale, 0.0, 1.0) * 16777215.0;
+    float r = floor(v / 65536.0), g = floor((v - r * 65536.0) / 256.0), b = v - r * 65536.0 - g * 256.0;
+    return vec4(r, g, b, 255.0) / 255.0;
+  }
+  float shade = 0.55 + 0.45 * max(dot(normal, normalize(vec3(0.5, 0.8, 0.35))), 0.0)
+              + 0.12 * max(dot(normal, normalize(vec3(-0.6, -0.2, -0.7))), 0.0);
+  float fog = 1.0 - exp(-length(rel) * uFog);
+  return vec4(mix(base * shade, vec3(0.027, 0.027, 0.039), fog * 0.85), 1.0);
+}
+`;
+const FS = `#version 300 es
+precision highp float;
+precision highp int;
+in vec3 vRel;
+in vec3 vNormal;
+in vec3 vGamut;
+flat in uint vPose;
+flat in uint vAttr;
+flat in int vInst;
+uniform vec3 uChunkColor;
+uniform vec3 uLodColor;
+uniform int uDrawIndex;    // colour mode 7 (debugging): which draw and instance
+${GLSL_SHADE}
+${GLSL_ATTR}
+vec3 orbitColor(float bi, float order){
+  const float S = 0.62, L = 0.55;
+  float c = (1.0 - abs(2.0 * L - 1.0)) * S;
+  float hp = fract(bi / max(1.0, order)) * 6.0;
+  float x = c * (1.0 - abs(mod(hp, 2.0) - 1.0));
+  vec3 t = hp < 1.0 ? vec3(c, x, 0.0) : hp < 2.0 ? vec3(x, c, 0.0) : hp < 3.0 ? vec3(0.0, c, x)
+         : hp < 4.0 ? vec3(0.0, x, c) : hp < 5.0 ? vec3(x, 0.0, c) : vec3(c, 0.0, x);
+  return t + (L - c * 0.5);
+}
+void main(){
+  vec3 base = uColorMode == 0 ? uLodColor
+            : uColorMode == 1 ? (vPose == 0u ? vec3(0.42) : orbitColor(float(vPose), 48.0))
+            : uColorMode == 2 ? uChunkColor
+            : uColorMode == 3 ? clamp(vGamut, 0.0, 1.0)
+            : uColorMode == 6 ? vec3(0.85, 0.62, 0.42)
+            : uColorMode == 8 ? attrColour(vAttr) : vec3(0.75);
+  outColor = shadeOut(base, vNormal, vRel);
+  if (uColorMode == 9) outColor = vec4(vec3(attrRGB(vAttr) << 2u) / 255.0, 1.0);
+  if (uColorMode == 7){
+    int v = uDrawIndex * 32768 + vInst;
+    outColor = vec4(float((v >> 16) & 255), float((v >> 8) & 255), float(v & 255), 255.0) / 255.0;
+  }
+}`;
+
+/* ---- the ray pass (step 5, docs/ray-plan.md) ------------------------------
+   One full-screen triangle after the raster pass. Each pixel marches the
+   cover tree through GLSL_RAY (ray-glsl.js) from the eye, in absolute
+   voxels. Raster chunks and undrawn regions are empty to the ray.
+
+   The march is bounded by the raster's depth (docs/ray-depth-plan.md).
+   The raster pass draws into an offscreen target whose depth is a
+   texture (rasterTarget, below), and rasterTMax turns this pixel's depth
+   back into a distance along its ray. A ray stops there, so a pixel the
+   raster covers marches only up to that surface, and any hit the ray
+   does find is nearer than the raster's, so it simply overwrites it: no
+   depth test and no gl_FragDepth. The first version wrote gl_FragDepth
+   and let the depth test pick the nearer path, so every pixel marched its
+   whole ray, covered or not (ray-findings.md, the third bench: 14 far
+   chunks of a terrain cost 5.4 ms, more than half of tracing all 705). */
+const RAY_VS = `#version 300 es
+void main(){
+  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+const GLSL_RAY_CAMERA = `
+uniform vec3 uEye;         // voxels
+uniform vec3 uFwd, uRightT, uUpT;   // camera basis; right and up scaled by the half-fov tangent
+uniform vec4 uViewport;    // x, y, width, height in pixels
+vec3 rayDirAt(vec2 frag){
+  vec2 ndc = (frag - uViewport.xy) / uViewport.zw * 2.0 - 1.0;
+  vec3 d = normalize(uFwd + ndc.x * uRightT + ndc.y * uUpT);
+  return mix(vec3(-1.0), vec3(1.0), greaterThanEqual(d, vec3(0.0))) * max(abs(d), vec3(1e-6));
+}
+`;
+/* The raster's depth at this pixel as a distance along the pixel's ray d:
+   the window depth z back to the forward distance n·f / (f − z(f − n)) of
+   viewProj's projection, over d · forward. z = 1 is the clear, nothing
+   drawn: no bound. Written as f(1 − z) + z·n so that float32 keeps the far
+   end (f − z·f cancels). boundProbe holds it to the raster's own distances
+   and to ray-core's traceCPU with the same bound. markTraced's box shader
+   reads it too (GLSL_RASTER_TMAX alone, without the march). */
+const GLSL_RASTER_TMAX = `
+uniform highp sampler2D uRasterDepth;
+uniform vec2 uNearFar;     // the raster's near and far planes, voxels
+float rasterTMax(vec2 frag, vec3 d){
+  float z = texelFetch(uRasterDepth, ivec2(frag), 0).r;
+  if (z >= 1.0) return 3.0e38;
+  float n = uNearFar.x, f = uNearFar.y;
+  return n * f / (f * (1.0 - z) + z * n) / dot(d, uFwd);
+}
+`;
+const GLSL_RAY_BOUND = GLSL_RASTER_TMAX + `
+// The ray pass's march for pixel frag, from the near plane (both paths
+// clip the same) to the raster's surface. PROBE_BOUND_FS runs this too.
+bool traceBounded(vec2 frag, out vec3 d, out float t, out ivec3 cell, out int axis){
+  d = rayDirAt(frag);
+  return traceRay(uEye, d, uNearFar.x / dot(d, uFwd), rasterTMax(frag, d), t, cell, axis);
+}
+`;
+const rayFS = missDiscard => `#version 300 es
+precision highp float;
+precision highp int;
+${GLSL_RAY}
+${GLSL_RAY_ATTR}
+${GLSL_RAY_CAMERA}
+${GLSL_RAY_BOUND}
+uniform vec3 uEyeN;
+uniform float uInvSide;
+uniform vec3 uLodColors[24];
+${GLSL_SHADE}
+${GLSL_ATTR}
+void main(){
+  // Colour mode 10: white wherever the pass runs, no march (maskProbe).
+  if (uColorMode == 10){ outColor = vec4(1.0); return; }
+  vec3 d; float t; ivec3 cell; int axis;
+  if (!traceBounded(gl_FragCoord.xy, d, t, cell, axis)) ${missDiscard ? 'discard;' : '{ outColor = vec4(0.0); return; }'}
+  vec3 rel = t * d, n = vec3(0.0);
+  if (axis >= 0) n[axis] = d[axis] > 0.0 ? -1.0 : 1.0;
+  // A hit with no word (the ray started inside a solid, or looked through
+  // a hole in the cover) is drawn mid grey.
+  uint word = uColorMode >= 8 ? rayHitAttr(cell) : ATTR_NONE;
+  vec3 base = uColorMode == 0 ? uLodColors[clamp(rayHitLod, 0, 23)]
+            : uColorMode == 3 ? clamp(uEyeN + rel * uInvSide, 0.0, 1.0)
+            : uColorMode == 6 ? vec3(0.42, 0.66, 0.9)
+            : uColorMode == 8 ? (word == ATTR_NONE ? vec3(0.5) : attrColour(word)) : vec3(0.75);
+  outColor = shadeOut(base, n, rel);
+  if (uColorMode == 9) outColor = word == ATTR_NONE ? vec4(1.0, 0.0, 1.0, 1.0) : vec4(vec3(attrRGB(word) << 2u) / 255.0, 1.0);
+}`;
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)){ console.error(gl.getShaderInfoLog(s), src); return null; }
+  return s;
+}
+function link(vs, fs){
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(p)); return null; }
+  return p;
+}
+const prog = link(VS, FS);
+const uniformsOf = (p, names) => Object.fromEntries(names.map(n => [n, gl.getUniformLocation(p, n)]));
+const U = uniformsOf(prog, ['uViewProj', 'uEyeN', 'uInvSide', 'uOrigin', 'uCellSize', 'uOpenSides',
+  'uColorMode', 'uChunkColor', 'uLodColor', 'uFog', 'uDepthScale', 'uDrawIndex']);
+/* A miss writes transparent black, and the pass blends over the raster
+   (ONE, ONE_MINUS_SRC_ALPHA): a hit's alpha is exactly 1, so it replaces
+   the pixel, and a miss leaves it. The first ray pass discarded a miss,
+   and on your Mac that made the stencil useless (docs/stencil-pass.md
+   §6): Safari draws through Metal, where a fragment function that can
+   discard runs *before* the depth and stencil tests unless it is marked
+   for early tests, which WebGL2 has no way to ask for. So every pixel ran
+   the march and the stencil rejected it afterwards: 5.98 ms with the
+   stencil, 5.88 without, on the scatter world. ?raymiss=discard (and the
+   bench's `density/discard` row) keeps the old pass, for the comparison. */
+const rayProg = link(RAY_VS, rayFS(false)), rayProgDiscard = link(RAY_VS, rayFS(true));
+const RAY_UNIFORMS = ['uTree', 'uPages', 'uBricks', 'uPageAttr', 'uAttrHeap', 'uTop', 'uD', 'uSteps', 'uEye', 'uFwd', 'uRightT', 'uUpT', 'uViewport',
+                      'uRasterDepth', 'uNearFar'];
+const RAY_PASS_UNIFORMS = [...RAY_UNIFORMS, 'uEyeN', 'uInvSide', 'uLodColors', 'uColorMode', 'uFog', 'uDepthScale'];
+const RU = uniformsOf(rayProg, RAY_PASS_UNIFORMS), RUD = uniformsOf(rayProgDiscard, RAY_PASS_UNIFORMS);
+const emptyVAO = gl.createVertexArray();
+
+/* The raster target (docs/ray-depth-plan.md, decision 2): a colour
+   renderbuffer and a depth *texture*, one pair per size (the screen, and
+   the self-tests' 160 × 120). renderView draws the raster pass here, blits
+   the colour to wherever the frame is going, and the ray pass reads the
+   depth from the texture: a framebuffer's own depth can't be sampled, and
+   the default framebuffer's can't be read at all.
+
+   It is single-sampled, and so is the canvas now (antialias: false; a blit
+   can't write into a multisampled framebuffer). Keeping MSAA would mean
+   resolving its depth for the bound, and a depth resolve picks an
+   implementation-defined value between a pixel's samples. Where it picks
+   the near one at a silhouette, the ray would stop short of what shows
+   through the pixel's other samples, a dark fringe around raster edges in
+   front of ray content. Both paths now sample the pixel centre and nothing
+   else, which is also what raySelftest has always compared.
+
+   The ray pass draws into a second framebuffer, `rayFb`: the same colour
+   renderbuffer, and a stencil of its own (markTraced, below). It can't
+   be the raster's framebuffer with a stencil added. WebGL2 wants depth
+   and stencil in one image when both are attached, and that image is
+   the depth texture the ray pass samples: sampling a texture attached to
+   the framebuffer being drawn is a feedback loop, an INVALID_OPERATION
+   whatever the depth mask says. So rayFb has no depth at all, and the
+   colour is blitted out after the ray pass, not before it. */
+const RASTER_TARGETS = new Map();
+function rasterTarget(w, h){
+  const key = w + 'x' + h;
+  let T = RASTER_TARGETS.get(key);
+  if (T) return T;
+  if (RASTER_TARGETS.size >= 3){         // a resize: drop the oldest
+    const [k0, T0] = RASTER_TARGETS.entries().next().value;
+    gl.deleteFramebuffer(T0.fb); gl.deleteFramebuffer(T0.rayFb);
+    gl.deleteRenderbuffer(T0.color); gl.deleteRenderbuffer(T0.stencil); gl.deleteTexture(T0.depth);
+    RASTER_TARGETS.delete(k0);
+  }
+  T = { fb: gl.createFramebuffer(), rayFb: gl.createFramebuffer(), color: gl.createRenderbuffer(), stencil: gl.createRenderbuffer(),
+        depth: gl.createTexture(), w, h };
+  gl.bindRenderbuffer(gl.RENDERBUFFER, T.color);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
+  gl.bindRenderbuffer(gl.RENDERBUFFER, T.stencil);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.STENCIL_INDEX8, w, h);
+  gl.bindTexture(gl.TEXTURE_2D, T.depth);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.fb);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, T.color);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, T.depth, 0);
+  const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  if (status !== gl.FRAMEBUFFER_COMPLETE) throw new Error(`raster target ${key} incomplete (0x${status.toString(16)})`);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.rayFb);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, T.color);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.STENCIL_ATTACHMENT, gl.RENDERBUFFER, T.stencil);
+  const rayStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  if (rayStatus !== gl.FRAMEBUFFER_COMPLETE) throw new Error(`ray target ${key} incomplete (0x${rayStatus.toString(16)})`);
+  RASTER_TARGETS.set(key, T);
+  return T;
+}
+const RASTER_DEPTH_UNIT = 5;              // bindRayTextures uses 0–4
+
+/* The stencil (ray-depth-findings.md question 2, docs/stencil-pass.md).
+   Before it, the ray pass ran on every pixel of the screen, and a pixel
+   whose ray went nowhere near a traced chunk still marched the cover tree
+   to the raster's surface or out of the world. On your terrain bench
+   that was ~2.8 ms of march for 27 traced chunks (path-occupancy.md §3).
+
+   Now each traced chunk's box is drawn into rayFb's stencil first, every
+   face and no culling, so a pixel is marked when its ray, from the near
+   plane on, meets the box. Faces only, no caps: where the near plane
+   cuts a box, a ray through the cut enters the box there and leaves
+   through a face beyond the near plane, which is drawn. So the eye
+   inside a box needs no case of its own (its back faces mark it). The
+   ray pass then runs with the stencil test, which rejects the other
+   pixels before their shader runs.
+
+   Nothing but a traced chunk can stop a ray (raster chunks and undrawn
+   regions are empty to it), so the mask loses no hit. Each box is grown
+   by one of its cells (size / 64) all round, so a ray grazing a box's
+   edge, where float32 and the rasterizer's snapping can disagree about
+   which side of it the pixel centre is, is still marked.
+
+   And a box is depth-tested against the raster, by hand: the fragment
+   finds where the pixel's ray enters the box (a slab test, the eye at
+   the origin) and is discarded if the raster's surface (rasterTMax, the
+   ray pass's own bound) comes first. rayFb has no depth buffer to do it
+   (see above). The first version marked every box whole: on the
+   checkerboard 99.5% of the pixels were marked, since a box behind a
+   raster chunk still covers the screen, and the march saved 1% of its
+   steps. A ray that reaches the raster first can't hit anything the
+   ray pass draws, so such a pixel has nothing to march for.
+   maskProbe holds the mask to the boxes and the raster's depth in
+   float64, both ways.
+
+   ?stencil=0 turns it off (the whole screen marked), for the bench's
+   comparison row. */
+const BOX_CORNERS = [];
+for (let f = 0; f < 6; f++) for (const i of [0, 1, 2, 0, 2, 3]) BOX_CORNERS.push(FACE_OFF[4 * f + i].map(v => v + 0.5));
+const BOX_VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec4 aBox;   // per box: eye-relative low corner and side, voxels
+uniform mat4 uViewProj;
+flat out vec4 vBox;
+const vec3 CORNER[36] = vec3[36](
+  ${glslVec3s(BOX_CORNERS)});
+void main(){
+  vBox = aBox;
+  gl_Position = uViewProj * vec4(aBox.xyz + CORNER[gl_VertexID] * aBox.w, 1.0);
+}`;
+const BOX_FS = `#version 300 es
+precision highp float;
+${GLSL_RAY_CAMERA}
+${GLSL_RASTER_TMAX}
+flat in vec4 vBox;
+out vec4 outColor;
+void main(){
+  vec3 d = rayDirAt(gl_FragCoord.xy), a = vBox.xyz / d, b = (vBox.xyz + vBox.w) / d;
+  float tIn = max(max(min(a.x, b.x), min(a.y, b.y)), min(a.z, b.z));
+  if (max(tIn, uNearFar.x / dot(d, uFwd)) >= rasterTMax(gl_FragCoord.xy, d)) discard;
+  outColor = vec4(1.0);
+}`;
+const boxProg = link(BOX_VS, BOX_FS);
+const BU = uniformsOf(boxProg, ['uViewProj', 'uFwd', 'uRightT', 'uUpT', 'uViewport', 'uRasterDepth', 'uNearFar', 'uEye']);
+const boxVAO = gl.createVertexArray(), boxBuf = gl.createBuffer();
+gl.bindVertexArray(boxVAO);
+gl.bindBuffer(gl.ARRAY_BUFFER, boxBuf);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 16, 0);
+gl.vertexAttribDivisor(0, 1);
+gl.bindVertexArray(null);
+let boxData = new Float32Array(4 * 256);
+// The traced chunks of `list` (renderView's, eye-relative), grown and
+// culled, into the stencil of T.rayFb (bound) as 1 where the raster's
+// depth in T doesn't hide them. Returns how many boxes were drawn.
+function markTraced(M, planes, list, T){
+  let n = 0;
+  for (const { d, rel, e } of list){
+    if (e.kind !== 'page') continue;
+    const pad = d.size / 64, lo = rel.map(v => v - pad), size = d.size + 2 * pad;
+    if (!boxVisible(planes, lo, size)) continue;
+    if (4 * (n + 1) > boxData.length){ const b = new Float32Array(2 * boxData.length); b.set(boxData); boxData = b; }
+    boxData.set([lo[0], lo[1], lo[2], size], 4 * n++);
+  }
+  gl.clearStencil(0); gl.stencilMask(0xff);
+  gl.clear(gl.STENCIL_BUFFER_BIT);
+  if (!n) return 0;
+  gl.useProgram(boxProg);
+  gl.uniformMatrix4fv(BU.uViewProj, false, M);
+  setRayCamera(BU, T.w, T.h);
+  bindRasterDepth(BU, T);
+  gl.bindBuffer(gl.ARRAY_BUFFER, boxBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, boxData.subarray(0, 4 * n), gl.DYNAMIC_DRAW);
+  gl.disable(gl.CULL_FACE); gl.disable(gl.DEPTH_TEST);
+  gl.enable(gl.STENCIL_TEST);
+  gl.stencilFunc(gl.ALWAYS, 1, 0xff); gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+  gl.colorMask(false, false, false, false);
+  gl.bindVertexArray(boxVAO);
+  gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, n);
+  gl.bindVertexArray(null);
+  gl.colorMask(true, true, true, true);
+  // Leave the test on for the pass that follows: only where marked.
+  gl.stencilFunc(gl.EQUAL, 1, 0xff); gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+  return n;
+}
+
+/* The ray path's three textures, with CPU mirrors laid out word for word
+   as the textures are, so ray-core's classifyPagesCPU and traceCPU read
+   exactly what the shader reads (raySelftest's probes need that).
+     tree    RGBA32UI, TREE_W × 64: 16,384 cover-tree nodes
+     pages   R32UI, 512 × 4,096: one page per row
+     bricks  RGBA32UI, 1,024 × 1,024: 262,143 bricks (slot 0 = empty)
+   and step 6's two:
+     pageAttr  R32UI, 512 × 4,096: per page, each brick's run in the heap
+     heap      R32UI, 4,096 × up to 4,096 (64 MB): attribute runs. When it
+               is full, a page goes in without words (they draw grey) and
+               the HUD says so: the densest porous row traced from lod 0
+               needs ~16M words, which is the whole heap. */
+const TREE_ROWS = 64, PAGE_CAP = 4096, BRICK_ROWS = 1024, BRICK_CAP = BRICK_ROW * BRICK_ROWS - 1;
+const HEAP_ROWS = Math.min(4096, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+function intTexture(internal, format, w, h){
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, internal, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  return { t, internal, format, w, h };
+}
+const ray = {
+  tree: intTexture(gl.RGBA32UI, gl.RGBA_INTEGER, TREE_W, TREE_ROWS),
+  pages: intTexture(gl.R32UI, gl.RED_INTEGER, PAGE_WORDS, PAGE_CAP),
+  bricks: intTexture(gl.RGBA32UI, gl.RGBA_INTEGER, 4 * BRICK_ROW, BRICK_ROWS),
+  pageAttr: intTexture(gl.R32UI, gl.RED_INTEGER, PAGE_WORDS, PAGE_CAP),
+  heap: intTexture(gl.R32UI, gl.RED_INTEGER, HEAP_W, HEAP_ROWS),
+  treeCPU: new Uint32Array(4 * TREE_W * TREE_ROWS), pagesCPU: new Uint32Array(PAGE_WORDS * PAGE_CAP),
+  bricksCPU: new Uint32Array(BRICK_WORDS * (BRICK_CAP + 1)),
+  pageAttrCPU: new Uint32Array(PAGE_WORDS * PAGE_CAP).fill(ATTR_NONE), heapCPU: new Uint32Array(HEAP_W * HEAP_ROWS),
+  brickPool: createBrickPool(BRICK_CAP), heapAlloc: createHeap(HEAP_W * HEAP_ROWS), heapFull: 0,
+  freePages: [], nextPage: 1, pageCount: 0, treeNodes: 0, frame: null,
+  uploads: 0,
+};
+/* A run of words into the heap texture at word index `at`: the first
+   partial row, the whole rows, the last partial row. */
+function putHeap(at, words){
+  ray.heapCPU.set(words, at);
+  gl.bindTexture(gl.TEXTURE_2D, ray.heap.t);
+  const put = (i, w, rows) => gl.texSubImage2D(gl.TEXTURE_2D, 0, (at + i) % HEAP_W, Math.floor((at + i) / HEAP_W), w, rows,
+                                                gl.RED_INTEGER, gl.UNSIGNED_INT, words.subarray(i, i + w * rows));
+  const n = words.length, x0 = at % HEAP_W;
+  let i = 0;
+  if (x0){ const w = Math.min(HEAP_W - x0, n); put(0, w, 1); i = w; }
+  const rows = Math.floor((n - i) / HEAP_W);
+  if (rows){ put(i, HEAP_W, rows); i += rows * HEAP_W; }
+  if (i < n) put(i, n - i, 1);
+}
+function texRows(tex, data, y0, rows){
+  gl.bindTexture(gl.TEXTURE_2D, tex.t);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, y0, tex.w, rows, tex.format, gl.UNSIGNED_INT, data);
+}
+function putBrick(slot, bits){
+  ray.bricksCPU.set(bits, BRICK_WORDS * slot);
+  gl.bindTexture(gl.TEXTURE_2D, ray.bricks.t);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 4 * (slot % BRICK_ROW), Math.floor(slot / BRICK_ROW), 4, 1, gl.RGBA_INTEGER, gl.UNSIGNED_INT, bits);
+  ray.uploads++;
+}
+/* The cover as the ray sees it: rebuilt and uploaded whenever the
+   streamer's frame changes (a new cut, or an admission). A few hundred
+   nodes, a few KB. */
+function syncCoverTree(){
+  if (!W || ray.frame === streamer.frame) return;
+  ray.frame = streamer.frame;
+  const words = buildCoverTree(W.top, streamer.frame.draw, d => {
+    const e = streamer.entry(d.key);
+    return e && e.kind === 'page' ? { kind: KIND_RAY, page: e.gpu.page } : { kind: KIND_RASTER };
+  });
+  const nodes = words.length / TREE_WORDS;
+  if (nodes * TREE_TEXELS > TREE_W * TREE_ROWS) throw new Error(`cover tree of ${nodes} nodes doesn't fit`);
+  ray.treeCPU.fill(0, 0, words.length + 4 * TREE_W);
+  ray.treeCPU.set(words);
+  const rows = Math.ceil(nodes * TREE_TEXELS / TREE_W);
+  texRows(ray.tree, ray.treeCPU.subarray(0, 4 * TREE_W * rows), 0, rows);
+  ray.treeNodes = nodes;
+}
+const cubeIndex = gl.createBuffer();
+{
+  const idx = new Uint8Array(36);
+  for (let f = 0; f < 6; f++){ const b = 4 * f; idx.set([b, b+1, b+2, b, b+2, b+3], 6 * f); }
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIndex);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+}
+
+/* The streamer's gl hooks: one VAO and buffer per resident chunk, made
+   when the streamer admits it (inside its upload budget) and deleted when
+   it evicts it. An empty chunk owns nothing. */
+const gpu = { buffers: 0, bytes: 0 };
+function install(entry){
+  if (entry.kind === 'page'){
+    // A page row, and an atlas slot per distinct brick (shared with every
+    // other page holding the same DAG node at this lod).
+    const page = ray.freePages.length ? ray.freePages.pop() : ray.nextPage < PAGE_CAP ? ray.nextPage++ : 0;
+    if (!page) throw new Error('page pool full');
+    const slots = installPage(ray.brickPool, entry.lod, entry.page, putBrick);
+    ray.pagesCPU.set(slots, PAGE_WORDS * page);
+    texRows(ray.pages, slots, page, 1);
+    // The page's attribute block, one run of the heap; its grid entries
+    // point at their runs (step 6). No room: no words, drawn grey.
+    const { attr, attrAt } = entry.page, row = ray.pageAttrCPU.subarray(PAGE_WORDS * page, PAGE_WORDS * (page + 1));
+    let base = 0;
+    row.fill(ATTR_NONE);
+    if (attr && attr.length){
+      base = ray.heapAlloc.alloc(attr.length);
+      if (base < 0){ base = 0; ray.heapFull++; }
+      else {
+        putHeap(base, attr);
+        for (let b = 0; b < PAGE_WORDS; b++) if (attrAt[b] !== ATTR_NONE) row[b] = base + attrAt[b];
+      }
+    }
+    texRows(ray.pageAttr, row, page, 1);
+    ray.pageCount++;
+    return { page, base };
+  }
+  if (!entry.total) return null;
+  // Records, then their words: one buffer, two integer attributes.
+  const vao = gl.createVertexArray(), buf = gl.createBuffer(), n = entry.records.length;
+  const both = new Uint32Array(2 * n);
+  both.set(entry.records);
+  if (entry.attrs) both.set(entry.attrs, n);
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIndex);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, both, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribIPointer(0, 1, gl.UNSIGNED_INT, 4, 0);
+  gl.vertexAttribDivisor(0, 1);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_INT, 4, 4 * n);
+  gl.vertexAttribDivisor(1, 1);
+  gl.bindVertexArray(null);
+  gpu.buffers++; gpu.bytes += entry.bytes;
+  return { vao, buf };
+}
+function dispose(entry){
+  if (!entry.gpu) return;
+  if (entry.kind === 'page'){
+    releasePage(ray.brickPool, entry.lod, entry.page);
+    if (entry.gpu.base) ray.heapAlloc.free(entry.gpu.base);
+    ray.freePages.push(entry.gpu.page); ray.pageCount--;
+    entry.gpu = null;
+    return;
+  }
+  gl.deleteVertexArray(entry.gpu.vao); gl.deleteBuffer(entry.gpu.buf);
+  gpu.buffers--; gpu.bytes -= entry.bytes;
+  entry.gpu = null;
+}
+
+/* ---- state ------------------------------------------------------------- */
+const state = {
+  world: params.get('world') || 'row:142',
+  depth: params.has('depth') ? +params.get('depth') : null,
+  detail: +(params.get('detail') || DEFAULTS.detail),
+  max: +(params.get('max') || DEFAULTS.maxChunks),
+  rule: params.get('rule') || 'adaptive',
+  color: +(params.get('color') ?? 8),
+  cache: +(params.get('cache') ?? 256),
+  seams: params.get('seams') !== '0',
+  // Which chunks are traced (pathOptions): 'density', the default, each
+  // chunk by its records per pixel on screen (stream-core §2b,
+  // docs/ray-depth-plan.md); 'off', raster only (step 4); a lod n, every
+  // chunk at lod ≥ n (step 5's split); 'checker', a checkerboard of kinds
+  // for raySelftest, so raster and ray chunks meet everywhere. Step 5 left
+  // raster only as the default, since one rayLod couldn't suit both the
+  // sparse rows and the dense ones (ray-findings.md, the 2026-11-01 benches).
+  path: params.get('ray') || 'density',
+  // Records per footprint pixel above which a chunk is traced: for an
+  // empty chunk, then for a full one, linear in occupancy between them
+  // (stream-core §2b), fitted to your benches (docs/path-occupancy.md):
+  // 0.26…0.015 on three views, 0.27…0.025 since the scatter world joined
+  // them (docs/stencil-pass.md §6; on the four views it traces the same
+  // except 42 fewer full chunks under the scatter field).
+  // One number is the first version's constant rule (?density=0.2).
+  density: (params.get('density') || '0.27,0.025').split(',').map(Number),
+  // The ray pass only on the traced chunks' pixels (markTraced); off, the
+  // whole screen, as before docs/stencil-pass.md.
+  stencil: params.get('stencil') !== '0',
+  // A ray that hits nothing: 'blend' writes transparent black over the
+  // raster; 'discard' is the first pass's, which kept Safari's stencil
+  // from rejecting anything (rayProg, above).
+  rayMiss: params.get('raymiss') === 'discard' ? 'discard' : 'blend',
+  freeze: false,
+  // The lattice world's descriptor (docs/lattice3d-plan.md): ?lattice=
+  // R,nx,ny,nz,gap,turns,axes,align, the seed from the world id (lattice:<seed>).
+  lattice: null,
+  // The kit world's descriptor (docs/kit-plan.md): ?kit=D,libs,ornaments,
+  // ground,colourLevel, the seed from the world id (kit:<seed>).
+  kit: null,
+};
+state.lattice = (() => {
+  const seed = /^lattice:\d+$/.test(state.world) ? +state.world.slice(8) || 1 : 1;
+  try { return params.has('lattice') ? latticeFromParam(params.get('lattice'), seed) : latticeDesc({ seed }); }
+  catch (e){ console.warn('?lattice refused:', e.message); return latticeDesc({ seed }); }
+})();
+state.kit = (() => {
+  const seed = /^kit:\d+$/.test(state.world) ? +state.world.slice(4) || 1 : 1;
+  try { return params.has('kit') ? kitFromParam(params.get('kit'), seed) : kitDesc({ seed }); }
+  catch (e){ console.warn('?kit refused:', e.message); return kitDesc({ seed }); }
+})();
+const workerCount = params.has('workers') ? +params.get('workers') : Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
+// The lattice's build threads: short-lived, so up to 8 (a 128³ lattice is
+// ~3 min of work on one thread; docs/lattice3d-log.md §5). ?workers sets both.
+const buildThreads = params.has('workers') ? workerCount : Math.min(8, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
+const cacheBytes = mb => mb ? mb * 1048576 : 1;
+/* The streamer options of a path. The checkerboard alternates by chunk
+   and lod, so every chunk's face neighbours and parent are the other kind. */
+function pathOptions(path){
+  if (path === 'density') return { rayLod: Infinity, rayDensity: state.density[0], rayDensityFull: state.density[1] ?? null, kindRule: null };
+  if (path === 'checker') return { rayLod: Infinity, rayDensity: Infinity, kindRule: c => ((c.x + c.y + c.z + c.lod) & 1) ? 'page' : 'records' };
+  return { rayLod: path === 'off' ? Infinity : +path, rayDensity: Infinity, kindRule: null };
+}
+// The density thresholds as the HUD and the bench show them.
+const densityText = () => state.density.length > 1 ? `${state.density[0]}…${state.density[1]} by occupancy` : `${state.density[0]}`;
+const pathLabel = path => path === 'density' ? `by density > ${densityText()}` : path === 'off' ? 'raster only' : path === '0' ? 'ray only'
+                        : path === 'checker' ? 'checkerboard' : `ray ≥ lod ${path}`;
+/* The viewport, for the density rule's footprints: pixels per radian at
+   the centre of viewProj's projection (half-height over tan of the half
+   field of view), and the pixel count, which caps a footprint. */
+const viewportOptions = (w, h) => ({ pxPerRadian: h / (2 * Math.tan(0.45)), screenPixels: w * h });
+const streamer = createStreamer({ install, dispose, detail: state.detail, maxChunks: state.max,
+  cacheBytes: cacheBytes(state.cache), cacheMax: state.cache ? DEFAULTS.cacheMax : 1,
+  lodRuleOf: lod => lod === 0 || state.rule === 'any' ? 'any' : 'adaptive', ...pathOptions(state.path),
+  ...viewportOptions(Math.round(innerWidth * Math.min(devicePixelRatio || 1, 2)), Math.round(innerHeight * Math.min(devicePixelRatio || 1, 2))) });
+const pool = new StreamPool(streamer, { workerCount });
+pool.start();
+addEventListener('pagehide', () => pool.suspend());
+addEventListener('pageshow', e => { if (e.persisted) pool.resume(); });
+
+/* ---- worlds -------------------------------------------------------------
+   Shapes are ready at once; the testbed rows need sol-v4's core, which
+   lives inside its HTML, so the page fetches it and slices it out the way
+   test/load-core.js does in Node. The scatter world (docs/scatter-plan.md)
+   is built across workers first (scatter-build.js): block-showroom
+   specimens on `hills`, one per 128² cell, so D = 12 holds 1,024. The
+   lattice world (docs/lattice3d-plan.md) is built by the same workers:
+   specimens of any R from 5 to 64 on an nx × ny × nz grid, with controls
+   of its own instead of a depth (the depth follows from them). The kit
+   world (docs/kit-plan.md) is nested 4³ assemblies of 16³ parts, built
+   here on the main thread in tens of milliseconds (kit-core.js), with a
+   depth and controls of its own. */
+let ROWS = [], CORE = null;
+const catalogue = () => {
+  const out = SHAPES.map(s => ({ id: 'shape:' + s.name, label: s.name, group: 'shapes (fromField)' }));
+  ROWS.forEach((r, i) => out.push({ id: 'row:' + i, label: `${r.label} ${r.depth === '-' ? '' : r.depth}`, group: 'rows: ' + AXIS_NAMES[r.axis] }));
+  out.push({ id: 'scatter:1', label: 'specimens on hills', group: 'block-showroom specimens' });
+  out.push({ id: 'lattice:' + state.lattice.seed, label: 'specimen lattice (any R, nx × ny × nz)', group: 'block-showroom specimens' });
+  out.push({ id: 'kit:' + state.kit.seed, label: 'kit: nested 4³ assemblies of parts', group: 'kit world' });
+  return out;
+};
+function fillWorlds(){
+  const sel = $('world'); sel.innerHTML = '';
+  const groups = new Map();
+  for (const w of catalogue()){
+    if (!groups.has(w.group)){ const g = document.createElement('optgroup'); g.label = w.group; groups.set(w.group, g); sel.append(g); }
+    groups.get(w.group).append(new Option(w.label, w.id));
+  }
+  sel.value = state.world;
+}
+const isRow = id => id.startsWith('row:'), isScatter = id => id.startsWith('scatter:'), isLattice = id => id.startsWith('lattice:');
+const isKit = id => id.startsWith('kit:');
+// The kit: 12, 14 and 16 as planned (decision 7), and 10, small enough for the self-test.
+const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: `L=${L} (${(4 ** L).toLocaleString()}³)` }))
+  : isKit(id) ? [10, 12, 14, 16].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³, ${(D - 4) / 2} levels)` }))
+  : isScatter(id) ? [9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${((2 ** D / 128) ** 2).toLocaleString()} specimens)` }))
+  : [8, 9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }));
+function fillDepth(){
+  // The lattice has no depth to pick: its controls show instead.
+  $('depthL').hidden = isLattice(state.world); $('latticeCtl').hidden = !isLattice(state.world);
+  $('kitCtl').hidden = !isKit(state.world);
+  if (isLattice(state.world)){ state.depth = state.lattice.D; fillLattice(); return; }
+  const sel = $('depth'); sel.innerHTML = '';
+  for (const c of depthChoices(state.world)) sel.add(new Option(c.label, c.v));
+  // The kit's depth is its descriptor's.
+  if (isKit(state.world)){ state.depth = state.kit.D; sel.value = String(state.depth); fillKit(); return; }
+  if (state.depth === null || !depthChoices(state.world).some(c => c.v === state.depth))
+    state.depth = isRow(state.world) ? 8 : isScatter(state.world) ? 12 : (state.world === 'shape:gyroid' ? 9 : 10);
+  sel.value = String(state.depth);
+}
+
+/* ---- the lattice's controls (docs/lattice3d-plan.md) ---------------------
+   R, the size on each axis, the gap, turns and axes. Dragging R only
+   updates the labels; a released slider or an edited number asks for a
+   rebuild after a short pause (LATTICE_DEBOUNCE), and a rebuild asked for
+   while one is building supersedes it (loadWorld). A new R resets the gap
+   to its default and, if the size no longer fits the budget, clamps each
+   axis to the largest cube that does (lattice-core's maxCube). */
+const LATTICE_DEBOUNCE = 300;
+let latticeTimer = 0;
+function showBudget(extra = ''){
+  const d = state.lattice, b = budgetOf(d), stack = stackOf(d.R).map(l => l.radix).join('·');
+  $('latBudget').innerHTML = `${b.specimens.toLocaleString()} specimens, stack ${stack}, pitch ${d.pitch}${d.pitch === 2 ** Math.round(Math.log2(d.pitch)) ? ' (one block each)' : ''}, ` +
+    `D=${d.D}, ~${(b.nodes / 1e6).toFixed(2)}M nodes est.  (largest cube at R=${d.R}: ${maxCube(d.R, d)}³)` + (b.ok ? '' : `\n<span class="warn">over budget: ${b.reason}</span>`) + (extra ? '\n' + extra : '');
+}
+function fillLattice(){
+  const d = state.lattice;
+  $('latR').value = d.R; $('latRV').textContent = d.R;
+  $('latX').value = d.n[0]; $('latY').value = d.n[1]; $('latZ').value = d.n[2];
+  $('latGap').value = d.gap; $('latRot').value = d.rotate ? '1' : '0'; $('latAxes').value = d.axes; $('latAlign').value = d.align ? '1' : '0';
+  showBudget();
+}
+// The descriptor the controls show, or null (with the reason shown) if they don't make one.
+function latticeFromControls(){
+  try {
+    return latticeDesc({ seed: state.lattice.seed, R: +$('latR').value, n: [+$('latX').value, +$('latY').value, +$('latZ').value],
+                         gap: +$('latGap').value, rotate: $('latRot').value === '1', axes: $('latAxes').value, align: $('latAlign').value === '1' });
+  } catch (e){ showBudget(`<span class="warn">${e.message.replace(/^lattice: /, '')}</span>`); return null; }
+}
+function scheduleLattice({ newR = false } = {}){
+  clearTimeout(latticeTimer);
+  if (newR) $('latGap').value = gapOf(+$('latR').value);
+  let d = latticeFromControls(), note = '';
+  if (!d) return;
+  if (newR && !budgetOf(d).ok){
+    const m = maxCube(d.R, d);
+    d = latticeDesc({ ...d, n: d.n.map(v => Math.min(v, m)) });
+    note = `size clamped to ${m} an axis to fit the budget`;
+  }
+  state.lattice = d; fillLattice(); if (note) showBudget(note);
+  if (!budgetOf(d).ok) return;
+  latticeTimer = setTimeout(() => loadWorld(true).catch(e => console.error('lattice build failed', e)), LATTICE_DEBOUNCE);
+}
+function bindLattice(){
+  $('latR').addEventListener('input', () => { $('latRV').textContent = $('latR').value; });
+  $('latR').addEventListener('change', () => scheduleLattice({ newR: true }));
+  for (const id of ['latX', 'latY', 'latZ', 'latGap', 'latRot', 'latAxes', 'latAlign']) $(id).addEventListener('change', () => scheduleLattice());
+}
+
+/* ---- the kit's controls (docs/kit-plan.md, decision 7) -------------------
+   The depth (the depth select), the library sizes bottom up, the
+   ornaments, the ground, and the level whose frames the colour is read
+   in. A kit builds in tens of milliseconds (decision 1), so every change
+   rebuilds, after a short pause, and the eye stays where it is: the
+   point of a live control is to see the change in place. A new depth is
+   a new world size, so that one resets the view. */
+const KIT_DEBOUNCE = 250;
+let kitTimer = 0;
+function showKit(note = ''){
+  const d = state.kit, b = W && W.kit && kitParam(W.kit.desc) === kitParam(d) && W.kit.desc.seed === d.seed ? W.kit : null;
+  $('kitInfo').innerHTML = `parts 16³${d.libs.map((n, i) => ` · ${n} of ${sideOf(i + 1).toLocaleString()}³`).join('')} · the world` +
+    (b ? `\n${b.nodes.toLocaleString()} nodes (${b.dropped.toLocaleString()} unpicked, pruned), built in ${b.totalMs.toFixed(0)} ms` : '') + (note ? '\n' + note : '');
+}
+function fillKit(note = ''){
+  const d = state.kit, sel = $('kitColourLevel');
+  $('kitLibs').value = d.libs.join(','); $('kitOrn').value = d.ornaments; $('kitGround').value = d.ground ? '1' : '0';
+  sel.innerHTML = '';
+  for (let l = 0; l <= d.L; l++) sel.add(new Option(`level ${l}, ${sideOf(l).toLocaleString()}³${l === 0 ? ' (the parts)' : l === d.L ? ' (the world)' : ''}`, l));
+  sel.value = String(d.colourLevel);
+  showKit(note);
+}
+// The descriptor the controls show, or null (with the reason shown) if they don't make one.
+function kitFromControls(D = state.kit.D){
+  try {
+    const libs = $('kitLibs').value.split(/[\s,.]+/).filter(Boolean).map(Number);
+    return kitDesc({ seed: state.kit.seed, D, libs, ornaments: +$('kitOrn').value, ground: $('kitGround').value === '1',
+                     colourLevel: Math.min(+$('kitColourLevel').value, (D - 4) / 2) });
+  } catch (e){ showKit(`<span class="warn">${e.message.replace(/^kit: /, '')} (libraries ${KIT_LIMITS.lib.join('…')} each)</span>`); return null; }
+}
+function scheduleKit(){
+  clearTimeout(kitTimer);
+  const d = kitFromControls();
+  if (!d) return;
+  state.kit = d; fillKit();
+  kitTimer = setTimeout(() => loadWorld('keep').catch(e => console.error('kit build failed', e)), KIT_DEBOUNCE);
+}
+function bindKit(){
+  for (const id of ['kitLibs', 'kitOrn', 'kitGround', 'kitColourLevel']) $(id).addEventListener('change', scheduleKit);
+}
+
+let worldEpoch = 0;              // which world the workers hold (stream-pool.js)
+let W = null;                    // the current world: { id, store, root, D, side, ... }
+/* Build the world state asks for, and install it unless a newer build
+   was asked for meanwhile (gen !== buildGen): then it returns false and
+   the newer one installs. The worker-built worlds also take `signal`, so
+   a superseded build stops at once (scatter-build.js). */
+const CLASSES_MAX = 300000;
+async function buildWorld(signal, gen){
+  const t0 = performance.now();
+  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, classes = null;
+  if (isScatter(state.world)){
+    // No poses (docs/scatter-plan.md, decision 9): classes over 1.7M nodes
+    // would hold the main thread for seconds, for the pose colour mode only.
+    const desc = scatterDesc({ seed: +state.world.slice(8) || 1, D: state.depth });
+    scatter = await buildScatterInWorkers(desc, { workers: workerCount, signal,
+      onPhase: (t, f) => setBuilding(`building the scatter world, D=${desc.D} … ${t}`, f) });
+    ({ store, root, D } = scatter);
+    scatter.groundTop = groundOf(desc).top;
+    label = `scatter: ${scatter.layout.cells.length.toLocaleString()} specimens on hills`;
+    colour = { kind: 'scatter', ...desc, table: scatter.table };
+  } else if (isLattice(state.world)){
+    // No poses either, as the scatter world (the lattice reaches 2M nodes).
+    const desc = state.lattice, budget = budgetOf(desc);
+    if (!budget.ok) throw new Error(`lattice over budget: ${budget.reason}`);
+    lattice = await buildScatterInWorkers(desc, { workers: buildThreads, signal,
+      onPhase: (t, f) => setBuilding(`building the lattice, R=${desc.R}, ${desc.n.join('×')} … ${t}`, f) });
+    ({ store, root, D } = lattice);
+    lattice.desc = desc;
+    label = `lattice: ${lattice.layout.cells.length.toLocaleString()} specimens, R=${desc.R}`;
+    colour = { ...desc, table: lattice.table };
+  } else if (isKit(state.world)){
+    // On the main thread (decision 1): the default D = 14 is ~40 ms. The
+    // descriptor is the colour: the workers rebuild the plan from it.
+    const desc = state.kit;
+    kit = buildKit(desc);
+    kit.desc = desc;
+    ({ store, root, D } = kit);
+    label = `kit: ${desc.L} levels of 4³ assemblies${desc.ground ? ' on the ground' : ', floating'}`;
+    colour = desc;
+  } else if (isRow(state.world)){
+    const row = ROWS[+state.world.slice(4)], a = automatonOf(CORE, row.cfgFor(state.depth));
+    ({ root, D } = store.fromRadix4(state.depth, a.start, a.step, a.accept, a.keyOf));
+    label = `${AXIS_NAMES[row.axis]}: ${row.label} ${row.depth === '-' ? '' : row.depth}`;
+    colour = { kind: 'row', D };
+  } else {
+    const shape = SHAPES.find(s => 'shape:' + s.name === state.world) || SHAPES[0];
+    D = state.depth;
+    ({ root } = store.fromField(D, fieldOf(shape, D)));
+    label = shape.name;
+    colour = { kind: 'shape', name: shape.name, D };
+  }
+  if (gen !== buildGen) return false;
+  // The counts and the snapshot hold the main thread (the build's last
+  // phase text would sit there meanwhile): say so, and let it paint.
+  // (buildMs stops before that frame's wait.)
+  const tBuilt = performance.now();
+  if (scatter || lattice){
+    setBuilding(`${building.text.replace(/ … .*$/, '')} … preparing ${store.size.toLocaleString()} nodes for the chunk workers`, 1);
+    await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+    if (gen !== buildGen) return false;
+  }
+  const t1 = performance.now();
+  const counts = createCounts(store);
+  // Poses for the kit too while it's small: 6,261 nodes by default, but
+  // libraries in the hundreds make hundreds of thousands.
+  if (!scatter && !lattice && store.size <= CLASSES_MAX) classes = createClasses(store, OH48);
+  const snap = worldSnapshot(store, root, D, { counts, classes, colour });
+  const t2 = performance.now();
+  W = { id: state.world, label, store, root, D, side: 2 ** D, top: Math.max(0, D - 6), nodes: store.size, voxels: counts.of(root),
+        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, classes: classes ? classes.size : null };
+  ray.frame = null;
+  streamer.setWorld(createWorld(store, root, D));
+  pool.setWorld(snap, ++worldEpoch);
+  dirty = true;
+  if (kit) showKit();
+  return true;
+}
+/* Where the eye starts: outside the world's low corner for a row (they
+   fill the cube), above the middle for terrain and the half-space, and
+   just off the surface for the closed shapes. `?eye=` overrides. */
+function defaultView(){
+  const s = W.side;
+  if (isRow(W.id)) return { eye: [-0.15 * s, 1.1 * s, -0.25 * s], yaw: 0.62, pitch: -0.5 };
+  // A couple of specimen heights over the ground, near one edge, looking across the field.
+  if (W.scatter){ const x = 0.5 * s, z = 0.03 * s; return { eye: [x, W.scatter.groundTop(x, z) + 160, z], yaw: 0, pitch: -0.16 }; }
+  // Outside the lattice's low corner, above it, looking at its centre
+  // (the lattice can be much smaller than the world's cube).
+  if (W.lattice){
+    const d = W.lattice.desc, ext = d.n.map(n => n * d.pitch + d.gap), c = ext.map(v => v / 2), r = 1.15 * Math.hypot(...ext);
+    const eye = [c[0] - 0.5 * r, c[1] + 0.45 * r, c[2] - 0.75 * r], v = c.map((x, a) => x - eye[a]);
+    return { eye, yaw: Math.atan2(v[0], v[2]), pitch: Math.atan2(v[1], Math.hypot(v[0], v[2])) };
+  }
+  // The kit from outside its low corner, above it, looking in (the
+  // sketch's far view, kit-plan.md §1): all of it at once, then fly in.
+  if (W.kit) return { eye: [-0.35 * s, 0.9 * s, -0.45 * s], yaw: 0.68, pitch: -0.5 };
+  if (/terrain|half-space/.test(W.id)) return { eye: [0.5 * s, 0.78 * s, 0.08 * s], yaw: 0, pitch: -0.35 };
+  return { eye: [0.5 * s, 0.55 * s, -0.12 * s], yaw: 0, pitch: -0.08 };
+}
+
+/* ---- camera -----------------------------------------------------------------
+   Eye in voxels (double). View = rotation only, since every position the
+   shader sees is already eye-relative. */
+const cam = { eye: [0, 0, 0], yaw: 0, pitch: 0, speedMul: 1 };
+const fwd = () => [Math.cos(cam.pitch) * Math.sin(cam.yaw), Math.sin(cam.pitch), Math.cos(cam.pitch) * Math.cos(cam.yaw)];
+const cross = (a, b) => [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]];
+const norm = a => { const l = Math.hypot(...a) || 1; return a.map(v => v / l); };
+const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+function mul4(A, B){
+  const C = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++){
+    let s = 0; for (let k = 0; k < 4; k++) s += A[k * 4 + r] * B[c * 4 + k]; C[c * 4 + r] = s;
+  }
+  return C;
+}
+/* §9.3's local scale: how far the nearest voxel is (stream-core's
+   clearance, a budgeted best-first search of the DAG; a lower bound when
+   the budget runs out). */
+function clearance(){ return clearanceOf(streamer.S.world, cam.eye, 2048).d; }
+function viewProj(aspect, near, far){
+  const f = 1 / Math.tan(0.45);
+  const P = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), -1, 0, 0, 2 * far * near / (near - far), 0];
+  const z = fwd().map(v => -v), x = norm(cross([0, 1, 0], z)), y = cross(z, x);
+  const V = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, 0, 0, 0, 1];
+  return mul4(P, V);
+}
+// The six planes of a clip matrix (Gribb–Hartmann), each [a, b, c, d] with inside ≥ 0.
+function frustumPlanes(M){
+  const r = i => [M[i], M[4 + i], M[8 + i], M[12 + i]];
+  const r0 = r(0), r1 = r(1), r2 = r(2), r3 = r(3), out = [];
+  for (const [a, sgn] of [[r0, 1], [r0, -1], [r1, 1], [r1, -1], [r2, 1], [r2, -1]])
+    out.push(r3.map((v, i) => v + sgn * a[i]));
+  return out;
+}
+function boxVisible(planes, lo, size){
+  for (const p of planes){
+    const x = lo[0] + (p[0] > 0 ? size : 0), y = lo[1] + (p[1] > 0 ? size : 0), z = lo[2] + (p[2] > 0 ? size : 0);
+    if (p[0] * x + p[1] * y + p[2] * z + p[3] < 0) return false;
+  }
+  return true;
+}
+
+/* ---- input --------------------------------------------------------------- */
+const keys = new Set();
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  keys.add(e.code);
+  if (e.code === 'KeyF') toggleFreeze();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+let drag = null;
+canvas.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); canvas.focus(); });
+canvas.addEventListener('pointermove', e => {
+  if (!drag) return;
+  cam.yaw -= (e.clientX - drag[0]) * 0.004;
+  cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch - (e.clientY - drag[1]) * 0.004));
+  drag = [e.clientX, e.clientY];
+});
+canvas.addEventListener('pointerup', () => { drag = null; saveView(); });
+const setSpeed = m => { cam.speedMul = Math.max(1 / 64, Math.min(64, m)); };
+canvas.addEventListener('wheel', e => { e.preventDefault(); setSpeed(cam.speedMul * Math.exp(-e.deltaY * 0.002)); }, { passive: false });
+const toggleFreeze = () => { state.freeze = !state.freeze; $('freeze').value = state.freeze ? '1' : '0'; dirty = true; };
+/* A gamepad (pad-core.js decides what each stick and button does). The
+   Gamepad API has no input events, only a snapshot to poll, so move()
+   reads it once a frame; a browser lists no pad until one of its buttons
+   is pressed with the page focused, which is why nothing shows on
+   connect. The view is saved when the pad comes to rest, as a drag saves
+   it on release. */
+const padState = { held: [], active: false, id: null };
+function padInput(){
+  const p = pickPad(navigator.getGamepads?.());
+  padState.id = p ? p.id : null;
+  if (!p){ padState.held = []; padState.active = false; return null; }
+  const r = readPad(p, padState.held);
+  padState.held = r.held;
+  if (padState.active && !r.active) saveView();
+  padState.active = r.active;
+  return r;
+}
+
+/* ---- controls and permalink ---------------------------------------------- */
+function saveView(){
+  const q = new URLSearchParams(location.search);
+  q.set('world', state.world); q.set('depth', state.depth);
+  if (isLattice(state.world)){ q.set('lattice', latticeParam(state.lattice)); q.delete('depth'); } else q.delete('lattice');
+  if (isKit(state.world)){ q.set('kit', kitParam(state.kit)); q.delete('depth'); } else q.delete('kit');
+  q.set('eye', cam.eye.map(v => Math.round(v)).join(','));
+  q.set('yaw', cam.yaw.toFixed(3)); q.set('pitch', cam.pitch.toFixed(3));
+  history.replaceState(null, '', '?' + q);
+}
+function bindControls(){
+  $('detail').value = state.detail; $('detailV').textContent = state.detail;
+  $('max').value = String(state.max); $('rule').value = state.rule; $('color').value = String(state.color);
+  $('cache').value = String(state.cache); $('seams').value = state.seams ? '1' : '0';
+  $('ray').value = state.path;
+  $('ray').addEventListener('change', () => setPath($('ray').value));
+  $('world').addEventListener('change', () => { state.world = $('world').value; state.depth = null; fillDepth(); loadWorld(true); });
+  bindLattice(); bindKit();
+  $('depth').addEventListener('change', () => {
+    state.depth = +$('depth').value;
+    if (isKit(state.world)){ const d = kitFromControls(state.depth); if (!d) return; state.kit = d; fillKit(); }
+    loadWorld(true);
+  });
+  $('detail').addEventListener('input', () => { state.detail = +$('detail').value; $('detailV').textContent = state.detail; streamer.setOptions({ detail: state.detail }); dirty = true; });
+  $('max').addEventListener('change', () => { state.max = +$('max').value; streamer.setOptions({ maxChunks: state.max }); dirty = true; });
+  $('rule').addEventListener('change', () => { state.rule = $('rule').value; loadWorld(false); });
+  $('color').addEventListener('change', () => { state.color = +$('color').value; });
+  $('cache').addEventListener('change', () => {
+    state.cache = +$('cache').value;
+    streamer.setOptions({ cacheBytes: cacheBytes(state.cache), cacheMax: state.cache ? DEFAULTS.cacheMax : 1 });
+    streamer.evict();
+  });
+  $('seams').addEventListener('change', () => { state.seams = $('seams').value === '1'; });
+  $('freeze').addEventListener('change', () => { state.freeze = $('freeze').value === '1'; dirty = true; });
+}
+/* A new path only changes which kind each chunk wants: the chunks of the
+   old kind are drawn until their replacements arrive (stream-core §2b).
+   Step 5 flushed the cache here, so the view went blank and reloaded. */
+function setPath(path){
+  state.path = String(path);
+  streamer.setOptions(pathOptions(state.path));
+  dirty = true; ray.frame = null;
+  $('ray').value = state.path;
+  const q = new URLSearchParams(location.search);
+  q.set('ray', state.path); history.replaceState(null, '', '?' + q);
+}
+/* Load the world state asks for. resetView: true, the world's default
+   view; false, that unless the page was opened with ?eye; 'keep', the
+   eye stays (the kit's live controls). Resolves true once it is installed, or
+   false if a newer load superseded it (docs/lattice3d-plan.md): every
+   call bumps buildGen and aborts the build in flight, so dragging the
+   lattice's controls never queues builds; the last one asked for wins.
+   Before the lattice, two scatter builds could race and the slower one
+   would install last. */
+let buildGen = 0, buildAbort = null;
+function loadWorld(resetView){
+  const gen = ++buildGen;
+  if (buildAbort) buildAbort.abort();
+  const ac = buildAbort = new AbortController();
+  setBuilding('building ' + (isLattice(state.world) ? `the lattice, R=${state.lattice.R}, ${state.lattice.n.join('×')}`
+    : isKit(state.world) ? `the kit, D=${state.kit.D}` : state.world) + ' …', null, true);
+  // Let the message paint before a multi-second fromField. The scatter
+  // and lattice worlds build in workers, so the page keeps drawing the
+  // old world meanwhile, and the toast shows the build's progress.
+  return new Promise((resolve, reject) => setTimeout(async () => {
+    try {
+      if (gen !== buildGen || !await buildWorld(ac.signal, gen)) return resolve(false);
+      if (resetView === true || (!resetView && !params.has('eye'))){
+        const v = defaultView(); cam.eye = v.eye; cam.yaw = v.yaw; cam.pitch = v.pitch;
+      }
+      saveView();
+      resolve(true);
+    } catch (e){
+      if (isAbort(e)) return resolve(false);
+      if (isLattice(state.world)) showBudget(`<span class="warn">${e.message}</span>`);
+      if (isKit(state.world)) showKit(`<span class="warn">${e.message}</span>`);
+      reject(e);
+    } finally {
+      if (gen === buildGen){ buildAbort = null; setBuilding('', null); }
+    }
+  }, 20));
+}
+/* What is being built, in the toast (and the HUD, before the first world
+   arrives). fraction: 0…1, or null for "busy, no measure". The toast
+   also counts the seconds since this build began, once a second, so a
+   long phase (a 128³ lattice's graft and prune is one call, several
+   seconds) still shows the page is alive. The count only stops when the
+   main thread itself is held; the spinner turns even then. */
+const building = { text: '', fraction: null, t0: 0, timer: 0 };
+function buildClock(){
+  const s = (performance.now() - building.t0) / 1000;
+  $('toastTime').textContent = s < 1 ? '' : `${Math.floor(s)} s`;
+}
+function setBuilding(text, fraction, fresh = false){
+  if (text && (fresh || !building.timer)) building.t0 = performance.now();
+  if (text && !building.timer) building.timer = setInterval(buildClock, 1000);
+  if (!text && building.timer){ clearInterval(building.timer); building.timer = 0; }
+  building.text = text; building.fraction = fraction ?? null;
+  $('toast').hidden = !text;
+  $('toastText').textContent = text;
+  buildClock();
+  const bar = $('toastBar');
+  bar.classList.toggle('busy', building.fraction === null);
+  bar.firstElementChild.style.width = building.fraction === null ? '' : `${Math.round(100 * building.fraction)}%`;
+  if (!W) $('hud').textContent = text;
+}
+
+/* ---- the frame ------------------------------------------------------------- */
+let dirty = true, lastEye = [NaN, NaN, NaN], lastT = performance.now(), frameMs = 16, auto = true;
+const view = { culled: 0, instances: 0, drawn: 0, near: 1, clear: 0 };
+const LOD_COLORS = Array.from({ length: 24 }, (_, l) => {
+  const h = (l * 0.137 + 0.58) % 1, c = 0.5, x = c * (1 - Math.abs((h * 6) % 2 - 1)), m = 0.32;
+  const k = Math.floor(h * 6);
+  const rgb = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]][k];
+  return rgb.map(v => v + m);
+});
+function chunkColor(d){
+  let h = Math.imul(d.x + 1, 0x27d4eb2d) ^ Math.imul(d.y + 3, 0x165667b1) ^ Math.imul(d.z + 7, 0x9e3779b1) ^ Math.imul(d.lod + 11, 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b) >>> 0;
+  return [0.35 + 0.6 * ((h & 255) / 255), 0.35 + 0.6 * ((h >> 8 & 255) / 255), 0.35 + 0.6 * ((h >> 16 & 255) / 255)];
+}
+
+function move(dt){
+  if (!W) return;
+  view.clear = clearance();
+  const p = padInput();
+  if (p){
+    if (p.pressed.has('RB')) setSpeed(cam.speedMul * 2);
+    if (p.pressed.has('LB')) setSpeed(cam.speedMul / 2);
+    if (p.pressed.has('Y')) toggleFreeze();
+    // Look first, so the move below goes where the eye now points.
+    cam.yaw -= p.look[0] * dt * PAD.YAW;
+    cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch + p.look[1] * dt * PAD.PITCH));
+  }
+  const boost = keys.has('ShiftLeft') || keys.has('ShiftRight') || (p && p.boost);
+  const base = Math.min(W.side / 3, Math.max(2, view.clear)) * cam.speedMul * (boost ? 4 : 1);
+  const f = fwd(), r = norm(cross(f, [0, 1, 0])), step = base * dt / 1000;
+  const m = [0, 0, 0], add = (v, s) => { for (let a = 0; a < 3; a++) m[a] += v[a] * s; };
+  // The sticks are analog: a half push is a quarter of the keys' speed (pad-core's square response).
+  if (p){ add(f, p.move[1]); add(r, p.move[0]); add([0, 1, 0], p.move[2]); }
+  if (keys.has('KeyW')) add(f, 1); if (keys.has('KeyS')) add(f, -1);
+  if (keys.has('KeyD')) add(r, 1); if (keys.has('KeyA')) add(r, -1);
+  if (keys.has('KeyE')) add([0, 1, 0], 1); if (keys.has('KeyQ')) add([0, 1, 0], -1);
+  if (keys.has('ArrowLeft')) cam.yaw += dt * 0.0015; if (keys.has('ArrowRight')) cam.yaw -= dt * 0.0015;
+  if (keys.has('ArrowUp')) cam.pitch = Math.min(1.55, cam.pitch + dt * 0.0012);
+  if (keys.has('ArrowDown')) cam.pitch = Math.max(-1.55, cam.pitch - dt * 0.0012);
+  for (let a = 0; a < 3; a++) cam.eye[a] += m[a] * step;
+}
+
+/* One frame: re-cut if the eye moved, refill the workers, admit results
+   under the budgets, draw. The selftest calls it directly, with draw off. */
+function frame({ draw: doDraw = true } = {}){
+  if (!W) return;
+  const e = cam.eye;
+  if (!state.freeze && (dirty || Math.abs(e[0] - lastEye[0]) + Math.abs(e[1] - lastEye[1]) + Math.abs(e[2] - lastEye[2]) > 0.25)){
+    streamer.update(e); lastEye = e.slice(); dirty = false;
+  }
+  pool.dispatch();
+  streamer.service();
+  if (doDraw) draw();
+}
+function draw(){
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; streamer.setOptions(viewportOptions(w, h)); dirty = true; }
+  canvas.style.width = innerWidth + 'px'; canvas.style.height = innerHeight + 'px';
+  renderView(w, h, state.color, true);
+}
+
+/* GPU time per pass (EXT_disjoint_timer_query_webgl2, where the browser
+   offers it): the answer to "what does a frame cost", which the frame
+   interval can't give, since the display's refresh holds it at 13–17 ms.
+   Results arrive a few frames late and are smoothed. */
+const timerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+const timers = { pending: [], raster: NaN, ray: NaN, samples: { raster: [], ray: [] } };
+function timed(name, fn){
+  if (!timerExt){ fn(); return; }
+  const q = gl.createQuery();
+  gl.beginQuery(timerExt.TIME_ELAPSED_EXT, q);
+  fn();
+  gl.endQuery(timerExt.TIME_ELAPSED_EXT);
+  timers.pending.push({ name, q });
+}
+function pollTimers(){
+  if (!timerExt) return;
+  const disjoint = gl.getParameter(timerExt.GPU_DISJOINT_EXT);
+  while (timers.pending.length){
+    const { name, q } = timers.pending[0];
+    if (!gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) break;
+    timers.pending.shift();
+    const ms = gl.getQueryParameter(q, gl.QUERY_RESULT) / 1e6;
+    gl.deleteQuery(q);
+    if (disjoint) continue;
+    timers[name] = Number.isFinite(timers[name]) ? timers[name] * 0.9 + ms * 0.1 : ms;
+    timers.samples[name].push(ms);
+    if (timers.samples[name].length > 2000) timers.samples[name].shift();
+  }
+}
+
+/* Into framebuffer `out` (null: the canvas), w × h: the raster pass into
+   rasterTarget(w, h), then the traced chunks marked in its stencil and
+   the ray pass on the marked pixels, bounded by the target's depth, then
+   the colour blitted to `out`. The blit is timed with the last pass.
+   `passes` ('both', 'raster', 'ray' or 'none') leaves one out, for the
+   bench's wall-clock fallback, which can't time the passes apart; the ray
+   alone then sees a cleared depth, i.e. no bound. 'mask' is the ray
+   pass itself, stencil and all, in colour mode 10 (white wherever it
+   runs, no march) over a clear: the raster pass runs for its depth, and
+   its colour is cleared away (maskProbe). */
+function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.039, 1], passes = 'both', out = null){
+  const doRaster = passes === 'both' || passes === 'raster' || passes === 'mask', doRay = passes === 'both' || passes === 'ray' || passes === 'mask';
+  const T = rasterTarget(w, h);
+  const blit = () => {
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, T.fb); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, out);
+    gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, out);
+  };
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.fb);
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(...clear);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (!W){ blit(); return; }
+  syncCoverTree();
+  gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE);
+  view.near = Math.max(0.05, Math.min(64, 0.5 * (view.clear || clearance())));
+  const far = view.far = 4 * W.side + Math.hypot(...cam.eye);
+  const M = viewProj(w / h, view.near, far), planes = frustumPlanes(M);
+  const run = timeIt ? timed : (_, fn) => fn();
+  gl.useProgram(prog);
+  gl.uniformMatrix4fv(U.uViewProj, false, M);
+  gl.uniform3f(U.uEyeN, cam.eye[0] / W.side, cam.eye[1] / W.side, cam.eye[2] / W.side);
+  gl.uniform1f(U.uInvSide, 1 / W.side);
+  gl.uniform1i(U.uColorMode, colorMode);
+  gl.uniform1f(U.uFog, 1 / (1.5 * W.side));
+  gl.uniform1f(U.uDepthScale, 1 / (8 * W.side));
+  const list = [];
+  for (const d of streamer.frame.draw){
+    const e = streamer.entry(d.key);
+    if (!e || !e.gpu) continue;
+    const rel = [d.lo[0] - cam.eye[0], d.lo[1] - cam.eye[1], d.lo[2] - cam.eye[2]];
+    list.push({ d, e, rel, dist: Math.hypot(rel[0] + d.size / 2, rel[1] + d.size / 2, rel[2] + d.size / 2) });
+  }
+  list.sort((a, b) => a.dist - b.dist);
+  view.culled = 0; view.instances = 0; view.drawn = 0; view.drawList = [];
+  view.rayChunks = list.filter(q => q.e.kind === 'page').length;
+  const rayPass = view.rayChunks > 0 && doRay;
+  run('raster', () => {
+    for (const { d, e, rel } of list){
+      if (e.kind === 'page' || !doRaster) continue;
+      if (!boxVisible(planes, rel, d.size)){ view.culled++; continue; }
+      const open = state.seams ? d.open : 0, n = open ? e.total : e.count;
+      if (!n) continue;
+      gl.uniform3f(U.uOrigin, rel[0], rel[1], rel[2]);
+      gl.uniform1f(U.uCellSize, e.cellSize);
+      gl.uniform1ui(U.uOpenSides, open);
+      gl.uniform3fv(U.uLodColor, LOD_COLORS[d.lod]);
+      gl.uniform3fv(U.uChunkColor, chunkColor(d));
+      gl.uniform1i(U.uDrawIndex, view.drawn);
+      view.drawList[view.drawn] = d.key;
+      gl.bindVertexArray(e.gpu.vao);
+      gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_BYTE, 0, n);
+      view.drawn++; view.instances += n;
+    }
+    gl.bindVertexArray(null);
+    if (!rayPass) blit();
+  });
+  view.marked = 0;
+  if (!rayPass){
+    // No ray pass this frame: don't let the HUD show the last one's time.
+    if (timeIt) timers.ray = NaN;
+    return;
+  }
+  run('ray', () => {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, T.rayFb);
+    if (passes === 'mask'){ gl.clearColor(...clear); gl.clear(gl.COLOR_BUFFER_BIT); }
+    if (state.stencil && !(view.marked = markTraced(M, planes, list, T))){ blit(); return; }
+    const discardMiss = state.rayMiss === 'discard', RP = discardMiss ? RUD : RU;
+    gl.useProgram(discardMiss ? rayProgDiscard : rayProg);
+    bindRayTextures(RP);
+    bindRasterDepth(RP, T);
+    setRayCamera(RP, w, h);
+    gl.uniform3f(RP.uEyeN, cam.eye[0] / W.side, cam.eye[1] / W.side, cam.eye[2] / W.side);
+    gl.uniform1f(RP.uInvSide, 1 / W.side);
+    gl.uniform3fv(RP.uLodColors, LOD_COLORS.flat());
+    gl.uniform1i(RP.uColorMode, passes === 'mask' ? 10 : colorMode);
+    gl.uniform1f(RP.uFog, 1 / (1.5 * W.side));
+    gl.uniform1f(RP.uDepthScale, 1 / (8 * W.side));
+    gl.disable(gl.CULL_FACE); gl.disable(gl.DEPTH_TEST);
+    if (!discardMiss){ gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); }
+    gl.bindVertexArray(emptyVAO);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindVertexArray(null);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.STENCIL_TEST);
+    blit();
+  });
+}
+function bindRayTextures(u){
+  [ray.tree, ray.pages, ray.bricks, ray.pageAttr, ray.heap].forEach((tex, i) => { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, tex.t); });
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1i(u.uTree, 0); gl.uniform1i(u.uPages, 1); gl.uniform1i(u.uBricks, 2);
+  gl.uniform1i(u.uPageAttr, 3); gl.uniform1i(u.uAttrHeap, 4);
+  gl.uniform1i(u.uTop, W.top); gl.uniform1i(u.uD, W.D); gl.uniform1i(u.uSteps, 1024);
+}
+// The raster target's depth for GLSL_RAY_BOUND, with the planes it was drawn with.
+function bindRasterDepth(u, T){
+  gl.activeTexture(gl.TEXTURE0 + RASTER_DEPTH_UNIT); gl.bindTexture(gl.TEXTURE_2D, T.depth);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1i(u.uRasterDepth, RASTER_DEPTH_UNIT);
+  gl.uniform2f(u.uNearFar, view.near, view.far);
+}
+// The camera basis viewProj uses, with right and up scaled by the half-fov
+// tangent, so a pixel's ray is fwd + ndc.x · rightT + ndc.y · upT.
+function rayBasis(aspect){
+  const tanH = Math.tan(0.45), f = fwd(), z = f.map(v => -v), x = norm(cross([0, 1, 0], z)), y = cross(z, x);
+  return { fwd: f, rightT: x.map(v => v * tanH * aspect), upT: y.map(v => v * tanH) };
+}
+function setRayCamera(u, w, h, vx = 0, vy = 0){
+  const B = rayBasis(w / h);
+  gl.uniform3f(u.uEye, cam.eye[0], cam.eye[1], cam.eye[2]);
+  gl.uniform3fv(u.uFwd, B.fwd); gl.uniform3fv(u.uRightT, B.rightT); gl.uniform3fv(u.uUpT, B.upT);
+  gl.uniform4f(u.uViewport, vx, vy, w, h);
+}
+
+const k = n => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
+const mb = b => (b / 1048576).toFixed(1) + ' MB';
+function hud(){
+  if (!W){ if (building.text) $('hud').textContent = building.text; return; }
+  const S = streamer.S, sel = streamer.sel, fr = streamer.frame;
+  const byLod = {};
+  if (sel) for (const l of sel.leaves) byLod[l.lod] = (byLod[l.lod] || 0) + 1;
+  const lods = Object.keys(byLod).sort((a, b) => a - b).map(l => `${l}:${byLod[l]}`).join(' ');
+  const missing = sel ? [...sel.nodes.keys()].filter(key => !S.cache.has(key)).length : 0;
+  const switching = sel ? [...sel.nodes.keys()].filter(key => streamer.stale(key)).length : 0;
+  $('hud').innerHTML =
+    `<b>${W.label}</b>  D=${W.D} (${W.side.toLocaleString()}³)  ${k(W.nodes)} nodes, built ${W.buildMs.toFixed(0)} + ${W.prepMs.toFixed(0)} ms\n` +
+    (W.scatter ? `<span class="sec">scatter</span> ${W.scatter.layout.cells.length.toLocaleString()} unique specimens (${W.scatter.skipped} recipes skipped as repeats), ` +
+      `${W.scatter.blocks.toLocaleString()} blocks, ${k(W.scatter.dropped || 0)} nodes pruned, ${W.scatter.threads ? `${W.scatter.threads} threads` : '<span class="warn">main thread</span>'}\n` : '') +
+    (W.lattice ? `<span class="sec">lattice</span> R=${W.lattice.desc.R} (${stackOf(W.lattice.desc.R).map(l => l.radix).join('·')}), ${W.lattice.desc.n.join('×')}, gap ${W.lattice.desc.gap}${W.lattice.desc.align ? ' (pitch aligned)' : ''}, ` +
+      `${W.lattice.desc.axes}${W.lattice.desc.rotate ? ', turned' : ''}: ` +
+      (W.lattice.desc.axes === 'traits' ? `${W.lattice.layout.cells.length.toLocaleString()} trait cells (not fingerprinted)` :
+        `${W.lattice.unique.toLocaleString()} unique` + (W.lattice.repeats ? ` <span class="warn">${W.lattice.repeats.toLocaleString()} cells repeat</span>` : '') +
+        `, ${W.lattice.skipped.toLocaleString()} recipes skipped`) + `, ${W.lattice.blocks.toLocaleString()} blocks, ${k(W.lattice.dropped || 0)} nodes pruned, ` +
+      `${W.lattice.threads ? `${W.lattice.threads} threads` : '<span class="warn">main thread</span>'} ${(W.buildMs / 1000).toFixed(1)} s\n` : '') +
+    (W.kit ? `<span class="sec">kit</span> libraries ${W.kit.desc.libs.join(', ')}, ${W.kit.desc.ornaments} ornaments, ${W.kit.desc.ground ? 'ground and gravity' : 'floating'}, ` +
+      `colour in level-${W.kit.desc.colourLevel} frames: ${k(W.voxels)} voxels, ${W.classes ? `${W.classes.toLocaleString()} Oh classes, ` : ''}${k(W.kit.dropped)} nodes pruned\n` : '') +
+    `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}\n` +
+    `<span class="sec">cut</span> ${sel ? sel.leaves.length : 0} leaves + ${sel ? sel.nodes.size - sel.leaves.length : 0} split  (lod ${lods})${sel && sel.capped ? `  <span class="warn">capped ${sel.capped}</span>` : ''}\n` +
+    `<span class="sec">resident</span> ${S.cache.size} chunks, ${mb(S.cacheBytes)}  missing ${missing}${state.cache ? '' : '  <span class="warn">tiny cache</span>'}\n` +
+    `<span class="sec">drawn</span> <b>${view.drawn}</b> chunks (${fr.draw.length} in cover, ${view.culled} culled)  <b>${k(view.instances)}</b> cubes  ${fr.draw.filter(d => d.open).length} with open sides\n` +
+    `<span class="sec">fallback</span> ${fr.up} coarser, ${fr.down} finer${fr.holes.length ? `  <span class="warn">${fr.holes.length} holes</span>` : ''}${fr.maxUp > 1 ? `  up to ${fr.maxUp} lods` : ''}\n` +
+    `<span class="sec">jobs</span> ${pool.mode} ${pool.busy}/${pool.liveWorkers || workerCount}  pending ${S.pending.size}  waiting ${S.results.length}  done ${k(pool.completed)}  discarded ${S.stats.discarded}\n` +
+    `<span class="sec">path</span> ${pathLabel(state.path)}: <b>${view.rayChunks}</b> chunks traced, ${view.drawn} as cubes  switching ${switching}, switched ${S.stats.switches}` +
+      (view.rayChunks ? state.stencil ? `  stencil ${view.marked} boxes` : '  <span class="warn">full-screen ray pass</span>' : '') + '\n' +
+    (ray.pageCount ? `<span class="sec">ray</span> ${ray.pageCount} pages, ${ray.brickPool.size.toLocaleString()} bricks (${ray.uploads.toLocaleString()} uploaded), tree ${ray.treeNodes}\n` : '') +
+    `<span class="sec">words</span> ${mb(4 * [...S.cache.values()].reduce((a, e) => a + (e.words || 0), 0))} of the cache${ray.pageCount ? `, heap ${mb(4 * ray.heapAlloc.used)} of ${mb(4 * ray.heapAlloc.capacity)}` : ''}${ray.heapFull ? `  <span class="warn">heap full: ${ray.heapFull} pages without words</span>` : ''}\n` +
+    `<span class="sec">gpu</span> ${timerExt ? `raster ${Number.isFinite(timers.raster) ? timers.raster.toFixed(2) : '–'} ms  ray ${Number.isFinite(timers.ray) ? timers.ray.toFixed(2) : '–'} ms` : 'no timer extension'}\n` +
+    `<span class="sec">frame</span> ${frameMs.toFixed(1)} ms rAF interval  cut ${S.stats.selectMs.toFixed(2)}  cover ${S.stats.coverMs.toFixed(2)}  upload ${(S.stats.lastUpload / 1024).toFixed(0)} KB` +
+    (benchHud.status || benchHud.text ? `\n<span class="bench">${benchHud.status || benchHud.text}</span>` : '');
+  window.__stream = { state: { ...state }, world: { id: W.id, D: W.D, nodes: W.nodes, buildMs: W.buildMs,
+      scatter: W.scatter ? { specimens: W.scatter.layout.cells.length, skipped: W.scatter.skipped, blocks: W.scatter.blocks,
+                             threads: W.scatter.threads, fellBack: W.scatter.fellBack || null, ms: W.scatter.ms } : null,
+      lattice: W.lattice ? { param: latticeParam(W.lattice.desc), specimens: W.lattice.layout.cells.length, unique: W.lattice.unique, repeats: W.lattice.repeats,
+                             skipped: W.lattice.skipped, blocks: W.lattice.blocks, dropped: W.lattice.dropped, threads: W.lattice.threads, fellBack: W.lattice.fellBack || null, ms: W.lattice.ms } : null,
+      kit: W.kit ? { param: kitParam(W.kit.desc), seed: W.kit.desc.seed, nodes: W.kit.nodes, dropped: W.kit.dropped, classes: W.classes, ms: W.kit.totalMs } : null },
+    eye: cam.eye.slice(), view: { ...view }, gpu: { ...gpu },
+    cut: sel ? { leaves: sel.leaves.length, nodes: sel.nodes.size, capped: sel.capped } : null,
+    resident: S.cache.size, cacheBytes: S.cacheBytes, missing, drawn: fr.draw.length, holes: fr.holes.length,
+    pending: S.pending.size, mode: pool.mode, stats: { ...S.stats },
+    ray: { path: state.path, density: state.density, switching, pages: ray.pageCount, bricks: ray.brickPool.size, uploads: ray.uploads, tree: ray.treeNodes,
+           heapWords: ray.heapAlloc.used, heapFull: ray.heapFull },
+    gpuMs: { raster: timers.raster, ray: timers.ray } };
+}
+
+let hudTick = 0;
+function loop(now){
+  const dt = Math.min(100, now - lastT); lastT = now;
+  frameMs = frameMs * 0.9 + dt * 0.1;
+  if (auto){
+    move(dt);
+    pollTimers();
+    // ?quiet: don't draw until the view has converged, so that a slow GPU
+    // (SwiftShader, in test/browser/stream-shots.mjs) doesn't hold up the
+    // once-a-frame admission while the cut fills.
+    const quiet = params.has('quiet') && !isConverged();
+    frame({ draw: !quiet });
+    if (hudTick++ % 6 === 0) hud();
+  }
+  requestAnimationFrame(loop);
+}
+
+/* ---- selftest ---------------------------------------------------------------
+   streamSelftest(): the real streamer, pool and workers on scripted
+   flights, with the invariants stream-core.test.js holds in Node checked
+   on every frame here too:
+     overlap   no drawn chunk lies under another drawn chunk;
+     resident  every drawn chunk is resident (and has a buffer if it has
+               records);
+     upload    a frame that admits more than one result stays in budget;
+     evict     the cache only exceeds its budget by protected chunks;
+     holes     none once the pinned top chunk is in;
+   and each phase must end converged (the whole cut resident, nothing
+   pending). The fourth phase builds a scatter world (16 specimens) in its
+   own workers and streams it; the last asks for a lattice at R = 64 and,
+   before it lands, for another at R = 11, so the first build must be
+   superseded (resolve false, its workers gone) and the second converge;
+   and a kit (docs/kit-plan.md) at D = 10 is built on the main thread and
+   streamed, its colour field rebuilt in the workers from its descriptor. Frames don't draw, because SwiftShader can't draw a million
+   cubes per frame; a draw at the end of each phase must light pixels. */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function invariants(phase, report, { noHoles }){
+  const S = streamer.S, fr = streamer.frame, drawn = new Set(fr.draw.map(d => d.key));
+  const bad = msg => { if (report.violations.length < 20) report.violations.push(`${phase} frame ${report.frames}: ${msg}`); };
+  for (const d of fr.draw){
+    const e = S.cache.get(d.key);
+    if (!e) bad(`${d.key} drawn, not resident`);
+    else if ((e.total || e.kind === 'page') && !e.gpu) bad(`${d.key} drawn without a buffer or page`);
+    // Step 6, as in stream-core.test.js's frameChecker: one word per
+    // record, or per shown cell of a page.
+    else if (e.kind === 'records' ? e.words !== e.total : e.words !== e.shown) bad(`${d.key}: ${e.words} words for ${e.kind === 'records' ? e.total + ' records' : e.shown + ' shown cells'}`);
+    for (let l = d.lod + 1; l <= W.D - 6; l++){
+      const s = l - d.lod;
+      if (drawn.has(keyOf(l, d.x >> s, d.y >> s, d.z >> s))) bad(`${d.key} drawn under ${keyOf(l, d.x >> s, d.y >> s, d.z >> s)}`);
+    }
+  }
+  if (S.stats.lastInstalls > 1 && S.stats.lastUpload > S.cfg.uploadBytes) bad(`uploaded ${S.stats.lastUpload}`);
+  if (S.cacheBytes > S.cfg.cacheBytes){
+    const keep = streamer.protectedKeys();
+    for (const key of S.cache.keys()) if (!keep.has(key)){ bad(`over budget with ${key} unprotected`); break; }
+  }
+  if (noHoles && S.cache.has(S.pinned) && fr.holes.length) bad(`${fr.holes.length} holes`);
+  // The path (stream-core §2b), as frameChecker holds it: the cache's bytes
+  // are its entries', and every chunk of the cut wants the kind the rule,
+  // written again here, gives it.
+  let bytes = 0;
+  for (const e of S.cache.values()) bytes += e.bytes;
+  if (bytes !== S.cacheBytes) bad(`cacheBytes ${S.cacheBytes}, entries hold ${bytes}`);
+  const sel = streamer.sel, cfg = S.cfg, want = new Map();
+  if (sel) for (const c of sel.nodes.values()){
+    const e = S.cache.get(c.key), parent = c.parent ? want.get(c.parent.key) : 'records';
+    let k;
+    if (cfg.kindRule) k = cfg.kindRule(c);
+    else if (c.lod >= cfg.rayLod) k = 'page';
+    else if (cfg.rayDensity === Infinity) k = 'records';
+    else if (!e) k = parent;
+    else if (e.recordCount === null) k = e.kind;
+    else {
+      const angle = c.size / (c.dist + c.size / 2), perPixel = e.recordCount / Math.min(cfg.screenPixels, (cfg.pxPerRadian * angle) ** 2);
+      // Linear in occupancy from the empty chunk's threshold to the full one's.
+      const full = cfg.rayDensityFull ?? cfg.rayDensity, o = e.occupancy || 0;
+      const threshold = (1 - o) * cfg.rayDensity + o * full;
+      k = e.kind === 'page' ? (perPixel >= threshold / cfg.densityBand ? 'page' : 'records')
+                            : (perPixel > threshold * cfg.densityBand ? 'page' : 'records');
+    }
+    want.set(c.key, k);
+    if (streamer.kindOf(c.key) !== k){ bad(`${c.key} wants ${streamer.kindOf(c.key)}, the rule says ${k}`); break; }
+  }
+}
+// Converged: the whole cut resident, each chunk in the kind it wants.
+const isConverged = () => {
+  const S = streamer.S, sel = streamer.sel;
+  return sel && S.pending.size === 0 && S.results.length === 0 && [...sel.nodes.keys()].every(key => S.cache.has(key) && !streamer.stale(key))
+      && streamer.frame.holes.length === 0;
+};
+function litPixels(){
+  draw();
+  const px = new Uint8Array(4 * 96 * 96);
+  gl.readPixels(Math.max(0, (canvas.width >> 1) - 48), Math.max(0, (canvas.height >> 1) - 48), 96, 96, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  let lit = 0;
+  for (let i = 0; i < px.length; i += 4) if (px[i] + px[i + 1] + px[i + 2] > 40) lit++;
+  return lit;
+}
+window.streamSelftest = async function streamSelftest(opts = {}){
+  const t0 = performance.now(), saved = { auto, cache: state.cache };
+  auto = false;
+  const report = { frames: 0, violations: [], phases: [], glError: 0 };
+  const frameMsReal = opts.frameMs ?? 16;
+  async function run(phase, { frames = 0, path = null, until = null, max = 3000, noHoles = true }){
+    const p = { phase, frames: 0, converged: false, maxHoles: 0, maxUp: 0, sawUp: false };
+    for (let f = 0; f < max; f++){
+      if (path) cam.eye = path(f);
+      frame({ draw: false });
+      report.frames++; p.frames++;
+      invariants(phase, report, { noHoles });
+      const fr = streamer.frame;
+      p.maxHoles = Math.max(p.maxHoles, fr.holes.length); p.maxUp = Math.max(p.maxUp, fr.maxUp); p.sawUp ||= fr.up > 0;
+      if (f >= frames && (!until || until())){ p.converged = !until || until(); break; }
+      await sleep(frameMsReal);
+    }
+    p.converged = until ? until() : true;
+    p.lit = litPixels();
+    p.resident = streamer.S.cache.size; p.drawn = streamer.frame.draw.length;
+    report.phases.push(p);
+    hud();
+  }
+  const lerp = (a, b, n) => f => a.map((v, i) => v + (b[i] - v) * Math.min(1, f / n));
+  // 1. A testbed row: converge, fly through it, stop.
+  state.world = opts.world || 'row:146'; state.depth = opts.depth || 7; fillWorlds(); fillDepth();
+  await loadWorld(true);
+  const s = W.side, A = [0.5 * s, 0.62 * s, 0.5 * s], B = [0.2 * s, 0.35 * s, 0.8 * s];
+  cam.eye = A.slice(); cam.yaw = 2.4; cam.pitch = -0.3;
+  await run('converge', { until: isConverged });
+  await run('flight', { frames: opts.flightFrames || 120, path: lerp(A, B, opts.flightFrames || 120) });
+  await run('stop', { until: isConverged });
+  // 2. §6: a tiny cache on the same row, flying back.
+  streamer.setOptions({ cacheBytes: 1, cacheMax: 1 }); streamer.evict();
+  await run('tiny cache flight', { frames: opts.flightFrames || 120, path: lerp(B, A, opts.flightFrames || 120) });
+  await run('tiny cache stop', { until: isConverged });
+  report.tinyResident = streamer.S.cache.size;
+  report.tinyProtected = streamer.protectedKeys().size;
+  streamer.setOptions({ cacheBytes: cacheBytes(saved.cache), cacheMax: saved.cache ? DEFAULTS.cacheMax : 1 });
+  // 3. A world switch while jobs are in flight: a shape, built top-down.
+  dirty = true; frame({ draw: false });
+  state.world = 'shape:sphere'; state.depth = 9; fillWorlds(); fillDepth();
+  await loadWorld(true);
+  await run('switch to sphere', { until: isConverged });
+  // 4. The scatter world (docs/scatter-plan.md): built in workers of its
+  // own (scatter-build.js), then streamed like any other DAG.
+  state.world = 'scatter:1'; state.depth = 9; fillWorlds(); fillDepth();
+  await loadWorld(true);
+  await run('switch to scatter', { until: isConverged });
+  report.scatter = { specimens: W.scatter.layout.cells.length, skipped: W.scatter.skipped, threads: W.scatter.threads,
+                     fellBack: W.scatter.fellBack || null, nodes: W.nodes, voxels: W.voxels, buildMs: Math.round(W.buildMs) };
+  // 5. The lattice world (docs/lattice3d-plan.md): one build superseded by
+  // the next, as dragging its controls does, then the second streamed.
+  const savedLattice = state.lattice;
+  state.world = 'lattice:1'; state.lattice = latticeDesc({ R: 64, n: 4 }); fillWorlds(); fillDepth();
+  const first = loadWorld(true);
+  await sleep(opts.supersedeMs ?? 150);
+  state.lattice = latticeDesc({ R: 11, n: [6, 5, 4], rotate: true }); fillDepth();
+  const second = loadWorld(true);
+  const [firstLanded, secondLanded] = await Promise.all([first, second]);
+  await run('switch to lattice', { until: isConverged });
+  report.lattice = { firstLanded, secondLanded, param: latticeParam(W.lattice.desc), specimens: W.lattice.layout.cells.length,
+                     unique: W.lattice.unique, threads: W.lattice.threads, fellBack: W.lattice.fellBack || null,
+                     nodes: W.nodes, voxels: W.voxels, D: W.D, buildMs: Math.round(W.buildMs), toastHidden: $('toast').hidden };
+  state.lattice = savedLattice;
+  // 6. The kit world (docs/kit-plan.md): built here, streamed like any DAG.
+  const savedKit = state.kit;
+  state.world = 'kit:1'; state.kit = kitDesc({ D: 10 }); fillWorlds(); fillDepth();
+  await loadWorld(true);
+  await run('switch to kit', { until: isConverged });
+  report.kit = { param: kitParam(W.kit.desc), nodes: W.nodes, voxels: W.voxels, D: W.D, classes: W.classes, buildMs: Math.round(W.buildMs),
+                 words: [...streamer.S.cache.values()].reduce((a, e) => a + (e.words || 0), 0) };
+  state.kit = savedKit;
+  report.glError = gl.getError();
+  report.mode = pool.mode; report.completed = pool.completed; report.discarded = streamer.S.stats.discarded;
+  report.gpu = { ...gpu };
+  report.ms = Math.round(performance.now() - t0);
+  auto = saved.auto;
+  window.__streamSelftest = report;
+  return report;
+};
+
+/* ---- ray probes (docs/ray-plan.md, decision 8) ------------------------------
+   The same GLSL_RAY text the ray pass runs, rendered into a 32-bit integer
+   target and read back:
+     classify  for a hashed sample of voxels (the hash is written twice,
+               here and in JS, with the same integer ops), classifyPages's
+               answer, which must equal classifyPagesCPU's EXACTLY;
+     trace     for a W × H grid of camera rays, (hit | truncated << 1 |
+               steps << 2, cell), held to traceCPU in float64 with
+               sol-v4's graze excuses;
+     attr      (step 6) for the same rays, the word GLSL_RAY_ATTR reads
+               at the GPU's hit cell, which must equal ray-core's
+               hitAttrCPU at that cell EXACTLY (so a trace graze can't
+               hide a lookup bug, or excuse one). Like the trace probe it
+               sees ray pages only, so in a hybrid view a ray that passes
+               through a raster chunk can hit a buried cell behind it,
+               which has no word ("none"): the raster hides it on screen. */
+const PROBE_HEAD = `#version 300 es
+precision highp float;
+precision highp int;
+${GLSL_RAY}
+${GLSL_RAY_ATTR}
+${GLSL_RAY_CAMERA}
+${GLSL_RAY_BOUND}
+uniform int uSeed;
+uniform int uProbeW;
+out ivec4 outProbe;
+uint hash32(uint x){ x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+`;
+const PROBE_CLASSIFY_FS = PROBE_HEAD + `
+void main(){
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  uint i = uint(px.y * uProbeW + px.x), m = uint((1 << uD) - 1);
+  ivec3 v = ivec3(hash32(i * 3u + uint(uSeed)) & m, hash32(i * 3u + 1u + uint(uSeed)) & m, hash32(i * 3u + 2u + uint(uSeed)) & m);
+  int size = classifyPages(v);
+  outProbe = ivec4(size, v);
+}`;
+const PROBE_TRACE_FS = PROBE_HEAD + `
+void main(){
+  vec3 d = rayDirAt(gl_FragCoord.xy);
+  float t; ivec3 cell; int axis;
+  bool hit = traceRay(uEye, d, 0.0, 3.0e38, t, cell, axis);
+  outProbe = ivec4((hit ? 1 : 0) | (rayTruncated ? 2 : 0) | (raySteps << 2), cell);
+}`;
+// The ray pass's own march, near plane to raster depth (boundProbe).
+const PROBE_BOUND_FS = PROBE_HEAD + `
+void main(){
+  vec3 d; float t; ivec3 cell; int axis;
+  bool hit = traceBounded(gl_FragCoord.xy, d, t, cell, axis);
+  outProbe = ivec4((hit ? 1 : 0) | (rayTruncated ? 2 : 0) | (raySteps << 2), cell);
+}`;
+// The raster target's depth as the ray pass reads it, as float bits.
+const PROBE_DEPTH_FS = PROBE_HEAD + `
+void main(){
+  outProbe = ivec4(floatBitsToInt(texelFetch(uRasterDepth, ivec2(gl_FragCoord.xy), 0).r), 0, 0, 0);
+}`;
+// Words never use bit 31 (the A byte is reserved and written 0), so as an
+// int a word is >= 0, ATTR_NONE is -1, and -2 marks a miss.
+const PROBE_ATTR_FS = PROBE_HEAD + `
+void main(){
+  vec3 d = rayDirAt(gl_FragCoord.xy);
+  float t; ivec3 cell; int axis;
+  bool hit = traceRay(uEye, d, 0.0, 3.0e38, t, cell, axis);
+  outProbe = ivec4(hit ? int(rayHitAttr(cell)) : -2, cell);
+}`;
+const hash32 = x => { x >>>= 0; x ^= x >>> 16; x = Math.imul(x, 0x7feb352d) >>> 0; x ^= x >>> 15; x = Math.imul(x, 0x846ca68b) >>> 0; x ^= x >>> 16; return x >>> 0; };
+let probes = null;
+function probeRun(fs, w, h, setup){
+  if (!probes){
+    const mk = f => { const p = link(RAY_VS, f); return { p, u: uniformsOf(p, [...RAY_UNIFORMS, 'uSeed', 'uProbeW']) }; };
+    probes = { classify: mk(PROBE_CLASSIFY_FS), trace: mk(PROBE_TRACE_FS), attr: mk(PROBE_ATTR_FS),
+               bound: mk(PROBE_BOUND_FS), depth: mk(PROBE_DEPTH_FS) };
+  }
+  const P = probes[fs], tex = gl.createTexture(), fb = gl.createFramebuffer();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32I, w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.viewport(0, 0, w, h);
+  gl.disable(gl.DEPTH_TEST);
+  gl.useProgram(P.p);
+  syncCoverTree();
+  bindRayTextures(P.u);
+  gl.uniform1i(P.u.uProbeW, w);
+  setup(P.u);
+  gl.bindVertexArray(emptyVAO);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindVertexArray(null);
+  const out = new Int32Array(4 * w * h);
+  gl.readPixels(0, 0, w, h, gl.RGBA_INTEGER, gl.INT, out);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fb); gl.deleteTexture(tex);
+  return out;
+}
+// ray-core's R: the CPU mirrors, as the textures hold them.
+const rayState = () => ({ tree: ray.treeCPU, pages: ray.pagesCPU, bricks: ray.bricksCPU, top: W.top, D: W.D,
+                          pageAttr: ray.pageAttrCPU, heap: ray.heapCPU });
+function classifyProbe(seed, w = 256, h = 256){
+  const got = probeRun('classify', w, h, u => gl.uniform1i(u.uSeed, seed));
+  const R = rayState(), m = 2 ** W.D - 1, rep = { cells: 0, mismatches: 0, hits: 0, first: [] };
+  for (let i = 0; i < w * h; i++){
+    const v = [0, 1, 2].map(a => hash32(i * 3 + a + seed) & m);
+    const want = classifyPagesCPU(R, v[0], v[1], v[2]), g = got[4 * i];
+    rep.cells++; if (want === 0) rep.hits++;
+    const sameCell = got[4 * i + 1] === v[0] && got[4 * i + 2] === v[1] && got[4 * i + 3] === v[2];
+    if (g !== want || !sameCell){ rep.mismatches++; if (rep.first.length < 6) rep.first.push({ v, want, got: Array.from(got.subarray(4 * i, 4 * i + 4)) }); }
+  }
+  return rep;
+}
+function attrProbe(w = 128, h = 96){
+  const got = probeRun('attr', w, h, u => setRayCamera(u, w, h));
+  const R = rayState(), rep = { rays: w * h, hits: 0, none: 0, mismatches: 0, first: [] };
+  for (let i = 0; i < w * h; i++){
+    const g = got[4 * i];
+    if (g === -2) continue;
+    rep.hits++;
+    const cell = [got[4 * i + 1], got[4 * i + 2], got[4 * i + 3]], want = hitAttrCPU(R, cell), gw = g >>> 0;
+    if (want === ATTR_NONE) rep.none++;
+    if (gw !== want){ rep.mismatches++; if (rep.first.length < 6) rep.first.push({ cell, want, got: gw }); }
+  }
+  return rep;
+}
+/* sol-v4's excuses, in voxels: a mismatch passes only when the exact ray
+   comes within GRAZE of a cell boundary. "near": the shader's voxel is
+   visible to the ray and the exact ray passes within GRAZE of it. "clip":
+   the exact ray never gets more than GRAZE inside the voxel the shader
+   missed. And a hit inside the same occupied coarse cell is the same hit:
+   the voxel a ray enters a 2^lod cell by is float32's choice. GRAZE
+   scales with the coordinates, since float32 does. */
+function rayBox(o, d, lo, hi){
+  let t0 = -Infinity, t1 = Infinity;
+  for (let a = 0; a < 3; a++){ const ta = (lo[a] - o[a]) / d[a], tb = (hi[a] - o[a]) / d[a]; t0 = Math.max(t0, Math.min(ta, tb)); t1 = Math.min(t1, Math.max(ta, tb)); }
+  return t0 <= t1 && t1 >= 0 ? [t0, t1] : null;
+}
+// One ray, the GPU's answer (gHit, gc) against traceCPU's (cpu): 'same',
+// 'sameCoarse', 'graze' or 'bad', by the excuses above.
+function gradeRay(R, eye, d, gHit, gc, cpu, GRAZE){
+  const coarse = (c, l) => c.map(v => v >> l);
+  const occupied = c => c && classifyPagesCPU(R, c[0], c[1], c[2]) === 0;
+  if (gHit === cpu.hit && (!gHit || gc.every((v, a) => v === cpu.cell[a]))) return 'same';
+  if (gHit && cpu.hit && occupied(gc)){
+    // Same coarse cell: find the lod by the page's cell size around gc.
+    let same = false;
+    for (let l = 0; l <= W.D && !same; l++){
+      const a = coarse(gc, l), b = coarse(cpu.cell, l);
+      if (a.every((v, k) => v === b[k])){
+        // Every voxel of that 2^l block occupied means one coarse cell.
+        const lo = a.map(v => v << l);
+        same = classifyPagesCPU(R, lo[0], lo[1], lo[2]) === 0 && classifyPagesCPU(R, lo[0] + (1 << l) - 1, lo[1] + (1 << l) - 1, lo[2] + (1 << l) - 1) === 0 && l <= 12;
+      }
+    }
+    if (same) return 'sameCoarse';
+  }
+  const near = gHit && occupied(gc) && !!rayBox(eye, d, gc.map(v => v - GRAZE), gc.map(v => v + 1 + GRAZE));
+  const clip = cpu.hit && !rayBox(eye, d, cpu.cell.map(v => v + GRAZE), cpu.cell.map(v => v + 1 - GRAZE));
+  let ok;
+  if (gHit && cpu.hit){ const rb = near && rayBox(eye, d, gc.map(v => v - GRAZE), gc.map(v => v + 1 + GRAZE)); ok = near && (clip || rb[0] <= cpu.t + 2 * GRAZE); }
+  else ok = gHit ? near : clip;
+  return ok ? 'graze' : 'bad';
+}
+// Pixel (x, y)'s ray as the shader makes it (rayDirAt), in float64.
+function probeDir(B, x, y, w, h){
+  const nx = (x + 0.5) / w * 2 - 1, ny = (y + 0.5) / h * 2 - 1;
+  const d = B.fwd.map((f, a) => f + nx * B.rightT[a] + ny * B.upT[a]), n = Math.hypot(...d);
+  return d.map(v => { v /= n; return (v >= 0 ? 1 : -1) * Math.max(Math.abs(v), 1e-6); });
+}
+const stepStats = s => { s.sort((a, b) => a - b); return { median: s[s.length >> 1], p99: s[Math.floor(s.length * 0.99)], max: s[s.length - 1],
+                                                          mean: s.reduce((a, b) => a + b, 0) / s.length }; };
+function traceProbe(w = 128, h = 96){
+  const got = probeRun('trace', w, h, u => setRayCamera(u, w, h));
+  const R = rayState(), B = rayBasis(w / h), eye = cam.eye.slice();
+  const GRAZE = 1e-3 + 4e-7 * Math.max(W.side, ...eye.map(Math.abs));
+  const rep = { rays: 0, same: 0, sameCoarse: 0, graze: 0, bad: 0, truncated: 0, first: [] }, steps = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++){
+    const i = 4 * (y * w + x), flags = got[i], gHit = (flags & 1) === 1, gc = [got[i + 1], got[i + 2], got[i + 3]];
+    rep.rays++; steps.push(flags >>> 2);
+    if (flags & 2){ rep.truncated++; continue; }
+    const d = probeDir(B, x, y, w, h), cpu = traceCPU(R, eye, d), g = gradeRay(R, eye, d, gHit, gc, cpu, GRAZE);
+    rep[g]++;
+    if (g === 'bad' && rep.first.length < 8) rep.first.push({ px: [x, y], gpu: { hit: gHit, cell: gc, steps: flags >>> 2 }, cpu: { hit: cpu.hit, cell: cpu.cell, t: cpu.t } });
+  }
+  rep.stepStats = stepStats(steps);
+  return rep;
+}
+
+/* The depth bound, end to end (docs/ray-depth-plan.md, decision 3). The
+   view's raster pass alone, w × h, leaves its depth in rasterTarget(w, h);
+   then three readings of the same pixels:
+     depth   the depth texture as the ray pass reads it (float bits);
+     bound   the ray pass's own march, near plane to rasterTMax;
+     trace   the unbounded march, for the steps it saves.
+   Two checks. GLSL_RAY_BOUND's formula, written again here in float64,
+   must turn each covered pixel's depth into the raster's own distance
+   (colour mode 5) within `tol`, and every uncovered pixel must read the
+   clear (1). And the bounded march must equal traceCPU with that tMax,
+   ray for ray, with the trace probe's excuses plus one more: a hit within
+   float32 of the bound ("atBound"), which either side may keep. */
+function boundProbe(w = 160, h = 120){
+  const rasterDist = renderDistances(w, h, 'raster'), T = rasterTarget(w, h);
+  const withDepth = u => { setRayCamera(u, w, h); bindRasterDepth(u, T); };
+  const depth = probeRun('depth', w, h, withDepth), got = probeRun('bound', w, h, withDepth);
+  const free = probeRun('trace', w, h, u => setRayCamera(u, w, h));
+  const R = rayState(), B = rayBasis(w / h), eye = cam.eye.slice(), n = view.near, f = view.far;
+  const GRAZE = 1e-3 + 4e-7 * Math.max(W.side, ...eye.map(Math.abs));
+  const bits = new Int32Array(1), asFloat = new Float32Array(bits.buffer);
+  const rep = { rays: 0, covered: 0, depthMaxRel: 0, depthBad: 0, same: 0, sameCoarse: 0, graze: 0, atBound: 0, bad: 0, truncated: 0,
+                cut: 0, first: [] };
+  const bounded = [], unbounded = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++){
+    const p = y * w + x, i = 4 * p;
+    bits[0] = depth[i];
+    const z = asFloat[0], d = probeDir(B, x, y, w, h), along = d[0] * B.fwd[0] + d[1] * B.fwd[1] + d[2] * B.fwd[2];
+    const tMin = n / along, tMax = z >= 1 ? Infinity : n * f / (f * (1 - z) + z * n) / along;
+    rep.rays++;
+    if (rasterDist[p] >= 0){
+      rep.covered++;
+      const rel = z >= 1 ? Infinity : Math.abs(tMax - rasterDist[p]) / rasterDist[p];
+      rep.depthMaxRel = Math.max(rep.depthMaxRel, rel);
+      if (!(rel <= 0.01)){ rep.depthBad++; if (rep.first.length < 8) rep.first.push({ px: [x, y], z, tMax, raster: rasterDist[p] }); }
+    } else if (z !== 1){ rep.depthBad++; if (rep.first.length < 8) rep.first.push({ px: [x, y], z, raster: 'none' }); }
+    const flags = got[i], gHit = (flags & 1) === 1, gc = [got[i + 1], got[i + 2], got[i + 3]];
+    bounded.push(flags >>> 2); unbounded.push(free[i] >>> 2);
+    if (flags & 2){ rep.truncated++; continue; }
+    const cpu = traceCPU(R, eye, d, 4096, tMin, tMax), all = traceCPU(R, eye, d, 4096, tMin);
+    const onBound = all.hit && Math.abs(all.t - tMax) <= 1e-4 * tMax + 2 * GRAZE;
+    let g;
+    // The GPU kept a hit the bound cuts: only "on the bound" excuses it.
+    // gradeRay's "near" would pass it, since that hit is really on the ray
+    // (a planted bug that ignored the bound in the loop got through that way).
+    if (gHit && !cpu.hit && all.hit) g = onBound ? 'atBound' : 'bad';
+    else {
+      g = gradeRay(R, eye, d, gHit, gc, cpu, GRAZE);
+      if (g === 'bad' && cpu.hit && !gHit && onBound) g = 'atBound';
+    }
+    rep[g]++;
+    if (all.hit && !cpu.hit) rep.cut++;           // a ray hit the raster hides
+    if (g === 'bad' && rep.first.length < 8) rep.first.push({ px: [x, y], tMax, gpu: { hit: gHit, cell: gc }, cpu: { hit: cpu.hit, cell: cpu.cell, t: cpu.t } });
+  }
+  rep.steps = { bounded: stepStats(bounded), unbounded: stepStats(unbounded) };
+  return rep;
+}
+
+/* The stencil, end to end (docs/stencil-pass.md). renderView's 'mask'
+   pass draws white wherever the ray pass would run; it is held, pixel by
+   pixel and in float64, to the traced chunks' boxes and the raster's
+   depth (read back as boundProbe reads it, GLSL_RAY_BOUND's formula
+   again). A pixel should be marked when its ray, past the near plane,
+   enters a traced box before it reaches the raster's surface. Two
+   counts, both must be 0:
+     missed  it should be (by more than GRAZE inside the box, and 0.1%
+             before the raster) but isn't: the ray pass never runs there,
+             and a hit could be lost;
+     extra   it is, but even against every box grown by twice
+             markTraced's pad, and the raster 0.1% further, it
+             shouldn't be: the stencil isn't limiting the pass.
+   And what it saves: the bounded march's steps (the ray pass's own, as
+   boundProbe reads them) summed over the marked pixels, against all of
+   them, each over the whole view. */
+function maskProbe(w = 160, h = 120){
+  const px = renderPixels(w, h, 0, 'mask'), boxesMarked = view.marked;
+  const T = rasterTarget(w, h), withDepth = u => { setRayCamera(u, w, h); bindRasterDepth(u, T); };
+  const depth = probeRun('depth', w, h, withDepth), got = probeRun('bound', w, h, withDepth);
+  const B = rayBasis(w / h), eye = cam.eye.slice(), GRAZE = 1e-3 + 4e-7 * Math.max(W.side, ...eye.map(Math.abs));
+  const n = view.near, f = view.far, bits = new Int32Array(1), asFloat = new Float32Array(bits.buffer);
+  const boxes = streamer.frame.draw.filter(d => streamer.entry(d.key)?.kind === 'page');
+  const rep = { pixels: w * h, boxes: boxes.length, boxesMarked, marked: 0, inside: 0, hidden: 0, missed: 0, extra: 0, first: [],
+                steps: { all: 0, marked: 0 } };
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++){
+    const i = y * w + x, marked = px[4 * i + 3] > 0, steps = got[4 * i] >>> 2;
+    const d = probeDir(B, x, y, w, h), along = d[0] * B.fwd[0] + d[1] * B.fwd[1] + d[2] * B.fwd[2], tMin = n / along;
+    bits[0] = depth[4 * i];
+    const z = asFloat[0], tMax = z >= 1 ? Infinity : n * f / (f * (1 - z) + z * n) / along;
+    // Some box, grown by grow(q), that the ray is in past `after` and enters before `before`.
+    const meets = (grow, after, before) => boxes.some(q => {
+      const g = grow(q), r = rayBox(eye, d, q.lo.map(v => v - g), q.lo.map(v => v + q.size + g));
+      return r && r[1] > after && Math.max(r[0], tMin) < before;
+    });
+    const inside = meets(() => -GRAZE, tMin + GRAZE, tMax * (1 - 1e-3) - GRAZE);
+    if (!inside && meets(() => -GRAZE, tMin + GRAZE, Infinity)) rep.hidden++;
+    rep.steps.all += steps;
+    if (marked){ rep.marked++; rep.steps.marked += steps; }
+    if (inside) rep.inside++;
+    let bad = null;
+    if (inside && !marked){ rep.missed++; bad = 'missed'; }
+    else if (marked && !meets(q => 2 * q.size / 64 + GRAZE, tMin * 0.999 - GRAZE, tMax * (1 + 1e-3) + GRAZE)){ rep.extra++; bad = 'extra'; }
+    if (bad && rep.first.length < 8) rep.first.push({ px: [x, y], bad });
+  }
+  rep.share = rep.marked / rep.pixels;
+  rep.steps.all /= rep.pixels; rep.steps.marked /= rep.pixels;
+  return rep;
+}
+
+/* Raster against ray: the same converged view rendered both ways into an
+   offscreen, non-multisampled target, with colour mode 5 (distance to the
+   eye as 24 bits). Both sample at pixel centres, so they should agree
+   everywhere but at silhouettes and float32 ties. */
+// The view in colour mode `mode`, into an offscreen RGBA8 target, read back.
+// Clear alpha 0 marks "nothing hit". rasterTarget(w, h) keeps the depth.
+function renderPixels(w, h, mode, passes = 'both'){
+  const fb = gl.createFramebuffer(), col = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, col); gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, col);
+  renderView(w, h, mode, false, [0, 0, 0, 0], passes, fb);
+  const px = new Uint8Array(4 * w * h);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fb); gl.deleteRenderbuffer(col);
+  return px;
+}
+function renderDistances(w, h, passes = 'both'){
+  const px = renderPixels(w, h, 5, passes), scale = 8 * W.side, out = new Float64Array(w * h);
+  for (let i = 0; i < w * h; i++)
+    out[i] = px[4 * i + 3] ? (px[4 * i] * 65536 + px[4 * i + 1] * 256 + px[4 * i + 2]) / 16777215 * scale : -1;
+  return out;
+}
+/* The same, in colour mode 9: each pixel's word, as its three 6-bit
+   channels times 4 (255 in red: a ray hit with no word). */
+function renderWords(w, h){ return renderPixels(w, h, 9); }
+/* Raster against ray on the words (step 6). Where both paths hit at the
+   same distance, find the cell each one hit: the raster's from the record
+   that drew the pixel (whoDrew), the ray's by tracing the pixel's ray on
+   the CPU. The same cell must show the same word, exactly, since both come
+   from the same chunk's job at the same lod. Every other pixel is counted
+   apart ("otherCell"): neighbouring cells meeting under the pixel centre,
+   which the distance can't tell apart (on the porous row 2% of pixels
+   showed different words before this split, docs/attrs-log.md), and, in
+   a hybrid view, pixels the raster draws in both renders, which the CPU
+   trace can't see (it sees ray pages only). */
+function compareWords(dA, dB, pA, pB, who, w, h){
+  const R = rayState(), basis = rayBasis(w / h), eye = cam.eye.slice();
+  const rep = { compared: 0, same: 0, differ: 0, otherCell: 0, rayNone: 0, first: [] };
+  for (let i = 0; i < dA.length; i++){
+    if (dA[i] < 0 || dB[i] < 0 || Math.abs(dA[i] - dB[i]) / Math.max(dA[i], dB[i]) > 0.01) continue;
+    const q = who[i];
+    if (!q || q.record == null) continue;
+    const x = i % w, y = (i / w) | 0, nx = (x + 0.5) / w * 2 - 1, ny = (y + 0.5) / h * 2 - 1;
+    let d = basis.fwd.map((f, a) => f + nx * basis.rightT[a] + ny * basis.upT[a]);
+    const n = Math.hypot(...d); d = d.map(v => v / n);
+    const tMin = view.near / (d[0] * basis.fwd[0] + d[1] * basis.fwd[1] + d[2] * basis.fwd[2]);
+    const c = traceCPU(R, eye, d, 4096, tMin);
+    const rasterLo = mortonXYZ(q.record & 262143).map((v, a) => q.lo[a] + v * q.cellSize);
+    const sameCell = c.hit && c.cell.every((v, a) => v >= rasterLo[a] && v < rasterLo[a] + q.cellSize);
+    if (!sameCell){ rep.otherCell++; continue; }
+    rep.compared++;
+    if (pB[4 * i] === 255){ rep.rayNone++; continue; }
+    if (pA[4 * i] === pB[4 * i] && pA[4 * i + 1] === pB[4 * i + 1] && pA[4 * i + 2] === pB[4 * i + 2]) rep.same++;
+    else { rep.differ++; if (rep.first.length < 6) rep.first.push({ px: [x, y], cell: c.cell, raster: Array.from(pA.subarray(4 * i, 4 * i + 3)), ray: Array.from(pB.subarray(4 * i, 4 * i + 3)) }); }
+  }
+  return rep;
+}
+function compareDistances(a, b){
+  const rep = { pixels: a.length, both: 0, neither: 0, onlyA: 0, onlyB: 0, far: 0, maxRel: 0 };
+  for (let i = 0; i < a.length; i++){
+    if (a[i] < 0 && b[i] < 0){ rep.neither++; continue; }
+    if (a[i] < 0){ rep.onlyB++; continue; }
+    if (b[i] < 0){ rep.onlyA++; continue; }
+    rep.both++;
+    const rel = Math.abs(a[i] - b[i]) / Math.max(a[i], b[i]);
+    if (rel > 0.01) rep.far++;
+    rep.maxRel = Math.max(rep.maxRel, rel);
+  }
+  rep.agree = (rep.neither + rep.both - rep.far) / rep.pixels;
+  return rep;
+}
+
+/* raySelftest(): the ray path's three-way check on real worlds.
+     classify  GPU classifyPages against classifyPagesCPU, exact;
+     trace     GPU traceRay against traceCPU, grazes excused;
+     bound     the depth bound: the raster's depth read back as distances,
+               and the bounded march against traceCPU with the same tMax;
+     mask      the stencil: the pixels the ray pass runs on against the
+               traced boxes, both ways (docs/stencil-pass.md);
+     raster against ray  the same converged view both ways, by distance.
+   Worlds: a porous seed row traced from lod 0, a smooth sphere traced
+   from lod 0, and a hybrid terrain (raster at lod 0, ray above), whose
+   cover tree has raster leaves for the ray to skip. */
+window.raySelftest = async function raySelftest(opts = {}){
+  const t0 = performance.now(), savedAuto = auto, savedPath = state.path;
+  auto = false;
+  const report = { cases: [], glError: 0 };
+  // Until the whole cut is resident, or 120 s: SwiftShader's workers share
+  // the CPU with everything else, so frames are not a useful clock.
+  const settle = async (ms = opts.settleMs ?? 120000) => {
+    const end = performance.now() + ms;
+    for (let f = 0; performance.now() < end; f++){ frame({ draw: false }); if (f > 2 && isConverged()) return true; await sleep(opts.frameMs ?? 8); }
+    return false;
+  };
+  // The checkerboard (docs/ray-depth-plan.md) puts raster and ray chunks
+  // side by side at every lod, so ray content lies in front of raster
+  // content as often as behind it. The lod split never does that (far is
+  // traced, near is not), and a bound cut too short passed every other
+  // case: it only hides ray hits that are nearer than the raster.
+  const CASES = opts.cases || [
+    { world: 'row:146', depth: 6, eye: [0.5, 0.62, 0.5], yaw: 2.4, pitch: -0.3, path: '0' },
+    { world: 'shape:sphere', depth: 9, eye: [0.5, 0.55, -0.12], yaw: 0, pitch: -0.08, path: '0' },
+    { world: 'row:146', depth: 6, eye: [0.5, 0.62, 0.5], yaw: 2.4, pitch: -0.3, path: 'checker' },
+    { world: 'shape:terrain', depth: 9, eye: [0.5, 0.62, 0.15], yaw: 0, pitch: -0.3, path: '1' },
+    // The scatter world (docs/scatter-plan.md) by density, from its own
+    // default view (eye: null): specimens over ground, the case the
+    // stencil was built for. Last, because ray.test.js's streamBench then
+    // measures this view (a cheap one: on SwiftShader the seed row's 2M
+    // cubes take ~10 s a frame).
+    { world: 'scatter:1', depth: 10, eye: null, path: 'density' },
+  ];
+  for (const c of CASES){
+    state.world = c.world; state.depth = c.depth; fillWorlds(); fillDepth();
+    await loadWorld(true);
+    if (c.eye){ cam.eye = c.eye.map(v => v * W.side); cam.yaw = c.yaw; cam.pitch = c.pitch; }
+    else { const v = defaultView(); cam.eye = v.eye; cam.yaw = v.yaw; cam.pitch = v.pitch; }
+    dirty = true;
+    const r = { world: c.world, depth: c.depth, path: c.path };
+    // Raster only first, for the comparison, keeping its records so each
+    // pixel can be traced back to the cube that drew it.
+    streamer.setOptions({ keepRecords: true });
+    setPath('off');
+    r.convergedRaster = await settle();
+    const raster = renderDistances(160, 120), who = whoDrew(160, 120), rasterWords = renderWords(160, 120);
+    streamer.setOptions({ keepRecords: false });
+    setPath(c.path);
+    r.converged = await settle();
+    r.rayChunks = streamer.frame.draw.filter(d => streamer.entry(d.key)?.kind === 'page').length;
+    r.rasterChunks = streamer.frame.draw.length - r.rayChunks;
+    r.classify = [11, 12345].map(seed => classifyProbe(seed, 128, 128))
+      .reduce((a, b) => ({ cells: a.cells + b.cells, hits: a.hits + b.hits, mismatches: a.mismatches + b.mismatches, first: a.first.concat(b.first).slice(0, 4) }));
+    r.trace = traceProbe(96, 72);
+    r.attr = attrProbe(96, 72);
+    r.bound = boundProbe(160, 120);
+    r.mask = maskProbe(160, 120);
+    // The eye inside a traced chunk, which only its back faces can mark
+    // (markTraced): from outside, a box's front faces alone cover what
+    // its back faces do, so a planted bug that culled back faces passed
+    // the four views above. The smallest traced chunk, the eye at its
+    // centre for one probe, with a near plane well inside the box.
+    const inner = streamer.frame.draw.filter(d => streamer.entry(d.key)?.kind === 'page').sort((a, b) => a.size - b.size)[0];
+    if (inner){
+      const savedEye = cam.eye.slice(), savedClear = view.clear;
+      cam.eye = inner.lo.map(v => v + inner.size / 2 + 0.25); view.clear = 1;
+      r.maskInside = { ...maskProbe(160, 120), chunk: inner.key };
+      cam.eye = savedEye; view.clear = savedClear;
+    }
+    const rays = renderDistances(160, 120);
+    r.rasterVsRay = gradeRasterVsRay(raster, rays, who, 160, 120);
+    r.words = compareWords(raster, rays, rasterWords, renderWords(160, 120), who, 160, 120);
+    r.heapFull = ray.heapFull;
+    r.bricks = ray.brickPool.size; r.pages = ray.pageCount; r.failedJobs = streamer.S.stats.failed;
+    report.cases.push(r);
+  }
+  report.glError = gl.getError();
+  report.ms = Math.round(performance.now() - t0);
+  setPath(savedPath); auto = savedAuto;
+  window.__raySelftest = report;
+  return report;
+};
+
+/* Which raster record drew each pixel (colour mode 7: draw index and
+   instance), with the record itself, so raster against ray can measure how
+   close each disagreement is to a cube edge. Needs keepRecords. */
+function whoDrew(w, h){
+  const px = renderPixels(w, h, 7, 'raster'), out = [];
+  for (let i = 0; i < w * h; i++){
+    if (!px[4 * i + 3]){ out.push(null); continue; }
+    const v = px[4 * i] << 16 | px[4 * i + 1] << 8 | px[4 * i + 2];
+    const key = view.drawList[v >> 15], e = streamer.entry(key);
+    out.push({ key, record: e && e.records ? e.records[v & 32767] : null, lo: streamer.frame.draw.find(d => d.key === key)?.lo, cellSize: e?.cellSize });
+  }
+  return out;
+}
+
+/* Raster against ray, with sol-v4's graze excuse in pixels. Both paths
+   point-sample the pixel centre, but a rasterizer snaps vertices to a
+   sub-pixel grid (SwiftShader's is coarse), so a cube edge within a few
+   hundredths of a pixel of the centre can go either way. Porous content
+   is nearly all edges: on the seed row 3% of pixels differed, and every
+   one was within 0.025 px (docs/ray-log.md §6). A disagreement is excused
+   only by a graze of whichever path shows the nearer surface: when the
+   ray's hit is nearer, it must only clip its cell within GRAZE_PX (the
+   rasterizer snapped past that cell); when the raster's is nearer, or the
+   ray shows nothing, the pixel's ray must pass within GRAZE_PX of the
+   raster cube's edge (the ray missed a cube the rasterizer caught).
+   Anything else is "bad".
+
+   "Within GRAZE_PX of the edge" means through the cube grown by the pad
+   but not through it shrunk by the pad. The first version only asked for
+   the grown cube, which a ray hitting the cube squarely passes too, and
+   asked it of every disagreement. The depth test hid that: a ray hit
+   behind the raster could never win a pixel. With the depth bound,
+   nothing but the bound stops one, and a planted bug that ignored it
+   changed 60% of the terrain's pixels, all "excused"
+   (docs/ray-depth-log.md §2). */
+const GRAZE_PX = 0.05;
+function gradeRasterVsRay(A, B, who, w, h){
+  const R = rayState(), basis = rayBasis(w / h), eye = cam.eye.slice(), pxAngle = 2 * Math.tan(0.45) / h;
+  const box = (lo, hi, d) => { let t0 = -Infinity, t1 = Infinity; for (let a = 0; a < 3; a++){ const ta = (lo[a] - eye[a]) / d[a], tb = (hi[a] - eye[a]) / d[a]; t0 = Math.max(t0, Math.min(ta, tb)); t1 = Math.min(t1, Math.max(ta, tb)); } return t0 <= t1 && t1 >= 0; };
+  const rep = compareDistances(A, B);
+  rep.graze = 0; rep.bad = 0; rep.first = [];
+  for (let i = 0; i < A.length; i++){
+    const differ = (A[i] < 0) !== (B[i] < 0) || (A[i] >= 0 && Math.abs(A[i] - B[i]) / Math.max(A[i], B[i]) > 0.01);
+    if (!differ) continue;
+    const x = i % w, y = (i / w) | 0, nx = (x + 0.5) / w * 2 - 1, ny = (y + 0.5) / h * 2 - 1;
+    let d = basis.fwd.map((f, a) => f + nx * basis.rightT[a] + ny * basis.upT[a]);
+    const n = Math.hypot(...d); d = d.map(v => v / n);
+    let ok;
+    if (B[i] >= 0 && (A[i] < 0 || B[i] < A[i])){       // the ray is nearer: it must only clip its cell
+      const tMin = view.near / (d[0] * basis.fwd[0] + d[1] * basis.fwd[1] + d[2] * basis.fwd[2]);
+      const c = traceCPU(R, eye, d, 4096, tMin);
+      const ch = c.hit && streamer.frame.draw.find(q => [0, 1, 2].every(a => c.cell[a] >= q.lo[a] && c.cell[a] < q.lo[a] + q.size));
+      if (!ch) ok = false;
+      else {
+        const size = 2 ** ch.lod, lo = c.cell.map((v, a) => v - (v - ch.lo[a]) % size), pad = GRAZE_PX * B[i] * pxAngle;
+        ok = !box(lo.map(v => v + pad), lo.map(v => v + size - pad), d);
+      }
+    } else {                                            // the raster is nearer: its cube must be grazed
+      const q = who[i];
+      if (!q || q.record == null) ok = false;
+      else {
+        const pad = GRAZE_PX * A[i] * pxAngle, lo = mortonXYZ(q.record & 262143).map((c, a) => q.lo[a] + c * q.cellSize);
+        ok = box(lo.map(v => v - pad), lo.map(v => v + q.cellSize + pad), d) && !box(lo.map(v => v + pad), lo.map(v => v + q.cellSize - pad), d);
+      }
+    }
+    if (ok) rep.graze++;
+    else { rep.bad++; if (rep.first.length < 6) rep.first.push({ px: [x, y], raster: A[i], ray: B[i] }); }
+  }
+  return rep;
+}
+
+/* streamBench(): GPU time per pass on this machine, for the current world
+   and eye (docs/ray-plan.md, decision 9). For each mode (raster only, by
+   density, by density with the full-screen ray pass of before the stencil
+   (docs/stencil-pass.md), ray from lod 3, from lod 1, ray only) it
+   converges without drawing, then
+   draws `frames` frames and reports the median GPU time of each pass from
+   the timer queries. ?bench runs it once the page has loaded.
+
+   Without EXT_disjoint_timer_query_webgl2 (Safari never offers it, and
+   Firefox and some Chrome builds hide it, since a precise GPU clock helps
+   timing attacks; the first ?bench on your machine, 2026-11-01, found it
+   missing) the bench falls back to the wall clock: `wallTime` draws the
+   view back to back for ~300 ms, forcing the GPU to finish with a 1-pixel
+   readPixels every 4 draws, and divides. That times each pass alone
+   ('raster', 'ray') and both together, and a clear-only draw ('none') is
+   subtracted from each, so the sync and the clear drop out (since the
+   depth bound, 'none' also blits the raster target to the canvas; its
+   time is reported as baseMs). 'ray' alone has no raster depth, so it is
+   the unbounded march; totalMs is the bounded one, what a frame costs. It measures
+   whichever of CPU and GPU is slower, not the GPU alone, so `submitMs`
+   (the JS time spent issuing one view's calls) comes with it: when the
+   two are close, the frame is bound by submission, not by the GPU
+   (webgpuquest.md §2). In Chrome the GPU process's own work on those calls
+   isn't in submitMs; it is in the wall time. `clock: 'timer' | 'wall'`
+   forces one. Checked against the timer under SwiftShader, same views:
+   raster only 2,128 ms wall against 2,057 timer, ray only 164.9 against
+   165.2, so the fallback reads within 3–4% of the GPU clock. */
+const px1 = new Uint8Array(4);
+function finishGPU(){ gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px1); }
+function wallTime(passes, minMs = 300){
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  const w = canvas.width, h = canvas.height;
+  finishGPU();
+  let n = 0, submit = 0;
+  const t0 = performance.now();
+  while (n < 8 || performance.now() - t0 < minMs){
+    const s = performance.now();
+    renderView(w, h, state.color, false, undefined, passes);
+    submit += performance.now() - s;
+    if (++n % 4 === 0) finishGPU();
+  }
+  finishGPU();
+  return { ms: (performance.now() - t0) / n, submitMs: submit / n, n };
+}
+// The GPU's own name where the browser will say it (Chrome, Firefox);
+// Safari answers with its generic string either way.
+function rendererName(){
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  return dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+}
+/* The bench in the HUD. While it runs, the frame loop's HUD is paused
+   (auto is off), so the bench writes its own progress line: the mode, and
+   how long it has waited for that mode to converge. Its report then stays
+   in the HUD, selectable for copying. The first version appended the
+   report to the HUD once, and the next HUD refresh (6 frames later) wiped
+   it, so on screen it lasted ~100 ms; an error inside the bench left the
+   loop paused with nothing said at all (you, 2026-11-01: "it never
+   produced a report"). */
+const benchHud = { status: '', text: '' };
+const benchLabel = mode => mode === 'off' ? 'raster' : mode === '0' ? 'ray' : mode === 'density' ? `density > ${densityText()}`
+                        : mode === 'density/discard' ? `density, misses discarded (the old pass)`
+                        : mode === 'density/full' ? `density, full-screen ray pass` : `ray ≥ lod ${mode}`;
+function benchText(r){
+  return `<b>bench</b> ${r.world} ${r.size.join('×')}, ${r.clock} clock, eye ${r.eye.join(',')} yaw ${r.yaw} pitch ${r.pitch}\n` + r.rows.map(x =>
+    `  ${x.mode}: <b>${x.totalMs.toFixed(2)} ms</b> (raster ${x.rasterMs.toFixed(2)}, ray ${x.rayMs.toFixed(2)}` +
+    (Number.isFinite(x.submitMs) ? `, submit ${x.submitMs.toFixed(2)}` : '') + `, ${k(x.cubes)} cubes, ${x.draws} draws, ${x.rayChunks} traced` +
+    (x.rayChunks ? `, ray pass on ${(100 * x.maskShare).toFixed(0)}% of pixels` : '') + ')' +
+    (x.converged ? '' : ' <span class="warn">not converged</span>')).join('\n');
+}
+window.streamBench = async function streamBench({ frames = 120, modes = ['off', 'density', 'density/discard', 'density/full', '3', '1', '0'], clock } = {}){
+  if (clock === 'timer' && !timerExt) return { error: 'EXT_disjoint_timer_query_webgl2 is not available in this browser' };
+  const useTimer = clock ? clock === 'timer' : !!timerExt;
+  const saved = { auto, path: state.path, stencil: state.stencil, rayMiss: state.rayMiss }, rows = [];
+  auto = false;
+  const median = a => { const s2 = [...a].sort((x, y) => x - y); return s2.length ? s2[s2.length >> 1] : NaN; };
+  const status = text => { benchHud.status = text; hud(); };
+  try {
+    for (const [i, mode] of modes.entries()){
+      // 'density/discard' and 'density/full' are the same cut and kinds as
+      // 'density' (they follow it, so nothing reconverges): the old ray
+      // pass that discards its misses, and no stencil at all
+      // (docs/stencil-pass.md §6).
+      const [path, pass] = mode.split('/');
+      setPath(path);
+      state.stencil = pass === 'full' ? false : saved.stencil;
+      state.rayMiss = pass === 'discard' ? 'discard' : saved.rayMiss;
+      const start = performance.now(), end = start + 120000;
+      let shown = 0;
+      for (let f = 0; performance.now() < end; f++){
+        frame({ draw: false });
+        if (f > 2 && isConverged()) break;
+        if (performance.now() - shown > 500){
+          shown = performance.now();
+          const S = streamer.S, keys = streamer.sel ? [...streamer.sel.nodes.keys()] : [];
+          status(`<b>bench</b> ${i + 1}/${modes.length} ${benchLabel(mode)}: converging ${((shown - start) / 1000).toFixed(0)} s ` +
+                 `(missing ${keys.filter(key => !S.cache.has(key)).length}, switching ${keys.filter(key => streamer.stale(key)).length}, jobs ${S.pending.size})`);
+        }
+        await sleep(8);
+      }
+      status(`<b>bench</b> ${i + 1}/${modes.length} ${benchLabel(mode)}: timing`);
+      let raster, rayMs, totalMs, submitMs = NaN, baseMs = NaN;
+      if (useTimer){
+        timers.samples.raster.length = 0; timers.samples.ray.length = 0;
+        for (let f = 0; f < frames + 10; f++){
+          draw(); pollTimers();
+          await new Promise(r => requestAnimationFrame(r));
+        }
+        for (let k = 0; k < 20 && timers.pending.length; k++){ pollTimers(); await sleep(16); }
+        raster = median(timers.samples.raster); rayMs = median(timers.samples.ray);
+        if (!Number.isFinite(rayMs)) rayMs = 0;
+        totalMs = raster + rayMs;
+      } else {
+        draw();   // size the canvas and count this mode's ray chunks
+        const base = wallTime('none'), r = wallTime('raster'), y = view.rayChunks ? wallTime('ray') : null, all = wallTime('both');
+        raster = Math.max(0, r.ms - base.ms);
+        rayMs = y ? Math.max(0, y.ms - base.ms) : 0;
+        totalMs = Math.max(0, all.ms - base.ms);
+        submitMs = all.submitMs; baseMs = base.ms;
+        await new Promise(r2 => requestAnimationFrame(r2));
+      }
+      // The share of the canvas the ray pass runs on: its own mask, read back.
+      let maskShare = 0;
+      if (view.rayChunks){
+        const px = renderPixels(canvas.width, canvas.height, 0, 'mask');
+        let on = 0;
+        for (let p = 3; p < px.length; p += 4) if (px[p]) on++;
+        maskShare = on / (canvas.width * canvas.height);
+      }
+      rows.push({ mode: benchLabel(mode), converged: isConverged(), rasterMs: raster, rayMs, totalMs, submitMs, baseMs, maskShare,
+                  cubes: view.instances, draws: view.drawn, rayChunks: view.rayChunks, marked: view.marked,
+                  MB: streamer.S.cacheBytes / 1048576, bricks: ray.brickPool.size });
+    }
+  } finally {
+    // Whatever happened, the page goes back to flying.
+    benchHud.status = '';
+    setPath(saved.path); state.stencil = saved.stencil; state.rayMiss = saved.rayMiss; auto = saved.auto;
+  }
+  const report = { world: W.label, D: W.D, eye: cam.eye.map(Math.round), yaw: +cam.yaw.toFixed(3), pitch: +cam.pitch.toFixed(3), size: [canvas.width, canvas.height],
+                   clock: useTimer ? 'timer' : 'wall', renderer: rendererName(), agent: navigator.userAgent, rows };
+  window.__bench = report;
+  return report;
+};
+
+// The streamer itself, for the console (its state while the bench runs).
+window.__streamer = streamer;
+// The CPU twin's view of the ray textures, for the console.
+window.__ray = {
+  R: () => rayState(),
+  classifyPagesCPU, traceCPU, classifyProbe, traceProbe, attrProbe, boundProbe, maskProbe, hitAttrCPU,
+};
+
+/* ---- boot ------------------------------------------------------------------ */
+async function boot(){
+  bindControls();
+  fillWorlds(); fillDepth();
+  try {
+    const html = await (await fetch('./sol-v4-tower-contact-sheet.html')).text();
+    CORE = sliceCore(html, 'sol-v4-tower-contact-sheet.html');
+    ROWS = rowsOf(CORE);
+  } catch (e){ console.error('could not load the testbed rows', e); if (isRow(state.world)) state.world = 'shape:sphere'; }
+  fillWorlds(); fillDepth();
+  if (params.has('eye')){
+    cam.eye = params.get('eye').split(',').map(Number);
+    cam.yaw = +(params.get('yaw') || 0); cam.pitch = +(params.get('pitch') || 0);
+  }
+  await loadWorld(!params.has('eye'));
+  requestAnimationFrame(loop);
+  if (params.has('bench')){
+    try {
+      const r = await streamBench(params.get('bench') === 'wall' ? { clock: 'wall' } : {});
+      console.log('streamBench', JSON.stringify(r, null, 1));
+      benchHud.text = r.error ? `<b>bench</b> <span class="warn">${r.error}</span>` : benchText(r);
+    } catch (e){
+      console.error('streamBench failed', e);
+      benchHud.text = `<b>bench</b> <span class="warn">failed: ${e && e.message || e}</span> (the console has the stack)`;
+    }
+    hud();
+  }
+  if (params.has('raytest')){
+    const r = await raySelftest();
+    console.log('raySelftest', r);
+  }
+  if (params.has('selftest')){
+    const r = await streamSelftest();
+    console.log('streamSelftest', r);
+    $('hud').innerHTML += `\n<span class="sec">selftest</span> ${r.frames} frames, <b>${r.violations.length} violations</b>, ${r.ms} ms`;
+  }
+}
+boot();
+</script>
+</body>
+</html>

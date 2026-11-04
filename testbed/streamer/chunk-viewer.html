@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>chunk viewer — DAG → 4-byte instance records</title>
+<style>
+  html,body{ height:100%; margin:0; background:#07070a; overflow:hidden;
+    font:10px/1.4 ui-monospace, Menlo, Consolas, monospace; color:#6a6a7a; letter-spacing:.05em; }
+  canvas{ display:block; position:absolute; left:0; top:0; touch-action:none; }
+  #hud{ position:fixed; right:10px; bottom:8px; text-align:right; white-space:pre;
+        background:rgba(0,0,0,.5); padding:8px 12px; border-radius:6px;
+        border:1px solid rgba(255,255,255,.07); pointer-events:none; }
+  #hud b{ color:#a0a0b2; font-weight:normal; }
+  #hud .sec{ color:#3e3e4c; }
+  #ctl{ position:fixed; left:10px; top:8px; background:rgba(0,0,0,.5); padding:8px 12px;
+        border-radius:6px; border:1px solid rgba(255,255,255,.07); }
+  #ctl label{ display:block; margin:3px 0; color:#8a8a9e; }
+  #ctl select{ background:#14141c; color:#b8b8cc; border:1px solid rgba(255,255,255,.14);
+        font:inherit; border-radius:3px; margin-left:6px; }
+  #ctl .keys{ color:#3e3e4c; margin-top:6px; white-space:pre; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="ctl">
+  <label>shape <select id="shape"></select></label>
+  <label>R <select id="R"><option>64</option><option selected>128</option><option>256</option></select></label>
+  <label>lod <select id="lod"><option>0</option><option>1</option><option>2</option><option>3</option></select></label>
+  <label>colour <select id="color"><option value="4">attribute (step 6)</option><option value="0">gamut</option><option value="1">pose (8³ brick)</option>
+    <option value="2">chunk</option><option value="3">plain</option></select></label>
+  <label>mean depth <select id="mean"><option>0</option><option selected>1</option><option>2</option><option>3</option></select></label>
+  <label>borders <select id="border"><option value="apron">apron</option><option value="closed">closed</option></select></label>
+  <label>lod rule <select id="rule"><option>any</option><option>majority</option><option>volume</option><option>opacity</option><option>adaptive</option></select></label>
+  <div class="keys">drag: orbit   wheel: zoom
+?shape=&amp;R=&amp;lod=&amp;color=&amp;border=&amp;rule=&amp;mean=
+?selftest runs the decode probe</div>
+</div>
+<div id="hud"></div>
+
+<script type="module">
+/* CHUNK VIEWER
+   ---------------------------------------------------------------------
+   Step 3 of ifsandwhats.md §8.5, on the GPU side (docs/expand-plan.md).
+   A shape is hash-consed into a dag-core DAG, cut into 64³ chunks by
+   chunk-core's expandChunk, and each chunk is drawn as ONE instanced draw
+   of a cube template over its records: a uint32 per drawn voxel, read
+   with vertexAttribIPointer, and nothing else.
+
+   It forks block-showroom's InstancedSpecimen (src/scene/instancing.js) in
+   idea, not code: one shared cube, a face mask that pushes a hidden face's
+   corners out of the clip volume, the orbit hue ramp. What changed:
+   - the 12-byte f32 centre is gone. The vertex shader decodes the Morton
+     cell index and computes  origin + (cell + 0.5 + corner) · cellSize
+     from two per-chunk uniforms, so a record is 4 bytes, not 14;
+   - there is no template vertex buffer either: the corner, normal and face
+     come from gl_VertexID (the index value), against a const table that is
+     block-showroom's FACE_OFF, so the windings are its windings;
+   - raw WebGL2, not three r128 (Q11): r128 has no integer attributes.
+
+   The decode lives in GLSL_DECODE (chunk-glsl.js since step 4) and is the
+   ONLY decode: the render program and the selftest probe both prepend it,
+   the way sol-v4's probes reuse GLSL_CLASSIFY. The probe runs it under
+   transform feedback and compares every field with chunk-core's CPU
+   decode, exactly, open sides included.
+
+   Step 6 (docs/attrs-plan.md): each record has an attribute word, the
+   shape's colour field at the voxel (or the mean under a coarse cell,
+   descending `mean` levels). The words follow the records in the same
+   buffer and arrive as a second integer attribute; GLSL_ATTR decodes
+   them, and the probe holds that decode to attr-core's attrRGB too. */
+import { createStore, createClasses, createCounts, OH48 } from './dag-core.js';
+import { expandWorld, mortonXYZ, cellOf, maskOf, poseOf, packRecord, shownMask } from './chunk-core.js';
+import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
+import { packAttr, attrRGB, ATTR_RESERVED } from './attr-core.js';
+import { SHAPES, denseShape, colourFieldOf } from './experiments/shapes.mjs';
+
+const $ = id => document.getElementById(id);
+const canvas = $('gl');
+const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
+if (!gl) throw new Error('WebGL2 is required');
+
+/* ---- the shared decode ----------------------------------------------
+   GLSL_DECODE (chunk-glsl.js) is the only decode: the render program and
+   the selftest probe both prepend it, and so does stream-viewer.html. */
+/* block-showroom's FACE_OFF and FACE_D, +X −X +Y −Y +Z −Z, 4 corners each,
+   counter-clockwise seen from outside. */
+const FACE_OFF = [
+  [.5,-.5,-.5],[.5,.5,-.5],[.5,.5,.5],[.5,-.5,.5],   [-.5,-.5,.5],[-.5,.5,.5],[-.5,.5,-.5],[-.5,-.5,-.5],
+  [-.5,.5,-.5],[-.5,.5,.5],[.5,.5,.5],[.5,.5,-.5],   [-.5,-.5,.5],[-.5,-.5,-.5],[.5,-.5,-.5],[.5,-.5,.5],
+  [.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5],[-.5,-.5,.5],   [-.5,-.5,-.5],[-.5,.5,-.5],[.5,.5,-.5],[.5,-.5,-.5]];
+const glslVec3s = a => a.map(v => `vec3(${v.map(x => x.toFixed(1)).join(',')})`).join(',\n  ');
+
+const VS = `#version 300 es
+precision highp float;
+precision highp int;
+${GLSL_DECODE}
+layout(location = 0) in uint aRec;
+layout(location = 1) in uint aAttr;
+uniform mat4 uViewProj;
+uniform float uScale;      // voxels → unit box
+uniform float uHalf;       // half the world side, voxels
+const vec3 CORNER[24] = vec3[24](
+  ${glslVec3s(FACE_OFF)});
+const vec3 NORMAL[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
+out vec3 vUnit;
+out vec3 vNormal;
+flat out uint vPose;
+flat out uint vAttr;
+void main(){
+  uint corner = uint(gl_VertexID), face = corner / 4u;
+  vec3 p = recCentre(aRec) + CORNER[corner] * uCellSize;
+  vUnit = (p - uHalf) * uScale;
+  vNormal = NORMAL[face];
+  vPose = recPose(aRec);
+  vAttr = aAttr;
+  gl_Position = uViewProj * vec4(vUnit, 1.0);
+  // block-showroom's INSTANCING_MASK: a hidden face leaves the clip volume.
+  if (!faceShown(aRec, face)) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}`;
+
+const FS = `#version 300 es
+precision highp float;
+precision highp int;
+${GLSL_ATTR}
+in vec3 vUnit;
+in vec3 vNormal;
+flat in uint vPose;
+flat in uint vAttr;
+uniform int uColorMode;
+uniform vec3 uChunkColor;
+out vec4 outColor;
+// block-showroom's bimoblockOrbitColor, at its saturation and lightness.
+vec3 orbitColor(float bi, float order){
+  const float S = 0.62, L = 0.55;
+  float c = (1.0 - abs(2.0 * L - 1.0)) * S;
+  float hp = fract(bi / max(1.0, order)) * 6.0;
+  float x = c * (1.0 - abs(mod(hp, 2.0) - 1.0));
+  vec3 t = hp < 1.0 ? vec3(c, x, 0.0) : hp < 2.0 ? vec3(x, c, 0.0) : hp < 3.0 ? vec3(0.0, c, x)
+         : hp < 4.0 ? vec3(0.0, x, c) : hp < 5.0 ? vec3(x, 0.0, c) : vec3(c, 0.0, x);
+  return t + (L - c * 0.5);
+}
+void main(){
+  vec3 base = uColorMode == 0 ? vUnit * 0.5 + 0.5
+            : uColorMode == 1 ? (vPose == 0u ? vec3(0.42) : orbitColor(float(vPose), 48.0))
+            : uColorMode == 2 ? uChunkColor
+            : uColorMode == 4 ? attrColour(vAttr) : vec3(0.75);
+  float shade = 0.55 + 0.45 * max(dot(vNormal, normalize(vec3(0.5, 0.8, 0.35))), 0.0)
+              + 0.12 * max(dot(vNormal, normalize(vec3(-0.6, -0.2, -0.7))), 0.0);
+  outColor = vec4(base * shade, 1.0);
+}`;
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)){ console.error(gl.getShaderInfoLog(s), src); return null; }
+  return s;
+}
+function link(vs, fs, feedback){
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  if (feedback) gl.transformFeedbackVaryings(p, feedback, gl.SEPARATE_ATTRIBS);
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(p)); return null; }
+  return p;
+}
+const uniformsOf = (p, names) => Object.fromEntries(names.map(n => [n, gl.getUniformLocation(p, n)]));
+
+const prog = link(VS, FS);
+const U = uniformsOf(prog, ['uViewProj', 'uScale', 'uHalf', 'uOrigin', 'uCellSize', 'uColorMode', 'uChunkColor']);
+
+// Two triangles per face, the windings of block-showroom's solid index.
+const cubeIndex = gl.createBuffer();
+{
+  const idx = new Uint8Array(36);
+  for (let f = 0; f < 6; f++){ const b = 4 * f; idx.set([b, b+1, b+2, b, b+2, b+3], 6 * f); }
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIndex);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+}
+
+/* One VAO per chunk: the cube index, then one buffer holding the records
+   and after them their attribute words, one of each per instance. */
+function recordsBuffer(records, attrs){
+  const both = new Uint32Array(2 * records.length);
+  both.set(records); both.set(attrs, records.length);
+  return both;
+}
+function chunkVAO(records, attrs){
+  const vao = gl.createVertexArray(), buf = gl.createBuffer();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIndex);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, recordsBuffer(records, attrs), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribIPointer(0, 1, gl.UNSIGNED_INT, 4, 0);
+  gl.vertexAttribDivisor(0, 1);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_INT, 4, 4 * records.length);
+  gl.vertexAttribDivisor(1, 1);
+  gl.bindVertexArray(null);
+  return { vao, buf };
+}
+
+/* ---- state, URL, controls -------------------------------------------- */
+const params = new URLSearchParams(location.search);
+const state = {
+  shape: params.get('shape') || 'gyroid',
+  R: +(params.get('R') || 128), lod: +(params.get('lod') || 0),
+  color: +(params.get('color') || 4), border: params.get('border') || 'apron',
+  rule: params.get('rule') || 'any', mean: +(params.get('mean') ?? 1),
+};
+for (const s of SHAPES) $('shape').add(new Option(s.name, s.name));
+for (const k of ['shape', 'R', 'lod', 'color', 'border', 'rule', 'mean']){
+  $(k).value = String(state[k]);
+  $(k).addEventListener('change', () => {
+    state[k] = k === 'shape' || k === 'border' || k === 'rule' ? $(k).value : +$(k).value;
+    const q = new URLSearchParams(location.search);
+    q.set(k, $(k).value); history.replaceState(null, '', '?' + q);
+    if (k === 'color') draw(); else rebuild();
+  });
+}
+
+/* The DAG is rebuilt only when the shape or R changes; lod, borders and the
+   lod rule just re-expand it, which is the cheap path a clipmap would take.
+   The voxel counts (docs/coverage-plan.md) are built with the DAG, because
+   every lod rule but 'any' reads them. */
+let world = null, chunks = [], stats = {};
+function buildWorld(){
+  const t0 = performance.now();
+  const shape = SHAPES.find(s => s.name === state.shape) || SHAPES[0];
+  const { occ, filled } = denseShape(shape, state.R);
+  const t1 = performance.now();
+  const store = createStore(), { root, D } = store.fromDense(occ, state.R);
+  const t2 = performance.now();
+  const classes = createClasses(store, OH48), counts = createCounts(store);
+  const t3 = performance.now();
+  world = { key: state.shape + '@' + state.R, store, root, D, classes, counts, filled, nodes: store.size, classCount: classes.size,
+            colour: colourFieldOf(shape, D),
+            ms: { field: t1 - t0, dag: t2 - t1, classes: t3 - t2 } };
+}
+function rebuild(){
+  if (!world || world.key !== state.shape + '@' + state.R) buildWorld();
+  for (const c of chunks){ gl.deleteVertexArray(c.gpu.vao); gl.deleteBuffer(c.gpu.buf); }
+  const lod = Math.min(state.lod, world.D);
+  const t0 = performance.now();
+  const ex = expandWorld(world.store, world.root, world.D, lod, { classes: world.classes, border: state.border,
+                                                                  lodRule: state.rule, counts: world.counts,
+                                                                  colour: world.colour, meanDepth: state.mean });
+  const t1 = performance.now();
+  chunks = ex.map(c => ({ ...c, gpu: chunkVAO(c.records, c.attrs), color: chunkColor(c.chunk) }));
+  stats = {
+    lod, chunks: chunks.length, records: sum(chunks, 'count'), occupied: sum(chunks, 'occupied'),
+    buried: sum(chunks, 'buried'), quads: sum(chunks, 'quads'), bytes: sum(chunks, 'bytes'),
+    keptVoxels: sum(chunks, 'keptVoxels'),
+    expandMs: t1 - t0,
+  };
+  window.__chunkViewer = { state: { ...state }, stats, world: { nodes: world.nodes, classes: world.classCount, filled: world.filled, D: world.D } };
+  draw();
+}
+const sum = (a, k) => a.reduce((s, c) => s + c[k], 0);
+function chunkColor([x, y, z]){
+  let h = Math.imul(x + 1, 0x27d4eb2d) ^ Math.imul(y + 3, 0x165667b1) ^ Math.imul(z + 7, 0x9e3779b1);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b) >>> 0;
+  return [0.35 + 0.6 * ((h & 255) / 255), 0.35 + 0.6 * ((h >> 8 & 255) / 255), 0.35 + 0.6 * ((h >> 16 & 255) / 255)];
+}
+
+/* ---- camera ------------------------------------------------------------ */
+const cam = { yaw: 0.7, pitch: 0.45, dist: 3.2 };
+function viewProj(aspect){
+  const f = 1 / Math.tan(0.4), n = 0.05, far = 50;
+  const P = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + n) / (n - far), -1, 0, 0, 2 * far * n / (n - far), 0];
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw), cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const eye = [cam.dist * cp * sy, cam.dist * sp, cam.dist * cp * cy];
+  const zA = norm(eye), xA = norm(cross([0, 1, 0], zA)), yA = cross(zA, xA);
+  const V = [xA[0], yA[0], zA[0], 0, xA[1], yA[1], zA[1], 0, xA[2], yA[2], zA[2], 0,
+             -dot(xA, eye), -dot(yA, eye), -dot(zA, eye), 1];
+  return mul4(P, V);
+}
+const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const cross = (a, b) => [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]];
+const norm = a => { const l = Math.hypot(...a); return a.map(v => v / l); };
+function mul4(A, B){
+  const C = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++){
+    let s = 0; for (let k = 0; k < 4; k++) s += A[k * 4 + r] * B[c * 4 + k]; C[c * 4 + r] = s;
+  }
+  return C;
+}
+let drag = null;
+canvas.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointermove', e => {
+  if (!drag) return;
+  cam.yaw -= (e.clientX - drag[0]) * 0.008;
+  cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch + (e.clientY - drag[1]) * 0.008));
+  drag = [e.clientX, e.clientY]; draw();
+});
+canvas.addEventListener('pointerup', () => { drag = null; });
+canvas.addEventListener('wheel', e => { e.preventDefault(); cam.dist = Math.max(0.6, Math.min(12, cam.dist * Math.exp(e.deltaY * 0.001))); draw(); }, { passive: false });
+addEventListener('resize', draw);
+
+/* ---- draw ---------------------------------------------------------------- */
+function draw(){
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; }
+  canvas.style.width = innerWidth + 'px'; canvas.style.height = innerHeight + 'px';
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0.027, 0.027, 0.039, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE);
+  gl.useProgram(prog);
+  gl.uniformMatrix4fv(U.uViewProj, false, viewProj(w / h));
+  gl.uniform1f(U.uScale, 2 / state.R);
+  gl.uniform1f(U.uHalf, state.R / 2);
+  gl.uniform1i(U.uColorMode, state.color);
+  for (const c of chunks){
+    gl.uniform3f(U.uOrigin, c.origin[0], c.origin[1], c.origin[2]);
+    gl.uniform1f(U.uCellSize, c.cellSize);
+    gl.uniform3fv(U.uChunkColor, c.color);
+    gl.bindVertexArray(c.gpu.vao);
+    gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_BYTE, 0, c.count);
+  }
+  gl.bindVertexArray(null);
+  hud();
+}
+
+function hud(){
+  if (!world) return;
+  const k = n => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'K' : String(n);
+  const kb = b => b >= 1 << 20 ? (b / (1 << 20)).toFixed(2) + ' MB' : (b / 1024).toFixed(1) + ' KB';
+  const s = stats;
+  $('hud').innerHTML =
+    `<b>${state.shape}</b> R=${state.R}  lod ${s.lod} (cell ${2 ** s.lod}³)  ${state.border}  rule ${state.rule}\n` +
+    `<span class="sec">volume</span> ${(s.occupied * 8 ** s.lod / world.filled).toFixed(2)}× true, ` +
+      `voxel error ${((s.occupied * 8 ** s.lod + world.filled - 2 * s.keptVoxels) / world.filled).toFixed(2)}\n` +
+    `<span class="sec">dag</span> ${k(world.nodes)} nodes, ${k(world.classCount)} Oh classes\n` +
+    `<span class="sec">records</span> <b>${k(s.records)}</b> × (4 + 4) B = <b>${kb(2 * s.bytes)}</b> in ${s.chunks} chunk${s.chunks === 1 ? '' : 's'}, words included\n` +
+    `<span class="sec">skipped</span> ${k(s.buried)} buried of ${k(s.occupied)} (${(100 * s.buried / Math.max(1, s.occupied)).toFixed(1)}%)\n` +
+    `<span class="sec">faces</span> ${k(s.quads)} quads, ${(s.quads / Math.max(1, s.records)).toFixed(2)} per record\n` +
+    `<span class="sec">vs showroom</span> ${kb(s.occupied * 14)} at 14 B per occupied voxel\n` +
+    `<span class="sec">ms</span> field ${world.ms.field.toFixed(0)}  dag ${world.ms.dag.toFixed(0)}  classes ${world.ms.classes.toFixed(0)}  expand ${s.expandMs.toFixed(0)}`;
+}
+
+/* ---- selftest ------------------------------------------------------------
+   chunkSelftest(): the decode probe. The vertex shader below is GLSL_DECODE
+   plus outputs, run over a records buffer with transform feedback and the
+   rasterizer off. Every record comes back as (cell xyz, mask, pose, the
+   six faceShown() answers, the centre) and is compared with chunk-core's
+   CPU decode. All of it is exact: integer fields are integers, and the
+   centre is exact in f32 (see GLSL_DECODE).
+
+   Cases: a synthetic chunk of all 2^18 indices with masks and poses
+   cycling through every value, then the real chunks of a few shapes at
+   lod 0–2, at their real origins and cell sizes, with their seam tails
+   (step 4). Each runs under several uOpenSides values, and the six
+   faceShown() answers must equal chunk-core's shownMask().
+
+   Step 6: each record also carries an attribute word, read back through
+   GLSL_ATTR's attrRGB and compared with attr-core's. The synthetic chunk
+   gives all 2^18 colours once, with junk in the reserved bits (a reader
+   must ignore them); the real chunks give their shapes' coloured words. */
+const PROBE_VS = `#version 300 es
+precision highp float;
+precision highp int;
+${GLSL_DECODE}
+${GLSL_ATTR}
+layout(location = 0) in uint aRec;
+layout(location = 1) in uint aAttr;
+flat out uvec4 vFields;    // x, y, z, mask | pose << 6 | shown << 12
+out vec3 vCentre;
+flat out uvec3 vRGB;       // attrRGB(aAttr)
+void main(){
+  vRGB = attrRGB(aAttr);
+  uvec3 c = recCell(aRec);
+  uint shown = 0u;
+  for (uint f = 0u; f < 6u; f++) if (faceShown(aRec, f)) shown |= 1u << f;
+  vFields = uvec4(c, recMask(aRec) | recPose(aRec) << 6u | shown << 12u);
+  vCentre = recCentre(aRec);
+  gl_Position = vec4(0.0);
+  gl_PointSize = 1.0;
+}`;
+const PROBE_FS = `#version 300 es
+precision highp float;
+out vec4 o;
+void main(){ o = vec4(0.0); }`;
+let probe = null;
+
+function probeChunk(records, attrs, origin, cellSize, open = 0){
+  if (!probe){
+    const p = link(PROBE_VS, PROBE_FS, ['vFields', 'vCentre', 'vRGB']);
+    probe = { prog: p, U: uniformsOf(p, ['uOrigin', 'uCellSize', 'uOpenSides']) };
+  }
+  const n = records.length;
+  const vao = gl.createVertexArray(), src = gl.createBuffer();
+  const outF = gl.createBuffer(), outC = gl.createBuffer(), outA = gl.createBuffer(), tf = gl.createTransformFeedback();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, src);
+  gl.bufferData(gl.ARRAY_BUFFER, recordsBuffer(records, attrs), gl.STATIC_DRAW);   // the render's layout
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribIPointer(0, 1, gl.UNSIGNED_INT, 4, 0);
+  gl.vertexAttribDivisor(0, 1);       // one instance per record, as in the render
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_INT, 4, 4 * n);
+  gl.vertexAttribDivisor(1, 1);
+  gl.bindBuffer(gl.ARRAY_BUFFER, outF); gl.bufferData(gl.ARRAY_BUFFER, n * 16, gl.STREAM_READ);
+  gl.bindBuffer(gl.ARRAY_BUFFER, outC); gl.bufferData(gl.ARRAY_BUFFER, n * 12, gl.STREAM_READ);
+  gl.bindBuffer(gl.ARRAY_BUFFER, outA); gl.bufferData(gl.ARRAY_BUFFER, n * 12, gl.STREAM_READ);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  gl.useProgram(probe.prog);
+  gl.uniform3f(probe.U.uOrigin, origin[0], origin[1], origin[2]);
+  gl.uniform1f(probe.U.uCellSize, cellSize);
+  gl.uniform1ui(probe.U.uOpenSides, open);
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf);
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, outF);
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 1, outC);
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 2, outA);
+  gl.enable(gl.RASTERIZER_DISCARD);
+  gl.beginTransformFeedback(gl.POINTS);
+  gl.drawArraysInstanced(gl.POINTS, 0, 1, n);
+  gl.endTransformFeedback();
+  gl.disable(gl.RASTERIZER_DISCARD);
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 1, null);
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 2, null);
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+  const fields = new Uint32Array(n * 4), centres = new Float32Array(n * 3), rgbs = new Uint32Array(n * 3);
+  gl.bindBuffer(gl.ARRAY_BUFFER, outF); gl.getBufferSubData(gl.ARRAY_BUFFER, 0, fields);
+  gl.bindBuffer(gl.ARRAY_BUFFER, outC); gl.getBufferSubData(gl.ARRAY_BUFFER, 0, centres);
+  gl.bindBuffer(gl.ARRAY_BUFFER, outA); gl.getBufferSubData(gl.ARRAY_BUFFER, 0, rgbs);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  gl.bindVertexArray(null);
+  for (const b of [src, outF, outC, outA]) gl.deleteBuffer(b);
+  gl.deleteVertexArray(vao); gl.deleteTransformFeedback(tf);
+
+  let mismatches = 0; const first = [];
+  for (let i = 0; i < n; i++){
+    const r = records[i], [x, y, z] = mortonXYZ(cellOf(r)), m = maskOf(r), p = poseOf(r);
+    const want = [x, y, z, m | p << 6 | shownMask(r, open) << 12];
+    const centre = [origin[0] + (x + 0.5) * cellSize, origin[1] + (y + 0.5) * cellSize, origin[2] + (z + 0.5) * cellSize];
+    let ok = true;
+    for (let a = 0; a < 4; a++) if (fields[4 * i + a] !== want[a]) ok = false;
+    for (let a = 0; a < 3; a++) if (centres[3 * i + a] !== Math.fround(centre[a])) ok = false;
+    const rgb = attrRGB(attrs[i]);
+    for (let a = 0; a < 3; a++) if (rgbs[3 * i + a] !== rgb[a]) ok = false;
+    if (!ok){
+      mismatches++;
+      if (first.length < 8) first.push({ i, record: r >>> 0, attr: attrs[i] >>> 0, open, want, got: Array.from(fields.subarray(4 * i, 4 * i + 4)),
+        wantCentre: centre, gotCentre: Array.from(centres.subarray(3 * i, 3 * i + 3)), wantRGB: rgb, gotRGB: Array.from(rgbs.subarray(3 * i, 3 * i + 3)) });
+    }
+  }
+  return { n, mismatches, first };
+}
+
+window.chunkSelftest = function chunkSelftest(opts = {}){
+  const t0 = performance.now();
+  const report = { cases: 0, records: 0, mismatches: 0, first: [] };
+  const add = (label, r) => {
+    report.cases++; report.records += r.n; report.mismatches += r.mismatches;
+    for (const f of r.first) if (report.first.length < 8) report.first.push({ label, ...f });
+  };
+  // Every index once, with every mask and pose value.
+  const all = new Uint32Array(1 << 18);
+  for (let i = 0; i < all.length; i++) all[i] = packRecord(i, i % 64, (i >> 6) % 48);
+  // Every colour once (a scrambled order), reserved bits full of junk.
+  const words = new Uint32Array(1 << 18);
+  for (let i = 0; i < words.length; i++){
+    const c = Math.imul(i, 0x9e3779b1) & 0x3ffff;   // odd multiplier, low 18 bits: a bijection
+    words[i] = (packAttr(c & 63, c >> 6 & 63, c >> 12 & 63) | (Math.imul(i, 0x85ebca6b) & ATTR_RESERVED)) >>> 0;
+  }
+  add('all indices', probeChunk(all, words, [0, 0, 0], 1));
+  add('all indices, far origin', probeChunk(all, words, [1 << 20, 3 << 18, 65536], 8));
+  // Open sides: every side alone, all of them, and two mixtures.
+  for (const open of [1, 2, 4, 8, 16, 32, 63, 21, 42])
+    add(`all indices, open ${open}`, probeChunk(all, words, [0, 0, 0], 1, open));
+  // Real chunks.
+  const shapes = opts.shapes || ['sphere', 'gyroid', 'half-space'];
+  for (const name of shapes){
+    const { occ } = denseShape(SHAPES.find(s => s.name === name), 128);
+    const s = createStore(), { root, D } = s.fromDense(occ, 128), classes = createClasses(s, OH48), counts = createCounts(s);
+    const colour = colourFieldOf(SHAPES.find(s => s.name === name), D);
+    for (const lod of [0, 1, 2])
+      for (const c of expandWorld(s, root, D, lod, { classes, counts, seams: true, colour }))
+        if (c.records.length) for (const open of [0, 63, 21])
+          add(`${name} lod ${lod} chunk ${c.chunk} open ${open}`, probeChunk(c.records, c.attrs, c.origin, c.cellSize, open));
+  }
+  report.ms = Math.round(performance.now() - t0);
+  // And a frame: the render program must have drawn something.
+  draw();
+  const px = new Uint8Array(4 * 64 * 64);
+  gl.readPixels(Math.max(0, (canvas.width >> 1) - 32), Math.max(0, (canvas.height >> 1) - 32), 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  let lit = 0;
+  for (let i = 0; i < px.length; i += 4) if (px[i] + px[i + 1] + px[i + 2] > 40) lit++;
+  report.render = { centrePixelsLit: lit, of: 64 * 64 };
+  report.glError = gl.getError();
+  window.__chunkSelftest = report;
+  return report;
+};
+
+rebuild();
+if (params.has('selftest')){
+  const r = chunkSelftest();
+  console.log('chunkSelftest', r);
+  $('hud').innerHTML += `\n<span class="sec">selftest</span> ${r.records} records, <b>${r.mismatches} mismatches</b>, ${r.ms} ms`;
+}
+</script>
+</body>
+</html>
