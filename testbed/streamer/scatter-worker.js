@@ -34,12 +34,32 @@
                                and the table.
    That was the 6–12 s the main thread held still at R = 5, 128³.
 
+   A caves descriptor (desc.kind === 'caves', docs/caves-plan.md) asks
+   for column parts instead (cave-core.js's buildCavePart):
+     cave-part { desc, job, tag }  one column of level-L blocks, its keys
+                               and blocks to the assembler;
+     cave-info { desc }        the plan's counts and the start view.
+   Each worker rebuilds the plan from the descriptor (~0.6 s at D = 12),
+   once. The assembler merges the parts in job order and grafts them into
+   an empty world.
+
+   A kit descriptor (desc.kind === 'kit', kit-core.js, kit-findings §5)
+   asks for two things, both answered to the driver (no assembler port):
+     kit-ornaments { n0, n1 }  ornaments [n0, n1) of the fixed library, in
+                               a store of their own (buildOrnamentRange):
+                               its keys and each ornament's root. The page
+                               keeps them, so a new seed builds none;
+     kit-assemble { desc, ranges }  the kit composed from every range, in
+                               order, pruned (assembleKit): its keys.
+
    Keys go back as transferable buffers. Everything this does is
    scatter-core.js's, lattice-core.js's or dag-core.js's, which Node
    tests; this file only moves messages. */
 import { createStore, prune, EMPTY } from './dag-core.js';
 import { groundOf, fingerprintRange, placeRange, scatterLayout, mergePart, TABLE_WORDS } from './scatter-core.js';
 import * as lattice from './lattice-core.js';
+import * as caves from './cave-core.js';
+import { buildOrnamentRange, assembleKit } from './kit-core.js';
 
 const occs = new Map();
 let toAsm = null, asm = null;
@@ -56,6 +76,7 @@ function landed(tag, part){
     const t = asm.order[asm.next++], p = asm.landed.get(t), t0 = performance.now();
     asm.landed.delete(t);
     if (t === 'ground') asm.groundRoot = asm.store.importKeys(p.keys)[p.root];
+    else if (asm.isCaves) caves.mergeCavePart(asm.store, asm.blocks, p);
     else if (asm.isLattice) lattice.mergePart(asm.store, asm.layout, asm.table, asm.blocks, p);
     else mergePart(asm.store, asm.layout, asm.prints, asm.table, asm.blocks, p);
     asm.ms.merge += performance.now() - t0;
@@ -67,7 +88,8 @@ function finish(){
   if (asm.error){ const error = 'assembling: ' + asm.error; asm = null; self.postMessage({ id, error }); return; }
   if (asm.next < asm.order.length) return;          // parts still on their way
   let t0 = performance.now();
-  const grafted = store.graft(asm.groundRoot, desc.D, Math.log2(asm.isLattice ? desc.B : desc.R), blocks);
+  const grafted = asm.isCaves ? caves.assembleCaves(store, desc, blocks)
+                              : store.graft(asm.groundRoot, desc.D, Math.log2(asm.isLattice ? desc.B : desc.R), blocks);
   ms.graft = performance.now() - t0; t0 = performance.now();
   const { keys, map } = prune(store.snapshot().keys, [grafted]);
   ms.prune = performance.now() - t0;
@@ -78,7 +100,7 @@ function finish(){
 
 self.onmessage = ({ data, ports }) => {
   try {
-    const { desc } = data, isLattice = desc?.kind === 'lattice';
+    const { desc } = data, isLattice = desc?.kind === 'lattice', isCaves = desc?.kind === 'caves';
     if (data.type === 'port'){
       toAsm = ports[0];
       self.postMessage({ id: data.id });
@@ -90,14 +112,25 @@ self.onmessage = ({ data, ports }) => {
       };
       self.postMessage({ id: data.id });
     } else if (data.type === 'assemble'){
-      const layout = isLattice ? lattice.latticeLayout(desc) : scatterLayout(desc);
-      asm = { desc, isLattice, layout, order: data.order, prints: data.prints, next: 0, landed: new Map(), store: createStore(), blocks: [],
-              table: new Int32Array(TABLE_WORDS * layout.cells.length), groundRoot: EMPTY, finish: null, ms: { merge: 0 } };
+      const layout = isCaves ? null : isLattice ? lattice.latticeLayout(desc) : scatterLayout(desc);
+      asm = { desc, isLattice, isCaves, layout, order: data.order, prints: data.prints, next: 0, landed: new Map(), store: createStore(), blocks: [],
+              table: new Int32Array(isCaves ? 0 : TABLE_WORDS * layout.cells.length), groundRoot: EMPTY, finish: null, ms: { merge: 0 } };
       self.postMessage({ id: data.id });
       for (const [tag, part] of early){ early.delete(tag); landed(tag, part); }
     } else if (data.type === 'finish'){
       asm.finish = data.id;
       finish();
+    } else if (data.type === 'cave-part'){
+      const t0 = performance.now(), { store, blocks } = caves.buildCavePart(desc, data.job), { keys } = store.snapshot();
+      send(data, { keys, blocks, ms: performance.now() - t0 });
+    } else if (data.type === 'kit-ornaments'){
+      const t0 = performance.now(), r = buildOrnamentRange(data.n0, data.n1);
+      self.postMessage({ id: data.id, ...r, ms: performance.now() - t0 }, [r.keys.buffer, r.roots.buffer]);
+    } else if (data.type === 'kit-assemble'){
+      const k = assembleKit(desc, data.ranges), { keys } = k.store.snapshot();
+      self.postMessage({ id: data.id, keys, root: k.root, raw: k.raw, dropped: k.dropped, ms: k.ms }, [keys.buffer]);
+    } else if (data.type === 'cave-info'){
+      self.postMessage({ id: data.id, info: caves.caveInfo(caves.cavePlan(desc)) });
     } else if (data.type === 'ground'){
       const store = createStore(), { root } = store.fromField(desc.D, groundOf(desc).field), { keys } = store.snapshot();
       send(data, { keys, root });

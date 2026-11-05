@@ -11,7 +11,11 @@
    colourLevel }), and everything follows from it:
    - LEVEL 0 is a library of 16³ parts: the eight structural ones of the
      sketch (block, slab, beam, post, frame, shell, window, step), then
-     `ornaments` block-showroom specimens (0 to 16; plan decision 2);
+     `ornaments` block-showroom specimens (0 to 256; plan decision 2,
+     kit-findings §5). The ornaments are one fixed LIBRARY, the same for
+     every seed (ORNAMENT_SEED): the world's seed decides where they go,
+     not what they are, so a page can build them once and keep them
+     (buildOrnamentRange, assembleKit);
    - each LEVEL l ≥ 1 is a library of libs[l − 1] assemblies (the top
      level has one, the world). An assembly is a 4³ grid of slots; a
      mask picks which are filled, and each filled slot holds an entry of
@@ -19,9 +23,15 @@
      side, and the world is D = 4 + 2L for L levels: 4,096³ at L = 4,
      16,384³ at 5, 65,536³ at 6 (decision 7: 14 by default);
    - every choice (an entry's mask, each slot's child and turn) is a hash
-     of (seed, level, entry), made in kitPlan. The plan is a few typed
-     arrays and needs no DAG, so the colour field rebuilds it in each
-     chunk worker from the descriptor (colours are named, not shipped);
+     of (seed, level, entry), made in kitPlan. `share` (null, or 0 to 100)
+     is the percentage of level 1's non-floor slots that draw an
+     ornament: a two-entry weighted table, structure or ornament, then
+     uniform within the side drawn. null is "proportional", every part
+     equally likely, which is what the kit did before share existed, by
+     the same code, so a kit without a share is the kit it always was.
+     The plan is a few typed arrays and needs no DAG, so the colour field
+     rebuilds it in each chunk worker from the descriptor (colours are
+     named, not shipped);
    - the DAG (buildKit) is the plan composed bottom-up: a 4³ grid of
      level-k ids is two binary levels, 8 interns and then 1, and a turned
      entry is store.transform (memoized), so there is no graft and no
@@ -64,8 +74,11 @@ export const PART = 16, PART_LEVELS = 4;
    all its turned descendants with every other turn of them (they're
    hash-consed), so even that is ~1M nodes. `nodes` is checked as the
    build goes, measured, not estimated. */
-export const KIT_LIMITS = { D: [8, 16], lib: [1, 1024], ornaments: [0, 16], seed: [1, 0xffff], nodes: 4e6 };
-export const KIT_DEFAULTS = { seed: 1, D: 14, libs: null, ornaments: 4, ground: true, colourLevel: 2 };
+/* ornaments to 256 (asked for 2026-11-04; kit-findings §5 measured 2,048).
+   At the default libraries level 1 places at most ~166 of them, so past
+   256 a larger set buys nothing unless the libraries grow with it. */
+export const KIT_LIMITS = { D: [8, 16], lib: [1, 1024], ornaments: [0, 256], share: [0, 100], seed: [1, 0xffff], nodes: 4e6 };
+export const KIT_DEFAULTS = { seed: 1, D: 14, libs: null, ornaments: 4, ground: true, colourLevel: 2, share: null };
 export const levelsOf = D => (D - PART_LEVELS) / 2;
 export const sideOf = l => PART * 4 ** l;
 // The sketch's library sizes, bottom up (struct16's were 8, 6, 4, 3, 2).
@@ -90,6 +103,8 @@ export function kitDesc(over = {}){
   libs.forEach((n, i) => int(n, KIT_LIMITS.lib, `library ${i + 1}`));
   d.libs = libs;
   int(d.ornaments, KIT_LIMITS.ornaments, 'ornaments');
+  d.share = d.share ?? null;
+  if (d.share !== null) int(d.share, KIT_LIMITS.share, 'ornament share');
   d.ground = !!d.ground;
   int(d.colourLevel, [0, L], 'colour level');
   return d;
@@ -182,8 +197,23 @@ export function partOcc(f){
   for (let z = 0; z < PART; z++) for (let y = 0; y < PART; y++) for (let x = 0; x < PART; x++) o[i++] = f(x, y, z) ? 1 : 0;
   return o;
 }
-// Ornament n: the n-th specimen of a 16³ lattice with the kit's seed.
-export const ornamentOcc = (desc, n) => buildRecipe({ R: PART, seed: desc.seed, axes: 'random', n: [1, 1, 1] }, n);
+/* Ornament n: the n-th specimen of a 16³ lattice with ORNAMENT_SEED. It
+   was the kit's own seed until 2026-11-04; seed 1's kits are unchanged,
+   the others place the library's ornaments instead of their own. Ornament
+   n doesn't depend on how many there are, so a larger set keeps the
+   smaller one's first ornaments. 2,048 are 2,033 distinct (§5). */
+export const ORNAMENT_SEED = 1, ORNAMENT_RANGE = 32;
+export const ornamentOcc = n => buildRecipe({ R: PART, seed: ORNAMENT_SEED, axes: 'random', n: [1, 1, 1] }, n);
+/* The ornaments in ranges of ORNAMENT_RANGE, the unit a page builds in a
+   worker and keeps: [n0, n1) for n ornaments. */
+export const ornamentRanges = n => Array.from({ length: Math.ceil(n / ORNAMENT_RANGE) },
+  (_, i) => [i * ORNAMENT_RANGE, Math.min(n, (i + 1) * ORNAMENT_RANGE)]);
+// One range in a store of its own: its keys and each ornament's root there.
+export function buildOrnamentRange(n0, n1){
+  const store = createStore(), roots = new Uint32Array(n1 - n0);
+  for (let n = n0; n < n1; n++) roots[n - n0] = store.fromDense(ornamentOcc(n), PART).root;
+  return { n0, n1, keys: store.snapshot().keys, roots };
+}
 
 /* ---- the plan --------------------------------------------------------------
    Every choice, as typed arrays, level by level. levels[l] (l ≥ 1) has
@@ -202,6 +232,8 @@ export function kitPlan(desc){
   for (let l = 1; l <= L; l++){
     const n = sizes[l], g = !ground ? 0 : l === L ? 1 : Math.ceil(n / 2);
     const child = new Int32Array(64 * n).fill(-1), turn = new Uint8Array(64 * n), mask = [], grounded = [];
+    // Level 1's non-floor child (the share's one draw; see childOf).
+    const pickChild = l === 1 ? childOf(desc, sizes[0]) : r => pick(r, sizes[l - 1]);
     for (let j = 0; j < n; j++){
       const r = rng(seed, l, j), isG = j < g, fam = familyOf(l, L, ground, isG), name = fam[pick(r, fam.length)];
       const upright = ground && l >= L - 1;
@@ -210,7 +242,7 @@ export function kitPlan(desc){
         // The bottom layer is y = 0 at every x and z (the first version
         // also asked s < 16, the z = 0 row only, and the ground had holes).
         const floor = isG && (s >> 2 & 3) === 0;
-        child[64 * j + s] = floor ? floors[l - 1][pick(r, floors[l - 1].length)] : pick(r, sizes[l - 1]);
+        child[64 * j + s] = floor ? floors[l - 1][pick(r, floors[l - 1].length)] : pickChild(r);
         turn[64 * j + s] = floor || upright ? Y_TURNS[pick(r, 4)] : PROPER[pick(r, 24)];
       }
     }
@@ -220,15 +252,33 @@ export function kitPlan(desc){
   return { L, sizes, floors, levels };
 }
 
+/* The share (kit-findings §5, question 1): structure or ornament at the
+   given percentage, then uniform within the side drawn. One draw either
+   way, as pick's, so the draws after it (the turn, the next slot) are the
+   same whatever the share: only level 1's child indices change. With no
+   share it is pick itself, every part equally likely, so the default
+   kits are unchanged. */
+function childOf(desc, n){
+  const P = PART_NAMES.length, N = desc.ornaments;
+  if (desc.share === null || !N) return r => pick(r, n);
+  const s = desc.share / 100;
+  return r => {
+    const u = r();
+    return u < s ? P + Math.min(N - 1, Math.floor(u / s * N)) : Math.min(P - 1, Math.floor((u - s) / (1 - s) * P));
+  };
+}
+
 /* ---- the build ----------------------------------------------------------------
    The plan composed bottom-up into one store, then pruned. A grid of 64
    level-k ids (slot x + 4y + 16z) is one level-(k + 2) node: octant O of
    it is the 2³ slots at 2·(O's bits), and octant o of that is one slot.
-   Throws past KIT_LIMITS.nodes, checked after each entry. */
-export function buildKit(desc, plan = kitPlan(desc)){
-  const t = {}, t0 = performance.now(), store = createStore(), { L } = plan;
+   Throws past KIT_LIMITS.nodes, checked after each entry. `store` and
+   `ornaments` (their roots in it) let assembleKit compose ornaments
+   built elsewhere. */
+export function buildKit(desc, plan = kitPlan(desc), { store = createStore(), ornaments = null } = {}){
+  const t = {}, t0 = performance.now(), { L } = plan;
   const parts = PART_NAMES.map(n => store.fromDense(partOcc(PARTS[n]), PART).root);
-  for (let n = 0; n < desc.ornaments; n++) parts.push(store.fromDense(ornamentOcc(desc, n), PART).root);
+  for (let n = 0; n < desc.ornaments; n++) parts.push(ornaments ? ornaments[n] : store.fromDense(ornamentOcc(n), PART).root);
   t.parts = performance.now() - t0;
   const lib = [parts], g = new Uint32Array(64), ch = new Uint32Array(8), top = new Uint32Array(8);
   const compose = k => {
@@ -255,6 +305,25 @@ export function buildKit(desc, plan = kitPlan(desc)){
   const t2 = performance.now(), raw = store.size, { store: world, root, dropped } = pruneWorld(store, lib[L][0]);
   t.prune = performance.now() - t2;
   return { store: world, root, D: desc.D, plan, nodes: world.size, raw, dropped, ms: t, totalMs: performance.now() - t0 };
+}
+
+/* The kit from ornament ranges built elsewhere (buildOrnamentRange, in
+   other workers or kept from an earlier build), imported in range order
+   into one store, then buildKit as usual, pruned: the page's assembler
+   worker. Ranges must cover [0, desc.ornaments) in order. The pruned
+   node count is the plain buildKit's (it's what the root reaches); the
+   ids may differ, as the store's order does. */
+export function assembleKit(desc, ranges){
+  const store = createStore(), roots = [], t0 = performance.now();
+  for (const r of ranges){
+    if (r.n0 !== roots.length) throw new Error(`kit: ornament range ${r.n0}…${r.n1} out of order`);
+    const map = store.importKeys(r.keys);
+    for (const id of r.roots) roots.push(map[id]);
+  }
+  if (roots.length < desc.ornaments) throw new Error(`kit: ${roots.length} ornaments for ${desc.ornaments}`);
+  const importMs = performance.now() - t0, k = buildKit(desc, kitPlan(desc), { store, ornaments: roots });
+  k.ms.import = importMs;
+  return k;
 }
 
 /* ---- colour -------------------------------------------------------------------
@@ -337,12 +406,14 @@ export function kitColour(desc, rgb8){
 }
 
 /* ---- the permalink ------------------------------------------------------------
-   ?kit=D,libs,ornaments,ground,colourLevel, libs joined by dots, bottom
-   up (the seed is the world id's, kit:<seed>): ?kit=14,8.6.4.3,4,1,2 is
-   the default. */
-export const kitParam = d => [d.D, d.libs.join('.'), d.ornaments, d.ground ? 1 : 0, d.colourLevel].join(',');
+   ?kit=D,libs,ornaments,ground,colourLevel[,share], libs joined by dots,
+   bottom up (the seed is the world id's, kit:<seed>): ?kit=14,8.6.4.3,4,1,2
+   is the default. The share is written only when there is one, so every
+   older link (and the pinned kits) reads as it did. */
+export const kitParam = d => [d.D, d.libs.join('.'), d.ornaments, d.ground ? 1 : 0, d.colourLevel, ...(d.share === null ? [] : [d.share])].join(',');
 export function kitFromParam(s, seed = 1){
-  const [D, libs, orn, ground, cl] = String(s).split(',');
+  const [D, libs, orn, ground, cl, share] = String(s).split(',');
   return kitDesc({ seed, D: +D, libs: libs ? libs.split('.').map(Number) : null, ornaments: orn === undefined || orn === '' ? KIT_DEFAULTS.ornaments : +orn,
-                   ground: ground === undefined ? KIT_DEFAULTS.ground : ground === '1', colourLevel: cl === undefined || cl === '' ? KIT_DEFAULTS.colourLevel : +cl });
+                   ground: ground === undefined ? KIT_DEFAULTS.ground : ground === '1', colourLevel: cl === undefined || cl === '' ? KIT_DEFAULTS.colourLevel : +cl,
+                   share: share === undefined || share === '' ? null : +share });
 }

@@ -10,7 +10,7 @@
      left stick     move: forward/back, strafe (WASD)
      right stick    look: yaw, pitch (the arrows, or a drag)
      RT / LT        up / down, analog (E / Q)
-     A (cross), L3  hold: ×4 (shift)
+     A (cross), L3  hold: ×8 (shift)
      RB / LB        speed ×2 / ÷2 (the wheel)
      Y (triangle)   freeze the cut (F)
 
@@ -58,7 +58,7 @@ export function pickPad(pads){
    returned then), so presses are edges: a held RB doubles the speed once.
      move    [strafe right, forward, up], each in [−1, 1]
      look    [turn right, pitch up], each in [−1, 1], times PAD.YAW / PITCH a ms
-     boost   ×4 held
+     boost   ×8 held
      pressed the buttons that went down this frame, by name
      active  anything off rest (the page saves the view when this goes false) */
 export function readPad(pad, held = []){

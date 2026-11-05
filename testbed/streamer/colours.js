@@ -16,6 +16,10 @@
                                   it (kit-core.js, kitColour). No table:
                                   the field rebuilds the kit's plan from
                                   the descriptor, a few ms
+     { kind: 'caves', D, seed, G } the caves' (cave-core.js, caveColour):
+                                  strata, the surface's grass, rock and
+                                  snow, water and lava. No table: the
+                                  field rebuilds the plan, ~0.6 s at D = 12
      null                         no colour: jobs emit no words
    colourOf(desc) turns it into a field on whichever side asks: the
    worker, the pool's main-thread fallback, Node's simulator and the tests.
@@ -34,6 +38,7 @@ import { SHAPES, colourFieldOf } from './experiments/shapes.mjs';
 import { scatterColour } from './scatter-core.js';
 import { latticeColour } from './lattice-core.js';
 import { kitColour } from './kit-core.js';
+import { caveColour } from './cave-core.js';
 
 const TAU = 2 * Math.PI;
 function hash3(i, j, k){
@@ -70,5 +75,6 @@ export function colourOf(desc){
   if (desc.kind === 'scatter') return scatterColour(desc, rgb8);
   if (desc.kind === 'lattice') return latticeColour(desc, rgb8);
   if (desc.kind === 'kit') return kitColour(desc, rgb8);
+  if (desc.kind === 'caves') return caveColour(desc, rgb8);
   throw new Error(`colourOf: unknown kind '${desc.kind}'`);
 }

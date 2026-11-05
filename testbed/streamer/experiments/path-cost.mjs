@@ -33,7 +33,8 @@
    a GPU.
 
    A view marked `check` (the lattice, benched in Chrome 2026-11-03; the
-   kit, 2026-11-04, whose rays the occupancy line doesn't predict) is
+   kit and the caves, 2026-11-04, whose rays the occupancy line doesn't
+   predict) is
    rebuilt and reported but kept out of the fit: another browser on the
    same GPU costs twice as much a cube, and one view would pull the
    Safari fit toward it. §4 holds it to the rule instead: the rule's
@@ -47,6 +48,7 @@ import { loadTestbed, rowsOf, automatonOf } from './testbed-corpus.mjs';
 import { buildScatter, scatterDesc } from '../scatter-core.js';
 import { buildLattice, latticeDesc } from '../lattice-core.js';
 import { buildKit, kitDesc } from '../kit-core.js';
+import { buildCaves, caveDesc } from '../cave-core.js';
 
 const PRINT = process.argv.includes('--print');
 const started = performance.now();
@@ -99,6 +101,18 @@ const VIEWS = [
     make: () => { const b = buildKit(kitDesc({ D: 16 })); return { store: b.store, root: b.root, D: 16 }; },
     eye: [1311, 7864, 1311], yaw: 0.78, pitch: -0.05, canvas: [2560, 1357], raster: 16.46, cubes: 3.95e6, ray: 15.17,
     rows: { density: 17.93, 'ray ≥ lod 3': 14.23, 'ray ≥ lod 1': 14.93 } },
+  // 2026-11-04, the caves at D = 12 from their start chamber (caves-log.md
+  // question 2: ?world=caves:1&depth=12&bench), wall clock, no timer
+  // extension, Safari's canvas. The first view from inside solid rock:
+  // the cut is capped at 1,024 leaves, and every chunk past the chamber's
+  // walls is hidden behind them, so the stencil marks none of the traced
+  // chunks' pixels (0% in every density row). A check, not fitted: the
+  // whole frame is 1.3–2 ms, where the clear and blit are a good part of
+  // it (caves-log.md §8).
+  { name: 'caves D = 12, start chamber', check: true,
+    make: () => { const b = buildCaves(caveDesc({ D: 12 }), { fast: true }); return { store: b.store, root: b.root, D: 12 }; },
+    eye: [2361.67, 817.02, 1524.79], yaw: -2.9016, pitch: -0.0349, canvas: [2560, 1357], raster: 2.00, cubes: 553.7e3, ray: 7.50,
+    rows: { density: 1.76, 'ray ≥ lod 3': 1.31, 'ray ≥ lod 1': 1.66 } },
 ];
 
 // The viewer's frustum (viewProj's 0.9 rad vertical field of view at the

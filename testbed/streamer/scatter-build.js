@@ -34,12 +34,28 @@
    ticker), so the fraction moves within a pass, not only between its
    rounds and slices.
 
-   Without workers (or if one fails) it falls back to buildScatter or
-   buildLattice on the main thread, which is the same world, much slower.
+   The caves (docs/caves-plan.md, decision 5) are simpler: 64 column parts
+   (cave-core.js's cavePartsOf), handed out one at a time to whichever
+   worker is free (the parts under the peaks take far longer than the
+   ones over the sea), each sent straight to the assembler, which merges
+   them in job order, grafts and prunes.
+
+   The kit (buildKitInWorkers; kit-findings §5) has a fixed library of
+   ornaments, the same for every seed, so the page keeps the ranges it
+   has built (ornamentCache): only ranges it hasn't seen are built, one
+   at a time on whichever worker is free, and the assembler composes the
+   kit from all of them. A new seed, libraries, ground or share builds
+   no ornaments at all.
+
+   Without workers (or if one fails) it falls back to buildScatter,
+   buildLattice or buildCaves on the main thread, which is the same world,
+   much slower.
    A cancelled build never falls back. */
 import { storeView } from './dag-core.js';
 import { scatterLayout, pickUnique, moreUntil, assignCells, buildScatter } from './scatter-core.js';
 import * as lattice from './lattice-core.js';
+import * as caves from './cave-core.js';
+import { buildKit, ornamentRanges } from './kit-core.js';
 
 const abortError = () => new DOMException('the build was superseded', 'AbortError');
 export const isAbort = e => e && e.name === 'AbortError';
@@ -82,8 +98,9 @@ function assembled(r){
 }
 
 export async function buildScatterInWorkers(desc, { workers = 4, onPhase = () => {}, signal = null } = {}){
-  const isLattice = desc.kind === 'lattice';
-  const fallback = () => isLattice ? lattice.buildLattice(desc, { onPhase }) : buildScatter(desc, { onPhase });
+  const isLattice = desc.kind === 'lattice', isCaves = desc.kind === 'caves';
+  const fallback = () => isCaves ? cavesOnMainThread(desc)
+    : isLattice ? lattice.buildLattice(desc, { onPhase }) : buildScatter(desc, { onPhase });
   if (signal?.aborted) throw abortError();
   if (!workers) return { ...fallback(), threads: 0 };
   // The bar only moves forward: pass A's fraction within a round is a
@@ -91,7 +108,7 @@ export async function buildScatterInWorkers(desc, { workers = 4, onPhase = () =>
   const report = onPhase;
   let shown = 0;
   onPhase = (t, f) => report(t, f == null ? f : (shown = Math.max(shown, f)));
-  const t0 = performance.now(), pool = Array.from({ length: workers + (isLattice ? 0 : 1) }, spawn), asm = spawn();
+  const t0 = performance.now(), pool = Array.from({ length: workers + (isLattice || isCaves ? 0 : 1) }, spawn), asm = spawn();
   // Every wait races the signal, so a cancel doesn't wait for a worker.
   const cancelled = new Promise((_, reject) => signal?.addEventListener('abort', () => reject(abortError()), { once: true }));
   cancelled.catch(() => {});
@@ -99,8 +116,9 @@ export async function buildScatterInWorkers(desc, { workers = 4, onPhase = () =>
   try {
     await wait(Promise.all([...pool, asm].map(p => p.ready)));
     await wait(Promise.all(pool.map(p => connect(asm, p))));
-    return isLattice ? await latticeInWorkers(desc, pool, asm, { t0, wait, onPhase })
-                     : await scatterInWorkers(desc, pool, asm, { t0, wait, onPhase });
+    return isCaves ? await cavesInWorkers(desc, pool, asm, { t0, wait, onPhase })
+      : isLattice ? await latticeInWorkers(desc, pool, asm, { t0, wait, onPhase })
+      : await scatterInWorkers(desc, pool, asm, { t0, wait, onPhase });
   } catch (e){
     if (isAbort(e) || signal?.aborted) throw abortError();
     console.warn(`${desc.kind || 'scatter'}: workers failed, building on the main thread`, e);
@@ -219,4 +237,95 @@ async function latticeInWorkers(desc, pool, asm, { t0, wait, onPhase }){
   const r = await wait(asm.ask({ type: 'finish' }));
   return { ...assembled(r), D: desc.D, layout, picked, ...lattice.pickStats(picked),
            threads: pool.length, ms: { passA: tA - t0, passB: tB - tA, assemble: r.ms, graft: r.ms.graft + r.ms.prune, total: performance.now() - t0 } };
+}
+
+/* The caves: the column parts handed out as workers free up, the plan's
+   info from the first worker (it rebuilds the plan for its parts
+   anyway), then the assembler's graft and prune. */
+async function cavesInWorkers(desc, pool, asm, { t0, wait, onPhase }){
+  const { jobs } = caves.cavePartsOf(desc), N = jobs.length, label = `${N} column parts on ${pool.length} threads`;
+  onPhase(label, 0);
+  await wait(asm.ask({ type: 'assemble', desc, order: jobs.map((_, i) => i) }));
+  const infoP = pool[0].ask({ type: 'cave-info', desc });
+  let next = 0, done = 0;
+  const partMs = new Array(N);
+  await wait(Promise.all(pool.map(async w => {
+    while (next < N){
+      const i = next++, t = performance.now();
+      await w.ask({ type: 'cave-part', desc, job: jobs[i], tag: i });
+      partMs[i] = performance.now() - t;
+      onPhase(`${label}: ${++done} of ${N} built`, 0.95 * done / N);
+    }
+  })));
+  const tB = performance.now(), info = await wait(infoP);
+  onPhase(`${label}: grafting and pruning`, 0.95);
+  const r = await wait(asm.ask({ type: 'finish' }));
+  return { ...assembled(r), D: desc.D, info: info.info, threads: pool.length,
+           ms: { parts: tB - t0, slowestPart: Math.max(...partMs), assemble: r.ms, total: performance.now() - t0 } };
+}
+// The main thread's way, pruned as the workers' is.
+function cavesOnMainThread(desc){
+  const { keys, root } = caves.buildCavesInParts(desc);
+  return { store: storeView({ keys }), root, nodes: keys.length / 9, D: desc.D, info: caves.caveInfo(caves.cavePlan(desc)), table: new Int32Array(0) };
+}
+
+/* ---- the kit ------------------------------------------------------------------
+   Ornament ranges kept by n0…n1 (a range's ornaments don't depend on the
+   kit's seed or size, ORNAMENT_SEED): 256 ornaments are ~9,500 nodes,
+   ~340 KB, kept for the page's life. Sent to the assembler as copies, so
+   the kept ones stay usable. Builders: at most one a missing range, so a
+   kit whose ornaments are all kept starts none.
+
+   The kit's assembler is KEPT between builds (kitAsm), unlike the other
+   worlds' short-lived workers: a kit is rebuilt on every control change
+   and every seed, and a new module worker has to load its modules first
+   (69 ms headless with nothing drawing). Measured on the way (kit-log
+   §8): under headless software GL a frame holds the main thread for
+   0.4–0.5 s, and starting a worker and delivering its answers both wait
+   for the main thread, so a rebuild there took 8 s against a first
+   build's 0.3 s, the worker's own work ~110 ms. A superseded build
+   terminates the kept assembler (its compose would otherwise run on),
+   and the next build starts a fresh one. */
+const ornamentCache = new Map();
+export const ornamentsKept = () => ornamentCache.size;
+let kitAsm = null;
+export async function buildKitInWorkers(desc, { workers = 4, onPhase = () => {}, signal = null } = {}){
+  if (signal?.aborted) throw abortError();
+  const fallback = () => ({ ...buildKit(desc), threads: 0 });
+  if (!workers) return fallback();
+  const t0 = performance.now(), want = ornamentRanges(desc.ornaments), key = ([a, z]) => a + '…' + z;
+  const missing = want.filter(r => !ornamentCache.has(key(r)));
+  const pool = Array.from({ length: Math.min(workers, missing.length) }, spawn), asm = kitAsm ||= spawn();
+  const cancelled = new Promise((_, reject) => signal?.addEventListener('abort', () => reject(abortError()), { once: true }));
+  cancelled.catch(() => {});
+  const wait = p => Promise.race([p, cancelled]);
+  try {
+    await wait(Promise.all([...pool, asm].map(p => p.ready)));
+    let next = 0, done = 0;
+    const label = `the kit, D=${desc.D}`, n = missing.reduce((a, [x, z]) => a + z - x, 0);
+    if (missing.length) onPhase(`${label}: ${n} new ornaments on ${pool.length} threads`, 0);
+    await wait(Promise.all(pool.map(async w => {
+      while (next < missing.length){
+        const r = missing[next++], got = await w.ask({ type: 'kit-ornaments', n0: r[0], n1: r[1] });
+        ornamentCache.set(key(r), { n0: got.n0, n1: got.n1, keys: got.keys, roots: got.roots });
+        onPhase(`${label}: ${++done} of ${missing.length} ornament ranges built`, 0.6 * done / missing.length);
+      }
+    })));
+    const tO = performance.now();
+    onPhase(`${label}: composing`, missing.length ? 0.6 : null);
+    const r = await wait(asm.ask({ type: 'kit-assemble', desc, ranges: want.map(w => ornamentCache.get(key(w))) }));
+    const nodes = r.keys.length / 9;
+    return { store: storeView({ keys: r.keys }), root: r.root, D: desc.D, nodes, raw: r.raw, dropped: r.dropped, threads: pool.length,
+             builtRanges: missing.length, keptRanges: want.length - missing.length,
+             ms: { ornaments: tO - t0, ...r.ms }, totalMs: performance.now() - t0 };
+  } catch (e){
+    // Superseded or failed: the kept assembler may be mid-compose or
+    // broken, so it goes; the next build starts a fresh one.
+    if (kitAsm === asm){ asm.close(); kitAsm = null; }
+    if (isAbort(e) || signal?.aborted) throw abortError();
+    console.warn('kit: workers failed, building on the main thread', e);
+    return { ...fallback(), fellBack: String(e.message || e) };
+  } finally {
+    for (const p of pool) p.close();
+  }
 }

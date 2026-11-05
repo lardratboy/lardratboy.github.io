@@ -1,0 +1,1801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAGs &amp; Kits — how a trillion voxels fit in seven thousand nodes</title>
+<style>
+:root{
+  --ink:#050508;
+  --ink-2:#0a0a11;
+  --panel:rgba(10,10,18,.72);
+  --rule:rgba(120,150,190,.16);
+  --rule-hi:rgba(0,229,255,.32);
+  --dim:#5a627a;
+  --mid:#8e97ad;
+  --text:#c3c9d6;
+  --live:#00e5ff;
+  --tree:#b98220;   /* chart series: tree (SVO) counts */
+  --dag:#1d9db4;    /* chart series: unique (DAG) counts */
+  --warm:#ffc44f;
+  --mono: ui-monospace,'SF Mono','Cascadia Mono','Roboto Mono',Consolas,monospace;
+  --serif:'Iowan Old Style','Palatino Linotype',Palatino,Charter,Georgia,serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{animation:none!important;transition:none!important}}
+body{
+  background:var(--ink);color:var(--text);
+  font-family:var(--serif);font-size:17px;line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+  background-image:radial-gradient(ellipse 80% 50% at 50% -10%,rgba(0,229,255,.055),transparent 70%);
+  background-repeat:no-repeat;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 28px 140px}
+
+h1{font-family:var(--mono);font-weight:700;letter-spacing:.02em;line-height:1.1;
+   font-size:clamp(30px,5.2vw,58px);color:#e8f6ff}
+h2{font-family:var(--mono);font-size:15px;font-weight:700;letter-spacing:.18em;
+   text-transform:uppercase;color:var(--live)}
+h3{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.16em;
+   text-transform:uppercase;color:var(--dim);margin-bottom:9px}
+p{margin:0 0 15px;max-width:68ch}
+p.lede{font-size:19px;color:#aab3c6;max-width:62ch}
+em{color:#dfe6f2;font-style:italic}
+b,strong{color:#8fd8ff;font-weight:600}
+code{font-family:var(--mono);font-size:.85em;color:#9fe8ff;
+     background:rgba(0,229,255,.07);padding:1px 5px;border-radius:3px;
+     border:1px solid rgba(0,229,255,.12)}
+a{color:var(--live)}
+ul.plain{margin:0 0 15px 1.1em;max-width:66ch}
+ul.plain li{margin:0 0 6px}
+.aside{border-left:2px solid var(--rule-hi);padding-left:16px;color:var(--mid);
+       font-size:15.5px;margin:22px 0;max-width:70ch}
+.aside b{color:#b8e6f7}
+pre.code{font-family:var(--mono);font-size:12px;line-height:1.55;color:#9fb4c8;
+       background:rgba(0,0,0,.35);border:1px solid var(--rule);border-radius:6px;
+       padding:12px 14px;overflow-x:auto;margin:14px 0 18px;max-width:100%}
+pre.code .c{color:#5a6a80}
+pre.code .k{color:#9fe8ff}
+
+header{padding:96px 0 40px;border-bottom:1px solid var(--rule)}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.3em;text-transform:uppercase;
+         color:var(--dim);margin-bottom:22px}
+.formula{font-family:var(--mono);font-size:clamp(11.5px,1.75vw,15px);color:#9fe8ff;
+         margin-top:30px;padding:16px 18px;border:1px solid var(--rule-hi);
+         border-radius:6px;background:rgba(0,229,255,.04);overflow-x:auto;white-space:pre;line-height:1.7}
+.formula .d{color:var(--dim)}
+.hero{display:flex;flex-wrap:wrap;gap:12px 40px;margin-top:30px}
+.hero div{font-family:var(--mono)}
+.hero .n{font-size:30px;color:#e8f6ff;font-weight:700;letter-spacing:.01em}
+.hero .l{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
+
+nav{position:sticky;top:0;z-index:20;background:rgba(5,5,8,.9);
+    backdrop-filter:blur(14px);border-bottom:1px solid var(--rule)}
+nav ol{display:flex;gap:2px;list-style:none;overflow-x:auto;max-width:1180px;
+       margin:0 auto;padding:0 22px;scrollbar-width:none}
+nav ol::-webkit-scrollbar{display:none}
+nav a{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.13em;
+      text-transform:uppercase;color:var(--dim);text-decoration:none;
+      padding:13px 11px;white-space:nowrap;border-bottom:2px solid transparent}
+nav a:hover{color:var(--mid)}
+nav a.on{color:var(--live);border-bottom-color:var(--live)}
+nav a:focus-visible{outline:2px solid var(--live);outline-offset:-4px}
+
+section{padding:76px 0;border-bottom:1px solid var(--rule)}
+.shead{display:flex;align-items:baseline;gap:16px;margin-bottom:26px}
+.snum{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.1em;
+      border:1px solid var(--rule);border-radius:3px;padding:3px 8px;flex:none}
+
+.stage{background:var(--panel);border:1px solid var(--rule);border-radius:10px;
+       padding:20px;margin:26px 0}
+.ctrls{display:flex;flex-wrap:wrap;gap:18px 22px;align-items:flex-end;margin-bottom:16px}
+.cgroup{display:flex;flex-direction:column;gap:7px}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+button{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
+       background:rgba(0,229,255,.05);border:1px solid var(--rule);color:var(--mid);
+       padding:6px 11px;border-radius:4px;cursor:pointer;transition:.14s}
+button:hover{border-color:var(--rule-hi);color:#cfefff}
+button:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+button.on{background:rgba(0,229,255,.14);border-color:var(--live);color:#e6faff}
+button:disabled{opacity:.4;cursor:default}
+input[type=range]{-webkit-appearance:none;appearance:none;width:140px;height:3px;
+       background:#1a2030;border-radius:2px;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;
+       border-radius:50%;background:var(--live);cursor:pointer}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:var(--live)}
+input[type=range]:focus-visible{outline:2px solid var(--live);outline-offset:4px}
+input[type=number]{font-family:var(--mono);font-size:11px;width:62px;padding:5px 6px;
+       background:rgba(0,0,0,.4);color:#cfefff;border:1px solid var(--rule);border-radius:4px}
+input[type=number]:focus-visible{outline:2px solid var(--live);outline-offset:1px}
+label.lbl{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;
+       text-transform:uppercase;color:var(--dim)}
+.val{color:var(--live)}
+
+canvas{display:block;width:100%;background:var(--ink-2);
+       border:1px solid var(--rule);border-radius:6px}
+canvas.paint{cursor:crosshair;touch-action:none}
+canvas.look{cursor:grab;touch-action:none}
+canvas.look:active{cursor:grabbing}
+
+.read{display:flex;flex-wrap:wrap;gap:2px 24px;margin-top:14px;
+      font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+.read span b{color:var(--live);font-weight:600}
+.verdict{font-family:var(--mono);font-size:12px;margin-top:14px;padding:11px 14px;
+      border-radius:5px;border:1px solid rgba(0,229,255,.3);
+      background:rgba(0,229,255,.06);color:#a8ecff;line-height:1.6}
+.warnbox{font-family:var(--mono);font-size:12px;padding:12px 14px;border-radius:5px;
+      border:1px solid rgba(255,196,79,.4);background:rgba(255,196,79,.07);color:#ffd88a;margin:18px 0;display:none}
+
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.twoL{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:18px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--mono);
+        font-size:10px;letter-spacing:.1em;color:var(--dim);margin:4px 0 10px}
+.swatch{display:inline-block;width:14px;height:8px;border-radius:2px;vertical-align:middle;margin-right:6px}
+
+table.dt{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px;margin-top:8px}
+table.dt th{text-align:left;font-weight:600;font-size:9.5px;letter-spacing:.14em;
+      text-transform:uppercase;color:var(--dim);padding:0 10px 9px 0;border-bottom:1px solid var(--rule)}
+table.dt td{padding:7px 10px 7px 0;border-bottom:1px solid rgba(120,150,190,.07);color:var(--mid)}
+table.dt td.k{color:#9fe8ff}
+table.dt td.n{text-align:right;font-variant-numeric:tabular-nums}
+table.dt th.n{text-align:right}
+table.dt tr.hi td{color:#e6faff;background:rgba(0,229,255,.05)}
+
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:10px}
+.gallery figure{background:var(--ink-2);border:1px solid var(--rule);border-radius:6px;padding:6px 6px 8px}
+.gallery canvas{border:0;background:none}
+.gallery figcaption{font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--mid);
+      text-align:center;margin-top:3px}
+.gallery figcaption i{color:var(--dim);font-style:normal}
+
+.path{font-family:var(--mono);font-size:11.5px;color:var(--mid);line-height:1.55}
+.path .step{padding:6px 0 6px 12px;border-left:2px solid var(--rule);margin-left:4px}
+.path .step b{color:#cfefff}
+.path .step .t{color:var(--warm)}
+.path .step.part{border-left-color:var(--live)}
+.path .hint{color:var(--dim)}
+.plan{font-family:var(--mono);font-size:11px;color:var(--dim);line-height:1.75;max-height:380px;overflow:auto}
+.plan .lv{color:var(--mid);margin-top:6px}
+.plan .e{display:inline-block;padding:0 6px;margin:1px 2px;border:1px solid var(--rule);border-radius:3px;color:var(--mid)}
+.plan .e.g{border-bottom:2px solid #6f7a90}
+.plan .e.on{border-color:var(--live);color:#e6faff;background:rgba(0,229,255,.12)}
+
+#tip{position:fixed;z-index:50;pointer-events:none;font-family:var(--mono);font-size:11px;
+     color:#e6faff;background:rgba(12,14,22,.96);border:1px solid var(--rule-hi);border-radius:5px;
+     padding:7px 9px;max-width:300px;line-height:1.5;display:none}
+
+details{margin-top:12px;font-family:var(--mono);font-size:11px;color:var(--mid)}
+details summary{cursor:pointer;color:var(--dim);letter-spacing:.1em}
+
+footer{padding:60px 0 0;font-family:var(--mono);font-size:11px;color:var(--dim);line-height:1.9}
+footer a{color:var(--mid)}
+
+@media(max-width:860px){
+  .two,.twoL{grid-template-columns:1fr}
+  .wrap{padding:0 18px 100px}
+  body{font-size:16px}
+}
+</style>
+</head>
+<body>
+
+<nav aria-label="Sections">
+  <ol>
+    <li><a href="#s1" data-nav="s1">1 · Hash-consing</a></li>
+    <li><a href="#s2" data-nav="s2">2 · The store</a></li>
+    <li><a href="#s3" data-nav="s3">3 · Turned copies</a></li>
+    <li><a href="#s4" data-nav="s4">4 · Slot grids</a></li>
+    <li><a href="#s5" data-nav="s5">5 · The library</a></li>
+    <li><a href="#s6" data-nav="s6">6 · Kit lab</a></li>
+    <li><a href="#s7" data-nav="s7">7 · Costs</a></li>
+    <li><a href="#s8" data-nav="s8">8 · Colour</a></li>
+    <li><a href="#s9" data-nav="s9">9 · Endless</a></li>
+  </ol>
+</nav>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">dag-core.js &nbsp;·&nbsp; kit-core.js &nbsp;·&nbsp; interactive companion</div>
+  <h1>DAGs &amp; Kits</h1>
+  <p class="lede" style="margin-top:22px">The kit world is 65,536 voxels on a side and holds
+  3.4 trillion solid voxels. It is stored in fewer nodes than a 100×100 thumbnail has pixels, and built in
+  about fifty milliseconds. This page shows why: first the DAG, a tree that never stores the same
+  subtree twice, and then the kit, a way of making content that gives the DAG almost nothing new to store.</p>
+
+  <div class="hero" aria-label="Headline numbers, from docs/kit-results.md">
+    <div><div class="n">65,536³</div><div class="l">world side, D = 16</div></div>
+    <div><div class="n">3.45 T</div><div class="l">solid voxels</div></div>
+    <div><div class="n">6,990</div><div class="l">DAG nodes</div></div>
+    <div><div class="n">371</div><div class="l">Oh classes</div></div>
+    <div><div class="n">48 ms</div><div class="l">to build</div></div>
+  </div>
+
+  <div class="formula"><span class="d">descriptor</span>  kitDesc({ seed, D, libs, ornaments, ground, colourLevel })
+   <span class="d">↓ kitPlan</span>    every choice is a hash of (seed, level, entry)      <span class="d">0.01–0.2 ms</span>
+   <span class="d">↓ buildKit</span>   compose bottom-up: intern, transform, prune          <span class="d">~50 ms</span>
+<span class="d">DAG</span>         node = (level, 8 child ids), never stored twice      <span class="d">D = 4 + 2L</span></div>
+</header>
+
+<!-- ============================ 1 ============================ -->
+<section id="s1">
+  <div class="shead"><span class="snum">01</span><h2>One node, many places</h2></div>
+
+  <p>An octree splits space in half on every axis, again and again, until it reaches single voxels.
+  Stored as a tree, every split costs a node, so a world with a billion voxels of surface costs about a
+  billion nodes. <b>Hash-consing</b> stores the tree differently. A node is its key: its level and the ids of its eight
+  children. Before a node is created, the store looks the key up. If that exact subtree already exists,
+  its id is reused. The tree becomes a <b>directed acyclic graph</b>, where every repeat is a pointer.</p>
+
+  <p>The code is three-dimensional, with eight children a node. To make it drawable, the demo below is the
+  same algorithm in two dimensions: a quadtree, four children a node, on a 32×32 grid. Paint on the grid
+  (click and drag). On the right is the store: every unique node, level by level, with the number of places it
+  appears.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup" style="flex:1 1 auto">
+        <label class="lbl">Start from</label>
+        <div class="chips" id="s1p"></div>
+      </div>
+      <div class="cgroup">
+        <label class="lbl">Highlight repeats at level</label>
+        <div class="chips" id="s1l"></div>
+      </div>
+    </div>
+    <div class="twoL">
+      <div>
+        <h3>The grid · paint to edit</h3>
+        <canvas id="cv1" class="paint" height="430" aria-label="32 by 32 voxel grid. Click and drag to paint."></canvas>
+      </div>
+      <div>
+        <h3>The store · unique nodes, top level first</h3>
+        <div class="legend">
+          <span><i class="swatch" style="background:var(--tree)"></i>tree nodes (SVO)</span>
+          <span><i class="swatch" style="background:var(--dag)"></i>unique nodes (DAG)</span>
+          <span>×n = places it appears</span>
+        </div>
+        <canvas id="cvS1" height="380" aria-label="Unique nodes per level with their occurrence counts"></canvas>
+      </div>
+    </div>
+    <div class="read" id="rd1"></div>
+    <div class="verdict" id="vd1"></div>
+  </div>
+
+  <p>Try <b>Sierpiński</b>. Its DAG has exactly one node a level, because each level is three copies of the
+  level below and one empty quadrant. A 65,536³ version would still be one node a level. That is
+  <code>ifsandwhats.md</code> §1's claim, and step 2 measured it on real content: a hash-consed voxel DAG
+  <em>is</em> an iterated function system. <b>Noise</b> is the opposite case. It shares nodes only at the
+  bottom, because a 2×2 block has just 15 non-empty patterns, and above that nothing repeats.</p>
+
+  <p class="aside">The real store (<code>createStore</code> in dag-core.js) works the same way with
+  9-word keys, <code>[level, c0 … c7]</code>, in an open-addressing table. <code>EMPTY</code> = 0 is shared by
+  every level and never stored. <code>FULL</code> = 1 is a solid voxel only. A solid 16³ block is an ordinary
+  node, one per level, because special-casing it would cost a branch in every walk. Step 2 found that on
+  block-showroom specimens, plain hash-consing is a <b>bottom-of-the-tree effect</b>: 2³ nodes collapse
+  3,605×, and above 32³ almost nothing repeats (<code>hashcons-findings.md</code> §2). The kit is built so
+  that things repeat at <em>every</em> level.</p>
+</section>
+
+<!-- ============================ 2 ============================ -->
+<section id="s2">
+  <div class="shead"><span class="snum">02</span><h2>The store only grows</h2></div>
+
+  <p>Ids are handed out in creation order, and a node can only be interned once its children exist. So a
+  child's id is <b>always lower than its parent's</b>. dag-core.js relies on that everywhere.
+  <code>createClasses</code> and <code>createCounts</code> make one pass up the ids. <code>census</code> walks
+  them down. <code>prune</code> marks what the roots reach in a single sweep from the top id to the bottom.
+  It needs no stack, because by the time the sweep reaches a node, every node that could keep it has already been seen.</p>
+
+  <p>The store is append-only. Every edit you made above interned new nodes, and the old ones stayed
+  behind. Below is every id the demo's store holds, coloured by level. Hollow cells are dead, meaning nothing
+  reachable from the current root points to them. Hover over an id to see its children, which are always to the
+  left. Then prune.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup">
+        <label class="lbl">Store</label>
+        <div class="chips"><button id="s2prune">Prune to the root</button><button id="s2reset">Fresh store</button></div>
+      </div>
+      <div class="legend" style="margin:0 0 4px auto" id="s2leg"></div>
+    </div>
+    <canvas id="cv2" height="170" aria-label="Every id in the store, in order, coloured by level"></canvas>
+    <div class="read" id="rd2"></div>
+  </div>
+
+  <p>Real builds leave a lot behind. In the lattice at R = 5, the pieces that <code>graft</code> unions
+  were 54–75% of the store. A kit leaves almost nothing: 6,270 interned and 6,261 kept at D = 14, because
+  it is composed directly, with no unions. The prune still matters, because <code>buildKit</code> makes every
+  library entry, and an entry no one picked is dropped. Every chunk worker gets a copy of the store, so
+  dead nodes cost memory several times over.</p>
+</section>
+
+<!-- ============================ 3 ============================ -->
+<section id="s3">
+  <div class="shead"><span class="snum">03</span><h2>Turned copies</h2></div>
+
+  <p>Hash-consing finds <em>identical</em> subtrees. A part that has been turned is not identical. Every node
+  below the turn is new, all the way down to the voxels. The kit turns parts at every level, so in the plain
+  DAG that is where it pays. The cure is to <b>label the edges</b>. Each pointer carries a transform, the store
+  keeps one representative per <em>class</em> (nodes equal up to that transform), and a reader composes the
+  labels as it descends.</p>
+
+  <p>Below, sixteen copies of one motif are placed, each turned by a hash. Compare three counts: the
+  plain DAG, classes under the mirrors only (SSVDAG's choice, which is 8 mirrors in 3D and 4 here), and classes under
+  the whole symmetry group (Oh, 48 transforms in 3D; D4, 8 here).</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup">
+        <label class="lbl">Motif</label>
+        <div class="chips" id="s3m"></div>
+      </div>
+      <div class="cgroup">
+        <label class="lbl">Each copy turned by</label>
+        <div class="chips" id="s3t"></div>
+      </div>
+      <div class="cgroup">
+        <label class="lbl">Draws</label>
+        <div class="chips"><button id="s3s">Reshuffle</button></div>
+      </div>
+    </div>
+    <div class="two">
+      <div>
+        <h3>Sixteen placed copies</h3>
+        <canvas id="cv3" height="360" aria-label="Sixteen copies of a motif, each turned"></canvas>
+      </div>
+      <div>
+        <h3>Nodes per level, three ways</h3>
+        <table class="dt" id="tb3"><thead><tr>
+          <th>level</th><th>side</th><th class="n">plain DAG</th><th class="n">mirror classes</th><th class="n">full-group classes</th>
+        </tr></thead><tbody></tbody></table>
+        <div class="verdict" id="vd3"></div>
+      </div>
+    </div>
+  </div>
+
+  <p>In 3D the kit sketch measured the same effect. With no turns, the D = 12 struct kit is <b>715 nodes</b>,
+  and with turns it is <b>6,273</b>, 8.8× as many. Under 48 labels it is 325 classes against <b>326</b>,
+  so turning every part costs one class. Under SSVDAG's 8 mirrors it is 392 against 1,622, because mirrors
+  can't express a rotation (<code>kit-plan.md</code> §1).</p>
+
+  <p>What a label costs is in the reader, not the storage. A 6-bit label fits in the pointer. A traversal keeps a running
+  transform <code>g</code>, one byte, and does two table lookups per step:</p>
+<pre class="code"><span class="c">// descend through an edge labelled `label` toward the octant you want, o</span>
+<span class="k">g</span>      = MUL[g * 48 + label];        <span class="c">// compose: 48×48 table</span>
+<span class="k">stored</span> = OCT[INV[g] * 8 + o];        <span class="c">// which stored octant holds it: 48×8 table</span></pre>
+  <p>Mirrors alone reduce both lookups to XORs, which is why the SSVDAG paper stopped there. The DAG the chunk
+  workers walk is still the plain one. <code>createClasses</code> measures what labels would save, and
+  <code>labels-and-bricks.md</code> sets out the trade.</p>
+</section>
+
+<!-- ============================ 4 ============================ -->
+<section id="s4">
+  <div class="shead"><span class="snum">04</span><h2>Two binary levels make a 4³ slot grid</h2></div>
+
+  <p>A kit assembly is a 4×4×4 grid of slots, and each slot holds a whole entry from the level below. The DAG is
+  binary, so 4³ is two levels of it: eight interns of 2³ slots, then one intern of those eight. There is no graft and no
+  union, only <code>intern</code>. This is the whole of <code>buildKit</code>'s composition:</p>
+<pre class="code"><span class="c">// g[s]: the 64 slot ids, s = x + 4y + 16z.  One level-(k+2) node from them.</span>
+<span class="k">for</span> (let O = 0; O &lt; 8; O++){
+  <span class="k">for</span> (let o = 0; o &lt; 8; o++) ch[o] = g[(2*(O&amp;1) + (o&amp;1)) + 4*(2*(O&gt;&gt;1&amp;1) + (o&gt;&gt;1&amp;1)) + 16*(2*(O&gt;&gt;2) + (o&gt;&gt;2))];
+  top[O] = store.intern(k + 1, ch);
+}
+<span class="k">return</span> store.intern(k + 2, top);</pre>
+
+  <div class="stage">
+    <div class="two">
+      <div>
+        <h3>The 64 slots, as four z-slices · hover a slot</h3>
+        <canvas id="cv4" height="200" aria-label="Four 4 by 4 slices of the slot grid"></canvas>
+      </div>
+      <div>
+        <h3>The same slots as two binary levels</h3>
+        <canvas id="cv4t" height="200" aria-label="Root, eight intermediate nodes, sixty-four slots"></canvas>
+      </div>
+    </div>
+    <div class="read" id="rd4"></div>
+  </div>
+
+  <p>The high bit of each coordinate picks the coarse octant <code>O</code>, and the low bit picks the fine one
+  <code>o</code>. Read together, <code>d = 8·O + o</code> is the slot's <b>Morton digit</b>, the same octant-major
+  order the radix-4 port settled on (<code>radix4-addressing.md</code>). That is why a 4³ level costs nothing
+  extra. It was already two binary levels with a convenient name.</p>
+</section>
+
+<!-- ============================ 5 ============================ -->
+<section id="s5">
+  <div class="shead"><span class="snum">05</span><h2>The library</h2></div>
+
+  <p>A kit is nested 4³ assemblies over a small library. <b>Level 0</b> is a library of 16³ parts: eight
+  structural ones and, by default, four block-showroom specimens as ornaments. <b>Each level above</b> is a
+  library of assemblies. An assembly picks a <em>mask</em> (which of its 64 slots are filled) and, for each filled slot,
+  an entry of the level below and one of the 24 rotations. The top level has one entry, which is the world.
+  Since parts are 2⁴ on a side and each level is two binary levels, <b>D = 4 + 2L</b>.</p>
+
+  <div class="warnbox" id="modfail"></div>
+
+  <h3 style="margin-top:28px">Level 0 · the parts, drawn from kit-core.js's own <code>PARTS</code>, coloured as colour level 0 would</h3>
+  <div class="gallery" id="galParts"></div>
+
+  <h3 style="margin-top:28px">Level 0 · ornaments, <code>ornamentOcc(n)</code>: block-showroom specimens at R = 16, one library for every seed</h3>
+  <div class="gallery" id="galOrn"></div>
+
+  <h3 style="margin-top:28px">Masks · which of an assembly's 4³ slots are filled (<code>MASKS</code>)</h3>
+  <div class="gallery" id="galMasks"></div>
+
+  <p style="margin-top:26px">Which masks an entry may pick depends on its level. That choice is the main
+  control on the look:</p>
+  <table class="dt" style="max-width:820px">
+    <thead><tr><th>where</th><th>family</th><th>why</th></tr></thead>
+    <tbody>
+      <tr><td class="k">level 1</td><td>frame, cross, arches, pillars, slabs</td><td>detailed: these are 64³ objects</td></tr>
+      <tr><td class="k">level 2</td><td>tower, pillars, frame, arches</td><td>tall: 256³ buildings</td></tr>
+      <tr><td class="k">levels 3+</td><td>frame, pillars, cross</td><td>open, so there's room to fly in</td></tr>
+      <tr><td class="k">level L − 1, ground on</td><td>tower, pillars, arches, frame</td><td>nothing hangs from nothing</td></tr>
+      <tr><td class="k">the top, ground on</td><td>pillars, court, skyline</td><td>grounded: the world stands on a floor</td></tr>
+      <tr><td class="k">grounded entries</td><td>pillars, slabs, court, skyline</td><td>every one fills its whole bottom layer</td></tr>
+    </tbody>
+  </table>
+
+  <p style="margin-top:22px"><b>The ground</b> is built as nested floors. Half of each level's library
+  (rounded up) is <em>grounded</em>. A grounded entry fills its bottom layer, and each of those 16 slots holds a
+  grounded entry from the level below, turned only about y (<code>Y_TURNS</code>, 4 of the 24). This bottoms out at the
+  block, the slab and the step, all solid for y &lt; 4. So a grounded world is solid in its bottom 4 voxels from
+  edge to edge, and anything that stands on it stands on floors at every scale. The top two levels also place
+  their children upright, so the large structure stands up. Below them, every slot keeps all 24 turns.</p>
+
+  <p class="aside">The first <code>kitPlan</code> marked a floor slot with <code>s &lt; 16 &amp;&amp; y === 0</code>.
+  Since <code>s = x + 4y + 16z</code>, that is the z = 0 row only, so 4 of the 16 bottom slots were floors and the ground had holes.
+  The dense stamp passed, because it stamps whatever the plan says. A separate test of the ground's promise caught it
+  (<code>kit-log.md</code> §2). <b>A stamp checks the composition, not the plan's promises.</b></p>
+</section>
+
+<!-- ============================ 6 ============================ -->
+<section id="s6">
+  <div class="shead"><span class="snum">06</span><h2>The kit lab</h2></div>
+
+  <p>This lab builds a real kit, in your browser, with the repo's own <code>kitDesc</code>, <code>kitPlan</code>
+  and <code>buildKit</code>. It ray-casts the DAG on the CPU, a port of <code>experiments/kit-sketch.mjs</code>'s
+  tracer, and colours each hit with the kit's own <code>kitColour</code>. Every number below the picture is
+  measured on this build, not copied. Drag to look around, scroll to move, and hold shift to move ×8.
+  <b>Hover over the picture</b> to see the voxel's path through the plan, which is the same walk the colour
+  field makes in each chunk worker. Far views sparkle: this is one ray a pixel at full detail, where the viewer
+  would draw coarse lods with averaged colour.</p>
+
+  <div class="stage" id="lab">
+    <div class="ctrls">
+      <div class="cgroup">
+        <label class="lbl">Depth D</label>
+        <div class="chips" id="kD"></div>
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="kSeed">Seed</label>
+        <input type="number" id="kSeed" min="1" max="65535" value="1">
+      </div>
+      <div class="cgroup">
+        <label class="lbl">Libraries, bottom up</label>
+        <div class="chips" id="kLibs"></div>
+      </div>
+      <div class="cgroup">
+        <label class="lbl">Library presets</label>
+        <div class="chips" id="kLibP"></div>
+      </div>
+    </div>
+    <div class="ctrls">
+      <div class="cgroup">
+        <label class="lbl" for="kOrn">Ornaments <span class="val" id="kOrnV">4</span></label>
+        <input type="range" id="kOrn" min="0" max="256" step="1" value="4">
+      </div>
+      <div class="cgroup">
+        <label class="lbl">Ground</label>
+        <div class="chips"><button id="kGround" class="on" aria-pressed="true">on</button></div>
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="kCol">Colour level <span class="val" id="kColV">2</span></label>
+        <input type="range" id="kCol" min="0" max="5" step="1" value="2">
+      </div>
+      <div class="cgroup">
+        <label class="lbl">View</label>
+        <div class="chips" id="kView"></div>
+      </div>
+    </div>
+
+    <canvas id="cvK" class="look" height="405" tabindex="0" aria-label="Ray-cast view of the kit. Drag to look, scroll to move."></canvas>
+    <div class="read" id="rdK"></div>
+    <div class="read" id="rdK2"></div>
+
+    <div class="two" style="margin-top:20px">
+      <div>
+        <h3>This voxel's path through the plan</h3>
+        <div class="path" id="kPath"><span class="hint">Hover over the picture.</span></div>
+      </div>
+      <div>
+        <h3>The plan · every entry's mask (underlined: grounded)</h3>
+        <div class="plan" id="kPlan"></div>
+      </div>
+    </div>
+  </div>
+
+  <p>The plan is a few typed arrays: per level, per entry, 64 slots of (child index, turn). It is rebuilt
+  from the descriptor in a fraction of a millisecond, so nothing but the descriptor ever needs to be sent anywhere. A chunk
+  worker gets <code>{ kind: 'kit', … }</code> and rebuilds the colour field itself. The draws come in a fixed order
+  (the mask, a skyline's heights, then each filled slot's child and turn), so adding one draw anywhere
+  moves every later choice. That is why <code>stream.test.js</code> pins the D = 10 kit to 76,250,785 voxels and 3,092
+  nodes.</p>
+</section>
+
+<!-- ============================ 7 ============================ -->
+<section id="s7">
+  <div class="shead"><span class="snum">07</span><h2>What a kit costs</h2></div>
+
+  <p>The node count is a library bill. A turned entry is a new node all the way down, but it is hash-consed
+  too: every other copy with the same turn shares all of it. So the store is bounded by roughly
+  <b>24 × (the parts' nodes + 9 a library entry)</b>, whatever D is. Deeper kits add a level of library
+  and almost no nodes. Below, the lab's current kit is rebuilt four ways, and each build gets its classes counted.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Measure the lab's kit</label>
+        <div class="chips"><button id="mGo">Measure</button></div></div>
+      <div class="read" id="mWhat" style="margin:0 0 6px"></div>
+    </div>
+    <table class="dt" id="tb7"><thead><tr>
+      <th>variant</th><th class="n">built</th><th class="n">nodes</th><th class="n">Oh classes (48)</th><th class="n">mirror classes (8)</th>
+      <th class="n">voxels</th><th class="n">build ms</th>
+    </tr></thead><tbody><tr><td colspan="7">…</td></tr></tbody></table>
+    <div class="verdict" id="vd7"></div>
+  </div>
+
+  <p>What the measured tables say (<code>kit-findings.md</code> §1):</p>
+  <ul class="plain">
+    <li><b>The ground costs nothing.</b> At D = 14 a grounded kit has 6,261 nodes and a floating one 7,110. The upright levels
+      and floors use 4 turns instead of 24, so the grounded kit is smaller, with the same 353 Oh classes, and has more voxels, because floors are solid.</li>
+    <li><b>Turning costs one class.</b> Under 48 labels a kit is 5–7% of its nodes. Under SSVDAG's 8 mirrors it is 25–26%.</li>
+    <li><b>Ornaments are the costliest parts.</b> Each specimen brings about 570 nodes with its turns: 3,449 nodes with none, 6,261 with
+      four (45% of the kit), and 12,529 with sixteen.</li>
+    <li><b>Libraries are the knob that costs</b>, about linearly, and they buy variety, not size:</li>
+  </ul>
+
+  <div class="stage">
+    <h3>D = 14 kits, nodes against library entries (measured, docs/kit-results.md)</h3>
+    <div id="ch7" role="img" aria-label="Log-log chart: nodes grow about linearly with total library entries, from 1,544 to 222,949"></div>
+    <details><summary>Table view</summary>
+      <table class="dt" id="tb7b"><thead><tr><th>libraries</th><th class="n">entries</th><th class="n">nodes</th><th class="n">Oh classes</th><th class="n">voxels</th><th class="n">build ms</th></tr></thead><tbody></tbody></table>
+    </details>
+  </div>
+
+  <p><b>A cache of copies would not pay.</b> In the street views at D = 14 and 16, only 58–61% of the cut's
+  chunks are distinct (lod, node) pairs, so about 40% are copies. But 94–97% of the chunk jobs' outputs are
+  distinct, because a chunk's records also depend on its neighbours (the apron hides faces, and the seams open where a neighbour
+  isn't drawn), and a kit's copies rarely have the same neighbours. The DAG shares the content. The views
+  of it are still mostly unique.</p>
+</section>
+
+<!-- ============================ 8 ============================ -->
+<section id="s8">
+  <div class="shead"><span class="snum">08</span><h2>Colour frames, and why far views go grey</h2></div>
+
+  <p>The kit's colour is a stand-in you chose: the <b>gamut of a voxel's position in its frame</b>. The frame is
+  the level-<code>colourLevel</code> entry the voxel lies in (level 2 by default, the 256³ buildings), turned with it. A
+  turned copy shows the same colours, turned, so a repeat shows up as a repeated patch of colour. The demo below
+  is a 2D slice of that: a grid of frames, each turned, and next to it what a coarse lod draws, the mean colour of
+  each cell.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup">
+        <label class="lbl" for="s8f">Frame side <span class="val" id="s8fv">32</span></label>
+        <input type="range" id="s8f" min="3" max="6" step="1" value="5">
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="s8c">Coarse cell <span class="val" id="s8cv">8</span></label>
+        <input type="range" id="s8c" min="0" max="7" step="1" value="3">
+      </div>
+      <div class="cgroup">
+        <label class="lbl">Colour</label>
+        <div class="chips" id="s8m"></div>
+      </div>
+    </div>
+    <div class="two">
+      <div><h3>Per voxel</h3><canvas id="cv8a" height="300" aria-label="Fine colour field"></canvas></div>
+      <div><h3>Per coarse cell (mean)</h3><canvas id="cv8b" height="300" aria-label="Colour averaged per coarse cell"></canvas></div>
+    </div>
+    <div class="read" id="rd8"></div>
+    <div class="verdict" id="vd8"></div>
+  </div>
+
+  <p>When a coarse cell is as large as a frame, the cell averages the frame's whole gamut, and the mean of a
+  gamut is grey. From outside, the D = 14 kit's cut is 17 leaves at lods 6–9, which means cells of 64–512 voxels
+  against 256³ frames. The opening view was confetti at D = 14 and grey at D = 16
+  (<code>kit-findings.md</code> §2). Nothing is broken. It is what a gamut looks like at a scale coarser than its
+  frame. You picked <b>(c), a two-scale colour</b>: the fine gamut blended with a coarse one, read in level L − 1's
+  frames. It is decided but <b>not built yet</b>. The "two-scale" chip shows roughly what it would do.</p>
+
+  <p class="aside">A walk through the plan for every point made colour most of a kit job, 30 ms per chunk against
+  6.4 ms without colour. The fix rests on one fact: level-c entries sit on a world-aligned grid, and a turn about a child's centre
+  maps aligned cells to aligned cells. So each world cell of a frame's side is <b>one affine map</b>, a centre plus a
+  signed permutation, read off four walks and cached. A cache hit costs nine multiply-adds, and since every value is an integer or a
+  half, the cached map gives exactly the walk's answer (<code>kit-log.md</code> §4).</p>
+</section>
+
+<!-- ============================ 9 ============================ -->
+<section id="s9">
+  <div class="shead"><span class="snum">09</span><h2>How far is endless</h2></div>
+
+  <p>A view's cost depends on the view, not the world: 0.3–15M cubes and 1–100 MB at the default detail, whatever
+  the world's size. The kit's node count barely moves with D either (4,935 → 6,261 → 6,990 for D = 12, 14, 16). So
+  the questions about scale are about numbers and engine assumptions, not storage. Slide D.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup">
+        <label class="lbl" for="s9d">World depth D <span class="val" id="s9dv">16</span></label>
+        <input type="range" id="s9d" min="4" max="32" step="1" value="16" style="width:300px">
+      </div>
+    </div>
+    <canvas id="cv9" height="200" aria-label="A ruler of depths from 4 to 32 with the engine's limits marked"></canvas>
+    <div class="read" id="rd9"></div>
+    <div class="verdict" id="vd9"></div>
+  </div>
+
+  <p>The next step you asked about is a universe packed full, with caves next to a kit: <b>many DAGs active at once</b>.
+  Today a world is one store, one root and one depth, built whole and copied whole to every worker.
+  <code>universekit.md</code> proposes a <b>universe tree</b> whose top levels are computed from a hash of
+  where they are, never stored, and whose leaves are <b>regions</b>. Each region is a whole world named by a descriptor and
+  built on demand.</p>
+
+  <div class="stage">
+    <svg id="uni" viewBox="0 0 1000 330" width="100%" role="img" aria-label="Universe tree: computed levels above region roots, each region a DAG over a shared base store">
+      <defs>
+        <marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#5a627a"/></marker>
+      </defs>
+      <g font-family="ui-monospace,SF Mono,Menlo,monospace" font-size="12">
+        <text x="20" y="34" fill="#5a627a">level 24–17</text>
+        <text x="20" y="50" fill="#5a627a">computed, never stored</text>
+        <circle cx="500" cy="38" r="9" fill="none" stroke="#00e5ff" stroke-dasharray="3 3"/>
+        <g stroke="#00e5ff" stroke-dasharray="3 3" stroke-width="1" opacity=".7">
+          <line x1="500" y1="47" x2="300" y2="98"/><line x1="500" y1="47" x2="500" y2="98"/><line x1="500" y1="47" x2="700" y2="98"/>
+        </g>
+        <g fill="none" stroke="#00e5ff" stroke-dasharray="3 3">
+          <circle cx="300" cy="106" r="8"/><circle cx="500" cy="106" r="8"/><circle cx="700" cy="106" r="8"/>
+        </g>
+        <g stroke="#00e5ff" stroke-dasharray="3 3" opacity=".6">
+          <line x1="300" y1="114" x2="210" y2="160"/><line x1="300" y1="114" x2="390" y2="160"/>
+          <line x1="500" y1="114" x2="560" y2="160"/><line x1="700" y1="114" x2="760" y2="160"/>
+        </g>
+        <text x="20" y="182" fill="#5a627a">level 16</text>
+        <text x="20" y="198" fill="#5a627a">region roots</text>
+        <g>
+          <rect x="160" y="162" width="104" height="34" rx="4" fill="rgba(0,229,255,.08)" stroke="#00e5ff"/>
+          <text x="212" y="184" text-anchor="middle" fill="#cfefff">kit:4182</text>
+          <rect x="340" y="162" width="104" height="34" rx="4" fill="rgba(255,196,79,.08)" stroke="#ffc44f"/>
+          <text x="392" y="184" text-anchor="middle" fill="#ffe2a0">caves:77</text>
+          <rect x="510" y="162" width="104" height="34" rx="4" fill="none" stroke="#2a3040" stroke-dasharray="4 3"/>
+          <text x="562" y="184" text-anchor="middle" fill="#5a627a">(empty)</text>
+          <rect x="708" y="162" width="104" height="34" rx="4" fill="rgba(0,229,255,.08)" stroke="#00e5ff"/>
+          <text x="760" y="184" text-anchor="middle" fill="#cfefff">kit:9</text>
+        </g>
+        <g stroke="#5a627a" marker-end="url(#ar)">
+          <line x1="212" y1="198" x2="212" y2="232"/><line x1="392" y1="198" x2="392" y2="232"/><line x1="760" y1="198" x2="760" y2="232"/>
+        </g>
+        <text x="20" y="252" fill="#5a627a">level 15–0</text>
+        <text x="20" y="268" fill="#5a627a">real DAGs, on demand</text>
+        <rect x="150" y="236" width="124" height="30" rx="4" fill="none" stroke="#2a4a56"/>
+        <text x="212" y="255" text-anchor="middle" fill="#8e97ad">tail: ~7K nodes</text>
+        <rect x="330" y="236" width="124" height="30" rx="4" fill="none" stroke="#56482a"/>
+        <text x="392" y="255" text-anchor="middle" fill="#8e97ad">tail: 84K nodes</text>
+        <rect x="698" y="236" width="124" height="30" rx="4" fill="none" stroke="#2a4a56"/>
+        <text x="760" y="255" text-anchor="middle" fill="#8e97ad">tail: ~7K nodes</text>
+        <rect x="150" y="290" width="672" height="28" rx="4" fill="rgba(0,229,255,.05)" stroke="#2a4a56"/>
+        <text x="486" y="308" text-anchor="middle" fill="#9fe8ff">shared base store: parts, specimens, detail materials, built once, same ids everywhere</text>
+        <g stroke="#2a4a56"><line x1="212" y1="266" x2="212" y2="290"/><line x1="392" y1="266" x2="392" y2="290"/><line x1="760" y1="266" x2="760" y2="290"/></g>
+      </g>
+    </svg>
+  </div>
+
+  <p>The recommended store shape is <b>layers</b>: a shared base, with the parts, the specimens and the IFS materials,
+  plus a tail of new nodes per region. Builds are deterministic, so the main thread and every worker get the same
+  ids from the same name, and <b>no store is shipped</b>. A job says "region kit:4182, lod 3, chunk 5,0,7", and the
+  worker builds the region (about 50 ms for a kit) or takes it from its own cache. That is the kit's
+  "named, not shipped" applied one level up. It is a discussion starter, not a plan. The open questions (which
+  universe, flat or full, how big, gaps between regions, unique or repeated) are listed at the end of
+  <code>docs/universekit.md</code>.</p>
+</section>
+
+<footer>
+  Companion to <b>kit-plan.md</b>, <b>kit-findings.md</b>, <b>kit-results.md</b>, <b>kit-log.md</b>,
+  <b>hashcons-findings.md</b>, <b>labels-and-bricks.md</b> and <b>universekit.md</b> (all in <code>docs/</code>).<br>
+  §5–7's live builds import <code>dag-core.js</code> and <code>kit-core.js</code> unchanged; serve the folder
+  (<code>npm run serve</code>) and open <code>/dagskits-explainer.html</code>.<br>
+  Sections 1–4 and 8 are 2D teaching models of the 3D code: same algorithms, 4 children instead of 8, D4 instead of Oh.
+</footer>
+
+</div>
+<div id="tip" role="tooltip"></div>
+
+<script>
+'use strict';
+/* =====================================================================
+   Sections 1–4, 8, 9 and the nav: plain script, no imports, so they work
+   even when the page is opened from disk. The kit sections are the
+   module script at the end (they import the repo's own cores).
+   ===================================================================== */
+const REDUCED = window.matchMedia('(prefers-reduced-motion:reduce)').matches;
+const TREE_C = '#b98220', DAG_C = '#1d9db4', LIVE = '#00e5ff';
+
+function fit(cv){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = cv.clientWidth, h = cv.getAttribute('height') | 0;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  cv.style.height = h + 'px';
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  return { g, w, h };
+}
+const fmt = n => n.toLocaleString('en-US');
+const human = n => n >= 1e12 ? (n / 1e12).toFixed(2) + ' T' : n >= 1e9 ? (n / 1e9).toFixed(2) + ' G'
+  : n >= 1e6 ? (n / 1e6).toFixed(2) + ' M' : n >= 1e3 ? (n / 1e3).toFixed(1) + ' K' : String(Math.round(n));
+const tip = document.getElementById('tip');
+function showTip(html, ev){
+  tip.innerHTML = html; tip.style.display = 'block';
+  const x = Math.min(ev.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+  const y = Math.min(ev.clientY + 14, window.innerHeight - tip.offsetHeight - 8);
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.style.display = 'none'; };
+addEventListener('scroll', hideTip, { passive: true });
+function chipRow(host, items, onPick, initial){
+  host.innerHTML = '';
+  items.forEach(([key, label]) => {
+    const b = document.createElement('button');
+    b.textContent = label; b.dataset.key = key;
+    b.classList.toggle('on', key === initial);
+    b.setAttribute('aria-pressed', key === initial ? 'true' : 'false');
+    b.onclick = () => {
+      [...host.children].forEach(c => { c.classList.toggle('on', c === b); c.setAttribute('aria-pressed', c === b ? 'true' : 'false'); });
+      onPick(key);
+    };
+    host.appendChild(b);
+  });
+}
+const h32 = (...k) => {   // a small integer hash, for the demos' draws
+  let h = 0x811c9dc5;
+  for (const v of k){ h = Math.imul(h ^ (v | 0), 0x01000193); h ^= h >>> 13; h = Math.imul(h, 0x5bd1e995); h ^= h >>> 15; }
+  return h >>> 0;
+};
+
+/* ---- a 2D hash-consed store: dag-core's createStore, four children ----
+   Key = level + 4 child ids, quadrant q = bx | by << 1 (Morton, like the
+   octant bx | by<<1 | bz<<2). EMPTY = 0 at every level, FULL = 1 a pixel;
+   ids from 2, in creation order, so children-first. */
+function newStore2(){
+  const map = new Map(), keys = [];
+  return {
+    map, keys,
+    intern(level, a, b, c, d){
+      if (!(a | b | c | d)) return 0;
+      const k = level + ':' + a + ',' + b + ',' + c + ',' + d;
+      let id = map.get(k);
+      if (id === undefined){ id = keys.length + 2; keys.push([level, a, b, c, d]); map.set(k, id); }
+      return id;
+    },
+    level: id => id < 2 ? 0 : keys[id - 2][0],
+    child: (id, q) => keys[id - 2][1 + q],
+    get size(){ return keys.length; }
+  };
+}
+function build2(store, grid, N, D){
+  const levels = [grid.slice()];
+  let g = levels[0], side = N;
+  for (let k = 1; k <= D; k++){
+    const s = side >> 1, nx = new Uint32Array(s * s);
+    for (let y = 0; y < s; y++) for (let x = 0; x < s; x++){
+      const i = 2 * x + side * 2 * y;
+      nx[x + s * y] = store.intern(k, g[i], g[i + 1], g[i + side], g[i + side + 1]);
+    }
+    levels.push(nx); g = nx; side = s;
+  }
+  return { levels, root: g[0] };
+}
+function bitmap2(store, id, k){
+  const n = 1 << k, b = new Uint8Array(n * n);
+  const fill = (id, k, x, y) => {
+    if (!id) return;
+    if (k === 0){ b[x + n * y] = 1; return; }
+    const h = 1 << (k - 1);
+    for (let q = 0; q < 4; q++) fill(store.child(id, q), k - 1, x + (q & 1) * h, y + (q >> 1) * h);
+  };
+  fill(id, k, 0, 0);
+  return b;
+}
+// prune(), as dag-core's: one sweep down the ids marks what the root reaches,
+// then the kept keys are re-interned in order (so still children-first).
+function prune2(store, root){
+  const n = store.size, keep = new Uint8Array(n + 2);
+  keep[root] = 1;
+  for (let id = n + 1; id >= 2; id--){
+    if (!keep[id]) continue;
+    for (let q = 0; q < 4; q++) keep[store.child(id, q)] = 1;
+  }
+  const fresh = newStore2(), map = new Uint32Array(n + 2);
+  map[1] = 1;
+  for (let id = 2; id <= n + 1; id++) if (keep[id]){
+    const [lv, a, b, c, d] = store.keys[id - 2];
+    map[id] = fresh.intern(lv, map[a], map[b], map[c], map[d]);
+  }
+  return { store: fresh, keep };
+}
+
+/* ================= SECTION 1 — hash-consing ================= */
+const S1 = (() => {
+  const N = 32, D = 5;
+  const st = { grid: new Uint8Array(N * N), store: newStore2(), built: null, hl: 3, hover: null,
+               bmCache: new Map(), layout: [], pruneAnim: null, onChange: [] };
+  const cv = document.getElementById('cv1'), cvS = document.getElementById('cvS1');
+
+  const PRESETS = {
+    'Sierpiński': (x, y) => (x & y) === 0,
+    'Tiles': (x, y) => { const u = x & 7, v = y & 7; return (u >= 1 && u <= 5 && v >= 1 && v <= 2) || (u >= 1 && u <= 2 && v >= 1 && v <= 6) || (u === 5 && v >= 4 && v <= 6); },
+    'Disc': (x, y) => (x - 15.5) ** 2 + (y - 15.5) ** 2 < 13.2 ** 2,
+    'Terrain': (x, y) => 31 - y < 11 + 5 * Math.sin(x * 0.33) + 3 * Math.sin(x * 0.91 + 1.3),
+    'Noise': (x, y) => (h32(x, y, 7) & 1023) < 470,
+    'Empty': () => false,
+  };
+  let preset = 'Sierpiński';
+  function load(name){
+    preset = name;
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) st.grid[x + N * y] = PRESETS[name](x, y) ? 1 : 0;
+    rebuild();
+  }
+  function rebuild(){
+    st.built = build2(st.store, st.grid, N, D);
+    st.bmCache.clear();
+    draw();
+    st.onChange.forEach(f => f());
+  }
+  const bm = (id, k) => { let b = st.bmCache.get(id); if (!b){ b = bitmap2(st.store, id, k); st.bmCache.set(id, b); } return b; };
+
+  function liveInfo(){
+    const { levels } = st.built, per = [];
+    let tree = 0, dag = 0;
+    for (let k = 0; k <= D; k++){
+      const ids = levels[k], occ = new Map();
+      for (const id of ids) if (id) occ.set(id, (occ.get(id) || 0) + 1);
+      const t = ids.reduce((s, v) => s + (v ? 1 : 0), 0);
+      per.push({ k, tree: t, unique: occ.size, occ });
+      if (k > 0){ tree += t; dag += occ.size; }
+    }
+    return { per, tree, dag };
+  }
+
+  function draw(){
+    const info = liveInfo();
+    drawGrid(info); drawStore(info);
+    const px = info.per[0].tree, dead = st.store.size - info.dag;
+    document.getElementById('rd1').innerHTML =
+      `<span>pixels set <b>${px}</b></span><span>tree nodes <b>${info.tree}</b></span>` +
+      `<span>DAG nodes <b>${info.dag}</b></span><span>tree ÷ DAG <b>${info.dag ? (info.tree / info.dag).toFixed(1) + '×' : '—'}</b></span>` +
+      `<span>store holds <b>${st.store.size}</b> (${dead} dead, see §2)</span>`;
+    const perLevelOne = info.per.slice(1).every(p => p.unique <= 1);
+    document.getElementById('vd1').textContent = !px
+      ? 'Nothing set: the root is EMPTY (id 0), and the store needs no node at all.'
+      : perLevelOne
+      ? `One node per level: ${info.dag} nodes stand for ${px} pixels. A self-similar set's DAG doesn't grow with its size, only with its depth.`
+      : `${info.dag} unique nodes stand for ${info.tree} tree nodes (${px} pixels). ` +
+        `The biggest saving is at level ${info.per.slice(1).reduce((b, p) => (p.tree / Math.max(1, p.unique) > b.tree / Math.max(1, b.unique) ? p : b)).k}.`;
+  }
+
+  function gridGeom(w, h){ const S = Math.min(w, h) - 16, ox = (w - S) / 2, oy = (h - S) / 2; return { S, ox, oy, c: S / N }; }
+  function drawGrid(info){
+    const { g, w, h } = fit(cv), { S, ox, oy, c } = gridGeom(w, h);
+    g.fillStyle = '#0d0f18'; g.fillRect(ox, oy, S, S);
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (st.grid[x + N * y]){
+      g.fillStyle = '#c9d2e2'; g.fillRect(ox + x * c + 0.5, oy + y * c + 0.5, c - 1, c - 1);
+    }
+    // level grid for the highlight level
+    const k = st.hover ? st.hover.k : st.hl, bs = 1 << k, n = N >> k;
+    g.strokeStyle = 'rgba(120,150,190,.22)'; g.lineWidth = 1;
+    for (let i = 0; i <= n; i++){
+      g.beginPath(); g.moveTo(ox + i * bs * c, oy); g.lineTo(ox + i * bs * c, oy + S); g.stroke();
+      g.beginPath(); g.moveTo(ox, oy + i * bs * c); g.lineTo(ox + S, oy + i * bs * c); g.stroke();
+    }
+    if (st.hover && st.hover.id){
+      const ids = st.built.levels[st.hover.k], hn = N >> st.hover.k, hb = 1 << st.hover.k;
+      for (let y = 0; y < hn; y++) for (let x = 0; x < hn; x++) if (ids[x + hn * y] === st.hover.id){
+        g.fillStyle = 'rgba(0,229,255,.16)'; g.fillRect(ox + x * hb * c, oy + y * hb * c, hb * c, hb * c);
+        g.strokeStyle = LIVE; g.lineWidth = 2; g.strokeRect(ox + x * hb * c + 1, oy + y * hb * c + 1, hb * c - 2, hb * c - 2);
+      }
+    }
+  }
+
+  // The store panel: one block per level (top first): label, two bars, thumbnails.
+  function drawStore(info){
+    const w = cvS.clientWidth, LAB = 118, PAD = 8, rows = [];
+    let y = 6;
+    st.layout = [];
+    for (let k = D; k >= 1; k--){
+      const p = info.per[k], ts = [32, 24, 16, 12, 8][D - k] || 8, ids = [...p.occ.keys()].sort((a, b) => a - b);
+      const per = Math.max(1, Math.floor((w - LAB - PAD) / (ts + 10)));
+      const lines = Math.max(1, Math.ceil(ids.length / per)), rh = Math.max(40, lines * (ts + 16) + 6);
+      rows.push({ k, p, ts, ids, per, y, rh });
+      y += rh;
+    }
+    cvS.setAttribute('height', Math.max(200, y + 4));
+    const { g } = fit(cvS);
+    const maxTree = Math.max(...info.per.slice(1).map(p => p.tree), 1), BW = 96;
+    const bar = v => v ? Math.max(2, BW * Math.log2(v + 1) / Math.log2(maxTree + 1)) : 0;
+    for (const r of rows){
+      g.strokeStyle = 'rgba(120,150,190,.10)'; g.beginPath(); g.moveTo(0, r.y + r.rh - 0.5); g.lineTo(w, r.y + r.rh - 0.5); g.stroke();
+      g.font = '10px ui-monospace,monospace'; g.fillStyle = '#8e97ad';
+      g.fillText(`L${r.k} · ${1 << r.k}×${1 << r.k}`, 2, r.y + 13);
+      g.fillStyle = TREE_C; g.fillRect(2, r.y + 19, bar(r.p.tree), 6);
+      g.fillStyle = DAG_C; g.fillRect(2, r.y + 28, bar(r.p.unique), 6);
+      g.fillStyle = '#5a627a';
+      g.fillText(String(r.p.tree), 6 + bar(r.p.tree), r.y + 25);
+      g.fillText(String(r.p.unique), 6 + bar(r.p.unique), r.y + 34);
+      st.layout.push({ kind: 'bar', k: r.k, x: 0, y: r.y, w: LAB - 6, h: r.rh, p: r.p });
+      r.ids.forEach((id, i) => {
+        const col = i % r.per, line = Math.floor(i / r.per);
+        const x = LAB + col * (r.ts + 10), yy = r.y + 4 + line * (r.ts + 16), n = 1 << r.k, px = r.ts / n, b = bm(id, r.k);
+        const on = st.hover && st.hover.id === id;
+        g.fillStyle = on ? 'rgba(0,229,255,.18)' : '#0d0f18'; g.fillRect(x - 1, yy - 1, r.ts + 2, r.ts + 2);
+        g.fillStyle = on ? '#e6faff' : '#aeb8cb';
+        for (let v = 0; v < n; v++) for (let u = 0; u < n; u++) if (b[u + n * v]) g.fillRect(x + u * px, yy + v * px, Math.max(px, 0.75), Math.max(px, 0.75));
+        if (on){ g.strokeStyle = LIVE; g.lineWidth = 1.5; g.strokeRect(x - 1.5, yy - 1.5, r.ts + 3, r.ts + 3); }
+        g.fillStyle = on ? LIVE : '#5a627a'; g.font = '9px ui-monospace,monospace';
+        g.fillText('×' + r.p.occ.get(id), x, yy + r.ts + 10);
+        st.layout.push({ kind: 'node', k: r.k, id, x: x - 2, y: yy - 2, w: r.ts + 6, h: r.ts + 14, count: r.p.occ.get(id) });
+      });
+    }
+  }
+
+  // painting
+  let painting = null;
+  function cellAt(ev){
+    const r = cv.getBoundingClientRect(), { S, ox, oy, c } = gridGeom(r.width, r.height);
+    const x = Math.floor((ev.clientX - r.left - ox) / c), y = Math.floor((ev.clientY - r.top - oy) / c);
+    return x >= 0 && y >= 0 && x < N && y < N ? [x, y] : null;
+  }
+  cv.addEventListener('pointerdown', ev => {
+    const p = cellAt(ev); if (!p) return;
+    cv.setPointerCapture(ev.pointerId);
+    painting = st.grid[p[0] + N * p[1]] ? 0 : 1;
+    st.grid[p[0] + N * p[1]] = painting; rebuild();
+  });
+  cv.addEventListener('pointermove', ev => {
+    const p = cellAt(ev);
+    if (painting !== null){
+      if (p && st.grid[p[0] + N * p[1]] !== painting){ st.grid[p[0] + N * p[1]] = painting; rebuild(); }
+      return;
+    }
+    if (!p){ if (st.hover){ st.hover = null; draw(); } hideTip(); return; }
+    const k = st.hl, n = N >> k, id = st.built.levels[k][(p[0] >> k) + n * (p[1] >> k)];
+    const cnt = id ? st.built.levels[k].reduce((s, v) => s + (v === id ? 1 : 0), 0) : 0;
+    if (!st.hover || st.hover.id !== id || st.hover.k !== k){ st.hover = { k, id }; draw(); }
+    showTip(id ? `level ${k} node <b>id ${id}</b><br>appears ${cnt}× in the grid, stored once` : `level ${k}: EMPTY (id 0), never stored`, ev);
+  });
+  const endPaint = () => { painting = null; };
+  cv.addEventListener('pointerup', endPaint); cv.addEventListener('pointercancel', endPaint);
+  cv.addEventListener('pointerleave', () => { if (painting === null && st.hover){ st.hover = null; draw(); } hideTip(); });
+
+  cvS.addEventListener('pointermove', ev => {
+    const r = cvS.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
+    const hit = st.layout.find(o => x >= o.x && x < o.x + o.w && y >= o.y && y < o.y + o.h);
+    if (!hit){ if (st.hover){ st.hover = null; draw(); } hideTip(); return; }
+    if (hit.kind === 'bar'){
+      showTip(`level ${hit.k} (${1 << hit.k}×${1 << hit.k})<br><span style="color:${TREE_C}">■</span> tree nodes ${hit.p.tree}<br><span style="color:${DAG_C}">■</span> unique nodes ${hit.p.unique}`, ev);
+      return;
+    }
+    if (!st.hover || st.hover.id !== hit.id){ st.hover = { k: hit.k, id: hit.id }; draw(); }
+    showTip(`id ${hit.id} · level ${hit.k}<br>children ${st.store.keys[hit.id - 2].slice(1).join(', ')}<br>appears ${hit.count}×`, ev);
+  });
+  cvS.addEventListener('pointerleave', () => { if (st.hover){ st.hover = null; draw(); } hideTip(); });
+
+  chipRow(document.getElementById('s1p'), Object.keys(PRESETS).map(k => [k, k]), load, preset);
+  chipRow(document.getElementById('s1l'), [1, 2, 3, 4].map(k => [k, `L${k} · ${1 << k}²`]), k => { st.hl = k; draw(); }, st.hl);
+  window.addEventListener('resize', draw);
+  load(preset);
+  return { st, draw, rebuild, N, D };
+})();
+
+/* ================= SECTION 2 — the store, children first, prune ================= */
+(() => {
+  const st = S1.st, cv = document.getElementById('cv2');
+  const LV = ['', '#0f5f6e', '#167f92', '#1d9db4', '#55bfd2', '#9ddfea'];
+  document.getElementById('s2leg').innerHTML = [1, 2, 3, 4, 5].map(k => `<span><i class="swatch" style="background:${LV[k]}"></i>L${k}</span>`).join('') +
+    '<span><i class="swatch" style="background:none;border:1px solid #5a627a"></i>dead</span>';
+  let hover = 0, anim = null, geom = null;
+
+  function reachable(){
+    const keep = new Uint8Array(st.store.size + 2), root = st.built.root;
+    keep[root] = 1;
+    for (let id = st.store.size + 1; id >= 2; id--) if (keep[id]) for (let q = 0; q < 4; q++) keep[st.store.child(id, q)] = 1;
+    return keep;
+  }
+  function draw(){
+    const n = st.store.size, w = cv.clientWidth, H = 170;
+    let cs = 28;
+    for (const c of [28, 22, 18, 14, 12, 10, 8, 6, 5, 4, 3, 2]){ cs = c; if (Math.ceil(n / Math.floor((w - 8) / c)) * c <= H - 30) break; }
+    const per = Math.max(1, Math.floor((w - 8) / cs));
+    geom = { cs, per };
+    const { g } = fit(cv), keep = reachable();
+    const kids = new Set(), parents = new Set();
+    if (hover >= 2 && hover < n + 2){
+      for (let q = 0; q < 4; q++){ const c = st.store.child(hover, q); if (c >= 2) kids.add(c); }
+      for (let id = hover + 1; id < n + 2; id++) for (let q = 0; q < 4; q++) if (st.store.child(id, q) === hover) parents.add(id);
+    }
+    for (let i = 0; i < n; i++){
+      const id = i + 2, x = 4 + (i % per) * cs, y = 4 + Math.floor(i / per) * cs, lv = st.store.level(id);
+      const swept = anim && id >= anim.cursor;
+      const dim = anim ? (swept && !anim.keep[id]) : !keep[id];
+      if (!dim){ g.fillStyle = LV[lv]; g.fillRect(x, y, cs - 1, cs - 1); }
+      else { g.strokeStyle = '#3a4256'; g.lineWidth = 1; g.strokeRect(x + 0.5, y + 0.5, cs - 2, cs - 2); }
+      if (anim && id === anim.cursor){ g.fillStyle = '#ffc44f'; g.fillRect(x, y, cs - 1, cs - 1); }
+      if (cs >= 18){ g.fillStyle = dim ? '#5a627a' : '#05070c'; g.font = '9px ui-monospace,monospace'; g.fillText(String(id), x + 3, y + cs / 2 + 3); }
+      if (id === hover){ g.strokeStyle = '#ffffff'; g.lineWidth = 2; g.strokeRect(x - 0.5, y - 0.5, cs, cs); }
+      else if (kids.has(id)){ g.strokeStyle = LIVE; g.lineWidth = 2; g.strokeRect(x - 0.5, y - 0.5, cs, cs); }
+      else if (parents.has(id)){ g.strokeStyle = '#ffc44f'; g.lineWidth = 1.5; g.strokeRect(x - 0.5, y - 0.5, cs, cs); }
+    }
+    if (n < 40){ g.fillStyle = '#5a627a'; g.font = '11px ui-monospace,monospace'; g.fillText('Paint in §1, or pick another preset, and watch the store grow: old nodes stay behind.', 8, H - 14); }
+    const liveN = keep.reduce((s, v, i) => s + (i >= 2 && v ? 1 : 0), 0);
+    document.getElementById('rd2').innerHTML =
+      `<span>ids <b>2…${n + 1}</b></span><span>reachable <b>${liveN}</b></span><span>dead <b>${n - liveN}</b></span>` +
+      (hover >= 2 && hover < n + 2 ? `<span>id <b>${hover}</b> · level ${st.store.level(hover)} · children <b style="color:${LIVE}">${st.store.keys[hover - 2].slice(1).join(', ')}</b> · parents <b style="color:#ffc44f">${[...parents].join(', ') || 'none'}</b></span>` : '<span>hover an id: children in cyan, parents in amber</span>');
+  }
+  cv.addEventListener('pointermove', ev => {
+    if (!geom) return;
+    const r = cv.getBoundingClientRect(), i = Math.floor((ev.clientY - r.top - 4) / geom.cs) * geom.per + Math.floor((ev.clientX - r.left - 4) / geom.cs);
+    const id = i >= 0 && i < st.store.size && ev.clientX - r.left - 4 < geom.per * geom.cs ? i + 2 : 0;
+    if (id !== hover){ hover = id; draw(); }
+  });
+  cv.addEventListener('pointerleave', () => { hover = 0; draw(); });
+  document.getElementById('s2prune').onclick = () => {
+    if (anim) return;
+    const { store, keep } = prune2(st.store, st.built.root);
+    const finish = () => { anim = null; st.store = store; S1.rebuild(); };
+    if (REDUCED){ finish(); return; }
+    anim = { cursor: st.store.size + 1, keep };
+    const step = Math.max(1, Math.ceil(st.store.size / 70));
+    const tick = () => {
+      anim.cursor -= step;
+      if (anim.cursor < 2){ finish(); return; }
+      draw(); requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  };
+  document.getElementById('s2reset').onclick = () => { st.store = newStore2(); S1.rebuild(); };
+  st.onChange.push(draw);
+  window.addEventListener('resize', draw);
+  draw();
+})();
+
+/* ================= SECTION 3 — turned copies ================= */
+(() => {
+  const N = 32, D = 5, T = 8;
+  const MOTIFS = {
+    'F': ['........', '.#####..', '.#......', '.####...', '.#......', '.#......', '.#......', '........'],
+    'Stair': ['........', '......#.', '.....##.', '....###.', '...####.', '..#####.', '.######.', '........'],
+    'Hook': ['........', '.####...', '....#...', '....#...', '.#..#...', '.####...', '........', '........'],
+  };
+  // D4: e = r + 4f, flip x first (if f) then r quarter turns.
+  const NAMES = ['id', 'r90', 'r180', 'r270', 'fx', 'fx·r90', 'fx·r180', 'fx·r270'];
+  const SETS = { none: [0], rot: [0, 1, 2, 3], all: [0, 1, 2, 3, 4, 5, 6, 7] };
+  const V4 = [0, 2, 4, 6], D4 = [0, 1, 2, 3, 4, 5, 6, 7];
+  function turnBits(b, n, e){
+    const out = new Uint8Array(n * n), r = e & 3, f = e >> 2;
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++){
+      let u = f ? n - 1 - x : x, v = y;
+      for (let i = 0; i < r; i++){ const t = u; u = n - 1 - v; v = t; }
+      out[u + n * v] = b[x + n * y];
+    }
+    return out;
+  }
+  let motif = 'F', set = 'all', seed = 1;
+  const cv = document.getElementById('cv3');
+  function draw(){
+    const grid = new Uint8Array(N * N), turns = [];
+    const base = new Uint8Array(T * T);
+    MOTIFS[motif].forEach((row, y) => [...row].forEach((ch, x) => { base[x + T * y] = ch === '#' ? 1 : 0; }));
+    for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++){
+      const s = SETS[set], e = s[h32(i, j, seed) % s.length], b = turnBits(base, T, e);
+      turns.push(e);
+      for (let y = 0; y < T; y++) for (let x = 0; x < T; x++) grid[i * T + x + N * (j * T + y)] = b[x + T * y];
+    }
+    // canvas
+    const { g, w, h } = fit(cv), S = Math.min(w, h) - 16, ox = (w - S) / 2, oy = (h - S) / 2, c = S / N;
+    g.fillStyle = '#0d0f18'; g.fillRect(ox, oy, S, S);
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (grid[x + N * y]){ g.fillStyle = '#c9d2e2'; g.fillRect(ox + x * c + .5, oy + y * c + .5, c - 1, c - 1); }
+    g.strokeStyle = 'rgba(120,150,190,.25)';
+    for (let i = 0; i <= 4; i++){ g.beginPath(); g.moveTo(ox + i * T * c, oy); g.lineTo(ox + i * T * c, oy + S); g.stroke(); g.beginPath(); g.moveTo(ox, oy + i * T * c); g.lineTo(ox + S, oy + i * T * c); g.stroke(); }
+    g.font = '9px ui-monospace,monospace'; g.fillStyle = '#ffc44f';
+    turns.forEach((e, t) => g.fillText(NAMES[e], ox + (t % 4) * T * c + 3, oy + Math.floor(t / 4) * T * c + T * c - 4));
+    // counts
+    const store = newStore2(), { levels } = build2(store, grid, N, D), rows = [];
+    let tP = 0, tV = 0, tD = 0;
+    for (let k = 1; k <= D; k++){
+      const ids = [...new Set(levels[k])].filter(Boolean), n = 1 << k;
+      const canon = G => new Set(ids.map(id => { const b = bitmap2(store, id, k); return G.map(e => turnBits(b, n, e).join('')).sort()[0]; })).size;
+      const r = { k, plain: ids.length, v4: canon(V4), d4: canon(D4) };
+      tP += r.plain; tV += r.v4; tD += r.d4; rows.push(r);
+    }
+    document.querySelector('#tb3 tbody').innerHTML = rows.map(r =>
+      `<tr${r.k === 3 ? ' class="hi"' : ''}><td class="k">L${r.k}${r.k === 3 ? ' (motif)' : ''}</td><td>${1 << r.k}²</td><td class="n">${r.plain}</td><td class="n">${r.v4}</td><td class="n">${r.d4}</td></tr>`).join('') +
+      `<tr><td class="k">total</td><td></td><td class="n"><b>${tP}</b></td><td class="n"><b>${tV}</b></td><td class="n"><b>${tD}</b></td></tr>`;
+    const distinctTurns = new Set(turns).size;
+    document.getElementById('vd3').textContent = set === 'none'
+      ? `No turns: the 16 copies are one level-3 node, and labels have nothing to fold (${tP} → ${tD}).`
+      : `${distinctTurns} distinct turns make ${rows[2].plain} different motif nodes in the plain DAG, and every node beneath them is new too. ` +
+        `Under the full group they're ${rows[2].d4} class${rows[2].d4 === 1 ? '' : 'es'}${set === 'rot' ? '; mirrors alone can\'t undo a quarter turn' : ''}. Total: ${tP} → ${tD}.`;
+  }
+  chipRow(document.getElementById('s3m'), Object.keys(MOTIFS).map(k => [k, k]), k => { motif = k; draw(); }, motif);
+  chipRow(document.getElementById('s3t'), [['none', 'no turn'], ['rot', '4 rotations'], ['all', 'all 8 (D4)']], k => { set = k; draw(); }, set);
+  document.getElementById('s3s').onclick = () => { seed++; draw(); };
+  window.addEventListener('resize', draw);
+  draw();
+})();
+
+/* ================= SECTION 4 — 4³ slots as two binary levels ================= */
+(() => {
+  const cv = document.getElementById('cv4'), cvT = document.getElementById('cv4t');
+  let hov = -1, geom = null;
+  const decode = s => {
+    const x = s & 3, y = s >> 2 & 3, z = s >> 4;
+    const O = (x >> 1) | (y >> 1) << 1 | (z >> 1) << 2, o = (x & 1) | (y & 1) << 1 | (z & 1) << 2;
+    return { x, y, z, O, o, d: 8 * O + o };
+  };
+  function draw(){
+    const { g, w, h } = fit(cv);
+    const gap = 14, cs = Math.min((w - 3 * gap - 8) / 16, (h - 52) / 4), sw = 4 * cs;
+    const x0 = (w - (4 * sw + 3 * gap)) / 2, y0 = 26;
+    geom = { cs, sw, gap, x0, y0 };
+    const H = hov >= 0 ? decode(hov) : null;
+    for (let z = 0; z < 4; z++){
+      const sx = x0 + z * (sw + gap);
+      g.fillStyle = '#5a627a'; g.font = '10px ui-monospace,monospace'; g.fillText('z = ' + z, sx, y0 - 8);
+      for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++){
+        const s = x + 4 * y + 16 * z, D = decode(s), px = sx + x * cs, py = y0 + (3 - y) * cs;
+        const inO = H && D.O === H.O;
+        g.fillStyle = s === hov ? 'rgba(0,229,255,.45)' : inO ? 'rgba(0,229,255,.14)' : 'rgba(255,255,255,.03)';
+        g.fillRect(px + 1, py + 1, cs - 2, cs - 2);
+        g.fillStyle = s === hov ? '#fff' : inO ? '#cfefff' : '#5a627a'; g.font = Math.max(9, cs * 0.3) + 'px ui-monospace,monospace';
+        g.fillText(String(s), px + 4, py + cs * 0.42);
+        g.fillStyle = s === hov ? '#fff' : '#3d4558'; g.font = Math.max(8, cs * 0.25) + 'px ui-monospace,monospace';
+        g.fillText(D.O + '·' + D.o, px + 4, py + cs - 5);
+      }
+      g.strokeStyle = 'rgba(0,229,255,.35)'; g.lineWidth = 1.5;
+      g.strokeRect(sx, y0, sw, sw);
+      g.beginPath(); g.moveTo(sx + 2 * cs, y0); g.lineTo(sx + 2 * cs, y0 + sw); g.moveTo(sx, y0 + 2 * cs); g.lineTo(sx + sw, y0 + 2 * cs); g.stroke();
+    }
+    g.fillStyle = '#5a627a'; g.font = '9.5px ui-monospace,monospace';
+    g.fillText('cell: slot s, below it O·o   ·   y up   ·   blue lines: the 2×2 groups', x0, y0 + sw + 18);
+    drawTree(H);
+    document.getElementById('rd4').innerHTML = H
+      ? `<span>slot (x,y,z) = <b>(${H.x}, ${H.y}, ${H.z})</b></span><span>s = x + 4y + 16z = <b>${hov}</b></span>` +
+        `<span>coarse octant O = <b>${H.O}</b></span><span>fine octant o = <b>${H.o}</b></span><span>Morton digit 8·O + o = <b>${H.d}</b></span>`
+      : '<span>hover a slot: its eight siblings under one level-(k+1) intern light up</span>';
+  }
+  function drawTree(H){
+    const { g, w, h } = fit(cvT);
+    const ry = 22, my = h * 0.42, ly = h - 26, rootX = w / 2;
+    const midX = O => (w * (O + 0.5)) / 8, leafX = d => 8 + (w - 16) * (d + 0.5) / 64;
+    for (let O = 0; O < 8; O++){
+      const on = H && H.O === O;
+      g.strokeStyle = on ? LIVE : 'rgba(120,150,190,.25)'; g.lineWidth = on ? 2 : 1;
+      g.beginPath(); g.moveTo(rootX, ry); g.lineTo(midX(O), my); g.stroke();
+      for (let o = 0; o < 8; o++){
+        const d = 8 * O + o, lon = H && H.d === d;
+        g.strokeStyle = lon ? LIVE : on ? 'rgba(0,229,255,.45)' : 'rgba(120,150,190,.14)'; g.lineWidth = lon ? 2 : 1;
+        g.beginPath(); g.moveTo(midX(O), my); g.lineTo(leafX(d), ly); g.stroke();
+      }
+    }
+    for (let d = 0; d < 64; d++){
+      const on = H && H.d === d;
+      g.fillStyle = on ? '#fff' : (H && (d >> 3) === H.O) ? '#55bfd2' : '#3a4256';
+      g.beginPath(); g.arc(leafX(d), ly, on ? 4 : 2.4, 0, 7); g.fill();
+    }
+    for (let O = 0; O < 8; O++){
+      g.fillStyle = H && H.O === O ? LIVE : '#1d9db4';
+      g.beginPath(); g.arc(midX(O), my, 6, 0, 7); g.fill();
+    }
+    g.fillStyle = LIVE; g.beginPath(); g.arc(rootX, ry, 7, 0, 7); g.fill();
+    g.font = '10px ui-monospace,monospace'; g.fillStyle = '#8e97ad';
+    g.fillText('level k+2: 1 intern', rootX + 14, ry + 4);
+    g.fillText('level k+1: 8 interns', 8, my - 12);
+    g.fillText('level k: 64 slots, each a whole entry of the level below, turned', 8, ly + 18);
+  }
+  cv.addEventListener('pointermove', ev => {
+    if (!geom) return;
+    const r = cv.getBoundingClientRect(), mx = ev.clientX - r.left - geom.x0, my = ev.clientY - r.top - geom.y0;
+    const z = Math.floor(mx / (geom.sw + geom.gap)), lx = mx - z * (geom.sw + geom.gap);
+    let s = -1;
+    if (z >= 0 && z < 4 && lx >= 0 && lx < geom.sw && my >= 0 && my < geom.sw){
+      const x = Math.floor(lx / geom.cs), y = 3 - Math.floor(my / geom.cs);
+      s = x + 4 * y + 16 * z;
+    }
+    if (s !== hov){ hov = s; draw(); }
+  });
+  cv.addEventListener('pointerleave', () => { hov = -1; draw(); });
+  window.addEventListener('resize', draw);
+  draw();
+})();
+
+/* ================= SECTION 8 — colour frames ================= */
+(() => {
+  const W = 256;
+  let fs = 5, cl = 3, mode = 'fine';
+  const a = document.getElementById('cv8a'), b = document.getElementById('cv8b');
+  // A quarter turn per frame by hash, as a kit's level-c entries are turned (2D: 4 rotations).
+  function colourAt(x, y, S){
+    const fx = Math.floor(x / S), fy = Math.floor(y / S), e = h32(fx, fy, 3) & 3;
+    let u = x - fx * S + 0.5, v = y - fy * S + 0.5;
+    for (let i = 0; i < e; i++){ const t = u; u = S - v; v = t; }
+    const fine = [40 + 215 * u / S, 40 + 215 * v / S, 40 + 215 * 0.5];
+    if (mode === 'fine') return fine;
+    const S2 = S * 8, u2 = (x % S2 + 0.5) / S2, v2 = (y % S2 + 0.5) / S2;   // a coarse frame, eight times the side
+    const coarse = [40 + 215 * u2, 40 + 215 * (1 - v2), 40 + 215 * (0.25 + 0.5 * u2 * v2)];
+    return fine.map((f, i) => 0.5 * f + 0.5 * coarse[i]);
+  }
+  function draw(){
+    const S = 1 << fs, C = 1 << cl;
+    document.getElementById('s8fv').textContent = S; document.getElementById('s8cv').textContent = C;
+    const img = new Float32Array(W * W * 3);
+    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++){ const c = colourAt(x, y, S); img.set(c, 3 * (x + W * y)); }
+    const paint = (cv, src, cell) => {
+      const { g, w, h } = fit(cv), side = Math.min(w, h) - 12, ox = (w - side) / 2, oy = (h - side) / 2;
+      const id = g.createImageData(W, W);
+      let chroma = 0;
+      for (let cy = 0; cy < W; cy += cell) for (let cx = 0; cx < W; cx += cell){
+        const m = [0, 0, 0];
+        for (let y = cy; y < cy + cell; y++) for (let x = cx; x < cx + cell; x++) for (let i = 0; i < 3; i++) m[i] += src[3 * (x + W * y) + i];
+        for (let i = 0; i < 3; i++) m[i] /= cell * cell;
+        chroma += (Math.max(...m) - Math.min(...m)) * cell * cell;
+        for (let y = cy; y < cy + cell; y++) for (let x = cx; x < cx + cell; x++){
+          const o = 4 * (x + W * y); id.data[o] = m[0]; id.data[o + 1] = m[1]; id.data[o + 2] = m[2]; id.data[o + 3] = 255;
+        }
+      }
+      const off = document.createElement('canvas'); off.width = W; off.height = W; off.getContext('2d').putImageData(id, 0, 0);
+      g.imageSmoothingEnabled = false; g.drawImage(off, ox, oy, side, side);
+      return chroma / (W * W);
+    };
+    const c0 = paint(a, img, 1), c1 = paint(b, img, C);
+    const pct = Math.round(100 * c1 / c0);
+    document.getElementById('rd8').innerHTML =
+      `<span>frame <b>${S}</b></span><span>coarse cell <b>${C}</b></span><span>cell ÷ frame <b>${C / S >= 1 ? C / S : '1/' + (S / C)}</b></span>` +
+      `<span>colour left after averaging <b>${pct}%</b> (mean max−min channel)</span>`;
+    document.getElementById('vd8').textContent = mode === 'fine'
+      ? (C >= S ? `Cells as large as a frame: each averages a whole gamut, and ${100 - pct}% of the colour is gone. That's the grey from outside.`
+                : `Cells smaller than a frame keep its gradient: ${pct}% of the colour survives. Raise the coarse cell to the frame's side.`)
+      : `Two-scale (your pick (c), not built yet): when the fine gamut greys out, the coarse frame's gradient is still there (${pct}% left).`;
+  }
+  document.getElementById('s8f').oninput = e => { fs = +e.target.value; draw(); };
+  document.getElementById('s8c').oninput = e => { cl = +e.target.value; draw(); };
+  chipRow(document.getElementById('s8m'), [['fine', 'gamut (today)'], ['two', 'two-scale (c)']], k => { mode = k; draw(); }, mode);
+  window.addEventListener('resize', draw);
+  draw();
+})();
+
+/* ================= SECTION 9 — scale ================= */
+(() => {
+  const cv = document.getElementById('cv9');
+  let D = 16;
+  const MARKS = [
+    { D: 4, t: 'a part, 16³', c: '#8e97ad' },
+    { D: 10, t: 'kit test, D = 10', c: '#8e97ad' },
+    { D: 14, t: 'kit default', c: LIVE },
+    { D: 16, t: 'kit max: 6,990 nodes', c: LIVE },
+    { D: 20, t: 'ray path: float32 eye', c: '#ffc44f' },
+    { D: 24, t: 'universe, proposed', c: '#9fe8ff' },
+    { D: 30, t: 'ivec3, 1 << uD', c: '#ffc44f' },
+    { D: 32, t: 'D = 32 universe', c: '#9fe8ff' },
+  ];
+  const NODES = { 12: 4935, 14: 6261, 16: 6990 };
+  const SPEED = 2300;   // voxels a second, street speed with shift (universekit.md)
+  const dur = s => s < 90 ? s.toFixed(s < 10 ? 1 : 0) + ' s' : s < 5400 ? (s / 60).toFixed(0) + ' min' : s < 172800 ? (s / 3600).toFixed(1) + ' h' : s < 1.2e6 ? (s / 86400).toFixed(1) + ' days' : (s / 604800).toFixed(1) + ' weeks';
+  function draw(){
+    const { g, w, h } = fit(cv), x0 = 30, x1 = w - 30, X = d => x0 + (x1 - x0) * (d - 4) / 28, base = h - 50;
+    g.strokeStyle = 'rgba(120,150,190,.35)'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x0, base); g.lineTo(x1, base); g.stroke();
+    g.font = '10px ui-monospace,monospace';
+    for (let d = 4; d <= 32; d += 2){
+      g.strokeStyle = 'rgba(120,150,190,.3)'; g.beginPath(); g.moveTo(X(d), base); g.lineTo(X(d), base + 5); g.stroke();
+      g.fillStyle = '#5a627a'; g.fillText(String(d), X(d) - (d >= 10 ? 6 : 3), base + 17);
+    }
+    g.fillText('D (side 2^D)', x1 - 70, base + 32);
+    g.fillStyle = 'rgba(0,229,255,.10)'; g.fillRect(X(4), base - 6, X(Math.min(D, 32)) - X(4), 6);
+    MARKS.forEach((m, i) => {
+      const lift = 18 + (i % 3) * 30;
+      g.strokeStyle = m.c; g.globalAlpha = 0.6; g.beginPath(); g.moveTo(X(m.D), base); g.lineTo(X(m.D), base - lift); g.stroke(); g.globalAlpha = 1;
+      g.fillStyle = m.c; g.beginPath(); g.arc(X(m.D), base, 3, 0, 7); g.fill();
+      const tw = g.measureText(m.t).width, tx = Math.min(Math.max(X(m.D) - tw / 2, 2), w - tw - 2);
+      g.fillText(m.t, tx, base - lift - 4);
+    });
+    g.strokeStyle = '#fff'; g.lineWidth = 2; g.beginPath(); g.moveTo(X(D), base - 12); g.lineTo(X(D), base + 8); g.stroke();
+    const side = 2 ** D, vox = side ** 3, solid = vox * 0.012257, cross = side / SPEED;
+    document.getElementById('s9dv').textContent = D;
+    document.getElementById('rd9').innerHTML =
+      `<span>side <b>${fmt(side)}</b></span><span>cells <b>${human(vox)}</b></span>` +
+      `<span>solid at the D = 16 kit's fill (1.23%) <b>${human(solid)}</b></span>` +
+      `<span>across at street speed with shift <b>${dur(cross)}</b></span>` +
+      `<span>kit nodes <b>${NODES[D] ? fmt(NODES[D]) + ' (measured)' : D > 16 ? '~10K (extrapolated, not measured)' : '—'}</b></span>`;
+    document.getElementById('vd9').textContent =
+      D <= 16 ? 'Inside what the viewer runs today: one store, one root, built whole in tens of milliseconds.'
+      : D <= 20 ? 'Past the kit\'s limit (KIT_LIMITS.D = 16), but the numbers still hold: one deeper kit would be universe A, cheap and repetitive.'
+      : D <= 29 ? 'Past float32: an eye at 2^20 steps by 1/8 voxel and at 2^24 by 2. The ray path must trace relative to the cover tree\'s root chunk, as the raster already draws eye-relative. The far plane needs a horizon.'
+      : 'Past ivec3 cells and 1 << uD: the ray path stops at D = 30 without relative coordinates. Counts are Float64, so not exact here, but nothing needs them exact.';
+  }
+  document.getElementById('s9d').oninput = e => { D = +e.target.value; draw(); };
+  window.addEventListener('resize', draw);
+  draw();
+})();
+
+/* ================= nav highlight ================= */
+(() => {
+  const links = [...document.querySelectorAll('nav a')];
+  const io = new IntersectionObserver(es => es.forEach(e => {
+    if (e.isIntersecting) links.forEach(l => l.classList.toggle('on', l.dataset.nav === e.target.id));
+  }), { rootMargin: '-45% 0px -50% 0px' });
+  links.forEach(a => { const s = document.getElementById(a.dataset.nav); if (s) io.observe(s); });
+})();
+</script>
+
+<script type="module">
+/* =====================================================================
+   Sections 5–7: the repo's own cores, imported unchanged. Everything
+   here is measured on a build made in this tab.
+   ===================================================================== */
+const fail = msg => {
+  const el = document.getElementById('modfail');
+  el.style.display = 'block';
+  el.innerHTML = msg;
+  for (const id of ['rdK', 'mWhat']) { const r = document.getElementById(id); if (r) r.textContent = 'needs the cores: see the note in §5'; }
+};
+let dag, kit, attr;
+try {
+  [dag, kit, attr] = await Promise.all([import('./dag-core.js'), import('./kit-core.js'), import('./attr-core.js')]);
+} catch (err) {
+  fail(`Sections 5–7 import <code>dag-core.js</code> and <code>kit-core.js</code> from this folder, and the browser refused (${String(err.message || err).replace(/</g, '&lt;')}). ` +
+       `Opened from disk, modules can't load: run <code>npm run serve</code> and open <code>http://localhost:8000/dagskits-explainer.html</code>.`);
+  throw err;
+}
+const { createCounts, createClasses, OH48, MIRROR8, EMPTY, FULL } = dag;
+const { kitDesc, kitPlan, buildKit, kitColour, PARTS, PART_NAMES, partOcc, ornamentOcc, MASKS, Y_TURNS, sideOf, KIT_LIMITS } = kit;
+const { rgb8 } = attr;
+const fmt = n => n.toLocaleString('en-US');
+const human = n => n >= 1e12 ? (n / 1e12).toFixed(2) + ' T' : n >= 1e9 ? (n / 1e9).toFixed(2) + ' G'
+  : n >= 1e6 ? (n / 1e6).toFixed(2) + ' M' : n >= 1e3 ? (n / 1e3).toFixed(1) + ' K' : String(Math.round(n));
+const LIVE = '#00e5ff';
+const fit = cv => {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2), w = cv.clientWidth, h = cv.getAttribute('height') | 0;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + 'px';
+  const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  return { g, w, h };
+};
+const tip = document.getElementById('tip');
+const showTip = (html, ev) => {
+  tip.innerHTML = html; tip.style.display = 'block';
+  tip.style.left = Math.min(ev.clientX + 14, innerWidth - tip.offsetWidth - 8) + 'px';
+  tip.style.top = Math.min(ev.clientY + 14, innerHeight - tip.offsetHeight - 8) + 'px';
+};
+const hideTip = () => { tip.style.display = 'none'; };
+
+/* ---- isometric voxel painter, for the gallery -------------------------
+   Visible faces are +y, +x and +z; cubes drawn far to near by x + y + z,
+   and a face is skipped when its neighbour is solid. */
+function isoDraw(cv, R, solid, colour){
+  const { g, w, h } = fit(cv), C = Math.cos(Math.PI / 6), Sn = 0.5;
+  const s = Math.min(w / (2 * R * C), h / (2 * R)) * 0.9, cx = w / 2, cy = h / 2;
+  const P = (x, y, z) => [cx + (x - z) * C * s, cy + ((x + z) * Sn - y) * s];
+  const off = R / 2;   // centre the cube on the canvas
+  const Q = (x, y, z) => P(x - off, y - off, z - off);
+  const list = [];
+  for (let z = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) if (solid(x, y, z)) list.push([x, y, z]);
+  list.sort((a, b) => (a[0] + a[1] + a[2]) - (b[0] + b[1] + b[2]));
+  const quad = (pts, fill) => { g.fillStyle = fill; g.strokeStyle = fill; g.lineWidth = 0.6; g.beginPath(); g.moveTo(...pts[0]); for (let i = 1; i < 4; i++) g.lineTo(...pts[i]); g.closePath(); g.fill(); g.stroke(); };
+  const rgb = (c, k) => `rgb(${c[0] * k | 0},${c[1] * k | 0},${c[2] * k | 0})`;
+  const at = (x, y, z) => x >= 0 && y >= 0 && z >= 0 && x < R && y < R && z < R && solid(x, y, z);
+  for (const [x, y, z] of list){
+    const c = colour(x, y, z);
+    if (!at(x, y + 1, z)) quad([Q(x, y + 1, z), Q(x + 1, y + 1, z), Q(x + 1, y + 1, z + 1), Q(x, y + 1, z + 1)], rgb(c, 1));
+    if (!at(x + 1, y, z)) quad([Q(x + 1, y, z), Q(x + 1, y + 1, z), Q(x + 1, y + 1, z + 1), Q(x + 1, y, z + 1)], rgb(c, 0.72));
+    if (!at(x, y, z + 1)) quad([Q(x, y, z + 1), Q(x + 1, y, z + 1), Q(x + 1, y + 1, z + 1), Q(x, y + 1, z + 1)], rgb(c, 0.52));
+  }
+  return list.length;
+}
+const gamut = R => (x, y, z) => [40 + 215 * (x + .5) / R, 40 + 215 * (y + .5) / R, 40 + 215 * (z + .5) / R];
+function figure(host, caption, draw){
+  const f = document.createElement('figure'), cv = document.createElement('canvas'), fc = document.createElement('figcaption');
+  cv.setAttribute('height', '120'); fc.innerHTML = caption;
+  f.append(cv, fc); host.appendChild(f);
+  requestAnimationFrame(() => draw(cv, fc));
+  return cv;
+}
+
+/* ---- §5 gallery ---- */
+(() => {
+  const PART_NOTE = { block: 'floor', slab: 'floor', step: 'floor' };
+  for (const name of PART_NAMES){
+    const occ = partOcc(PARTS[name]);
+    figure(document.getElementById('galParts'), `${name}${PART_NOTE[name] ? ' <i>· floor</i>' : ''}`, cv => {
+      const n = isoDraw(cv, 16, (x, y, z) => occ[x + 16 * (y + 16 * z)], gamut(16));
+      cv.title = `${name}: ${n} voxels`;
+    });
+  }
+  const desc = kitDesc({});
+  for (let n = 0; n < desc.ornaments; n++){
+    const occ = ornamentOcc(n);
+    figure(document.getElementById('galOrn'), `ornament ${n}`, cv => isoDraw(cv, 16, (x, y, z) => occ[x + 16 * (y + 16 * z)], gamut(16)));
+  }
+  const GROUNDED = new Set(['pillars', 'slabs', 'court', 'skyline']);
+  for (const name of Object.keys(MASKS)){
+    let slots = MASKS[name];
+    if (!slots){   // the skyline's heights are drawn per entry; one example draw
+      slots = [];
+      const hs = Array.from({ length: 16 }, (_, i) => [0, 0, 1, 2, 3][(i * 7 + 3) % 5]);
+      for (let z = 0; z < 4; z++) for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) if (y <= hs[x + 4 * z]) slots.push(x + 4 * y + 16 * z);
+    }
+    const set = new Set(slots);
+    figure(document.getElementById('galMasks'), `${name} <i>· ${slots.length} slots${MASKS[name] ? '' : ' in this draw'}${GROUNDED.has(name) ? ' · grounded' : ''}</i>`,
+      cv => isoDraw(cv, 4, (x, y, z) => set.has(x + 4 * y + 16 * z), (x, y, z) => y === 0 && GROUNDED.has(name) ? [140, 150, 170] : [40, 185, 210]));
+  }
+})();
+
+/* ---- §6 the lab ---- */
+const PERM = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]], AX = 'xyz';
+const turnName = e => e === 0 ? 'not turned' : '(x,y,z) ↦ (' + [0, 1, 2].map(i => ((e >> i) & 1 ? '−' : '') + AX[PERM[e >> 3][i]]).join(', ') + ')';
+const isY = e => Y_TURNS.includes(e);
+const LIB_PRESETS = { '1 each': [1, 1, 1, 1, 1], '2 each': [2, 2, 2, 2, 2], 'default': null, '24·16·12·8': [24, 16, 12, 8, 4], '128·64·32·16': [128, 64, 32, 16, 8] };
+const STREET = { 12: [82, 604, 82], 14: [328, 1966, 328], 16: [1311, 7864, 1311] };
+const VIEWS = {
+  street: D => ({ eye: (STREET[D] || [328, 1966, 328].map(v => v * 2 ** (D - 14))).slice(), yaw: 0.78, pitch: -0.05 }),
+  outside: D => ({ eye: [-0.35, 0.9, -0.45].map(v => v * 2 ** D), yaw: 0.68, pitch: -0.5 }),
+  above: D => ({ eye: [0.5, 1.7, -0.3].map(v => v * 2 ** D), yaw: 0, pitch: -1.0 }),
+};
+const lab = { D: 14, seed: 1, libs: null, ornaments: 4, ground: true, colourLevel: 2, view: 'street',
+              desc: null, k: null, plan: null, colour: null, voxels: 0, eye: null, yaw: 0, pitch: 0, listeners: [] };
+
+function rebuildKit(){
+  let desc;
+  try {
+    desc = kitDesc({ seed: lab.seed, D: lab.D, libs: lab.libs, ornaments: lab.ornaments, ground: lab.ground, colourLevel: Math.min(lab.colourLevel, (lab.D - 4) / 2) });
+  } catch (e) { document.getElementById('rdK').innerHTML = `<span style="color:#ffc44f">${e.message}</span>`; return; }
+  lab.desc = desc; lab.libs = desc.libs.slice();
+  const t0 = performance.now(), plan = kitPlan(desc), planMs = performance.now() - t0;
+  const k = buildKit(desc, plan);
+  lab.k = k; lab.plan = plan; lab.planMs = planMs;
+  lab.voxels = createCounts(k.store).of(k.root);
+  lab.colour = kitColour(desc, rgb8);
+  lab.classes = null;
+  paintControls();
+  writeStats();
+  drawPlan(null);
+  document.getElementById('kPath').innerHTML = '<span class="hint">Hover over the picture.</span>';
+  render();
+  // the Oh classes after the picture, so a big library doesn't hold the first frame
+  setTimeout(() => {
+    if (lab.k !== k) return;
+    if (k.nodes > 80000){ lab.classes = 'skip'; writeStats(); return; }
+    const t = performance.now(); lab.classes = createClasses(k.store, OH48).size; lab.classMs = performance.now() - t; writeStats();
+  }, 30);
+  lab.listeners.forEach(f => f());
+}
+function writeStats(){
+  const { k, desc, voxels } = lab, side = sideOf(desc.L), ms = k.ms;
+  document.getElementById('rdK').innerHTML =
+    `<span>side <b>${fmt(side)}³</b></span><span>levels L <b>${desc.L}</b></span><span>solid voxels <b>${human(voxels)}</b></span>` +
+    `<span>fill <b>${(100 * voxels / side ** 3).toFixed(2)}%</b></span>` +
+    `<span>nodes <b>${fmt(k.nodes)}</b> (built ${fmt(k.raw)}, pruned ${fmt(k.dropped)})</span>` +
+    `<span>Oh classes <b>${lab.classes === null ? '…' : lab.classes === 'skip' ? 'skipped (> 80K nodes)' : fmt(lab.classes)}</b></span>`;
+  document.getElementById('rdK2').innerHTML =
+    `<span>build <b>${k.totalMs.toFixed(0)} ms</b> (parts ${ms.parts.toFixed(0)} + compose ${ms.compose.toFixed(0)} + prune ${ms.prune.toFixed(0)})</span>` +
+    `<span>plan <b>${lab.planMs.toFixed(2)} ms</b></span><span>voxels per node <b>${human(voxels / k.nodes)}</b></span>` +
+    `<span>top mask <b>${lab.plan.levels[desc.L].mask[0]}</b></span><span>link <b>?kit=${desc.D},${desc.libs.join('.')},${desc.ornaments},${desc.ground ? 1 : 0},${desc.colourLevel}</b></span>`;
+}
+function paintControls(){
+  const host = document.getElementById('kLibs');
+  host.innerHTML = '';
+  lab.desc.libs.forEach((n, i) => {
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.min = 1; inp.max = 1024; inp.value = n; inp.title = `level ${i + 1}: ${n} assemblies of ${fmt(sideOf(i + 1))}³`;
+    inp.setAttribute('aria-label', `Library size at level ${i + 1}`);
+    inp.onchange = () => { const v = Math.max(1, Math.min(1024, inp.value | 0)); lab.libs[i] = v; schedule(); };
+    host.appendChild(inp);
+  });
+  const top = document.createElement('span'); top.className = 'mono'; top.style.cssText = 'font-family:var(--mono);font-size:10px;color:var(--dim);align-self:center';
+  top.textContent = '+ 1 world'; host.appendChild(top);
+  const cr = document.getElementById('kCol'); cr.max = lab.desc.L; cr.value = lab.desc.colourLevel;
+  document.getElementById('kColV').textContent = `${lab.desc.colourLevel} (${fmt(sideOf(lab.desc.colourLevel))}³)`;
+}
+let timer = 0;
+const schedule = () => { clearTimeout(timer); timer = setTimeout(rebuildKit, 120); };
+
+// controls
+const chips = (host, items, cur, on) => {
+  host.innerHTML = '';
+  for (const [k, label] of items){
+    const b = document.createElement('button'); b.textContent = label; b.classList.toggle('on', k === cur);
+    b.setAttribute('aria-pressed', k === cur ? 'true' : 'false');
+    b.onclick = () => { [...host.children].forEach(c => { c.classList.toggle('on', c === b); c.setAttribute('aria-pressed', c === b ? 'true' : 'false'); }); on(k); };
+    host.appendChild(b);
+  }
+};
+chips(document.getElementById('kD'), [10, 12, 14, 16].map(d => [d, `${d} · ${fmt(2 ** d)}³`]), lab.D, d => { lab.D = d; setView(lab.view, false); schedule(); });
+chips(document.getElementById('kLibP'), Object.keys(LIB_PRESETS).map(k => [k, k]), 'default', k => { lab.libs = LIB_PRESETS[k] && LIB_PRESETS[k].slice(); schedule(); });
+chips(document.getElementById('kView'), [['street', 'street'], ['outside', 'outside'], ['above', 'above']], lab.view, v => setView(v, true));
+document.getElementById('kSeed').onchange = e => { lab.seed = Math.max(1, Math.min(65535, e.target.value | 0)); schedule(); };
+document.getElementById('kOrn').oninput = e => { lab.ornaments = +e.target.value; document.getElementById('kOrnV').textContent = lab.ornaments; schedule(); };
+document.getElementById('kGround').onclick = e => {
+  lab.ground = !lab.ground; e.target.classList.toggle('on', lab.ground); e.target.textContent = lab.ground ? 'on' : 'off';
+  e.target.setAttribute('aria-pressed', String(lab.ground)); schedule();
+};
+document.getElementById('kCol').oninput = e => {
+  lab.colourLevel = +e.target.value;
+  if (!lab.desc) return;
+  lab.desc = kitDesc({ ...lab.desc, colourLevel: lab.colourLevel });
+  lab.colour = kitColour(lab.desc, rgb8);
+  document.getElementById('kColV').textContent = `${lab.colourLevel} (${fmt(sideOf(lab.colourLevel))}³)`;
+  writeStats(); render();
+};
+function setView(v, go){
+  lab.view = v;
+  const V = VIEWS[v](lab.D);
+  lab.eye = V.eye; lab.yaw = V.yaw; lab.pitch = V.pitch;
+  if (go) render();
+}
+setView('street', false);
+
+/* ---- the tracer: kit-sketch.mjs's, without allocations -----------------
+   Front to back by octant k ^ a (a = the ray's sign bits): a ray's path
+   through a node's children only ever sets bits in that frame, so the
+   numeric order is a valid visiting order, and the first FULL is the hit. */
+function makeTracer(store, root, D){
+  let ox, oy, oz, ix, iy, iz, a, bt, bax, hit, hx, hy, hz, ht, hax;
+  const box = (x0, y0, z0, s) => {
+    let tn = -Infinity, tf = Infinity, ax = 0, t1, t2, q;
+    t1 = (x0 - ox) * ix; t2 = (x0 + s - ox) * ix; if (t1 > t2){ q = t1; t1 = t2; t2 = q; } if (t1 > tn){ tn = t1; ax = 0; } if (t2 < tf) tf = t2;
+    t1 = (y0 - oy) * iy; t2 = (y0 + s - oy) * iy; if (t1 > t2){ q = t1; t1 = t2; t2 = q; } if (t1 > tn){ tn = t1; ax = 1; } if (t2 < tf) tf = t2;
+    t1 = (z0 - oz) * iz; t2 = (z0 + s - oz) * iz; if (t1 > t2){ q = t1; t1 = t2; t2 = q; } if (t1 > tn){ tn = t1; ax = 2; } if (t2 < tf) tf = t2;
+    if (tf < Math.max(tn, 0)) return false;
+    bt = Math.max(tn, 0); bax = ax; return true;
+  };
+  const walk = (id, lev, x0, y0, z0, t, ax) => {
+    if (id === FULL){ hit = true; ht = t; hax = ax; hx = x0; hy = y0; hz = z0; return true; }
+    const hs = 2 ** (lev - 1);
+    for (let k = 0; k < 8; k++){
+      const oc = k ^ a, c = store.child(id, oc);
+      if (c === EMPTY) continue;
+      const cx = x0 + (oc & 1) * hs, cy = y0 + (oc >> 1 & 1) * hs, cz = z0 + (oc >> 2) * hs;
+      if (box(cx, cy, cz, hs)){ const t2 = bt, a2 = bax; if (walk(c, lev - 1, cx, cy, cz, t2, a2)) return true; }
+    }
+    return false;
+  };
+  const inv = v => 1 / (Math.abs(v) < 1e-12 ? 1e-12 : v);
+  return (o, d, out) => {
+    ox = o[0]; oy = o[1]; oz = o[2]; ix = inv(d[0]); iy = inv(d[1]); iz = inv(d[2]);
+    a = (d[0] < 0 ? 1 : 0) | (d[1] < 0 ? 2 : 0) | (d[2] < 0 ? 4 : 0);
+    hit = false;
+    if (root !== EMPTY && box(0, 0, 0, 2 ** D)) walk(root, D, 0, 0, 0, bt, bax);
+    if (!hit) return false;
+    out[0] = ht; out[1] = hax; out[2] = hx; out[3] = hy; out[4] = hz;
+    return true;
+  };
+}
+
+/* ---- progressive render: a quarter-resolution pass, then full --------- */
+const cvK = document.getElementById('cvK');
+// Its CSS height, read once: setting cvK.height below overwrites the attribute.
+const K_CSS_H = cvK.getAttribute('height') | 0;
+const SKY = [14, 15, 24], LDIR = (() => { const v = [0.45, 0.8, 0.3], l = Math.hypot(...v); return v.map(x => x / l); })();
+let job = 0, hitMap = null, rw = 0, rh = 0;
+function camera(){
+  const cp = Math.cos(lab.pitch), fw = [cp * Math.sin(lab.yaw), Math.sin(lab.pitch), cp * Math.cos(lab.yaw)];
+  const zb = fw.map(v => -v), cr = (p, q) => [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
+  const nz = v => { const l = Math.hypot(...v) || 1; return v.map(x => x / l); };
+  const rt = nz(cr([0, 1, 0], zb)), up = cr(zb, rt);
+  return { fw, rt, up };
+}
+function render(quick = false){
+  if (!lab.k) return;
+  const my = ++job, { store, root, D } = lab.k, trace = makeTracer(store, root, D), colour = lab.colour;
+  const dpr = Math.min(devicePixelRatio || 1, 1.5), cssW = cvK.clientWidth, cssH = K_CSS_H;
+  const W = Math.min(720, Math.round(cssW * dpr)), H = Math.round(W * cssH / cssW);
+  cvK.width = W; cvK.height = H; cvK.style.height = cssH + 'px';
+  rw = W; rh = H;
+  const g = cvK.getContext('2d'), img = g.createImageData(W, H);
+  const map = new Int32Array(3 * W * H).fill(-1);
+  const { fw, rt, up } = camera(), f = 1 / Math.tan(0.45), side = 2 ** D, fog = 1.6 * side, out = new Float64Array(5), dir = [0, 0, 0];
+  const shadePx = (px, py) => {
+    const u = (2 * (px + 0.5) / W - 1) * (W / H) / f, v = (1 - 2 * (py + 0.5) / H) / f;
+    for (let i = 0; i < 3; i++) dir[i] = fw[i] + u * rt[i] + v * up[i];
+    const l = Math.hypot(dir[0], dir[1], dir[2]); dir[0] /= l; dir[1] /= l; dir[2] /= l;
+    if (!trace(lab.eye, dir, out)) return null;
+    const ax = out[1], nd = dir[ax] > 0 ? -LDIR[ax] : LDIR[ax];
+    const shade = 0.35 + 0.65 * Math.max(0, nd), k = 0.85 * Math.min(1, out[0] / fog) ** 2;
+    const c = colour(out[2] + 0.5, out[3] + 0.5, out[4] + 0.5);
+    return [ (c & 255) * shade * (1 - k) + SKY[0] * k, (c >> 8 & 255) * shade * (1 - k) + SKY[1] * k, (c >> 16 & 255) * shade * (1 - k) + SKY[2] * k, out[2], out[3], out[4] ];
+  };
+  const put = (x, y, s, c) => {
+    for (let yy = y; yy < Math.min(H, y + s); yy++) for (let xx = x; xx < Math.min(W, x + s); xx++){
+      const o = 4 * (xx + W * yy);
+      img.data[o] = c ? c[0] : SKY[0]; img.data[o + 1] = c ? c[1] : SKY[1]; img.data[o + 2] = c ? c[2] : SKY[2]; img.data[o + 3] = 255;
+    }
+  };
+  const passes = quick ? [4] : [4, 1];
+  let pass = 0, y = 0;
+  const step = () => {
+    if (my !== job) return;
+    const s = passes[pass], tEnd = performance.now() + 14;
+    while (y < H && performance.now() < tEnd){
+      for (let x = 0; x < W; x += s){
+        const c = shadePx(x + (s >> 1), y + (s >> 1));
+        put(x, y, s, c);
+        if (s === 1 && c){ const o = 3 * (x + W * y); map[o] = c[3]; map[o + 1] = c[4]; map[o + 2] = c[5]; }
+      }
+      y += s;
+    }
+    g.putImageData(img, 0, 0);
+    if (y >= H){
+      pass++; y = 0;
+      if (pass >= passes.length){ if (!quick) hitMap = map; return; }
+    }
+    requestAnimationFrame(step);
+  };
+  hitMap = null;
+  requestAnimationFrame(step);
+}
+
+// look and move
+let drag = null;
+cvK.addEventListener('pointerdown', ev => { drag = { x: ev.clientX, y: ev.clientY, yaw: lab.yaw, pitch: lab.pitch }; cvK.setPointerCapture(ev.pointerId); hideTip(); });
+cvK.addEventListener('pointermove', ev => {
+  if (drag){
+    lab.yaw = drag.yaw - (ev.clientX - drag.x) * 0.006;
+    lab.pitch = Math.max(-1.5, Math.min(1.5, drag.pitch - (ev.clientY - drag.y) * 0.006));
+    render(true); return;
+  }
+  inspect(ev);
+});
+const endDrag = () => { if (drag){ drag = null; render(); } };
+cvK.addEventListener('pointerup', endDrag); cvK.addEventListener('pointercancel', endDrag);
+cvK.addEventListener('pointerleave', () => { hideTip(); });
+let wheelT = 0;
+cvK.addEventListener('wheel', ev => {
+  ev.preventDefault();
+  const { fw } = camera(), step = 2 ** lab.D * 0.004 * (ev.shiftKey ? 8 : 1) * (ev.deltaY < 0 ? 1 : -1);
+  lab.eye = lab.eye.map((e, i) => e + fw[i] * step);
+  render(true); clearTimeout(wheelT); wheelT = setTimeout(() => render(), 160);
+}, { passive: false });
+cvK.addEventListener('keydown', ev => {
+  const k = ev.key.toLowerCase(); if (!'wsad'.includes(k) || k.length !== 1) return;
+  ev.preventDefault();
+  const { fw, rt } = camera(), step = 2 ** lab.D * 0.004 * (ev.shiftKey ? 8 : 1);
+  const v = k === 'w' ? fw : k === 's' ? fw.map(x => -x) : k === 'a' ? rt.map(x => -x) : rt;
+  lab.eye = lab.eye.map((e, i) => e + v[i] * step); render();
+});
+
+/* ---- the plan walk: kitColour's frameOf, keeping each step ------------- */
+function walkPath(x, y, z){
+  const { plan, desc } = lab, L = desc.L, steps = [];
+  let j = 0, u = [0, 0, 0];
+  for (let l = L; l >= 1; l--){
+    const s = sideOf(l - 1), i = Math.min(3, Math.floor(x / s)), k = Math.min(3, Math.floor(y / s)), m = Math.min(3, Math.floor(z / s));
+    const at = 64 * j + i + 4 * k + 16 * m, lv = plan.levels[l], next = lv.child[at], e = lv.turn[at];
+    steps.push({ l, j, mask: lv.mask[j], grounded: lv.grounded[j], slot: [i, k, m], child: next, turn: e, floor: lv.grounded[j] && k === 0 });
+    if (next < 0) return { steps, empty: true };
+    const w = [x - i * s, y - k * s, z - m * s];
+    for (let a = 0; a < 3; a++) u[PERM[e >> 3][a]] = (e >> a & 1) ? s - w[a] : w[a];
+    [x, y, z] = u; j = next;
+  }
+  return { steps, part: j, local: [Math.floor(x), Math.floor(y), Math.floor(z)] };
+}
+function inspect(ev){
+  if (!hitMap) return;
+  const r = cvK.getBoundingClientRect(), px = Math.floor((ev.clientX - r.left) / r.width * rw), py = Math.floor((ev.clientY - r.top) / r.height * rh);
+  if (px < 0 || py < 0 || px >= rw || py >= rh) return;
+  const o = 3 * (px + rw * py), hostP = document.getElementById('kPath');
+  if (hitMap[o] < 0){ hostP.innerHTML = '<span class="hint">Sky: the ray left the world without a hit.</span>'; drawPlan(null); hideTip(); return; }
+  const vx = hitMap[o], vy = hitMap[o + 1], vz = hitMap[o + 2], p = walkPath(vx + 0.5, vy + 0.5, vz + 0.5);
+  const nParts = PART_NAMES.length, partName = p.part === undefined ? '' : p.part < nParts ? PART_NAMES[p.part] : `ornament ${p.part - nParts}`;
+  hostP.innerHTML = `<div class="hint" style="margin-bottom:6px">voxel (${fmt(vx)}, ${fmt(vy)}, ${fmt(vz)})</div>` + p.steps.map(s =>
+    `<div class="step">L${s.l} entry <b>${s.j}</b> · ${s.mask}${s.grounded ? ' (grounded)' : ''} · ${fmt(sideOf(s.l))}³<br>` +
+    `slot (${s.slot.join(', ')})${s.floor ? ' · a floor slot' : ''} → ${s.child < 0 ? '<b>empty</b>' : `L${s.l - 1} ${s.l === 1 ? 'part' : 'entry'} <b>${s.child}</b>`}, ` +
+    `<span class="t">${turnName(s.turn)}</span>${s.turn && isY(s.turn) ? ' <span class="hint">(about y)</span>' : ''}</div>`).join('') +
+    (p.empty ? '' : `<div class="step part">L0 part <b>${partName}</b>, voxel (${p.local.join(', ')}) of its 16³</div>`);
+  drawPlan(p.steps);
+  showTip(`${partName || 'empty'}<br><span style="color:#8e97ad">${p.steps.length} levels down, ${p.steps.filter(s => s.turn).length} turned</span>`, ev);
+}
+function drawPlan(steps){
+  const { plan, desc } = lab, on = new Map((steps || []).map(s => [s.l, s.j])), host = document.getElementById('kPlan');
+  const CAP = 32;
+  let html = '';
+  for (let l = desc.L; l >= 1; l--){
+    const lv = plan.levels[l], n = lv.n;
+    html += `<div class="lv">L${l} · ${n} entr${n === 1 ? 'y' : 'ies'} of ${fmt(sideOf(l))}³${l === desc.L ? ' (the world)' : ''}</div>`;
+    const show = [...Array(Math.min(n, CAP)).keys()];
+    if (on.has(l) && on.get(l) >= CAP) show.push(on.get(l));
+    html += show.map(j => `<span class="e${lv.grounded[j] ? ' g' : ''}${on.get(l) === j ? ' on' : ''}" title="entry ${j}">${j}:${lv.mask[j]}</span>`).join('') + (n > CAP ? ` <span>+${n - CAP} more</span>` : '');
+  }
+  const nParts = PART_NAMES.length;
+  html += `<div class="lv">L0 · ${nParts + desc.ornaments} parts of 16³</div>` +
+    [...PART_NAMES, ...Array.from({ length: desc.ornaments }, (_, i) => `orn${i}`)].map((nm, j) =>
+      `<span class="e${j === 0 || nm === 'slab' || nm === 'step' ? ' g' : ''}${steps && steps.length && steps[steps.length - 1].child === j ? ' on' : ''}">${j}:${nm}</span>`).join('');
+  host.innerHTML = html;
+}
+
+/* ---- §7 costs: the lab's kit, four ways ---- */
+function measure(){
+  const desc = lab.desc; if (!desc) return;
+  const btn = document.getElementById('mGo'); btn.disabled = true; btn.textContent = 'measuring…';
+  setTimeout(() => {
+    const run = (name, d, plan, note) => {
+      const k = buildKit(d, plan), small = k.nodes <= 80000;
+      return { name, note, raw: k.raw, nodes: k.nodes, oh: small ? createClasses(k.store, OH48).size : null, mir: small ? createClasses(k.store, MIRROR8).size : null,
+               vox: createCounts(k.store).of(k.root), ms: k.totalMs };
+    };
+    const flat = kitPlan(desc); for (let l = 1; l <= desc.L; l++) flat.levels[l].turn.fill(0);
+    const rows = [
+      run('as in the lab', desc, undefined, 'turned'),
+      run('no turns', desc, flat, 'every turn set to the identity'),
+      run(desc.ground ? 'ground off' : 'ground on', kitDesc({ ...desc, ground: !desc.ground })),
+      run('no ornaments', kitDesc({ ...desc, ornaments: 0 })),
+    ];
+    const c = v => v === null ? '—' : fmt(v);
+    document.querySelector('#tb7 tbody').innerHTML = rows.map((r, i) =>
+      `<tr${i === 0 ? ' class="hi"' : ''}><td class="k">${r.name}</td><td class="n">${fmt(r.raw)}</td><td class="n">${fmt(r.nodes)}</td><td class="n">${c(r.oh)}</td><td class="n">${c(r.mir)}</td><td class="n">${human(r.vox)}</td><td class="n">${r.ms.toFixed(0)}</td></tr>`).join('');
+    const [a, b] = rows;
+    document.getElementById('vd7').textContent = a.oh === null ? `Over 80K nodes: classes skipped. Turns cost ${(a.nodes / b.nodes).toFixed(1)}× in nodes.`
+      : `Turns: ${fmt(b.nodes)} → ${fmt(a.nodes)} nodes (${(a.nodes / b.nodes).toFixed(1)}×), but ${fmt(b.oh)} → ${fmt(a.oh)} Oh classes (${a.oh - b.oh >= 0 ? '+' : ''}${a.oh - b.oh}). ` +
+        `SSVDAG's mirrors fold far less: ${fmt(b.mir)} → ${fmt(a.mir)}.`;
+    btn.disabled = false; btn.textContent = 'Measure';
+  }, 20);
+}
+document.getElementById('mGo').onclick = measure;
+lab.listeners.push(() => {
+  const d = lab.desc;
+  document.getElementById('mWhat').innerHTML = `<span>kit <b>?kit=${d.D},${d.libs.join('.')},${d.ornaments},${d.ground ? 1 : 0},${d.colourLevel}</b> seed <b>${d.seed}</b></span>`;
+});
+let measuredOnce = false;
+new IntersectionObserver(es => { if (!measuredOnce && es[0].isIntersecting && lab.desc){ measuredOnce = true; measure(); } }).observe(document.getElementById('tb7'));
+
+/* ---- §7 chart: nodes against library entries (measured, kit-results.md §1) ---- */
+const MEAS = [
+  { libs: '1.1.1.1', n: 4, nodes: 1544, oh: 113, vox: 100.73e9, ms: 8 },
+  { libs: '2.2.2.2', n: 8, nodes: 2534, oh: 172, vox: 89.71e9, ms: 19 },
+  { libs: '8.6.4.3', n: 21, nodes: 6261, oh: 353, vox: 86.00e9, ms: 42, def: true },
+  { libs: '24.16.12.8', n: 60, nodes: 12165, oh: 702, vox: 83.97e9, ms: 52 },
+  { libs: '128.64.32.16', n: 240, nodes: 42554, oh: 2219, vox: 80.28e9, ms: 123 },
+  { libs: '1024.256.64.16', n: 1360, nodes: 222949, oh: 10655, vox: 76.74e9, ms: 598 },
+];
+document.querySelector('#tb7b tbody').innerHTML = MEAS.map(m => `<tr><td class="k">${m.libs}</td><td class="n">${fmt(m.n)}</td><td class="n">${fmt(m.nodes)}</td><td class="n">${fmt(m.oh)}</td><td class="n">${human(m.vox)}</td><td class="n">${m.ms}</td></tr>`).join('');
+function chart(){
+  const host = document.getElementById('ch7'), w = host.clientWidth || 800, h = 300, m = { l: 64, r: 24, t: 16, b: 40 };
+  const lx = v => m.l + (w - m.l - m.r) * (Math.log10(v) - Math.log10(2)) / (Math.log10(3000) - Math.log10(2));
+  const ly = v => h - m.b - (h - m.t - m.b) * (Math.log10(v) - 3) / (Math.log10(400000) - 3);
+  let s = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" font-family="ui-monospace,SF Mono,Menlo,monospace" font-size="10">`;
+  for (const v of [1e3, 1e4, 1e5]) s += `<line x1="${m.l}" x2="${w - m.r}" y1="${ly(v)}" y2="${ly(v)}" stroke="rgba(120,150,190,.12)"/><text x="${m.l - 8}" y="${ly(v) + 3}" fill="#5a627a" text-anchor="end">${v / 1000}K</text>`;
+  for (const v of [2, 10, 100, 1000]) s += `<text x="${lx(v)}" y="${h - m.b + 16}" fill="#5a627a" text-anchor="middle">${fmt(v)}</text>`;
+  s += `<text x="${(m.l + w - m.r) / 2}" y="${h - 6}" fill="#5a627a" text-anchor="middle">library entries, all levels (log)</text>`;
+  s += `<text x="14" y="${(m.t + h - m.b) / 2}" fill="#5a627a" text-anchor="middle" transform="rotate(-90 14 ${(m.t + h - m.b) / 2})">nodes (log)</text>`;
+  s += `<polyline fill="none" stroke="#1d9db4" stroke-width="2" points="${MEAS.map(p => lx(p.n) + ',' + ly(p.nodes)).join(' ')}"/>`;
+  MEAS.forEach((p, i) => {
+    s += `<circle cx="${lx(p.n)}" cy="${ly(p.nodes)}" r="5" fill="#1d9db4" stroke="#0a0a11" stroke-width="2"/>`;
+    s += `<circle class="hitpt" data-i="${i}" cx="${lx(p.n)}" cy="${ly(p.nodes)}" r="14" fill="transparent"/>`;
+    if (p.def || i === 0 || i === MEAS.length - 1)
+      s += `<text x="${lx(p.n) + (i === MEAS.length - 1 ? -10 : 10)}" y="${ly(p.nodes) + (i === MEAS.length - 1 ? -10 : 18)}" fill="#c3c9d6" text-anchor="${i === MEAS.length - 1 ? 'end' : 'start'}">${p.def ? 'default ' : ''}${p.libs}: ${fmt(p.nodes)}</text>`;
+  });
+  host.innerHTML = s + '</svg>';
+  host.querySelectorAll('.hitpt').forEach(el => {
+    el.addEventListener('pointermove', ev => { const p = MEAS[+el.dataset.i]; showTip(`libraries ${p.libs} (${p.n} entries)<br>nodes <b>${fmt(p.nodes)}</b> · Oh classes ${fmt(p.oh)}<br>voxels ${human(p.vox)} · built in ${p.ms} ms`, ev); });
+    el.addEventListener('pointerleave', hideTip);
+  });
+}
+chart();
+addEventListener('resize', () => { chart(); render(); });
+
+rebuildKit();
+</script>
+</body>
+</html>

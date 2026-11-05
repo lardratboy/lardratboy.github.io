@@ -26,6 +26,10 @@
   #ctl [hidden]{ display:none; }   /* #ctl label's display:block would show a hidden label */
   #ctl input[type=number]{ width:38px; }
   #ctl input.n3{ margin-left:2px; }
+  #ctl input#seed{ width:52px; }
+  #ctl button{ background:#14141c; color:#b8b8cc; border:1px solid rgba(255,255,255,.14); font:inherit;
+        border-radius:3px; margin-left:3px; padding:0 6px; cursor:pointer; }
+  #ctl button:hover{ border-color:rgba(255,255,255,.3); }
   #latticeCtl{ border-left:2px solid rgba(255,255,255,.08); padding-left:8px; margin:4px 0; }
   #latBudget{ color:#4e4e5e; white-space:pre-wrap; }
   #latBudget .warn{ color:#d08a5a; }
@@ -54,6 +58,14 @@
               border:2px solid rgba(122,138,208,.25); border-top-color:#7a8ad0; animation:spin .8s linear infinite; }
   @keyframes spin{ to{ transform:rotate(360deg); } }
   #toastTime{ color:#6e6e86; margin-left:6px; font-variant-numeric:tabular-nums; }
+  /* World files (docs/binaryoutput.md §11). pointer-events:none on the
+     drop hint: under the pointer it would otherwise be the drag's target,
+     and leaving the canvas for it would read as leaving the page. */
+  #fileInfo{ color:#6e6e86; margin-top:2px; max-width:300px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  #ctl button:disabled{ color:#4a4a58; border-color:rgba(255,255,255,.06); }
+  #dropHint{ position:fixed; inset:12px; border:2px dashed #7a8ad0; border-radius:10px; background:rgba(10,10,20,.55);
+             color:#b8b8cc; display:flex; align-items:center; justify-content:center; font-size:15px; pointer-events:none; }
+  #dropHint[hidden]{ display:none; }
 </style>
 </head>
 <body>
@@ -61,6 +73,7 @@
 <div id="ctl">
   <label>world <select id="world"></select></label>
   <label id="depthL">depth <select id="depth"></select></label>
+  <label id="seedL" hidden>seed <input id="seed" type="number" min="1" max="65535"><button id="seedDown" title="the previous seed ([)">−</button><button id="seedUp" title="the next seed (])">+</button><button id="seedRand" title="a random seed (R)">random</button></label>
   <div id="latticeCtl" hidden>
     <label>R <input id="latR" type="range" min="5" max="64" step="1"> <span id="latRV"></span></label>
     <label>size <input id="latX" type="number" min="1" max="128"> ×<input id="latY" class="n3" type="number" min="1" max="128"> ×<input id="latZ" class="n3" type="number" min="1" max="128"></label>
@@ -72,10 +85,17 @@
   </div>
   <div id="kitCtl" hidden>
     <label>libraries <input id="kitLibs" type="text" spellcheck="false" title="assemblies per level, bottom up, e.g. 8,6,4,3 (the top level is always 1, the world)"></label>
-    <label>ornaments <input id="kitOrn" type="number" min="0" max="16"> specimens</label>
+    <label>ornaments <input id="kitOrn" type="number" min="0" max="256"> specimens</label>
+    <label>ornament share <select id="kitShare"><option value="">proportional (as before)</option><option value="5">5%</option><option value="10">10%</option><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option></select></label>
     <label>ground <select id="kitGround"><option value="1">ground and gravity</option><option value="0">floating</option></select></label>
     <label>colour frame <select id="kitColourLevel"></select></label>
     <div id="kitInfo"></div>
+  </div>
+  <div id="fileCtl">
+    <label>file <button id="fileOpen" title="open .vdag files (or drop them anywhere on the page)">open…</button><button id="fileExport" title="save the world on screen as one .vdag file">export this world</button></label>
+    <label>shelf <button id="shelfAdd" title="keep the world on screen, and this view of it, on the shelf">add this world</button><button id="shelfRemove" title="take the world on screen off the shelf">remove</button><button id="shelfExport" title="save every world on the shelf in one .vdag file">export all</button></label>
+    <div id="fileInfo"></div>
+    <input id="fileInput" type="file" accept=".vdag" multiple hidden>
   </div>
   <label>detail <input id="detail" type="range" min="1" max="4" step="0.25"> <span id="detailV"></span></label>
   <label>max chunks <select id="max"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option></select></label>
@@ -87,19 +107,25 @@
     <option value="0">ray only</option><option value="1">ray from lod 1</option><option value="2">ray from lod 2</option><option value="3">ray from lod 3</option>
     <option value="4">ray from lod 4</option><option value="5">ray from lod 5</option><option value="6">ray from lod 6</option>
     <option value="checker">checkerboard (self-test)</option></select></label>
+  <label>occlusion <select id="occlusion"><option value="off">off (draw every chunk)</option><option value="queries">skip hidden: occlusion queries</option><option value="depth">skip hidden: depth readback</option></select></label>
   <label>seams <select id="seams"><option value="1">open sides + tail</option><option value="0">off (cracks)</option></select></label>
   <label>cut <select id="freeze"><option value="0">follows the eye</option><option value="1">frozen</option></select></label>
   <div class="keys">drag: look   WASD: move   E/Q: up/down
-shift: ×4   wheel: speed   F: freeze cut
+shift: ×8   wheel: speed   F: freeze cut
+[ / ]: seed − / +   R: a random seed
+drop .vdag files anywhere to open them
 pad: L stick move, R stick look, RT/LT up/down
-     A or L3 ×4, RB/LB speed ×2/÷2, Y freeze cut
+     A or L3 ×8, RB/LB speed ×2/÷2, Y freeze cut
 ?world=&amp;depth=&amp;detail=&amp;max=&amp;workers=&amp;eye=x,y,z
 ?world=lattice:1&amp;lattice=R,nx,ny,nz,gap,turns,axes,align
 ?world=kit:1&amp;kit=D,libs,ornaments,ground,colour
+?world=caves:&lt;seed&gt;&amp;depth=10..12   (scatter:, lattice:, kit: the same)
 ?quiet draws once converged   ?selftest runs streamSelftest()
-?ray=density|off|0..6   ?density=0.27,0.025   ?stencil=0   ?raymiss=discard   ?bench   raySelftest()</div>
+?ray=density|off|0..6   ?density=0.27,0.025   ?stencil=0   ?raymiss=discard   ?bench   raySelftest()
+?occlusion=queries|depth (off by default)   occlusionSelftest()</div>
 </div>
 <div id="hud"></div>
+<div id="dropHint" hidden>drop world files to open them</div>
 <div id="toast" hidden><span id="toastSpin"></span><span id="toastText"></span><span id="toastTime"></span><div id="toastBar"><div></div></div></div>
 
 <script type="module">
@@ -151,7 +177,7 @@ pad: L stick move, R stick look, RT/LT up/down
    pixels of the traced chunks. Their boxes are drawn into a stencil
    first (markTraced), and the full-screen pass is stencil-tested, so a
    pixel whose ray meets no traced chunk never runs the march. */
-import { createStore, createClasses, createCounts, OH48 } from './dag-core.js';
+import { createStore, createClasses, createCounts, prune, storeView, OH48 } from './dag-core.js';
 import { mortonXYZ } from './chunk-core.js';
 import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
 import { createWorld, createStreamer, worldSnapshot, keyOf, DEFAULTS, clearance as clearanceOf } from './stream-core.js';
@@ -161,12 +187,14 @@ import { createBrickPool, installPage, releasePage, buildCoverTree, KIND_RAY, KI
          TREE_WORDS, classifyPagesCPU, traceCPU, hitAttrCPU, createHeap, ATTR_NONE, HEAP_W } from './ray-core.js';
 import { attrRGB } from './attr-core.js';
 import { readPad, pickPad, PAD } from './pad-core.js';
+import { createOcclusion, nearEye, nearRadius, hiddenByTiles, OCCLUSION } from './occlusion-core.js';
 import { SHAPES, fieldOf } from './experiments/shapes.mjs';
 import { sliceCore, rowsOf, automatonOf, AXIS_NAMES } from './testbed-rows.js';
 import { scatterDesc, groundOf } from './scatter-core.js';
-import { buildScatterInWorkers, isAbort } from './scatter-build.js';
+import { buildScatterInWorkers, buildKitInWorkers, ornamentsKept, isAbort } from './scatter-build.js';
 import { latticeDesc, latticeFromParam, latticeParam, budgetOf, maxCube, stackOf, gapOf } from './lattice-core.js';
-import { kitDesc, kitFromParam, kitParam, buildKit, sideOf, KIT_LIMITS } from './kit-core.js';
+import { kitDesc, kitFromParam, kitParam, sideOf, KIT_LIMITS } from './kit-core.js';
+import { caveDesc } from './cave-core.js';
 
 const $ = id => document.getElementById(id);
 const canvas = $('gl');
@@ -559,6 +587,214 @@ function markTraced(M, planes, list, T){
   return n;
 }
 
+/* Occlusion queries (occlusion-core.js has the why; docs/occlusion.md).
+   After the raster pass, each raster chunk the tracker asks about gets its
+   box, grown by one of its cells like markTraced's, drawn into the raster
+   target against the frame's depth, inside its own
+   ANY_SAMPLES_PASSED_CONSERVATIVE query: LEQUAL, back faces culled, every
+   write off. Any sample passing means some of the box lies in front of
+   what was drawn, so the chunk may show. None means none of its cubes can.
+   A query is one draw call of 36 vertices, and a query can't span an
+   instanced draw (it would count the boxes together), so it's one draw a
+   chunk. A box behind a wall fails the depth test on every fragment, which
+   GPUs reject before shading.
+
+   The results come back in the order asked, a frame or more late (the
+   spec holds them until the page returns to the event loop), so `poll`
+   reads the queue from the front and stops at the first that isn't
+   ready. Query objects are recycled through `free`: in the caves a frame
+   asks about several hundred chunks. The probe makes a runner of its own,
+   since its view isn't the screen's. */
+const QBOX_VS = `#version 300 es
+precision highp float;
+uniform mat4 uViewProj;
+uniform vec4 uBox;   // eye-relative low corner and side, voxels
+const vec3 CORNER[36] = vec3[36](
+  ${glslVec3s(BOX_CORNERS)});
+void main(){ gl_Position = uViewProj * vec4(uBox.xyz + CORNER[gl_VertexID] * uBox.w, 1.0); }`;
+const QBOX_FS = `#version 300 es
+precision highp float;
+out vec4 outColor;
+void main(){ outColor = vec4(0.0); }`;
+const qboxProg = link(QBOX_VS, QBOX_FS);
+const QU = uniformsOf(qboxProg, ['uViewProj', 'uBox']);
+function queryRunner(occ, revisit = OCCLUSION.REVISIT){
+  // Each frame's queries are a batch. On your Safari bench the first
+  // version's poll asked every query whether it was ready, then for its
+  // result: two round trips to the GPU process each, and the frame's
+  // submit time went from 0.27 to 3.41 ms for 147 queries. Queries finish
+  // in the order they're asked, so now one question (is the batch's last
+  // ready?) stands for the whole batch, and only the results are read one
+  // by one, which nothing in WebGL2 can batch.
+  const batches = [], free = [];
+  const R = {
+    occ, kind: 'queries', revisit,
+    get inFlight(){ return batches.reduce((a, b) => a + b.length, 0); },
+    poll(){
+      while (batches.length){
+        const b = batches[0];
+        if (!gl.getQueryParameter(b[b.length - 1].q, gl.QUERY_RESULT_AVAILABLE)) break;
+        batches.shift();
+        for (const { q, state: s } of b){ R.occ.landed(s, gl.getQueryParameter(q, gl.QUERY_RESULT) > 0); free.push(q); }
+      }
+    },
+    // The boxes `asks` ({ state, box: [x, y, z, side] }), against the depth
+    // of the framebuffer bound now, drawn with M.
+    run(M, asks){
+      if (!asks.length) return;
+      gl.useProgram(qboxProg);
+      gl.uniformMatrix4fv(QU.uViewProj, false, M);
+      gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(false);
+      gl.enable(gl.CULL_FACE);
+      gl.colorMask(false, false, false, false);
+      gl.bindVertexArray(emptyVAO);
+      const batch = [];
+      for (const { state: s, box } of asks){
+        const q = free.pop() || gl.createQuery();
+        gl.beginQuery(gl.ANY_SAMPLES_PASSED_CONSERVATIVE, q);
+        gl.uniform4f(QU.uBox, box[0], box[1], box[2], box[3]);
+        gl.drawArrays(gl.TRIANGLES, 0, 36);
+        gl.endQuery(gl.ANY_SAMPLES_PASSED_CONSERVATIVE);
+        batch.push({ q, state: s });
+        R.occ.query(s);
+      }
+      batches.push(batch);
+      gl.bindVertexArray(null);
+      gl.colorMask(true, true, true, true);
+      gl.depthMask(true); gl.depthFunc(gl.LESS);
+    },
+    dispose(){ for (const b of batches) for (const { q } of b) gl.deleteQuery(q); for (const q of free) gl.deleteQuery(q); batches.length = 0; free.length = 0; R.occ.clear(); },
+  };
+  return R;
+}
+
+/* The depth readback (docs/occlusion.md §6; occlusion-core's hiddenByTiles
+   has the argument). After the raster pass, TILE_FS reduces the raster's
+   depth to the farthest value in each TILE × TILE pixels, into a small
+   RGBA8 target (24 bits of depth in r, g, b), and readPixels copies it
+   into a pixel-pack buffer with a fence behind it. A later frame's poll
+   finds the fence signalled, reads the buffer (getBufferSubData), and
+   tests every box that frame asked about on the CPU. Two round trips a
+   frame (the fence, the read) however many chunks; a 2560 × 1357 canvas is
+   160 × 85 tiles, 54 KB. Up to three readbacks are in flight; a fourth
+   frame asks nothing, and its chunks are asked the frame after.
+
+   Every candidate is asked every frame its last answer has landed
+   (the tracker's revisit 1): an answer costs a box test, not a draw. */
+const TILE = 16;
+const TILE_FS = `#version 300 es
+precision highp float;
+uniform highp sampler2D uRasterDepth;
+uniform ivec2 uSize;
+out vec4 outColor;
+void main(){
+  ivec2 p0 = ivec2(gl_FragCoord.xy) * ${TILE};
+  float m = 0.0;
+  for (int y = 0; y < ${TILE}; y++) for (int x = 0; x < ${TILE}; x++){
+    ivec2 p = p0 + ivec2(x, y);
+    if (p.x < uSize.x && p.y < uSize.y) m = max(m, texelFetch(uRasterDepth, p, 0).r);
+  }
+  uint k = uint(round(m * 16777215.0));
+  outColor = vec4(float(k >> 16u), float((k >> 8u) & 255u), float(k & 255u), 255.0) / 255.0;
+}`;
+const tileProg = link(RAY_VS, TILE_FS);
+const TU = uniformsOf(tileProg, ['uRasterDepth', 'uSize']);
+function depthRunner(occ){
+  const slots = [];
+  let fb = null, rb = null, tw = 0, th = 0, seq = 0;
+  const R = {
+    occ, kind: 'depth', revisit: 1,
+    get inFlight(){ return slots.reduce((a, x) => a + (x.job ? x.job.asks.length : 0), 0); },
+    poll(){
+      for (const x of slots.filter(x => x.job).sort((a, b) => a.job.seq - b.job.seq)){
+        if (gl.getSyncParameter(x.fence, gl.SYNC_STATUS) !== gl.SIGNALED) break;
+        const { M, asks, tw: jw, th: jh, w, h, near } = x.job, n = jw * jh;
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, x.pbo);
+        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, x.bytes, 0, 4 * n);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        gl.deleteSync(x.fence); x.fence = null; x.job = null;
+        const tiles = new Uint32Array(n), B = x.bytes;
+        for (let i = 0; i < n; i++) tiles[i] = B[4 * i] << 16 | B[4 * i + 1] << 8 | B[4 * i + 2];
+        for (const a of asks) R.occ.landed(a.state, !hiddenByTiles(M, a.box, tiles, { w, h, tile: TILE, near }));
+      }
+    },
+    // The raster's depth in T (w × h, drawn with M) into the tiles, read
+    // back later; the boxes `asks` are answered when it lands.
+    run(M, asks, T, w, h){
+      if (!asks.length) return;
+      let x = slots.find(x => !x.job);
+      if (!x){ if (slots.length >= 3) return; x = { pbo: gl.createBuffer(), size: 0, bytes: null, fence: null, job: null }; slots.push(x); }
+      const nw = Math.ceil(w / TILE), nh = Math.ceil(h / TILE);
+      if (nw !== tw || nh !== th){
+        if (fb){ gl.deleteFramebuffer(fb); gl.deleteRenderbuffer(rb); }
+        fb = gl.createFramebuffer(); rb = gl.createRenderbuffer(); tw = nw; th = nh;
+        gl.bindRenderbuffer(gl.RENDERBUFFER, rb); gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, tw, th);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rb);
+      }
+      if (x.size < 4 * tw * th){
+        x.size = 4 * tw * th; x.bytes = new Uint8Array(x.size);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, x.pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, x.size, gl.STREAM_READ);
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.viewport(0, 0, tw, th);
+      gl.useProgram(tileProg);
+      gl.activeTexture(gl.TEXTURE0 + RASTER_DEPTH_UNIT); gl.bindTexture(gl.TEXTURE_2D, T.depth); gl.activeTexture(gl.TEXTURE0);
+      gl.uniform1i(TU.uRasterDepth, RASTER_DEPTH_UNIT); gl.uniform2i(TU.uSize, w, h);
+      gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.BLEND);
+      gl.bindVertexArray(emptyVAO); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.bindVertexArray(null);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, x.pbo);
+      gl.readPixels(0, 0, tw, th, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      x.fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      gl.flush();
+      x.job = { seq: seq++, M: Float64Array.from(M), asks: asks.slice(), tw, th, w, h, near: view.near };
+      for (const a of asks) R.occ.query(a.state);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, T.fb);
+      gl.viewport(0, 0, w, h);
+      gl.enable(gl.DEPTH_TEST);
+    },
+    dispose(){
+      for (const x of slots){ if (x.fence) gl.deleteSync(x.fence); gl.deleteBuffer(x.pbo); }
+      slots.length = 0;
+      if (fb){ gl.deleteFramebuffer(fb); gl.deleteRenderbuffer(rb); fb = null; tw = th = 0; }
+      R.occ.clear();
+    },
+  };
+  return R;
+}
+const makeRunner = mode => mode === 'queries' ? queryRunner(createOcclusion({ revisit: OCCLUSION.REVISIT }))
+                         : mode === 'depth' ? depthRunner(createOcclusion({ revisit: 1 })) : null;
+// The screen's (null when off): draw() and the bench's wall clock render through it.
+let occlusion = null;
+const occlusionOf = () => occlusion;
+/* Off, queries or depth. The runner starts empty every time: while off it
+   isn't told about frames, so a result it kept would look current.
+   `chosen`: the panel's choice, which sticks across worlds and goes in
+   the link; otherwise it's the world's default (occlusionDefault). */
+function setOcclusion(mode, { chosen = false } = {}){
+  state.occlusion = OCCLUSION_MODES.includes(mode) ? mode : 'off';
+  if (occlusion) occlusion.dispose();
+  occlusion = makeRunner(state.occlusion);
+  $('occlusion').value = state.occlusion;
+  if (!chosen) return;
+  state.occlusionChosen = true;
+  const q = new URLSearchParams(location.search);
+  q.set('occlusion', state.occlusion);
+  history.replaceState(null, '', '?' + q);
+}
+/* By world, until a view says otherwise (docs/occlusion.md §7–8). Your
+   Safari benches with the poll batched: in the caves at D = 12 the
+   queries are 40% under the same view without them (1.57 against 2.63
+   ms); in the kit's D = 16 street 20% (12.21 against 15.26), skipping a
+   quarter of the cubes behind its buildings. Nothing is measured on the
+   other worlds, and on an open view every query is pure cost, so they
+   stay off. */
+const occlusionDefault = world => {
+  if (isFile(world)){ const kind = shelfEntry(world)?.colour?.kind; return kind === 'caves' || kind === 'kit' ? 'queries' : 'off'; }
+  return isCaves(world) || isKit(world) ? 'queries' : 'off';
+};
+
 /* The ray path's three textures, with CPU mirrors laid out word for word
    as the textures are, so ray-core's classifyPagesCPU and traceCPU read
    exactly what the shader reads (raySelftest's probes need that).
@@ -709,8 +945,10 @@ function dispose(entry){
 }
 
 /* ---- state ------------------------------------------------------------- */
+const OCCLUSION_MODES = ['off', 'queries', 'depth'];
 const state = {
-  world: params.get('world') || 'row:142',
+  // (A link can't name a file: saveView writes what a shelf world was built from.)
+  world: /^file:/.test(params.get('world') || '') ? 'row:142' : params.get('world') || 'row:142',
   depth: params.has('depth') ? +params.get('depth') : null,
   detail: +(params.get('detail') || DEFAULTS.detail),
   max: +(params.get('max') || DEFAULTS.maxChunks),
@@ -741,6 +979,16 @@ const state = {
   // raster; 'discard' is the first pass's, which kept Safari's stencil
   // from rejecting anything (rayProg, above).
   rayMiss: params.get('raymiss') === 'discard' ? 'discard' : 'blend',
+  // Occlusion culling (occlusion-core.js, docs/occlusion.md): raster
+  // chunks whose boxes lie behind the frame's depth are skipped, found by
+  // occlusion queries ('queries') or by testing the boxes against the
+  // depth read back in tiles ('depth'). ?occlusion= chooses; without it,
+  // each world's default (occlusionDefault): queries in the caves, off
+  // elsewhere. Off everywhere after your first Safari bench, where the
+  // queries' results cost 3 ms of round trips (§6 there); the caves' since
+  // the second (§7).
+  occlusion: OCCLUSION_MODES.includes(params.get('occlusion')) ? params.get('occlusion') : null,
+  occlusionChosen: OCCLUSION_MODES.includes(params.get('occlusion')),
   freeze: false,
   // The lattice world's descriptor (docs/lattice3d-plan.md): ?lattice=
   // R,nx,ny,nz,gap,turns,axes,align, the seed from the world id (lattice:<seed>).
@@ -799,14 +1047,19 @@ addEventListener('pageshow', e => { if (e.persisted) pool.resume(); });
    of its own instead of a depth (the depth follows from them). The kit
    world (docs/kit-plan.md) is nested 4³ assemblies of 16³ parts, built
    here on the main thread in tens of milliseconds (kit-core.js), with a
-   depth and controls of its own. */
+   depth and controls of its own. The caves (docs/caves-plan.md) are a
+   cave network under mountains, with water and lava, built by the same
+   workers in 64 column parts (cave-core.js); the seed is the world id's
+   (caves:<seed>), and the view opens inside the start chamber. */
 let ROWS = [], CORE = null;
 const catalogue = () => {
   const out = SHAPES.map(s => ({ id: 'shape:' + s.name, label: s.name, group: 'shapes (fromField)' }));
   ROWS.forEach((r, i) => out.push({ id: 'row:' + i, label: `${r.label} ${r.depth === '-' ? '' : r.depth}`, group: 'rows: ' + AXIS_NAMES[r.axis] }));
-  out.push({ id: 'scatter:1', label: 'specimens on hills', group: 'block-showroom specimens' });
+  out.push({ id: isScatter(state.world) ? state.world : 'scatter:1', label: 'specimens on hills', group: 'block-showroom specimens' });
   out.push({ id: 'lattice:' + state.lattice.seed, label: 'specimen lattice (any R, nx × ny × nz)', group: 'block-showroom specimens' });
   out.push({ id: 'kit:' + state.kit.seed, label: 'kit: nested 4³ assemblies of parts', group: 'kit world' });
+  out.push({ id: isCaves(state.world) ? state.world : 'caves:1', label: 'caves under mountains (water, lava)', group: 'natural' });
+  for (const e of shelf) out.push({ id: e.id, label: e.name, group: 'shelf' });
   return out;
 };
 function fillWorlds(){
@@ -817,25 +1070,30 @@ function fillWorlds(){
     groups.get(w.group).append(new Option(w.label, w.id));
   }
   sel.value = state.world;
+  fillShelf();
 }
 const isRow = id => id.startsWith('row:'), isScatter = id => id.startsWith('scatter:'), isLattice = id => id.startsWith('lattice:');
-const isKit = id => id.startsWith('kit:');
+const isKit = id => id.startsWith('kit:'), isCaves = id => /^caves:\d+$/.test(id);
 // The kit: 12, 14 and 16 as planned (decision 7), and 10, small enough for the self-test.
 const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: `L=${L} (${(4 ** L).toLocaleString()}³)` }))
   : isKit(id) ? [10, 12, 14, 16].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³, ${(D - 4) / 2} levels)` }))
+  : isCaves(id) ? [10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }))
   : isScatter(id) ? [9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${((2 ** D / 128) ** 2).toLocaleString()} specimens)` }))
   : [8, 9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }));
 function fillDepth(){
+  fillSeed();
   // The lattice has no depth to pick: its controls show instead.
-  $('depthL').hidden = isLattice(state.world); $('latticeCtl').hidden = !isLattice(state.world);
+  $('depthL').hidden = isLattice(state.world) || isFile(state.world); $('latticeCtl').hidden = !isLattice(state.world);
   $('kitCtl').hidden = !isKit(state.world);
+  // A world on the shelf is the depth it is.
+  if (isFile(state.world)){ state.depth = shelfEntry(state.world)?.D ?? state.depth; return; }
   if (isLattice(state.world)){ state.depth = state.lattice.D; fillLattice(); return; }
   const sel = $('depth'); sel.innerHTML = '';
   for (const c of depthChoices(state.world)) sel.add(new Option(c.label, c.v));
   // The kit's depth is its descriptor's.
   if (isKit(state.world)){ state.depth = state.kit.D; sel.value = String(state.depth); fillKit(); return; }
   if (state.depth === null || !depthChoices(state.world).some(c => c.v === state.depth))
-    state.depth = isRow(state.world) ? 8 : isScatter(state.world) ? 12 : (state.world === 'shape:gyroid' ? 9 : 10);
+    state.depth = isRow(state.world) ? 8 : isScatter(state.world) || isCaves(state.world) ? 12 : (state.world === 'shape:gyroid' ? 9 : 10);
   sel.value = String(state.depth);
 }
 
@@ -899,11 +1157,14 @@ let kitTimer = 0;
 function showKit(note = ''){
   const d = state.kit, b = W && W.kit && kitParam(W.kit.desc) === kitParam(d) && W.kit.desc.seed === d.seed ? W.kit : null;
   $('kitInfo').innerHTML = `parts 16³${d.libs.map((n, i) => ` · ${n} of ${sideOf(i + 1).toLocaleString()}³`).join('')} · the world` +
-    (b ? `\n${b.nodes.toLocaleString()} nodes (${b.dropped.toLocaleString()} unpicked, pruned), built in ${b.totalMs.toFixed(0)} ms` : '') + (note ? '\n' + note : '');
+    (b ? `\n${b.nodes.toLocaleString()} nodes (${b.dropped.toLocaleString()} unpicked, pruned), built in ${b.totalMs.toFixed(0)} ms` +
+         (b.builtRanges != null && d.ornaments ? `\nornaments: ${b.builtRanges ? `${b.builtRanges} new range${b.builtRanges > 1 ? 's' : ''} of 32 on ${b.threads} thread${b.threads > 1 ? 's' : ''}` : 'none new'}, ${ornamentsKept()} range${ornamentsKept() === 1 ? '' : 's'} kept` : '') : '') +
+    (note ? '\n' + note : '');
 }
 function fillKit(note = ''){
   const d = state.kit, sel = $('kitColourLevel');
   $('kitLibs').value = d.libs.join(','); $('kitOrn').value = d.ornaments; $('kitGround').value = d.ground ? '1' : '0';
+  $('kitShare').value = d.share === null ? '' : String(d.share);
   sel.innerHTML = '';
   for (let l = 0; l <= d.L; l++) sel.add(new Option(`level ${l}, ${sideOf(l).toLocaleString()}³${l === 0 ? ' (the parts)' : l === d.L ? ' (the world)' : ''}`, l));
   sel.value = String(d.colourLevel);
@@ -913,7 +1174,7 @@ function fillKit(note = ''){
 function kitFromControls(D = state.kit.D){
   try {
     const libs = $('kitLibs').value.split(/[\s,.]+/).filter(Boolean).map(Number);
-    return kitDesc({ seed: state.kit.seed, D, libs, ornaments: +$('kitOrn').value, ground: $('kitGround').value === '1',
+    return kitDesc({ seed: state.kit.seed, D, libs, ornaments: +$('kitOrn').value, ground: $('kitGround').value === '1', share: $('kitShare').value === '' ? null : +$('kitShare').value,
                      colourLevel: Math.min(+$('kitColourLevel').value, (D - 4) / 2) });
   } catch (e){ showKit(`<span class="warn">${e.message.replace(/^kit: /, '')} (libraries ${KIT_LIMITS.lib.join('…')} each)</span>`); return null; }
 }
@@ -925,7 +1186,242 @@ function scheduleKit(){
   kitTimer = setTimeout(() => loadWorld('keep').catch(e => console.error('kit build failed', e)), KIT_DEBOUNCE);
 }
 function bindKit(){
-  for (const id of ['kitLibs', 'kitOrn', 'kitGround', 'kitColourLevel']) $(id).addEventListener('change', scheduleKit);
+  for (const id of ['kitLibs', 'kitOrn', 'kitShare', 'kitGround', 'kitColourLevel']) $(id).addEventListener('change', scheduleKit);
+}
+
+/* ---- the seed (asked for 2026-11-04) -------------------------------------
+   Four worlds take a seed: the scatter, the lattice, the kit and the
+   caves. It was always the number after the colon in the world id
+   (kit:<seed>), and each descriptor takes it, but only a hand-edited URL
+   could change it. The shapes have no seed (their noise is fixed), and
+   the testbed rows are sol-v4's at its seed 42, so the control hides for
+   them. A new seed is a new world id, loaded through loadWorld like any
+   other, so a seed asked for while one is building supersedes it; the
+   arrows and keys wait SEED_DEBOUNCE first, so stepping through seeds
+   builds only the one you stop on. The kit, the lattice and the scatter
+   keep the eye, so the new world appears around you; the caves open in
+   their start chamber, which moves with the seed (keeping the eye would
+   leave it in rock). Seeds wrap within 1…65,535, kitDesc's and
+   latticeDesc's range. */
+const SEED_MAX = 0xffff, SEED_DEBOUNCE = 250;
+const isSeeded = id => isScatter(id) || isLattice(id) || isKit(id) || isCaves(id);
+const seedOf = id => +id.slice(id.indexOf(':') + 1) || 1;
+const wrapSeed = s => ((Math.round(s) - 1) % SEED_MAX + SEED_MAX) % SEED_MAX + 1;
+const randomSeed = () => 1 + Math.floor(Math.random() * SEED_MAX);
+let seedTimer = 0;
+function fillSeed(){
+  $('seedL').hidden = !isSeeded(state.world);
+  if (isSeeded(state.world)) $('seed').value = seedOf(state.world);
+}
+/* Switch the current world to `seed`. now: load at once and return the
+   load's promise (the self-test); otherwise debounced, returning null. */
+function setSeed(seed, { now = false } = {}){
+  if (!isSeeded(state.world)) return Promise.resolve(false);
+  seed = wrapSeed(seed);
+  state.world = state.world.slice(0, state.world.indexOf(':') + 1) + seed;
+  if (isLattice(state.world)) state.lattice = latticeDesc({ ...state.lattice, seed });
+  if (isKit(state.world)){ state.kit = kitDesc({ ...state.kit, seed }); fillKit(); }
+  fillWorlds(); fillSeed();
+  clearTimeout(seedTimer);
+  const go = () => loadWorld(isCaves(state.world) ? true : 'keep');
+  if (now) return go();
+  seedTimer = setTimeout(() => go().catch(e => console.error('seed build failed', e)), SEED_DEBOUNCE);
+  return Promise.resolve(null);
+}
+const stepSeed = d => setSeed(seedOf(state.world) + d);
+function bindSeed(){
+  $('seed').addEventListener('change', () => setSeed(+$('seed').value || 1));
+  $('seedDown').addEventListener('click', () => stepSeed(-1));
+  $('seedUp').addEventListener('click', () => stepSeed(1));
+  $('seedRand').addEventListener('click', () => setSeed(randomSeed()));
+}
+
+/* ---- world files (docs/binaryoutput.md §11; asked for 2026-11-05) --------
+   A .vdag holds one or more whole worlds (vdag-core.js). The shelf is the
+   page's list of worlds held as data: every world opened from a file, and
+   any world added with "add this world", each with the view it was kept at.
+   Shelf worlds join the world dropdown with ids file:<n>, and go through
+   loadWorld like any other, so a world asked for while one loads supersedes
+   it. "Export this world" writes what's on screen; "export all" writes the
+   shelf as one file, each world whole, sharing what they share.
+
+   A shelf world costs its keys, 36 bytes a node, until it's removed. The
+   counts and poses are made when it's shown, and only the shown one is in the
+   chunk workers. Reading and writing run in a short-lived worker
+   (vdag-worker.js), so a big file doesn't freeze the page, and the old world
+   keeps drawing meanwhile.
+
+   A file is outside input. Its name and messages reach innerHTML in the HUD
+   and the file line, so they go through esc(). */
+const isFile = id => id.startsWith('file:');
+const shelf = [];
+let shelfSerial = 0, openSerial = 0;
+const shelfEntry = id => shelf.find(e => e.id === id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const mbOf = n => n >= 1e6 ? `${(n / 1e6).toFixed(2)} MB` : n >= 1e4 ? `${(n / 1e3).toFixed(1)} KB` : `${n.toLocaleString()} B`;
+// What a link or a file should say this world was built from.
+function sourceOf(){
+  if (isFile(state.world)) return shelfEntry(state.world)?.source ?? null;
+  return { world: state.world, depth: isLattice(state.world) || isKit(state.world) ? null : state.depth,
+           lattice: isLattice(state.world) ? latticeParam(state.lattice) : null, kit: isKit(state.world) ? kitParam(state.kit) : null };
+}
+const colourNote = status => ({
+  same: 'colour as written',
+  changed: '<span class="warn">this page\'s colour for it has changed since the file was written: the shape is right, the colours may not be</span>',
+  unknown: '<span class="warn">this page can\'t make the colour the file names, so it\'s drawn without</span>',
+  unchecked: 'colour not checked (the file has no print to compare)',
+  none: 'no colour in the file',
+})[status] ?? esc(status);
+function showFile(html = ''){
+  $('fileInfo').innerHTML = html;
+}
+function fillShelf(){
+  const onShelf = isFile(state.world);
+  $('shelfAdd').disabled = !W || !!W.file;
+  $('shelfRemove').disabled = !onShelf;
+  $('shelfExport').disabled = !shelf.length;
+  $('shelfExport').textContent = shelf.length ? `export all (${shelf.length})` : 'export all';
+  $('fileExport').disabled = !W;
+}
+const currentView = () => ({ eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch });
+const worldName = () => `${W.label}${isSeeded(W.id) ? `, seed ${seedOf(W.id)}` : ''}, D=${W.D}`;
+// What the writer needs (vdag-core's writeVdag).
+const fileWorld = e => ({ keys: e.keys, root: e.root, D: e.D, name: e.name, colour: e.colour, view: e.view, source: e.source });
+function onScreen(){
+  return W.file ? fileWorld({ ...W.file, view: currentView() })
+    : { keys: W.store.snapshot().keys, root: W.root, D: W.D, name: worldName(), colour: W.colour, view: currentView(), source: W.source };
+}
+function shelve(world){
+  const e = { ...world, id: 'file:' + ++shelfSerial };
+  shelf.push(e);
+  return e;
+}
+/* One job in a worker of its own, which ends with it. */
+function fileJob(message, transfer, phase){
+  return new Promise((resolve, reject) => {
+    const w = new Worker('./vdag-worker.js', { type: 'module' });
+    const fail = why => { w.terminate(); reject(new Error(why)); };
+    w.onmessage = ({ data }) => {
+      if (!data.done){ phase(data.phase, data.fraction); return; }
+      w.terminate();
+      if (data.error) reject(new Error(data.error)); else resolve(data);
+    };
+    w.onerror = e => fail(e.message || 'the file worker stopped');
+    w.onmessageerror = () => fail('the file worker sent something unreadable');
+    w.postMessage(message, transfer);
+  });
+}
+const fileToastDone = () => { if (!buildAbort) setBuilding('', null); };
+/* Open files: every world goes on the shelf, then the first one shows. A world
+   asked for while they were reading wins, and these wait on the shelf; of
+   two opens at once, the later one shows. A bad file is reported and takes
+   nothing else with it. */
+async function openFiles(fileList){
+  const files = [...fileList];                 // before any await: the drop's list empties with the event
+  if (!files.length) return { added: [], problems: [] };
+  const me = ++openSerial, load = buildGen, added = [], problems = [];
+  for (const f of files){
+    try {
+      // Said at once: the worker's first word can be a while coming.
+      setBuilding(`opening ${f.name} …`, null, true);
+      const bytes = await f.arrayBuffer();
+      const r = await fileJob({ op: 'read', bytes }, [bytes], (t, frac) => setBuilding(`opening ${f.name} … ${t}`, frac));
+      for (const w of r.worlds){
+        // Chunks are 64³, so D = 6 is the smallest world the streamer takes.
+        if (w.D < 6){ problems.push(`${f.name}: "${w.name}" is D = ${w.D}, and the viewer needs at least D = 6`); continue; }
+        if (!w.voxels){ problems.push(`${f.name}: "${w.name}" is empty`); continue; }
+        added.push(shelve({ ...w, name: w.name || f.name.replace(/\.vdag$/i, ''), fileName: f.name, fileBytes: r.bytes }));
+      }
+    } catch (e){
+      problems.push(`${f.name}: ${e.message}`);
+    }
+  }
+  fileToastDone();
+  const says = added.length ? `opened ${added.length} world${added.length > 1 ? 's' : ''} from ${files.length > 1 ? `${files.length} files` : esc(files[0].name)}` : '';
+  showFile([says, ...problems.map(p => `<span class="warn">${esc(p)}</span>`)].filter(Boolean).join('\n'));
+  // (a warning, not an error: a bad file is the file's fault, not the page's)
+  for (const p of problems) console.warn('world file:', p);
+  fillWorlds();
+  if (added.length && me === openSerial && buildGen === load){
+    state.world = added[0].id; state.depth = added[0].D;
+    fillWorlds(); fillDepth();
+    await loadWorld(true);
+  }
+  return { added, problems };
+}
+const fileSlug = world => (world.source?.world ?? world.name).replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase().slice(0, 60) || 'world';
+async function exportWorlds(worlds, fileName){
+  try {
+    setBuilding(`writing ${fileName} …`, null, true);
+    const { file } = await fileJob({ op: 'write', worlds }, [], (t, frac) => setBuilding(`writing ${fileName} … ${t}`, frac));
+    const url = URL.createObjectURL(new Blob([file], { type: 'application/octet-stream' })), a = document.createElement('a');
+    a.href = url; a.download = fileName;
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    showFile(`exported ${worlds.length} world${worlds.length > 1 ? 's' : ''} to ${esc(fileName)}, ${mbOf(file.length)}`);
+    return file;
+  } catch (e){
+    console.warn('world file:', e.message);
+    showFile(`<span class="warn">couldn't write ${esc(fileName)}: ${esc(e.message)}</span>`);
+    return null;
+  } finally {
+    fileToastDone();
+  }
+}
+function exportThis(){
+  if (!W) return Promise.resolve(null);
+  const w = onScreen();
+  return exportWorlds([w], `${fileSlug(w)}-d${w.D}.vdag`);
+}
+function exportShelf(){
+  if (!shelf.length) return Promise.resolve(null);
+  // The world on screen goes at the view you're looking at.
+  const worlds = shelf.map(e => fileWorld(W?.file === e ? { ...e, view: currentView() } : e));
+  return exportWorlds(worlds, worlds.length === 1 ? `${fileSlug(worlds[0])}-d${worlds[0].D}.vdag` : `worlds-${worlds.length}.vdag`);
+}
+/* Keep the world on screen. Pruned, one sweep down the ids: a world built on
+   this thread may hold nodes its root doesn't reach. */
+function addToShelf(){
+  if (!W || W.file) return null;
+  const { keys, map } = prune(W.store.snapshot().keys, [W.root]);
+  const e = shelve({ ...onScreen(), keys, root: map[W.root], colourStatus: 'same', voxels: W.voxels, nodes: keys.length / 9, fileName: null, fileBytes: null });
+  fillWorlds();
+  showFile(`added to the shelf: ${esc(e.name)}\n${shelf.length} world${shelf.length > 1 ? 's' : ''}, ${(shelf.reduce((a, s) => a + s.keys.byteLength, 0) / 1e6).toFixed(1)} MB in memory`);
+  return e;
+}
+/* Back to where it was built from when the shelf has nothing left to show. */
+function goToSource(src){
+  const id = src?.world;
+  if (!id || isFile(id) || (isRow(id) && !ROWS[+id.slice(4)])){ state.world = 'shape:sphere'; state.depth = null; return; }
+  state.world = id; state.depth = src.depth ?? null;
+  try {
+    if (src.lattice) state.lattice = latticeFromParam(src.lattice, seedOf(id));
+    if (src.kit) state.kit = kitFromParam(src.kit, seedOf(id));
+  } catch { /* a link that no longer parses: the current controls stand */ }
+}
+function removeFromShelf(){
+  const i = shelf.findIndex(e => e.id === state.world);
+  if (i < 0) return Promise.resolve(false);
+  const [gone] = shelf.splice(i, 1), next = shelf[i] ?? shelf[i - 1];
+  if (next){ state.world = next.id; state.depth = next.D; } else goToSource(gone.source);
+  fillWorlds(); fillDepth();
+  showFile(`removed from the shelf: ${esc(gone.name)}`);
+  return loadWorld(true);
+}
+function bindFiles(){
+  // Off the button after a click: a button with focus takes the next Space.
+  const on = (id, f) => $(id).addEventListener('click', e => { e.currentTarget.blur(); f(); });
+  on('fileOpen', () => $('fileInput').click());
+  on('fileExport', exportThis);
+  on('shelfAdd', addToShelf);
+  on('shelfRemove', removeFromShelf);
+  on('shelfExport', exportShelf);
+  $('fileInput').addEventListener('change', () => { openFiles($('fileInput').files); $('fileInput').value = ''; });
+  // Text or a link dragged over the page isn't ours: only a drag of files.
+  const files = e => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+  addEventListener('dragover', e => { if (!files(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; $('dropHint').hidden = false; });
+  addEventListener('dragleave', e => { if (!e.relatedTarget) $('dropHint').hidden = true; });
+  addEventListener('drop', e => { $('dropHint').hidden = true; if (!files(e)) return; e.preventDefault(); openFiles(e.dataTransfer.files); });
 }
 
 let worldEpoch = 0;              // which world the workers hold (stream-pool.js)
@@ -937,8 +1433,16 @@ let W = null;                    // the current world: { id, store, root, D, sid
 const CLASSES_MAX = 300000;
 async function buildWorld(signal, gen){
   const t0 = performance.now();
-  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, classes = null;
-  if (isScatter(state.world)){
+  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, classes = null, file = null;
+  if (isFile(state.world)){
+    // Already data: the file's worker read it, or it was added from a world
+    // built here. Nothing to build but the counts and the snapshot below.
+    file = shelfEntry(state.world);
+    if (!file) throw new Error(`${state.world} isn't on the shelf`);
+    store = storeView({ keys: file.keys });
+    ({ root, D, colour } = file);
+    label = file.name;
+  } else if (isScatter(state.world)){
     // No poses (docs/scatter-plan.md, decision 9): classes over 1.7M nodes
     // would hold the main thread for seconds, for the pose colour mode only.
     const desc = scatterDesc({ seed: +state.world.slice(8) || 1, D: state.depth });
@@ -958,11 +1462,26 @@ async function buildWorld(signal, gen){
     lattice.desc = desc;
     label = `lattice: ${lattice.layout.cells.length.toLocaleString()} specimens, R=${desc.R}`;
     colour = { ...desc, table: lattice.table };
+  } else if (isCaves(state.world)){
+    // In workers, 64 column parts (docs/caves-plan.md, decision 5). The
+    // descriptor is the colour: each chunk worker rebuilds the plan.
+    const desc = caveDesc({ seed: +state.world.slice(6) || 1, D: state.depth });
+    caves = await buildScatterInWorkers(desc, { workers: buildThreads, signal,
+      onPhase: (t, f) => setBuilding(`building the caves, D=${desc.D} … ${t}`, f) });
+    ({ store, root, D } = caves);
+    caves.desc = desc;
+    const i = caves.info;
+    label = `caves: ${i.chambers.toLocaleString()} chambers (${i.network.toLocaleString()} connected), ${i.pools} pools (${i.lava} lava)`;
+    colour = desc;
   } else if (isKit(state.world)){
-    // On the main thread (decision 1): the default D = 14 is ~40 ms. The
-    // descriptor is the colour: the workers rebuild the plan from it.
+    // In workers since kit-findings §5 (it was the main thread, ~40 ms by
+    // default, but 256 ornaments are ~0.1 s to generate and a library
+    // that places them all is seconds): the ornaments a range at a time,
+    // kept for the page's life, then the assembler composes and prunes.
+    // The descriptor is the colour: the chunk workers rebuild the plan.
     const desc = state.kit;
-    kit = buildKit(desc);
+    kit = await buildKitInWorkers(desc, { workers: buildThreads, signal,
+      onPhase: (t, f) => setBuilding(`building ${t}`, f) });
     kit.desc = desc;
     ({ store, root, D } = kit);
     label = `kit: ${desc.L} levels of 4³ assemblies${desc.ground ? ' on the ground' : ', floating'}`;
@@ -984,7 +1503,7 @@ async function buildWorld(signal, gen){
   // phase text would sit there meanwhile): say so, and let it paint.
   // (buildMs stops before that frame's wait.)
   const tBuilt = performance.now();
-  if (scatter || lattice){
+  if (scatter || lattice || caves || file){
     setBuilding(`${building.text.replace(/ … .*$/, '')} … preparing ${store.size.toLocaleString()} nodes for the chunk workers`, 1);
     await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
     if (gen !== buildGen) return false;
@@ -993,16 +1512,19 @@ async function buildWorld(signal, gen){
   const counts = createCounts(store);
   // Poses for the kit too while it's small: 6,261 nodes by default, but
   // libraries in the hundreds make hundreds of thousands.
-  if (!scatter && !lattice && store.size <= CLASSES_MAX) classes = createClasses(store, OH48);
+  // A file of a world that skips them skips them too.
+  const poseless = scatter || lattice || caves || (file && ['scatter', 'lattice', 'caves'].includes(file.colour?.kind));
+  if (!poseless && store.size <= CLASSES_MAX) classes = createClasses(store, OH48);
   const snap = worldSnapshot(store, root, D, { counts, classes, colour });
   const t2 = performance.now();
-  W = { id: state.world, label, store, root, D, side: 2 ** D, top: Math.max(0, D - 6), nodes: store.size, voxels: counts.of(root),
-        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, classes: classes ? classes.size : null };
+  W = { id: state.world, label, store, root, D, side: 2 ** D, top: Math.max(0, D - 6), nodes: store.size, voxels: counts.of(root), counts,
+        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, caves, file, colour, source: sourceOf(), classes: classes ? classes.size : null };
   ray.frame = null;
   streamer.setWorld(createWorld(store, root, D));
   pool.setWorld(snap, ++worldEpoch);
   dirty = true;
   if (kit) showKit();
+  fillShelf();
   return true;
 }
 /* Where the eye starts: outside the world's low corner for a row (they
@@ -1010,6 +1532,8 @@ async function buildWorld(signal, gen){
    just off the surface for the closed shapes. `?eye=` overrides. */
 function defaultView(){
   const s = W.side;
+  // A file opens where it was saved, if it says.
+  if (W.file?.view) return { eye: W.file.view.eye.slice(), yaw: W.file.view.yaw, pitch: W.file.view.pitch };
   if (isRow(W.id)) return { eye: [-0.15 * s, 1.1 * s, -0.25 * s], yaw: 0.62, pitch: -0.5 };
   // A couple of specimen heights over the ground, near one edge, looking across the field.
   if (W.scatter){ const x = 0.5 * s, z = 0.03 * s; return { eye: [x, W.scatter.groundTop(x, z) + 160, z], yaw: 0, pitch: -0.16 }; }
@@ -1023,6 +1547,8 @@ function defaultView(){
   // The kit from outside its low corner, above it, looking in (the
   // sketch's far view, kit-plan.md §1): all of it at once, then fly in.
   if (W.kit) return { eye: [-0.35 * s, 0.9 * s, -0.45 * s], yaw: 0.68, pitch: -0.5 };
+  // Inside the start chamber, facing its first tunnel (cave-core's caveInfo).
+  if (W.caves && W.caves.info.view) return W.caves.info.view;
   if (/terrain|half-space/.test(W.id)) return { eye: [0.5 * s, 0.78 * s, 0.08 * s], yaw: 0, pitch: -0.35 };
   return { eye: [0.5 * s, 0.55 * s, -0.12 * s], yaw: 0, pitch: -0.08 };
 }
@@ -1075,6 +1601,12 @@ addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
   keys.add(e.code);
   if (e.code === 'KeyF') toggleFreeze();
+  // The seed keys leave modified presses alone (cmd-R reloads, and shouldn't roll a seed first).
+  if (!e.metaKey && !e.ctrlKey && !e.altKey){
+    if (e.code === 'BracketLeft') stepSeed(-1);
+    if (e.code === 'BracketRight') stepSeed(1);
+    if (e.code === 'KeyR') setSeed(randomSeed());
+  }
 });
 addEventListener('keyup', e => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
@@ -1111,9 +1643,10 @@ function padInput(){
 /* ---- controls and permalink ---------------------------------------------- */
 function saveView(){
   const q = new URLSearchParams(location.search);
-  q.set('world', state.world); q.set('depth', state.depth);
-  if (isLattice(state.world)){ q.set('lattice', latticeParam(state.lattice)); q.delete('depth'); } else q.delete('lattice');
-  if (isKit(state.world)){ q.set('kit', kitParam(state.kit)); q.delete('depth'); } else q.delete('kit');
+  // A shelf world's link is what it was built from: a link can't hold the file.
+  const src = sourceOf();
+  for (const [k, v] of [['world', src?.world], ['depth', src?.depth], ['lattice', src?.lattice], ['kit', src?.kit]])
+    if (v == null) q.delete(k); else q.set(k, v);
   q.set('eye', cam.eye.map(v => Math.round(v)).join(','));
   q.set('yaw', cam.yaw.toFixed(3)); q.set('pitch', cam.pitch.toFixed(3));
   history.replaceState(null, '', '?' + q);
@@ -1125,7 +1658,7 @@ function bindControls(){
   $('ray').value = state.path;
   $('ray').addEventListener('change', () => setPath($('ray').value));
   $('world').addEventListener('change', () => { state.world = $('world').value; state.depth = null; fillDepth(); loadWorld(true); });
-  bindLattice(); bindKit();
+  bindLattice(); bindKit(); bindSeed(); bindFiles();
   $('depth').addEventListener('change', () => {
     state.depth = +$('depth').value;
     if (isKit(state.world)){ const d = kitFromControls(state.depth); if (!d) return; state.kit = d; fillKit(); }
@@ -1141,6 +1674,8 @@ function bindControls(){
     streamer.evict();
   });
   $('seams').addEventListener('change', () => { state.seams = $('seams').value === '1'; });
+  setOcclusion(state.occlusion ?? occlusionDefault(state.world));
+  $('occlusion').addEventListener('change', () => setOcclusion($('occlusion').value, { chosen: true }));
   $('freeze').addEventListener('change', () => { state.freeze = $('freeze').value === '1'; dirty = true; });
 }
 /* A new path only changes which kind each chunk wants: the chunks of the
@@ -1164,11 +1699,13 @@ function setPath(path){
    would install last. */
 let buildGen = 0, buildAbort = null;
 function loadWorld(resetView){
+  if (!state.occlusionChosen) setOcclusion(occlusionDefault(state.world));
   const gen = ++buildGen;
   if (buildAbort) buildAbort.abort();
   const ac = buildAbort = new AbortController();
   setBuilding('building ' + (isLattice(state.world) ? `the lattice, R=${state.lattice.R}, ${state.lattice.n.join('×')}`
-    : isKit(state.world) ? `the kit, D=${state.kit.D}` : state.world) + ' …', null, true);
+    : isKit(state.world) ? `the kit, D=${state.kit.D}` : isCaves(state.world) ? `the caves, D=${state.depth}`
+    : isFile(state.world) ? shelfEntry(state.world)?.name ?? state.world : state.world) + ' …', null, true);
   // Let the message paint before a multi-second fromField. The scatter
   // and lattice worlds build in workers, so the page keeps drawing the
   // old world meanwhile, and the toast shows the build's progress.
@@ -1217,7 +1754,8 @@ function setBuilding(text, fraction, fresh = false){
 
 /* ---- the frame ------------------------------------------------------------- */
 let dirty = true, lastEye = [NaN, NaN, NaN], lastT = performance.now(), frameMs = 16, auto = true;
-const view = { culled: 0, instances: 0, drawn: 0, near: 1, clear: 0 };
+const view = { culled: 0, instances: 0, drawn: 0, near: 1, clear: 0, voxels: 0,
+               occluded: 0, occludedCubes: 0, queried: 0, nearEye: 0, occlPollMs: 0, occlRunMs: 0 };
 const LOD_COLORS = Array.from({ length: 24 }, (_, l) => {
   const h = (l * 0.137 + 0.58) % 1, c = 0.5, x = c * (1 - Math.abs((h * 6) % 2 - 1)), m = 0.32;
   const k = Math.floor(h * 6);
@@ -1243,7 +1781,7 @@ function move(dt){
     cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch + p.look[1] * dt * PAD.PITCH));
   }
   const boost = keys.has('ShiftLeft') || keys.has('ShiftRight') || (p && p.boost);
-  const base = Math.min(W.side / 3, Math.max(2, view.clear)) * cam.speedMul * (boost ? 4 : 1);
+  const base = Math.min(W.side / 3, Math.max(2, view.clear)) * cam.speedMul * (boost ? 8 : 1);
   const f = fwd(), r = norm(cross(f, [0, 1, 0])), step = base * dt / 1000;
   const m = [0, 0, 0], add = (v, s) => { for (let a = 0; a < 3; a++) m[a] += v[a] * s; };
   // The sticks are analog: a half push is a quarter of the keys' speed (pad-core's square response).
@@ -1259,8 +1797,10 @@ function move(dt){
 
 /* One frame: re-cut if the eye moved, refill the workers, admit results
    under the budgets, draw. The selftest calls it directly, with draw off. */
+let frameTick = 0;   // page frames, for the occlusion tracker's pauses
 function frame({ draw: doDraw = true } = {}){
   if (!W) return;
+  frameTick++;
   const e = cam.eye;
   if (!state.freeze && (dirty || Math.abs(e[0] - lastEye[0]) + Math.abs(e[1] - lastEye[1]) + Math.abs(e[2] - lastEye[2]) > 0.25)){
     streamer.update(e); lastEye = e.slice(); dirty = false;
@@ -1274,7 +1814,7 @@ function draw(){
   const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
   if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; streamer.setOptions(viewportOptions(w, h)); dirty = true; }
   canvas.style.width = innerWidth + 'px'; canvas.style.height = innerHeight + 'px';
-  renderView(w, h, state.color, true);
+  renderView(w, h, state.color, true, undefined, 'both', null, occlusionOf());
 }
 
 /* GPU time per pass (EXT_disjoint_timer_query_webgl2, where the browser
@@ -1316,8 +1856,11 @@ function pollTimers(){
    alone then sees a cleared depth, i.e. no bound. 'mask' is the ray
    pass itself, stencil and all, in colour mode 10 (white wherever it
    runs, no march) over a clear: the raster pass runs for its depth, and
-   its colour is cleared away (maskProbe). */
-function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.039, 1], passes = 'both', out = null){
+   its colour is cleared away (maskProbe). `occ`, a queryRunner (the
+   screen's is occlusionOf()), skips the raster chunks its tracker says
+   are hidden and queries the boxes it asks about, after the raster pass
+   and against its depth; null draws every chunk, as before. */
+function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.039, 1], passes = 'both', out = null, occ = null){
   const doRaster = passes === 'both' || passes === 'raster' || passes === 'mask', doRay = passes === 'both' || passes === 'ray' || passes === 'mask';
   const T = rasterTarget(w, h);
   const blit = () => {
@@ -1351,15 +1894,46 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
     list.push({ d, e, rel, dist: Math.hypot(rel[0] + d.size / 2, rel[1] + d.size / 2, rel[2] + d.size / 2) });
   }
   list.sort((a, b) => a.dist - b.dist);
+  // The voxels the view stands for: the world's occupied voxels, at full
+  // resolution whatever lod draws them, under every chunk of the cover the
+  // frustum keeps, raster or traced. A chunk counts whole and occlusion is
+  // ignored, so it is an upper bound on what's on screen (and W.voxels,
+  // the world's, a bound on it). One counts lookup a chunk: each cover
+  // entry carries its DAG node.
+  view.voxels = 0;
+  for (const { d, rel } of list) if (boxVisible(planes, rel, d.size)) view.voxels += W.counts.of(d.id);
   view.culled = 0; view.instances = 0; view.drawn = 0; view.drawList = [];
+  view.occluded = 0; view.occludedCubes = 0; view.queried = 0; view.nearEye = 0; view.occlPollMs = 0; view.occlRunMs = 0;
   view.rayChunks = list.filter(q => q.e.kind === 'page').length;
   const rayPass = view.rayChunks > 0 && doRay;
+  // Occlusion (queryRunner, above): the results that have landed first,
+  // then every raster chunk with cubes in the frustum is a candidate,
+  // except those near enough the eye that the near plane may cut their
+  // box (occlusion-core's nearEye). Their boxes are queried after the
+  // whole raster pass, so each is tested against everything drawn.
+  const occl = occ && doRaster ? occ : null, asks = [];
+  const nearR = nearRadius(view.near, w / h, Math.tan(0.45));
+  if (occl){
+    const t = performance.now();
+    occl.poll();
+    view.occlPollMs = performance.now() - t;
+    occl.occ.begin(occ === occlusion ? frameTick : undefined);
+  }
   run('raster', () => {
     for (const { d, e, rel } of list){
       if (e.kind === 'page' || !doRaster) continue;
       if (!boxVisible(planes, rel, d.size)){ view.culled++; continue; }
       const open = state.seams ? d.open : 0, n = open ? e.total : e.count;
       if (!n) continue;
+      if (occl){
+        const pad = d.size / 64, lo = [rel[0] - pad, rel[1] - pad, rel[2] - pad], side = d.size + 2 * pad;
+        if (nearEye(lo, side, nearR)) view.nearEye++;
+        else {
+          const c = occl.occ.consider(d.key, e);
+          if (c.query) asks.push({ state: c.state, box: [lo[0], lo[1], lo[2], side] });
+          if (!c.draw){ view.occluded++; view.occludedCubes += n; continue; }
+        }
+      }
       gl.uniform3f(U.uOrigin, rel[0], rel[1], rel[2]);
       gl.uniform1f(U.uCellSize, e.cellSize);
       gl.uniform1ui(U.uOpenSides, open);
@@ -1372,6 +1946,12 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
       view.drawn++; view.instances += n;
     }
     gl.bindVertexArray(null);
+    if (occl){
+      const t = performance.now();
+      occl.run(M, asks, T, w, h);
+      view.occlRunMs = performance.now() - t;
+      view.queried = asks.length; occl.occ.end();
+    }
     if (!rayPass) blit();
   });
   view.marked = 0;
@@ -1432,8 +2012,10 @@ function setRayCamera(u, w, h, vx = 0, vy = 0){
   gl.uniform4f(u.uViewport, vx, vy, w, h);
 }
 
-const k = n => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
+const k = n => n >= 1e12 ? (n / 1e12).toFixed(2) + 'T' : n >= 1e9 ? (n / 1e9).toFixed(2) + 'G' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
 const mb = b => (b / 1048576).toFixed(1) + ' MB';
+// Two significant figures below 10%, so a street's share of a world isn't 0.0%.
+const pct = (a, b) => { const p = b ? 100 * a / b : 0; return (p >= 10 || p === 0 ? p.toFixed(1) : p.toPrecision(2)) + '%'; };
 function hud(){
   if (!W){ if (building.text) $('hud').textContent = building.text; return; }
   const S = streamer.S, sel = streamer.sel, fr = streamer.frame;
@@ -1443,7 +2025,7 @@ function hud(){
   const missing = sel ? [...sel.nodes.keys()].filter(key => !S.cache.has(key)).length : 0;
   const switching = sel ? [...sel.nodes.keys()].filter(key => streamer.stale(key)).length : 0;
   $('hud').innerHTML =
-    `<b>${W.label}</b>  D=${W.D} (${W.side.toLocaleString()}³)  ${k(W.nodes)} nodes, built ${W.buildMs.toFixed(0)} + ${W.prepMs.toFixed(0)} ms\n` +
+    `<b>${esc(W.label)}</b>${isSeeded(W.id) ? `  seed ${seedOf(W.id)}` : ''}  D=${W.D} (${W.side.toLocaleString()}³)  ${k(W.nodes)} nodes, built ${W.buildMs.toFixed(0)} + ${W.prepMs.toFixed(0)} ms\n` +
     (W.scatter ? `<span class="sec">scatter</span> ${W.scatter.layout.cells.length.toLocaleString()} unique specimens (${W.scatter.skipped} recipes skipped as repeats), ` +
       `${W.scatter.blocks.toLocaleString()} blocks, ${k(W.scatter.dropped || 0)} nodes pruned, ${W.scatter.threads ? `${W.scatter.threads} threads` : '<span class="warn">main thread</span>'}\n` : '') +
     (W.lattice ? `<span class="sec">lattice</span> R=${W.lattice.desc.R} (${stackOf(W.lattice.desc.R).map(l => l.radix).join('·')}), ${W.lattice.desc.n.join('×')}, gap ${W.lattice.desc.gap}${W.lattice.desc.align ? ' (pitch aligned)' : ''}, ` +
@@ -1452,12 +2034,20 @@ function hud(){
         `${W.lattice.unique.toLocaleString()} unique` + (W.lattice.repeats ? ` <span class="warn">${W.lattice.repeats.toLocaleString()} cells repeat</span>` : '') +
         `, ${W.lattice.skipped.toLocaleString()} recipes skipped`) + `, ${W.lattice.blocks.toLocaleString()} blocks, ${k(W.lattice.dropped || 0)} nodes pruned, ` +
       `${W.lattice.threads ? `${W.lattice.threads} threads` : '<span class="warn">main thread</span>'} ${(W.buildMs / 1000).toFixed(1)} s\n` : '') +
+    (W.caves ? `<span class="sec">caves</span> ${W.caves.info.tunnels.toLocaleString()} tunnels (${W.caves.info.mouths} mouths), ${W.caves.info.worms.toLocaleString()} worms, ` +
+      `${k(W.voxels)} voxels, ${W.caves.threads ? `${W.caves.threads} threads, slowest part ${(W.caves.ms.slowestPart / 1000).toFixed(1)} s` : '<span class="warn">main thread</span>'}\n` : '') +
+    (W.file ? `<span class="sec">file</span> ${W.file.fileName ? esc(W.file.fileName) : 'added here'}, ${k(W.voxels)} voxels, ${colourNote(W.file.colourStatus)}\n` : '') +
     (W.kit ? `<span class="sec">kit</span> libraries ${W.kit.desc.libs.join(', ')}, ${W.kit.desc.ornaments} ornaments, ${W.kit.desc.ground ? 'ground and gravity' : 'floating'}, ` +
       `colour in level-${W.kit.desc.colourLevel} frames: ${k(W.voxels)} voxels, ${W.classes ? `${W.classes.toLocaleString()} Oh classes, ` : ''}${k(W.kit.dropped)} nodes pruned\n` : '') +
     `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}\n` +
     `<span class="sec">cut</span> ${sel ? sel.leaves.length : 0} leaves + ${sel ? sel.nodes.size - sel.leaves.length : 0} split  (lod ${lods})${sel && sel.capped ? `  <span class="warn">capped ${sel.capped}</span>` : ''}\n` +
     `<span class="sec">resident</span> ${S.cache.size} chunks, ${mb(S.cacheBytes)}  missing ${missing}${state.cache ? '' : '  <span class="warn">tiny cache</span>'}\n` +
     `<span class="sec">drawn</span> <b>${view.drawn}</b> chunks (${fr.draw.length} in cover, ${view.culled} culled)  <b>${k(view.instances)}</b> cubes  ${fr.draw.filter(d => d.open).length} with open sides\n` +
+    `<span class="sec">occlusion</span> ` + (occlusion ? `${state.occlusion === 'depth' ? 'depth readback' : 'queries'}: <b>${view.occluded}</b> chunks skipped as hidden (<b>${k(view.occludedCubes)}</b> cubes), ` +
+      `${view.queried} boxes asked, ${occlusion.inFlight} in flight, ${view.nearEye} near the eye, poll ${view.occlPollMs.toFixed(2)} + ask ${view.occlRunMs.toFixed(2)} ms`
+      : 'off, every chunk drawn') + (state.occlusionChosen ? '' : '  (this world\'s default)') + '\n' +
+    `<span class="sec">voxels</span> <b>${k(view.voxels)}</b> in view of ${k(W.voxels)} occupied (${pct(view.voxels, W.voxels)}), ` +
+      `${k(W.side ** 3)} cells in the cube\n` +
     `<span class="sec">fallback</span> ${fr.up} coarser, ${fr.down} finer${fr.holes.length ? `  <span class="warn">${fr.holes.length} holes</span>` : ''}${fr.maxUp > 1 ? `  up to ${fr.maxUp} lods` : ''}\n` +
     `<span class="sec">jobs</span> ${pool.mode} ${pool.busy}/${pool.liveWorkers || workerCount}  pending ${S.pending.size}  waiting ${S.results.length}  done ${k(pool.completed)}  discarded ${S.stats.discarded}\n` +
     `<span class="sec">path</span> ${pathLabel(state.path)}: <b>${view.rayChunks}</b> chunks traced, ${view.drawn} as cubes  switching ${switching}, switched ${S.stats.switches}` +
@@ -1472,11 +2062,14 @@ function hud(){
                              threads: W.scatter.threads, fellBack: W.scatter.fellBack || null, ms: W.scatter.ms } : null,
       lattice: W.lattice ? { param: latticeParam(W.lattice.desc), specimens: W.lattice.layout.cells.length, unique: W.lattice.unique, repeats: W.lattice.repeats,
                              skipped: W.lattice.skipped, blocks: W.lattice.blocks, dropped: W.lattice.dropped, threads: W.lattice.threads, fellBack: W.lattice.fellBack || null, ms: W.lattice.ms } : null,
-      kit: W.kit ? { param: kitParam(W.kit.desc), seed: W.kit.desc.seed, nodes: W.kit.nodes, dropped: W.kit.dropped, classes: W.classes, ms: W.kit.totalMs } : null },
+      kit: W.kit ? { param: kitParam(W.kit.desc), seed: W.kit.desc.seed, nodes: W.kit.nodes, dropped: W.kit.dropped, classes: W.classes, ms: W.kit.totalMs } : null,
+      caves: W.caves ? { desc: W.caves.desc, info: W.caves.info, threads: W.caves.threads, fellBack: W.caves.fellBack || null, ms: W.caves.ms } : null,
+      file: W.file ? { name: W.file.name, fileName: W.file.fileName, colourStatus: W.file.colourStatus } : null },
     eye: cam.eye.slice(), view: { ...view }, gpu: { ...gpu },
     cut: sel ? { leaves: sel.leaves.length, nodes: sel.nodes.size, capped: sel.capped } : null,
     resident: S.cache.size, cacheBytes: S.cacheBytes, missing, drawn: fr.draw.length, holes: fr.holes.length,
     pending: S.pending.size, mode: pool.mode, stats: { ...S.stats },
+    occlusion: { mode: state.occlusion, ...(occlusion ? { ...occlusion.occ.stats, inFlight: occlusion.inFlight } : {}) },
     ray: { path: state.path, density: state.density, switching, pages: ray.pageCount, bricks: ray.brickPool.size, uploads: ray.uploads, tree: ray.treeNodes,
            heapWords: ray.heapAlloc.used, heapFull: ray.heapFull },
     gpuMs: { raster: timers.raster, ray: timers.ray } };
@@ -1651,8 +2244,25 @@ window.streamSelftest = async function streamSelftest(opts = {}){
   await loadWorld(true);
   await run('switch to kit', { until: isConverged });
   report.kit = { param: kitParam(W.kit.desc), nodes: W.nodes, voxels: W.voxels, D: W.D, classes: W.classes, buildMs: Math.round(W.buildMs),
+                 threads: W.kit.threads, fellBack: W.kit.fellBack || null,
                  words: [...streamer.S.cache.values()].reduce((a, e) => a + (e.words || 0), 0) };
+  // 6b. The seed control's own path (setSeed): the same kit at seed 2,
+  // in place, held to Node's buildKit(kitDesc({ D: 10, seed: 2 })).
+  await setSeed(2, { now: true });
+  await run('kit seed 2', { until: isConverged });
+  report.kitSeed = { world: state.world, select: $('world').value, input: $('seed').value, shown: !$('seedL').hidden,
+                     seed: W.kit.desc.seed, param: kitParam(W.kit.desc), nodes: W.nodes, voxels: W.voxels,
+                     builtRanges: W.kit.builtRanges, keptRanges: W.kit.keptRanges, fellBack: W.kit.fellBack || null,
+                     url: new URLSearchParams(location.search).get('world') };
   state.kit = savedKit;
+  // 7. The caves (docs/caves-plan.md): column parts in workers, opening
+  // inside the start chamber, streamed like any DAG.
+  state.world = 'caves:1'; state.depth = 10; fillWorlds(); fillDepth();
+  await loadWorld(true);
+  await run('switch to caves', { until: isConverged });
+  report.caves = { nodes: W.nodes, voxels: W.voxels, D: W.D, threads: W.caves.threads, fellBack: W.caves.fellBack || null,
+                   chambers: W.caves.info.chambers, eye: cam.eye.map(Math.round), clear: clearance(), buildMs: Math.round(W.buildMs),
+                   words: [...streamer.S.cache.values()].reduce((a, e) => a + (e.words || 0), 0) };
   report.glError = gl.getError();
   report.mode = pool.mode; report.completed = pool.completed; report.discarded = streamer.S.stats.discarded;
   report.gpu = { ...gpu };
@@ -1959,12 +2569,12 @@ function maskProbe(w = 160, h = 120){
    everywhere but at silhouettes and float32 ties. */
 // The view in colour mode `mode`, into an offscreen RGBA8 target, read back.
 // Clear alpha 0 marks "nothing hit". rasterTarget(w, h) keeps the depth.
-function renderPixels(w, h, mode, passes = 'both'){
+function renderPixels(w, h, mode, passes = 'both', occ = null){
   const fb = gl.createFramebuffer(), col = gl.createRenderbuffer();
   gl.bindRenderbuffer(gl.RENDERBUFFER, col); gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
   gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
   gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, col);
-  renderView(w, h, mode, false, [0, 0, 0, 0], passes, fb);
+  renderView(w, h, mode, false, [0, 0, 0, 0], passes, fb, occ);
   const px = new Uint8Array(4 * w * h);
   gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -2187,10 +2797,109 @@ function gradeRasterVsRay(A, B, who, w, h){
   return rep;
 }
 
+/* occlusionSelftest() (docs/occlusion.md): occlusion culling on real
+   worlds, through the real queries, held to what it promises.
+     same     at rest, every frame drawn with hidden chunks skipped is the
+              frame drawn without, byte for byte, in the attribute colours
+              (occlusion-core has the argument). Frames are a task apart,
+              so the queries land as they do in flight;
+     skips    and it skips something: in the caves, most of the cubes;
+     near     chunks near the eye are drawn unasked (the eye's own chunk
+              is always one);
+     reveal   then, with the cut frozen, the eye goes through the wall in
+              front of it, into the rock. Chunks that were hidden are in
+              view now, and the frames drawn before their new queries land
+              may differ (the pop-in, counted). By the end the frame must
+              be the plain one again, and some chunk that was skipped must
+              be drawn.
+   Three times a case: queries re-asking visible chunks every frame
+   (revisit 1), queries at their default (4), and the depth readback. Worlds: the caves from their start chamber, raster
+   only and by density (the ray pass and its stencil on top), and a
+   terrain from above, where hills hide hills. */
+async function occlusionProbe(w, h, method, revisit, { frames = 10, reveal = false } = {}){
+  const runner = method === 'depth' ? depthRunner(createOcclusion({ revisit: 1 })) : queryRunner(createOcclusion({ revisit }), revisit);
+  const differ = (a, b) => { let n = 0; for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) n++; return n; };
+  const lit = a => { let n = 0; for (let i = 3; i < a.length; i += 4) if (a[i]) n++; return n; };
+  const sweep = async plain => {
+    const out = [];
+    for (let f = 0; f < frames; f++){
+      const px = renderPixels(w, h, 8, 'both', runner);
+      out.push({ differ: differ(px, plain), skipped: view.occluded, cubes: view.occludedCubes, drawnCubes: view.instances,
+                 queried: view.queried, near: view.nearEye, inFlight: runner.inFlight });
+      await nextTask();
+    }
+    return out;
+  };
+  const hiddenKeys = () => streamer.frame.draw.filter(d => runner.occ.state(d.key)?.result === false).map(d => d.key);
+  try {
+    const plain = renderPixels(w, h, 8);
+    const rep = { method, revisit, pixels: w * h, lit: lit(plain), frames: await sweep(plain) };
+    rep.differ = rep.frames.reduce((a, f) => a + f.differ, 0);
+    rep.last = rep.frames[rep.frames.length - 1];
+    if (reveal){
+      // Through the wall: the raster's distance at the centre, and a few
+      // cells on, into the rock.
+      const dist = renderDistances(w, h)[(h >> 1) * w + (w >> 1)];
+      const hidden = new Set(hiddenKeys()), savedEye = cam.eye.slice(), savedClear = view.clear, savedFreeze = state.freeze;
+      state.freeze = true;
+      const f = fwd(), step = (dist > 0 ? dist : 0) + 8;
+      cam.eye = cam.eye.map((v, a) => v + f[a] * step);
+      view.clear = clearance();
+      const plainB = renderPixels(w, h, 8), after = await sweep(plainB);
+      const shown = streamer.frame.draw.filter(d => hidden.has(d.key) && runner.occ.state(d.key)?.result === true).length;
+      rep.reveal = { step, hiddenBefore: hidden.size, revealed: shown, lit: lit(plainB), frames: after.map(x => x.differ),
+                     settled: after.slice(-3).every(x => x.differ === 0), last: after[after.length - 1] };
+      cam.eye = savedEye; view.clear = savedClear; state.freeze = savedFreeze;
+    }
+    return rep;
+  } finally { runner.dispose(); }
+}
+window.occlusionSelftest = async function occlusionSelftest(opts = {}){
+  const t0 = performance.now(), savedAuto = auto, savedPath = state.path;
+  auto = false;
+  const report = { cases: [], glError: 0 };
+  const settle = async (ms = opts.settleMs ?? 120000) => {
+    const end = performance.now() + ms;
+    for (let f = 0; performance.now() < end; f++){ frame({ draw: false }); if (f > 2 && isConverged()) return true; await sleep(opts.frameMs ?? 8); }
+    return false;
+  };
+  // The caves last: occlusion.test.js's bench rows then time their
+  // default view, which the last case leaves loaded.
+  const CASES = opts.cases || [
+    { world: 'shape:terrain', depth: 9, eye: [0.5, 0.52, 0.02], yaw: 0, pitch: -0.12, path: 'off' },
+    { world: 'caves:1', depth: 10, eye: null, path: 'off', reveal: true },
+    { world: 'caves:1', depth: 10, eye: null, path: 'density', reveal: true },
+  ];
+  try {
+    for (const c of CASES){
+      if (state.world !== c.world || W?.D !== c.depth){ state.world = c.world; state.depth = c.depth; fillWorlds(); fillDepth(); await loadWorld(true); }
+      if (c.eye){ cam.eye = c.eye.map(v => v * W.side); cam.yaw = c.yaw; cam.pitch = c.pitch; }
+      else { const v = defaultView(); cam.eye = v.eye; cam.yaw = v.yaw; cam.pitch = v.pitch; }
+      view.clear = clearance();
+      setPath(c.path); dirty = true;
+      const r = { world: c.world, depth: c.depth, path: c.path, eye: cam.eye.map(Math.round) };
+      r.converged = await settle();
+      r.rayChunks = streamer.frame.draw.filter(d => streamer.entry(d.key)?.kind === 'page').length;
+      r.probes = [];
+      for (const [method, revisit] of [['queries', 1], ['queries', OCCLUSION.REVISIT], ['depth', 1]])
+        r.probes.push(await occlusionProbe(160, 120, method, revisit, { reveal: c.reveal }));
+      r.failedJobs = streamer.S.stats.failed;
+      report.cases.push(r);
+    }
+  } finally {
+    setPath(savedPath); auto = savedAuto;
+  }
+  report.glError = gl.getError();
+  report.ms = Math.round(performance.now() - t0);
+  window.__occlusionSelftest = report;
+  return report;
+};
+
 /* streamBench(): GPU time per pass on this machine, for the current world
    and eye (docs/ray-plan.md, decision 9). For each mode (raster only, by
    density, by density with the full-screen ray pass of before the stencil
-   (docs/stencil-pass.md), ray from lod 3, from lod 1, ray only) it
+   (docs/stencil-pass.md), ray from lod 3, from lod 1, ray only, and three
+   of them again with hidden chunks skipped, docs/occlusion.md) it
    converges without drawing, then
    draws `frames` frames and reports the median GPU time of each pass from
    the timer queries. ?bench runs it once the page has loaded.
@@ -2216,20 +2925,35 @@ function gradeRasterVsRay(A, B, who, w, h){
    165.2, so the fallback reads within 3–4% of the GPU clock. */
 const px1 = new Uint8Array(4);
 function finishGPU(){ gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px1); }
-function wallTime(passes, minMs = 300){
+/* A task boundary, without setTimeout's 4 ms clamp. Occlusion results
+   only become available once the page returns to the event loop, so a
+   bench of the occlusion rows can't render back to back the way the
+   other rows do: their queries would all stay in flight, none would be
+   asked again, and the rows would time a culler that never queries. With
+   `oneAtATime`, each view is rendered, finished, and timed alone, then
+   the page yields here (not timed) and the next view sees the results.
+   That's the frame's own rhythm, sync included, so an occlusion row is
+   compared with the same view timed the same way with occlusion off
+   (withoutMs), not with its base row's batches of four. */
+const nextTask = () => new Promise(r => { const c = new MessageChannel(); c.port1.onmessage = () => r(); c.port2.postMessage(0); });
+async function wallTime(passes, minMs = 300, oneAtATime = false){
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  const w = canvas.width, h = canvas.height;
+  const w = canvas.width, h = canvas.height, batch = oneAtATime ? 1 : 4;
   finishGPU();
-  let n = 0, submit = 0;
-  const t0 = performance.now();
-  while (n < 8 || performance.now() - t0 < minMs){
-    const s = performance.now();
-    renderView(w, h, state.color, false, undefined, passes);
-    submit += performance.now() - s;
-    if (++n % 4 === 0) finishGPU();
+  let n = 0, submit = 0, spent = 0, poll = 0, ask = 0;
+  while (n < 8 || spent < minMs){
+    const t0 = performance.now();
+    for (let i = 0; i < batch; i++){
+      const s = performance.now();
+      renderView(w, h, state.color, false, undefined, passes, null, occlusionOf());
+      submit += performance.now() - s; n++;
+      poll += view.occlPollMs; ask += view.occlRunMs;
+    }
+    finishGPU();
+    spent += performance.now() - t0;
+    if (oneAtATime) await nextTask();
   }
-  finishGPU();
-  return { ms: (performance.now() - t0) / n, submitMs: submit / n, n };
+  return { ms: spent / n, submitMs: submit / n, pollMs: poll / n, askMs: ask / n, n };
 }
 // The GPU's own name where the browser will say it (Chrome, Firefox);
 // Safari answers with its generic string either way.
@@ -2246,20 +2970,33 @@ function rendererName(){
    loop paused with nothing said at all (you, 2026-11-01: "it never
    produced a report"). */
 const benchHud = { status: '', text: '' };
-const benchLabel = mode => mode === 'off' ? 'raster' : mode === '0' ? 'ray' : mode === 'density' ? `density > ${densityText()}`
-                        : mode === 'density/discard' ? `density, misses discarded (the old pass)`
-                        : mode === 'density/full' ? `density, full-screen ray pass` : `ray ≥ lod ${mode}`;
+const benchLabel = mode => {
+  const [path, pass] = mode.split('/');
+  if (pass === 'queries' || pass === 'depth') return `${benchLabel(path)}, hidden chunks skipped (${pass === 'queries' ? 'occlusion queries' : 'depth readback'})`;
+  return mode === 'off' ? 'raster' : mode === '0' ? 'ray' : mode === 'density' ? `density > ${densityText()}`
+       : mode === 'density/discard' ? `density, misses discarded (the old pass)`
+       : mode === 'density/full' ? `density, full-screen ray pass` : `ray ≥ lod ${mode}`;
+};
 function benchText(r){
   return `<b>bench</b> ${r.world} ${r.size.join('×')}, ${r.clock} clock, eye ${r.eye.join(',')} yaw ${r.yaw} pitch ${r.pitch}\n` + r.rows.map(x =>
     `  ${x.mode}: <b>${x.totalMs.toFixed(2)} ms</b> (raster ${x.rasterMs.toFixed(2)}, ray ${x.rayMs.toFixed(2)}` +
     (Number.isFinite(x.submitMs) ? `, submit ${x.submitMs.toFixed(2)}` : '') + `, ${k(x.cubes)} cubes, ${x.draws} draws, ${x.rayChunks} traced` +
-    (x.rayChunks ? `, ray pass on ${(100 * x.maskShare).toFixed(0)}% of pixels` : '') + ')' +
+    (x.rayChunks ? `, ray pass on ${(100 * x.maskShare).toFixed(0)}% of pixels` : '') +
+    (Number.isFinite(x.withoutMs) ? `, ${x.occluded} chunks skipped (${k(x.occludedCubes)} cubes), ${x.queried} asked` +
+      (Number.isFinite(x.pollMs) ? `, of the submit: poll ${x.pollMs.toFixed(2)}, ask ${x.askMs.toFixed(2)}` : '') +
+      `; <b>${x.withoutMs.toFixed(2)} ms</b> without, timed the same way` : '') + ')' +
     (x.converged ? '' : ' <span class="warn">not converged</span>')).join('\n');
 }
-window.streamBench = async function streamBench({ frames = 120, modes = ['off', 'density', 'density/discard', 'density/full', '3', '1', '0'], clock } = {}){
+/* Each '/queries' and '/depth' row is its base row with hidden chunks
+   skipped, found the one way or the other (docs/occlusion.md). The rows
+   without them run with occlusion off, as every bench before did, so
+   their numbers stay comparable. ray ≥ lod 3 lost its occlusion row after
+   your first bench: it isn't a default, and each row costs two timings. */
+const BENCH_MODES = ['off', 'off/queries', 'off/depth', 'density', 'density/queries', 'density/depth', 'density/discard', 'density/full', '3', '1', '0'];
+window.streamBench = async function streamBench({ frames = 120, modes = BENCH_MODES, clock } = {}){
   if (clock === 'timer' && !timerExt) return { error: 'EXT_disjoint_timer_query_webgl2 is not available in this browser' };
   const useTimer = clock ? clock === 'timer' : !!timerExt;
-  const saved = { auto, path: state.path, stencil: state.stencil, rayMiss: state.rayMiss }, rows = [];
+  const saved = { auto, path: state.path, stencil: state.stencil, rayMiss: state.rayMiss, occlusion: state.occlusion }, rows = [], withoutOf = new Map();
   auto = false;
   const median = a => { const s2 = [...a].sort((x, y) => x - y); return s2.length ? s2[s2.length >> 1] : NaN; };
   const status = text => { benchHud.status = text; hud(); };
@@ -2269,10 +3006,15 @@ window.streamBench = async function streamBench({ frames = 120, modes = ['off', 
       // 'density' (they follow it, so nothing reconverges): the old ray
       // pass that discards its misses, and no stencil at all
       // (docs/stencil-pass.md §6).
+      // An occlusion row follows its base row too, and times the view
+      // twice: occlusion off, then on (wallTime has why). The off half is
+      // the same for both methods, so the second row reuses the first's.
       const [path, pass] = mode.split('/');
       setPath(path);
       state.stencil = pass === 'full' ? false : saved.stencil;
       state.rayMiss = pass === 'discard' ? 'discard' : saved.rayMiss;
+      const occluding = pass === 'queries' || pass === 'depth';
+      setOcclusion('off');
       const start = performance.now(), end = start + 120000;
       let shown = 0;
       for (let f = 0; performance.now() < end; f++){
@@ -2287,26 +3029,36 @@ window.streamBench = async function streamBench({ frames = 120, modes = ['off', 
         await sleep(8);
       }
       status(`<b>bench</b> ${i + 1}/${modes.length} ${benchLabel(mode)}: timing`);
-      let raster, rayMs, totalMs, submitMs = NaN, baseMs = NaN;
-      if (useTimer){
-        timers.samples.raster.length = 0; timers.samples.ray.length = 0;
-        for (let f = 0; f < frames + 10; f++){
-          draw(); pollTimers();
-          await new Promise(r => requestAnimationFrame(r));
+      const time = async oneAtATime => {
+        if (useTimer){
+          timers.samples.raster.length = 0; timers.samples.ray.length = 0;
+          for (let f = 0; f < frames + 10; f++){
+            draw(); pollTimers();
+            await new Promise(r => requestAnimationFrame(r));
+          }
+          for (let k = 0; k < 20 && timers.pending.length; k++){ pollTimers(); await sleep(16); }
+          const raster = median(timers.samples.raster), rayMs = Number.isFinite(median(timers.samples.ray)) ? median(timers.samples.ray) : 0;
+          return { raster, rayMs, totalMs: raster + rayMs, submitMs: NaN, baseMs: NaN, pollMs: NaN, askMs: NaN };
         }
-        for (let k = 0; k < 20 && timers.pending.length; k++){ pollTimers(); await sleep(16); }
-        raster = median(timers.samples.raster); rayMs = median(timers.samples.ray);
-        if (!Number.isFinite(rayMs)) rayMs = 0;
-        totalMs = raster + rayMs;
-      } else {
         draw();   // size the canvas and count this mode's ray chunks
-        const base = wallTime('none'), r = wallTime('raster'), y = view.rayChunks ? wallTime('ray') : null, all = wallTime('both');
-        raster = Math.max(0, r.ms - base.ms);
-        rayMs = y ? Math.max(0, y.ms - base.ms) : 0;
-        totalMs = Math.max(0, all.ms - base.ms);
-        submitMs = all.submitMs; baseMs = base.ms;
+        const base = await wallTime('none', 300, oneAtATime), r = await wallTime('raster', 300, oneAtATime);
+        const y = view.rayChunks ? await wallTime('ray', 300, oneAtATime) : null, all = await wallTime('both', 300, oneAtATime);
         await new Promise(r2 => requestAnimationFrame(r2));
+        return { raster: Math.max(0, r.ms - base.ms), rayMs: y ? Math.max(0, y.ms - base.ms) : 0, totalMs: Math.max(0, all.ms - base.ms),
+                 submitMs: all.submitMs, baseMs: base.ms, pollMs: all.pollMs, askMs: all.askMs };
+      };
+      let without = null;
+      if (occluding){
+        without = withoutOf.get(path) || await time(true);
+        withoutOf.set(path, without);
+        // On, and given frames to find what's hidden: the first frame
+        // knows nothing, and each result is a frame or more late.
+        setOcclusion(pass);
+        for (let f = 0; f < 12; f++){ draw(); await new Promise(r => requestAnimationFrame(r)); }
       }
+      const { raster, rayMs, totalMs, submitMs, baseMs, pollMs, askMs } = await time(occluding);
+      // The counts are the timed views' (the mask below renders without occlusion).
+      const v = { ...view };
       // The share of the canvas the ray pass runs on: its own mask, read back.
       let maskShare = 0;
       if (view.rayChunks){
@@ -2316,13 +3068,14 @@ window.streamBench = async function streamBench({ frames = 120, modes = ['off', 
         maskShare = on / (canvas.width * canvas.height);
       }
       rows.push({ mode: benchLabel(mode), converged: isConverged(), rasterMs: raster, rayMs, totalMs, submitMs, baseMs, maskShare,
-                  cubes: view.instances, draws: view.drawn, rayChunks: view.rayChunks, marked: view.marked,
+                  cubes: v.instances, draws: v.drawn, rayChunks: v.rayChunks, marked: v.marked,
+                  withoutMs: without ? without.totalMs : NaN, occluded: v.occluded, occludedCubes: v.occludedCubes, queried: v.queried, pollMs, askMs,
                   MB: streamer.S.cacheBytes / 1048576, bricks: ray.brickPool.size });
     }
   } finally {
     // Whatever happened, the page goes back to flying.
     benchHud.status = '';
-    setPath(saved.path); state.stencil = saved.stencil; state.rayMiss = saved.rayMiss; auto = saved.auto;
+    setPath(saved.path); state.stencil = saved.stencil; state.rayMiss = saved.rayMiss; setOcclusion(saved.occlusion); auto = saved.auto;
   }
   const report = { world: W.label, D: W.D, eye: cam.eye.map(Math.round), yaw: +cam.yaw.toFixed(3), pitch: +cam.pitch.toFixed(3), size: [canvas.width, canvas.height],
                    clock: useTimer ? 'timer' : 'wall', renderer: rendererName(), agent: navigator.userAgent, rows };
@@ -2332,10 +3085,222 @@ window.streamBench = async function streamBench({ frames = 120, modes = ['off', 
 
 // The streamer itself, for the console (its state while the bench runs).
 window.__streamer = streamer;
+// Occlusion culling, for the console: the screen's runner (its tracker's
+// states and stats), the probe, the mode.
+window.__occlusion = { runner: () => occlusion, probe: occlusionProbe, set: setOcclusion, mode: () => state.occlusion };
 // The CPU twin's view of the ray textures, for the console.
 window.__ray = {
   R: () => rayState(),
   classifyPagesCPU, traceCPU, classifyProbe, traceProbe, attrProbe, boundProbe, maskProbe, hitAttrCPU,
+};
+
+/* ---- fileSelftest: world files through the real controls ------------------
+   Real clicks, a real file input and a real drop, with only the browser's
+   download replaced by a capture. Every world built here is saved, the shelf
+   is emptied and the file opened again, and each must draw the frame its
+   original drew, byte for byte, on both paths: raster only and ray only, so
+   no flight history can pick different kinds (test/browser/file.test.js holds
+   the report). The words reach the screen, so that's the colour too. */
+window.fileSelftest = async function fileSelftest(opts = {}){
+  const t0 = performance.now(), savedAuto = auto, savedPath = state.path, savedLattice = state.lattice, savedKit = state.kit;
+  auto = false;
+  const report = { worlds: [], glError: 0 };
+  const W_ = 160, H_ = 120, settleMs = opts.settleMs ?? 180000;
+  const settle = async () => {
+    const end = performance.now() + settleMs;
+    for (let f = 0; performance.now() < end; f++){ frame({ draw: false }); if (f > 2 && isConverged()) return true; await sleep(8); }
+    return false;
+  };
+  const differ = (a, b) => { let n = 0; for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) n++; return n; };
+  const lit = a => { let n = 0; for (let i = 3; i < a.length; i += 4) if (a[i]) n++; return n; };
+  const frames = async () => {
+    const out = {};
+    for (const path of ['off', '0']){
+      setPath(path); dirty = true;
+      out['converged' + path] = await settle();
+      out[path] = renderPixels(W_, H_, 8);
+    }
+    return out;
+  };
+  // Downloads caught at the anchor; everything before that is the page's own.
+  const caught = [], anchorClick = HTMLAnchorElement.prototype.click, makeUrl = URL.createObjectURL;
+  let lastBlob = null;
+  URL.createObjectURL = b => { lastBlob = b; return makeUrl.call(URL, b); };
+  HTMLAnchorElement.prototype.click = function(){ if (this.download) caught.push({ name: this.download, blob: lastBlob }); else anchorClick.call(this); };
+  const until = async (test, ms = 60000) => { const end = performance.now() + ms; while (performance.now() < end){ if (test()) return true; await sleep(10); } return false; };
+  const click = id => $(id).click();
+  const clickExport = async id => {
+    const n = caught.length;
+    click(id);
+    if (!await until(() => caught.length > n)) throw new Error(`no download from ${id}: ${$('fileInfo').textContent}`);
+    const c = caught[caught.length - 1];
+    return { name: c.name, bytes: new Uint8Array(await c.blob.arrayBuffer()) };
+  };
+  const asFiles = list => { const dt = new DataTransfer(); for (const [name, bytes] of list) dt.items.add(new File([bytes], name)); return dt; };
+  const viaInput = async list => {
+    const before = openSerial;
+    $('fileInput').files = asFiles(list).files;
+    $('fileInput').dispatchEvent(new Event('change'));
+    return before;
+  };
+  const viaDrop = list => { canvas.dispatchEvent(new DragEvent('drop', { dataTransfer: asFiles(list), bubbles: true, cancelable: true })); };
+  // openFiles has no promise from a real event: wait for its message, cleared first.
+  const opened = async (act, list) => {
+    showFile('');
+    const load = buildGen;
+    await act(list);
+    if (!await until(() => $('fileInfo').textContent !== '')) throw new Error('the open never reported');
+    await until(() => buildGen === load || !buildAbort);
+    await sleep(40);
+    await until(() => !buildAbort);
+    return $('fileInfo').textContent;
+  };
+  const pick = async id => {
+    $('world').value = id;
+    $('world').dispatchEvent(new Event('change'));
+    await sleep(40);
+    await until(() => !buildAbort && W.id === id);
+  };
+  try {
+    const CASES = opts.cases || [
+      { world: 'kit:1', kit: kitDesc({ D: 10 }), pin: [76250785, 3092] },
+      { world: 'scatter:1', depth: 9, pin: [55656241, 29773] },
+      { world: 'lattice:1', lattice: latticeDesc({ R: 11, n: [6, 5, 4], rotate: true }), pin: [24412, 3184] },
+      { world: 'caves:1', depth: 10, pin: [386153834, 83692] },
+      { world: 'shape:sphere', depth: 8 },
+      { world: 'row:146', depth: 6 },
+    ];
+    // 1. Build each, look, keep it.
+    for (const c of CASES){
+      state.world = c.world; state.depth = c.depth ?? null;
+      if (c.kit) state.kit = c.kit;
+      if (c.lattice) state.lattice = c.lattice;
+      fillWorlds(); fillDepth();
+      await loadWorld(true);
+      c.voxels = W.voxels; c.nodes = W.nodes; c.source = W.source; c.eye = cam.eye.slice(); c.yaw = cam.yaw; c.pitch = cam.pitch;
+      c.frames = await frames();
+      click('shelfAdd');
+      c.entry = shelf[shelf.length - 1].id;
+    }
+    // 2. A shelf world draws the same frame without ever touching a file.
+    report.shelfDirect = { id: CASES[0].entry };
+    await pick(CASES[0].entry);
+    cam.eye = CASES[0].eye.slice(); cam.yaw = CASES[0].yaw; cam.pitch = CASES[0].pitch;
+    { const f = await frames(); report.shelfDirect.differ = differ(f.off, CASES[0].frames.off) + differ(f['0'], CASES[0].frames['0']); }
+    // 3. Export all, empty the shelf, open the file through the input.
+    const all = await clickExport('shelfExport');
+    report.allFile = { name: all.name, bytes: all.bytes.length, shelfBefore: shelf.length };
+    while (shelf.length){
+      if (!isFile(state.world)) await pick(shelf[0].id);
+      await removeFromShelf();
+    }
+    report.afterEmpty = { world: state.world, select: $('world').value, removeDisabled: $('shelfRemove').disabled, exportDisabled: $('shelfExport').disabled };
+    report.openMessage = await opened(viaInput, [[all.name, all.bytes]]);
+    report.opened = shelf.length; report.firstShown = W.id === shelf[0]?.id;
+    report.url = new URLSearchParams(location.search).get('world');
+    report.depthHidden = $('depthL').hidden;
+    // 4. Every world in the file against its original.
+    for (let i = 0; i < CASES.length; i++){
+      const c = CASES[i], e = shelf[i];
+      await pick(e.id);
+      const r = { world: c.world, id: e.id, name: e.name, viewKept: e.view.eye.every((v, a) => v === c.eye[a]) && e.view.yaw === c.yaw && e.view.pitch === c.pitch };
+      Object.assign(r, { voxels: W.voxels, nodes: W.nodes, wantVoxels: c.voxels, wantNodes: c.nodes, pin: c.pin ?? null, colourStatus: W.file.colourStatus,
+                         url: new URLSearchParams(location.search).get('world'), occlusion: state.occlusion, depth: state.depth, D: W.D });
+      const f = await frames();
+      r.convergedRaster = f.convergedoff; r.convergedRay = f.converged0;
+      r.differRaster = differ(f.off, c.frames.off); r.differRay = differ(f['0'], c.frames['0']);
+      r.lit = lit(f.off); r.failed = streamer.S.stats.failed;
+      report.worlds.push(r);
+    }
+    // 5. One world, by the export button, opened by a real drop. Writing it
+    // again from the file gives the same bytes: nothing was lost or invented.
+    await pick(shelf[0].id);
+    const one = await clickExport('fileExport');
+    report.oneName = one.name;
+    report.dropMessage = await opened(viaDrop, [[one.name, one.bytes]]);
+    report.droppedShown = W.file?.name === shelf[0].name && W.id === shelf[shelf.length - 1].id;
+    const again = await clickExport('fileExport');
+    report.rewriteSame = again.bytes.length === one.bytes.length && again.bytes.every((v, i) => v === one.bytes[i]);
+    // A drag of something else isn't taken.
+    { const ev = new DragEvent('dragover', { dataTransfer: (() => { const d = new DataTransfer(); d.setData('text/plain', 'hello'); return d; })(), bubbles: true, cancelable: true });
+      canvas.dispatchEvent(ev); report.textDragIgnored = !ev.defaultPrevented && $('dropHint').hidden; }
+    { const ev = new DragEvent('dragover', { dataTransfer: asFiles([['x.vdag', new Uint8Array(1)]]), bubbles: true, cancelable: true });
+      canvas.dispatchEvent(ev); report.fileDragTaken = ev.defaultPrevented && !$('dropHint').hidden;
+      canvas.dispatchEvent(new DragEvent('dragleave', { bubbles: true })); report.hintLeaves = $('dropHint').hidden; }
+    // 6. Files that aren't right: the world on screen stays, and the page says why.
+    const staying = W.id, shelfSize = shelf.length, core = await import('./vdag-core.js');
+    report.bad = [];
+    for (const [name, bytes, want] of [
+      ['notes.txt', new TextEncoder().encode('not a world'), /not a world file/],
+      ['cut.vdag', all.bytes.subarray(0, all.bytes.length >> 1), /damaged/],
+      ['flipped.vdag', (() => { const b = one.bytes.slice(), at = b.length - 3; b[at] ^= 0xff; return b; })(), /damaged/],
+    ]){
+      const said = await opened(viaDrop, [[name, bytes]]);
+      report.bad.push({ name, said, matched: want.test(said), stayed: W.id === staying && shelf.length === shelfSize, warned: !!$('fileInfo').querySelector('.warn') });
+    }
+    // One good and one bad together: the good one still opens.
+    report.mixed = await opened(viaDrop, [['bad.vdag', new Uint8Array(9)], [one.name, one.bytes]]);
+    report.mixedOpened = shelf.length === shelfSize + 1;
+    // 7. The experiment's bare files, whose colour this page can't name.
+    const bare = (json, Ds, payload) => {
+      const te = new TextEncoder(), d = te.encode(json), section = (tag, b) => { const s = new Uint8Array(8 + b.length); s.set(te.encode(tag)); new DataView(s.buffer).setUint32(4, b.length, true); s.set(b, 8); return s; };
+      const node = new Uint8Array(2 + payload.length); node[0] = 1; node.set(payload, 2);
+      const parts = [Uint8Array.of(0x56, 0x44, 0x41, 0x47, 1, 0, 0, 0), section('DESC', d), section('ROOT', Uint8Array.of(1, Ds)), section('NODE', node)];
+      const out = new Uint8Array(parts.reduce((a, p) => a + p.length, 0)); let at = 0; for (const p of parts){ out.set(p, at); at += p.length; }
+      return out;
+    };
+    { const s = createStore(), root = s.solid(10), file = bare('{"kind":"solid"}', 10, core.encodeGraph(s, [root], [10]));
+      setPath('off');
+      report.bareMessage = await opened(viaDrop, [['all-solid-d10.vdag', file]]);
+      dirty = true;
+      const converged = await settle(), px = renderPixels(W_, H_, 8);
+      report.bare = { name: W.file?.name, voxels: W.voxels, colourStatus: W.file?.colourStatus, colour: W.colour, converged, lit: lit(px), failed: streamer.S.stats.failed }; }
+    // 8. Stale colour: a print no field here gives. And a name that's markup.
+    { const s = createStore(), root = s.fromField(7, fieldOf(SHAPES.find(x => x.name === 'sphere'), 7)).root;
+      const file = await core.writeVdag([{ keys: s.snapshot().keys, root, D: 7, name: '<img src=x onerror="window.__pwned=1">', colour: { kind: 'shape', name: 'sphere', D: 7 } }],
+                                        { colourOf: () => () => 12345 });
+      await opened(viaDrop, [['<b>odd</b>.vdag', file]]);
+      dirty = true; await settle(); frame({ draw: false }); hud(); await sleep(50);
+      report.stale = { status: W.file?.colourStatus, warned: /has changed since/.test($('hud').textContent), imgInHud: !!$('hud').querySelector('img, b b'), imgInInfo: !!$('fileInfo').querySelector('img, b'),
+                       option: [...$('world').options].some(o => o.textContent.startsWith('<img')), pwned: !!window.__pwned, noUrl: !new URLSearchParams(location.search).has('world') }; }
+    // 9. A D = 5 world can't be streamed, and an empty one has nothing to show.
+    { const s = createStore(), small = s.solid(5);
+      const file = await core.writeVdag([{ keys: s.snapshot().keys, root: small, D: 5, name: 'small' }, { keys: s.snapshot().keys, root: 0, D: 8, name: 'nothing' }]);
+      const said = await opened(viaDrop, [['small.vdag', file]]);
+      report.small = { said, refused: /D = 5/.test(said) && /empty/.test(said) }; }
+    // 10. Supersession. A file opened while a slow build runs wins and the
+    // build never lands; a world asked for while a file reads wins, and the
+    // file's worlds wait on the shelf.
+    { state.world = 'lattice:1'; state.lattice = latticeDesc({ R: 64, n: 4 }); fillWorlds(); fillDepth();
+      const building_ = loadWorld(true);
+      await sleep(opts.supersedeMs ?? 100);
+      await viaDrop([[one.name, one.bytes]]);
+      await until(() => isFile(state.world));
+      const landed = await building_;
+      await until(() => !buildAbort);
+      report.fileBeatsBuild = { landed, shown: !!W.file }; }
+    { const size = shelf.length;
+      viaDrop([[all.name, all.bytes]]);
+      await sleep(0);
+      state.world = 'shape:sphere'; state.depth = 8; fillWorlds(); fillDepth();
+      const asked = loadWorld(true);
+      await asked;
+      await until(() => shelf.length >= size + CASES.length);
+      await sleep(100);
+      await until(() => !buildAbort);
+      report.buildBeatsFile = { shown: W.id, added: shelf.length - size, select: $('world').value }; }
+    report.toastHidden = $('toast').hidden;
+    report.glError = gl.getError();
+    report.mode = pool.mode;
+  } finally {
+    HTMLAnchorElement.prototype.click = anchorClick;
+    URL.createObjectURL = makeUrl;
+    setPath(savedPath); auto = savedAuto;
+    state.lattice = savedLattice; state.kit = savedKit;
+  }
+  report.ms = Math.round(performance.now() - t0);
+  window.__fileSelftest = report;
+  return report;
 };
 
 /* ---- boot ------------------------------------------------------------------ */
@@ -2364,6 +3329,10 @@ async function boot(){
       benchHud.text = `<b>bench</b> <span class="warn">failed: ${e && e.message || e}</span> (the console has the stack)`;
     }
     hud();
+  }
+  if (params.has('occlusiontest')){
+    const r = await occlusionSelftest();
+    console.log('occlusionSelftest', r);
   }
   if (params.has('raytest')){
     const r = await raySelftest();
