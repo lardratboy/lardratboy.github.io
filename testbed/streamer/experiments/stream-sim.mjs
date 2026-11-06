@@ -34,7 +34,9 @@ import { colourOf } from '../colours.js';
 export function createSim({ world, snap, memo = new Map() }){
   const runner = createJobRunner(snap, colourOf);
   const run = job => {
-    const k = job.key + '/' + job.lodRule + '/' + (job.kind || 'records');
+    // Root and colour too, for an edited world. A world never edited has one
+    // of each, so its memo can be shared between flights as before.
+    const k = job.key + '/' + job.lodRule + '/' + (job.kind || 'records') + '/' + (job.root ?? '') + '/' + (job.colourRev ?? 0);
     let r = memo.get(k);
     if (!r){ r = runner(job); memo.set(k, r); }
     return r;
@@ -52,7 +54,7 @@ export function createSim({ world, snap, memo = new Map() }){
   /* Fly `path(t)` (t in ms → eye) for `frames` frames. `check(frame, ctx)`
      is called after every frame; `options` go to createStreamer. */
   function fly({ path, frames, workers = 4, frameMs = 1000 / 60, jobMs = null, jobScale = 1, cost = null,
-                 options = {}, check = null, streamer = null }){
+                 options = {}, check = null, streamer = null, before = null }){
     const st = streamer || makeStreamer(options);
     const slots = Array.from({ length: workers }, () => ({ job: null, result: null, done: 0, free: 0 }));
     const log = [];
@@ -61,6 +63,8 @@ export function createSim({ world, snap, memo = new Map() }){
       t += frameMs;
       disposed.length = 0;
       const eye = path(t);
+      // before(frame, st): an edit, say, made when a page would handle input.
+      before?.(f, st, eye);
       st.update(eye);
       let started = 0;
       for (const s of slots) for (;;){
@@ -87,6 +91,9 @@ export function createSim({ world, snap, memo = new Map() }){
         drawBytes: fr.draw.reduce((a, d) => a + (S.cache.get(d.key)?.bytes || 0), 0),
         upload: S.stats.lastUpload, installs: S.stats.lastInstalls, started,
         busy: slots.filter(s => s.job).length, pending: S.pending.size, results: S.results.length,
+        // An open edit (stream-core §3): results held for its flip, and the flip.
+        editing: st.editing, held: S.edit ? S.edit.held.size : 0, flipped: S.stats.lastFlipInstalls, flipBytes: S.stats.lastFlip, flips: S.stats.flips,
+        out: st.sel ? [...st.sel.nodes.keys()].filter(k => S.cache.has(k) && !st.current(k)).length : 0,
         inFlight: [...S.pending.values()].filter(j => !j.done).length,
         open: fr.draw.filter(d => d.open).length,
         // The path (stream-core §2b): drawn pages, and chunks of the cut
@@ -103,7 +110,7 @@ export function createSim({ world, snap, memo = new Map() }){
     }
     return { st, log };
   }
-  return { run, fly, memo, makeStreamer };
+  return { run, fly, memo, makeStreamer, tail: t => runner.tail(t) };
 }
 
 /* Paths. A straight line at `speed` voxels per second, and a stop. */

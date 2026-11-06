@@ -19,14 +19,18 @@
       Virtualiser and GenerationPool.service(), keyed by (lod, chunk).
    4. createJobRunner: what a worker does with a job. One expandChunk.
 
+   Edits come in through setRoot and §3b, and a worker follows them through
+   tails (§4b). docs/edit-stream-log.md has the reasoning.
+
    Addresses. A chunk at lod l is a 64³ grid of level-l cells, i.e. the
    DAG node at level l + 6, and the chunk grid at lod l has side
    2^(D − l − 6). The top chunk (lod D − 6) is the whole world. Positions
    (the eye, chunk corners) are in level-0 voxels, as doubles.
    ===================================================================== */
-import { EMPTY, FULL, FIRST_NODE, storeView } from './dag-core.js';
+import { EMPTY, FULL, FIRST_NODE, storeView, isFull } from './dag-core.js';
 import { CHUNK_LEVELS, CHUNK_SIDE, chunkNode, expandChunk } from './chunk-core.js';
 import { pageJob, RUN_HEAD, ATTR_NONE } from './ray-core.js';
+import { createBlockTable, editedField } from './edit-core.js';
 
 // Face order of the record's mask and of uOpenSides: +X −X +Y −Y +Z −Z.
 export const SIDES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
@@ -137,7 +141,7 @@ export function selectChunks(world, eye, { detail = 2, maxChunks = 1024, minLod 
 }
 
 /* ---- 2. the cover ----------------------------------------------------------
-   What to draw, given which chunks are resident (`has(key)`). Bottom-up
+   What to draw, given which chunks are resident (`has(key, chunk)`). Bottom-up
    over the cut, each node returns a list of resident chunks that tiles
    its region and whether the tiling is complete:
      a leaf      itself if resident; else its non-empty children if all of
@@ -171,13 +175,13 @@ export function coverOf(sel, has){
   const kidsOf = c => { let k = kidCache.get(c.key); if (!k){ k = childrenOf(world, c); kidCache.set(c.key, k); } return k; };
   const tile = c => {
     if (!c.kids){
-      if (has(c.key)) return { list: [c], complete: true };
-      const kids = kidsOf(c), got = kids.filter(k => has(k.key));
+      if (has(c.key, c)) return { list: [c], complete: true };
+      const kids = kidsOf(c), got = kids.filter(k => has(k.key, k));
       return { list: got, complete: kids.length > 0 && got.length === kids.length };
     }
     const parts = c.kids.map(tile);
     if (parts.every(p => p.complete)) return { list: parts.flatMap(p => p.list), complete: true };
-    if (has(c.key)) return { list: [c], complete: true };
+    if (has(c.key, c)) return { list: [c], complete: true };
     return { list: parts.flatMap(p => p.list), complete: false };
   };
   out.draw = tile(sel.root).list;
@@ -287,6 +291,61 @@ export function chooseKinds(sel, entryOf, cfg){
   return kinds;
 }
 
+/* ---- 2c. stamps: is this entry still right? -----------------------------------
+   A chunk's job reads exactly seven nodes: its own and its six face neighbours
+   (the apron and the seam tail). Equal id means equal voxels, so an entry built
+   from the same seven ids as the world holds now has the same records, whatever
+   else changed. That makes the cache self-validating: an entry that leaves the
+   cut and comes back is just compared, and no invalidation list is needed. An
+   undo finds whatever was never replaced already right (realtimecsg.md §3.1).
+   test/stream-core.test.js holds "same stamp, same bytes" on every chunk.
+
+   **Ids can't see colour.** Place red, break, place blue gives back the same root
+   with a different colour (§5's trap), so a stamp also has a colour revision: the
+   last op whose block overlaps the chunk. A word only reads the field inside its
+   own chunk's box, cell centres or the coarse mean's sub-cells, so neighbours
+   don't count here, unlike ids.
+
+   createPaint answers that without scanning the log. Blocks are snapped, so a
+   block and a chunk overlap only if one holds the other, and each case is one
+   lookup: `inside` is marked on the block's whole path up the tree (D − level
+   entries, the same path place walks), and `covers` on the block itself, asked
+   only for the larger sizes in use. Exact in both directions, and O(sizes in use)
+   a chunk. */
+export const STAMP_IDS = 7;
+export function stampOf(store, root, D, lod, x, y, z){
+  const s = new Uint32Array(STAMP_IDS);
+  s[0] = chunkNode(store, root, D, lod, x, y, z).id;
+  for (let f = 0; f < 6; f++) s[f + 1] = chunkNode(store, root, D, lod, x + SIDES[f][0], y + SIDES[f][1], z + SIDES[f][2]).id;
+  return s;
+}
+const sameStamp = (a, b) => {
+  for (let i = 0; i < STAMP_IDS; i++) if (a[i] !== b[i]) return false;
+  return true;
+};
+export function createPaint(D){
+  const inside = new Map(), covers = new Map(), sizes = [], top = Math.max(D, CHUNK_LEVELS);
+  return {
+    touch({ level, X, Y, Z }, rev){
+      covers.set(keyOf(level, X, Y, Z), rev);
+      if (!sizes.includes(level)) sizes.push(level);
+      for (let k = level; k <= top; k++){ const s = k - level; inside.set(keyOf(k, X >> s, Y >> s, Z >> s), rev); }
+    },
+    // The latest revision whose block overlaps this chunk; 0 if none has.
+    revOf(lod, x, y, z){
+      const k0 = lod + CHUNK_LEVELS;
+      let rev = inside.get(keyOf(k0, x, y, z)) || 0;
+      for (let i = 0; i < sizes.length; i++){
+        const l = sizes[i];
+        if (l <= k0) continue;
+        const s = l - k0, r = covers.get(keyOf(l, x >> s, y >> s, z >> s));
+        if (r > rev) rev = r;
+      }
+      return rev;
+    },
+  };
+}
+
 /* ---- 3. the streamer -------------------------------------------------------
    block-showroom's Virtualiser + GenerationPool, minus the threads:
    - `update(eye)` re-cuts, re-covers, marks what is seen, evicts, and
@@ -322,7 +381,51 @@ export function chooseKinds(sel, entryOf, cfg){
 
    Job order: the pinned top chunk, then holes, then everything else by
    dist / size (decision 6). A missing chunk whose region a fallback
-   covers can wait; a hole can't. */
+   covers can wait; a hole can't.
+
+   **An edit is a transaction: every frame draws one root.** setRoot doesn't
+   flush anything, and it doesn't change what's on screen either. It opens an
+   edit: a second cut of the new root, and jobs for exactly what that cut would
+   draw wrongly, whose results are held. When the last one is in, all of them
+   install in one frame (the flip) and the cut moves to the new root. Until then
+   the frame is the old root, whole.
+
+   realtimecsg.md §3.4 listed three traps and meant to patch coverOf for each.
+   All three are one problem, a frame mixing two roots, so this removes the
+   cause, and coverOf stays as it was:
+     - Adding to an empty chunk made a region pop coarse, because the new chunk's
+       parent fell back while it was missing. Now it's resident before the cut
+       can ask for it.
+     - A chunk carved empty left the cut at once, with neighbours still hiding
+       the faces towards it: a sliver of sky. Now it leaves when they change.
+     - `open` sides came from the new DAG while tails were built for the old one.
+       Now they agree when the cut moves.
+
+   What a frame needs from an edit is `need`: run coverOf over the new cut as if
+   a chunk that was EMPTY in the shown root were resident (it drew nothing before,
+   so it can't be what's holding a region back), and take whatever it draws that
+   isn't right for the new root, nearest first. That was 2 to 14 chunks a click on
+   the worlds measured (docs/edit-stream-log.md §6): the leaf holding the edit, and
+   its neighbours whose stamps changed. Split chunks wait, as they aren't drawn.
+
+   While an edit is open, nothing else is dispatched, so an edit costs a flight
+   its one small group of jobs. One edit at a time, naming one root: a setRoot
+   during an edit waits, and the next edit jumps straight to the latest root. So a
+   fast clicker sees every flip consistent and can't starve it, which an exact
+   match on the latest root would (§3.4). A held result doesn't count against
+   resultLimit or resultBytes, or a group wider than they allow could never finish.
+   The flip installs past installMs and uploadBytes for the same reason, reported
+   apart in stats.lastFlip, not lastUpload.
+
+   After the flip, split chunks are still out of date. They're asked for last,
+   above kind switches, since they only matter as fallbacks. A chunk re-entering
+   the cut out of date is drawn until its job lands, like any fallback, nearest
+   first.
+
+   One job per chunk at a time means results arrive in the order they were asked
+   for, so an entry's `gen` never goes backwards (frameChecker holds that). A result
+   is still dropped if an undo has made the resident entry right and the result
+   wrong. */
 export const DEFAULTS = {
   detail: 2, maxChunks: 1024, minLod: 0,
   // false: want only the cut's leaves, the first version's rule, kept so
@@ -359,23 +462,29 @@ export function createStreamer(options = {}){
     cfg, world: null, revision: 0, serial: 0,
     cache: new Map(), cacheBytes: 0, pending: new Map(), results: [], failures: new Map(),
     sel: null, frame: coverOf({ root: null }, () => false), queue: [], tick: 0, pinned: null, kinds: new Map(),
+    // Edits (§2c, §3): the open one, the root waiting for it to finish, the
+    // counters, the shown root's colour index and its memo of current stamps.
+    edit: null, next: null, gen: 0, shownGen: 0, colourRev: 0, shownRev: 0, paint: null, stamps: new Map(),
     stats: { installs: 0, evictions: 0, discarded: 0, failed: 0, uploaded: 0, lastUpload: 0, lastInstalls: 0,
-             selectMs: 0, coverMs: 0, switches: 0 },
+             selectMs: 0, coverMs: 0, switches: 0, refreshed: 0, flips: 0, lastFlip: 0, lastFlipInstalls: 0 },
   };
   const has = key => S.cache.has(key);
 
   function setWorld(world){
     reset();
     S.world = world; S.sel = null; S.queue = [];
-    S.pinned = world && world.root !== EMPTY ? keyOf(world.top, 0, 0, 0) : null;
+    S.pinned = pinOf(world);
+    S.paint = world ? createPaint(world.D) : null;
     S.frame = coverOf({ root: null }, has);
   }
+  const pinOf = world => world && world.root !== EMPTY ? keyOf(world.top, 0, 0, 0) : null;
   // Forget every chunk and every job, keeping the world: a new revision.
   function reset(){
     S.revision++;
     for (const e of S.cache.values()) dispose(e);
     S.cache.clear(); S.cacheBytes = 0;
     S.pending.clear(); S.results.length = 0; S.failures.clear();
+    S.edit = S.next = null; S.gen = S.shownGen = S.colourRev = S.shownRev = 0; S.stamps = new Map();
     S.frame = coverOf({ root: null }, has);
   }
   /* Options take effect at the next update(). A new rayLod or rayDensity
@@ -385,8 +494,81 @@ export function createStreamer(options = {}){
   function setOptions(o){ Object.assign(cfg, o); }
   // The kind chunk `key` wants: decided in recover(), for the cut's chunks.
   const kindOf = key => S.kinds.get(key) || 'records';
-  // Resident, but not in the kind its chunk wants now.
-  const stale = key => { const e = S.cache.get(key); return !!e && e.kind !== kindOf(key); };
+  /* What a chunk's entry should have been built from, at the shown root or the
+     open edit's. Memoised per root: this runs for every chunk of the cut on every
+     recover, and a walk is about 100 child reads. A world never edited skips it. */
+  const stampNow = (memo, world, paintAt, lod, x, y, z, key) => {
+    let s = memo.get(key);
+    if (!s){ s = { ids: stampOf(world.store, world.root, world.D, lod, x, y, z), rev: paintAt(lod, x, y, z) }; memo.set(key, s); }
+    return s;
+  };
+  const shownPaint = (lod, x, y, z) => S.paint.revOf(lod, x, y, z);
+  const editPaint = (lod, x, y, z) => S.edit.paint.revOf(lod, x, y, z) || S.paint.revOf(lod, x, y, z);
+  const shownStamp = (lod, x, y, z, key) => stampNow(S.stamps, S.world, shownPaint, lod, x, y, z, key);
+  const editStamp = (lod, x, y, z, key) => stampNow(S.edit.stamps, S.edit.world, editPaint, lod, x, y, z, key);
+  const matches = (stamp, colourRev, now) => sameStamp(stamp, now.ids) && colourRev >= now.rev;
+  // Built from what the shown root holds? (Not the kind: that's `stale`.)
+  const current = e => !S.shownGen || matches(e.stamp, e.colourRev, shownStamp(e.lod, e.x, e.y, e.z, e.key));
+  const currentInEdit = e => matches(e.stamp, e.colourRev, editStamp(e.lod, e.x, e.y, e.z, e.key));
+  // Resident, but not in the kind its chunk wants now, or out of date.
+  const stale = key => { const e = S.cache.get(key); return !!e && (e.kind !== kindOf(key) || !current(e)); };
+
+  /* Move to a new root (§3's transaction). `paint`: the blocks whose colour this
+     step may have changed, which is what edit-core's log steps return. Ids can't
+     say that (§2c), so the same root with paint still opens an edit. */
+  function setRoot(root, { paint = [] } = {}){
+    if (!S.world) throw new Error('setRoot: no world');
+    const last = S.next ? S.next.root : S.edit ? S.edit.root : S.world.root;
+    if (root === last && !paint.length) return;
+    S.next = { root, paint: S.next ? S.next.paint.concat(paint) : paint };
+    // Before the first update there's no eye to cut for; update() opens it.
+    if (!S.edit && S.sel){ openEdit(); recover(); }
+  }
+  function openEdit(){
+    const { root, paint } = S.next;
+    S.next = null;
+    const gen = ++S.gen, rev = paint.length ? ++S.colourRev : S.shownRev, world = { ...S.world, root };
+    const index = createPaint(world.D);
+    for (const b of paint) index.touch(b, rev);
+    // Workers catch up before any job can name this root: the page posts the
+    // tail here, and a port keeps its messages in order (§4b).
+    cfg.publish?.({ root, gen });
+    S.edit = { gen, rev, root, world, paint: index, blocks: paint, held: new Map(), stamps: new Map(), kinds: new Map(), need: [],
+               sel: selectChunks(world, S.sel.eye, cfg) };
+  }
+  function planEdit(){
+    const E = S.edit, shown = S.world;
+    const wasEmpty = c => chunkNode(shown.store, shown.root, shown.D, c.lod, c.x, c.y, c.z).id === EMPTY;
+    const plan = coverOf(E.sel, (key, c) => S.cache.has(key) || E.held.has(key) || wasEmpty(c));
+    E.kinds = chooseKinds(E.sel, key => S.cache.get(key), cfg);
+    const need = new Set();
+    for (const d of plan.draw){
+      if (E.held.has(d.key)) continue;
+      const e = S.cache.get(d.key);
+      if (e && currentInEdit(e)) continue;
+      // A merge's fallback child isn't in the cut, so no job for it would be
+      // wanted. The leaf it stands in for is, and replaces it.
+      const c = E.sel.nodes.has(d.key) ? d : d.parent;
+      if ((S.failures.get(c.key) || 0) < 2) need.add(c);
+    }
+    E.need = [...need].sort((a, b) => a.dist - b.dist);
+    S.queue = E.need;
+  }
+  function flip(){
+    const E = S.edit;
+    for (const b of E.blocks) S.paint.touch(b, E.rev);
+    S.world = E.world; S.sel = E.sel; S.stamps = E.stamps; S.shownGen = E.gen; S.shownRev = E.rev;
+    S.pinned = pinOf(S.world); S.edit = null;
+    let accepted = 0, bytes = 0;
+    for (const item of E.held.values()){
+      if (!demanded(item.job.key)){ S.pending.delete(item.job.key); S.stats.discarded++; continue; }
+      installItem(item); accepted++; bytes += item.bytes;
+    }
+    S.stats.flips++; S.stats.installs += accepted; S.stats.uploaded += bytes;
+    S.stats.lastFlip = bytes; S.stats.lastFlipInstalls = accepted;
+    if (S.next) openEdit();
+    recover();
+  }
 
   function recover(){
     const t0 = now();
@@ -397,30 +579,44 @@ export function createStreamer(options = {}){
     for (const leaf of S.sel.leaves){ const e = S.cache.get(leaf.key); if (e) e.seen = S.tick; }
     for (const d of S.frame.draw){ const e = S.cache.get(d.key); if (e) e.seen = S.tick; }
     for (const c of S.sel.nodes.values()){ const e = S.cache.get(c.key); if (e) e.seen = S.tick; }
+    if (S.edit){
+      for (const c of S.edit.sel.nodes.values()){ const e = S.cache.get(c.key); if (e) e.seen = S.tick; }
+      planEdit(); evict();
+      return;
+    }
     // The job queue: the pinned top chunk, holes (nearest first), then every
     // other missing chunk of the cut, split ones included, by dist / size.
     // A split chunk ranks below `detail` and most leaves at or above it, so
     // this loads coarse to fine, and a chunk's parent is normally in before
     // it is (docs/stream-log.md §3 has the flight that forced this).
+    // Out-of-date chunks being drawn come before all of those but the holes,
+    // nearest first (dist alone, because dist / size would put the coarse chunks
+    // above the fine ones an edit changes): they're wrong, not just coarse. Those
+    // not being drawn come after them, only mattering as fallbacks.
     // Last come chunks resident in the wrong kind (§2b): they already draw
     // correctly, so a switch only makes them cheaper.
     const holeKeys = new Set(S.frame.holes.map(h => h.key)), q = [];
     if (S.pinned && !has(S.pinned)) q.push(S.sel.root);
     for (const leaf of S.sel.leaves) if (!has(leaf.key) && holeKeys.has(leaf.key)) q.push(leaf);
-    const rest = [], switches = [], wanted = cfg.splitsResident ? S.sel.nodes.values() : S.sel.leaves;
+    const rest = [], drawnOld = [], otherOld = [], switches = [], wanted = cfg.splitsResident ? S.sel.nodes.values() : S.sel.leaves;
     for (const c of wanted){
-      if (!has(c.key) && !holeKeys.has(c.key) && c.key !== S.pinned) rest.push(c);
-      else if (stale(c.key)) switches.push(c);
+      const e = S.cache.get(c.key);
+      if (!e){ if (!holeKeys.has(c.key) && c.key !== S.pinned) rest.push(c); }
+      else if (!current(e)) (S.frame.drawKeys.has(c.key) ? drawnOld : otherOld).push(c);
+      else if (e.kind !== kindOf(c.key)) switches.push(c);
     }
     const byRank = (a, b) => a.dist / a.size - b.dist / b.size || b.lod - a.lod;
-    rest.sort(byRank); switches.sort(byRank);
-    S.queue = q.concat(rest, switches);
+    rest.sort(byRank); otherOld.sort(byRank); switches.sort(byRank);
+    drawnOld.sort((a, b) => a.dist - b.dist);
+    S.queue = q.concat(drawnOld, rest, otherOld, switches);
     evict();
   }
   function update(eye){
     if (!S.world) return S.frame;
     const t0 = now();
     S.sel = selectChunks(S.world, eye, cfg);
+    if (S.edit) S.edit.sel = selectChunks(S.edit.world, eye, cfg);
+    else if (S.next) openEdit();
     S.stats.selectMs = now() - t0;
     recover();
     return S.frame;
@@ -429,6 +625,7 @@ export function createStreamer(options = {}){
   const protectedKeys = () => {
     const p = new Set(S.frame.drawKeys);
     if (S.sel) for (const k of (cfg.splitsResident ? S.sel.nodes.keys() : S.sel.leafKeys)) p.add(k);
+    if (S.edit) for (const k of S.edit.sel.nodes.keys()) p.add(k);
     if (S.pinned) p.add(S.pinned);
     return p;
   };
@@ -446,7 +643,7 @@ export function createStreamer(options = {}){
 
   // Wanted: anything in the cut, leaf or split (a split one is still a
   // fallback for its children), plus the pinned top chunk.
-  const demanded = key => key === S.pinned || (S.sel !== null && S.sel.nodes.has(key));
+  const demanded = key => key === S.pinned || (S.sel !== null && S.sel.nodes.has(key)) || (S.edit !== null && S.edit.sel.nodes.has(key));
   const reserved = () => {
     let b = 0;
     for (const j of S.pending.values()) if (!j.done) b += j.estimate;
@@ -458,12 +655,17 @@ export function createStreamer(options = {}){
     let inFlight = 0;
     for (const j of S.pending.values()) if (!j.done) inFlight++;
     if (inFlight + S.results.length >= cfg.resultLimit) return null;
-    const r = reserved();
+    const r = reserved(), E = S.edit, world = E ? E.world : S.world;
     for (const c of S.queue){
-      if ((has(c.key) && !stale(c.key)) || S.pending.has(c.key) || (S.failures.get(c.key) || 0) >= 2) continue;
+      // An open edit's queue is exactly what it still needs.
+      if ((!E && has(c.key) && !stale(c.key)) || S.pending.has(c.key) || (S.failures.get(c.key) || 0) >= 2) continue;
       if (r && r + cfg.estimate > cfg.resultBytes) return null;
-      const job = { key: c.key, lod: c.lod, cx: c.x, cy: c.y, cz: c.z, lodRule: cfg.lodRuleOf(c.lod), kind: kindOf(c.key),
-                    revision: S.revision, jobId: ++S.serial, estimate: cfg.estimate, done: false };
+      const job = { key: c.key, lod: c.lod, cx: c.x, cy: c.y, cz: c.z, lodRule: cfg.lodRuleOf(c.lod), kind: E ? E.kinds.get(c.key) : kindOf(c.key),
+                    revision: S.revision, jobId: ++S.serial, estimate: cfg.estimate, done: false,
+                    // What it reads: the entry's stamp, if it gets in. The worker
+                    // is at this root and this colour by the time it runs (§4b).
+                    root: world.root, gen: E ? E.gen : S.shownGen, colourRev: E ? E.rev : S.shownRev,
+                    stamp: stampOf(world.store, world.root, world.D, c.lod, c.x, c.y, c.z) };
       S.pending.set(c.key, job);
       return job;
     }
@@ -472,6 +674,11 @@ export function createStreamer(options = {}){
   function complete(job, result){
     if (job.revision !== S.revision) return;
     if (S.pending.get(job.key) !== job) return;
+    if (S.edit && job.gen === S.edit.gen){
+      job.done = true;
+      S.edit.held.set(job.key, { job, result, bytes: resultBytes(result) });
+      return;
+    }
     if (!demanded(job.key)){ S.pending.delete(job.key); S.stats.discarded++; return; }
     job.done = true;
     S.results.push({ job, result, bytes: resultBytes(result) });
@@ -485,16 +692,26 @@ export function createStreamer(options = {}){
   }
 
   function service(){
-    S.stats.lastUpload = 0; S.stats.lastInstalls = 0;
-    if (!S.results.length || !S.sel) return false;
+    S.stats.lastUpload = 0; S.stats.lastInstalls = 0; S.stats.lastFlip = 0; S.stats.lastFlipInstalls = 0;
+    if (!S.sel) return false;
+    let flipped = false;
+    if (S.edit){
+      planEdit();
+      if (!S.edit.need.length){ flip(); flipped = true; }
+    }
+    if (!S.results.length) return flipped;
     const started = now();
     // A result nobody wants any more goes, and so does one of the wrong
     // kind for a chunk already resident in the right one (the kind flipped
     // back while it was out). One of the wrong kind for a chunk that isn't
     // resident is still taken: it fills the region until the right one comes.
+    // A result also goes if an undo has left it wrong and the resident entry
+    // right (§3).
     S.results = S.results.filter(item => {
-      const k = item.job.key;
-      if (demanded(k) && !(has(k) && !stale(k) && item.job.kind !== kindOf(k))) return true;
+      const k = item.job.key, e = S.cache.get(k);
+      const wasted = e && !stale(k) && (item.job.kind !== kindOf(k) ||
+                                        (S.shownGen && !matches(item.job.stamp, item.job.colourRev, shownStamp(e.lod, e.x, e.y, e.z, k))));
+      if (demanded(k) && !wasted) return true;
       S.pending.delete(k); S.stats.discarded++; return false;
     });
     const holeKeys = new Set(S.frame.holes.map(h => h.key));
@@ -507,45 +724,58 @@ export function createStreamer(options = {}){
     while (S.results.length && accepted < cfg.maxInstalls){
       const item = S.results[0], { job, result } = item;
       if (accepted && (now() - started >= cfg.installMs || bytes + item.bytes > cfg.uploadBytes)) break;
-      S.results.shift(); S.pending.delete(job.key); S.failures.delete(job.key);
-      const size = CHUNK_SIDE * 2 ** job.lod;
-      // recordCount: the cubes this chunk draws, whichever kind it is, and
-      // occupancy, its kept cells over 64³, for its density (§2b); null
-      // when the job couldn't say.
-      const entry = { key: job.key, kind: job.kind, lod: job.lod, x: job.cx, y: job.cy, z: job.cz,
-                      origin: [job.cx * size, job.cy * size, job.cz * size], cellSize: 2 ** job.lod,
-                      bytes: item.bytes, seen: S.tick, gpu: null, recordCount: result.recordCount ?? null,
-                      occupancy: result.occupied != null ? result.occupied / CHUNK_SIDE ** 3 : null };
-      if (job.kind === 'page'){
-        // A page keeps its grid of node ids: the brick pool releases by it.
-        // words / shown: attribute words and shown cells (step 6), equal
-        // when the world has a colour (frameChecker).
-        entry.page = result; entry.count = 0; entry.total = 0; entry.cells = result.count;
-        entry.shown = result.shown || 0; entry.words = result.attr ? result.attr.length - RUN_HEAD * result.attrAt.reduce((a, v) => a + (v !== ATTR_NONE), 0) : 0;
-      } else {
-        // words: how many attribute words came with the records (step 6);
-        // one per record when the world has a colour (frameChecker).
-        Object.assign(entry, { records: result.records, attrs: result.attrs || null, count: result.count, borderStart: result.borderStart,
-                               total: result.records.length, quads: result.quads, words: result.attrs ? result.attrs.length : 0 });
-      }
-      entry.gpu = install(entry);
-      if (!cfg.keepRecords){ entry.records = null; entry.attrs = null; if (entry.page) entry.page = { grid: entry.page.grid, count: entry.page.count }; }
-      // A switch of kind: the old entry was drawn until this moment.
-      const old = S.cache.get(job.key);
-      if (old){ dispose(old); S.cacheBytes -= old.bytes; S.stats.switches++; }
-      S.cache.set(job.key, entry); S.cacheBytes += entry.bytes;
+      S.results.shift();
+      installItem(item);
       accepted++; bytes += item.bytes;
     }
     S.stats.installs += accepted; S.stats.uploaded += bytes;
     S.stats.lastUpload = bytes; S.stats.lastInstalls = accepted;
     if (accepted) recover();
-    return accepted > 0;
+    return accepted > 0 || flipped;
+  }
+  function installItem({ job, result, bytes: size }){
+    S.pending.delete(job.key); S.failures.delete(job.key);
+    const side = CHUNK_SIDE * 2 ** job.lod;
+    // recordCount: the cubes this chunk draws, whichever kind it is, and
+    // occupancy, its kept cells over 64³, for its density (§2b); null
+    // when the job couldn't say. stamp, colourRev, gen: what it was built from
+    // (§2c).
+    const entry = { key: job.key, kind: job.kind, lod: job.lod, x: job.cx, y: job.cy, z: job.cz,
+                    origin: [job.cx * side, job.cy * side, job.cz * side], cellSize: 2 ** job.lod,
+                    bytes: size, seen: S.tick, gpu: null, recordCount: result.recordCount ?? null,
+                    occupancy: result.occupied != null ? result.occupied / CHUNK_SIDE ** 3 : null,
+                    stamp: job.stamp, colourRev: job.colourRev, gen: job.gen, root: job.root };
+    if (job.kind === 'page'){
+      // A page keeps its grid of node ids: the brick pool releases by it.
+      // words / shown: attribute words and shown cells (step 6), equal
+      // when the world has a colour (frameChecker).
+      entry.page = result; entry.count = 0; entry.total = 0; entry.cells = result.count;
+      entry.shown = result.shown || 0; entry.words = result.attr ? result.attr.length - RUN_HEAD * result.attrAt.reduce((a, v) => a + (v !== ATTR_NONE), 0) : 0;
+    } else {
+      // words: how many attribute words came with the records (step 6);
+      // one per record when the world has a colour (frameChecker).
+      Object.assign(entry, { records: result.records, attrs: result.attrs || null, count: result.count, borderStart: result.borderStart,
+                             total: result.records.length, quads: result.quads, openQuads: result.openQuads, words: result.attrs ? result.attrs.length : 0 });
+    }
+    entry.gpu = install(entry);
+    if (!cfg.keepRecords){ entry.records = null; entry.attrs = null; if (entry.page) entry.page = { grid: entry.page.grid, count: entry.page.count }; }
+    // The old entry was drawn until this moment: a switch of kind, or an edit's
+    // new build of the same kind.
+    const old = S.cache.get(job.key);
+    if (old){
+      dispose(old); S.cacheBytes -= old.bytes;
+      if (old.kind !== entry.kind) S.stats.switches++; else S.stats.refreshed++;
+    }
+    S.cache.set(job.key, entry); S.cacheBytes += entry.bytes;
   }
 
   return {
-    S, setWorld, setOptions, update, nextJob, complete, fail, service, evict,
+    S, setWorld, setRoot, setOptions, update, nextJob, complete, fail, service, evict,
     get frame(){ return S.frame; }, get sel(){ return S.sel; }, get revision(){ return S.revision; },
     entry: key => S.cache.get(key), kindOf, stale,
+    // Is this resident entry built from what the shown root holds?
+    current: key => { const e = S.cache.get(key); return !!e && current(e); },
+    get editing(){ return S.edit !== null || S.next !== null; },
     protectedKeys,
   };
 }
@@ -631,32 +861,87 @@ export { resultBytes };
    coarse mean's depth (chunk-core's cellAttr). */
 export const MEAN_DEPTH = 1;
 export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH } = {}){
-  const store = storeView(snap), C = snap.counts, P = snap.poses;
-  const colour = snap.colour && colourOf ? colourOf(snap.colour) : null;
+  const store = storeView(snap);
+  let C = snap.counts, P = snap.poses;
+  const base = snap.colour && colourOf ? colourOf(snap.colour) : null;
+  let colour = base, table = null;
   const counts = { of: id => C[id] }, classes = P ? { pose: id => P[id] } : null;
-  const full = (lod, x, y, z) => {
-    const id = chunkNode(store, snap.root, snap.D, lod, x, y, z).id;
-    return id !== EMPTY && C[id] === 8 ** (lod + CHUNK_LEVELS);
+  const full = (root, lod, x, y, z) => {
+    const id = chunkNode(store, root, snap.D, lod, x, y, z).id;
+    return id !== EMPTY && isFull(store, counts, id, lod + CHUNK_LEVELS);
   };
-  return job => {
-    const t0 = performance.now(), { lod, cx, cy, cz } = job;
-    const buried = () => snap.D >= lod + CHUNK_LEVELS && full(lod, cx, cy, cz) && SIDES.every(([dx, dy, dz]) => full(lod, cx + dx, cy + dy, cz + dz));
+  const run = job => {
+    // A job names its root (§3), and an unedited world's is the snapshot's.
+    const t0 = performance.now(), { lod, cx, cy, cz } = job, root = job.root ?? snap.root;
+    const buried = () => snap.D >= lod + CHUNK_LEVELS && full(root, lod, cx, cy, cz) && SIDES.every(([dx, dy, dz]) => full(root, lod, cx + dx, cy + dy, cz + dz));
     if (job.kind === 'page'){
       // A coloured page needs its shown cells, so it expands with seams
       // and the colour; the cells (all kept ones) don't change with either.
-      const page = pageJob(store, snap.root, snap.D, counts, job,
-        () => expandChunk(store, snap.root, snap.D, { lod, cx, cy, cz },
+      const page = pageJob(store, root, snap.D, counts, job,
+        () => expandChunk(store, root, snap.D, { lod, cx, cy, cz },
                           colour ? { counts, lodRule: job.lodRule, cells: true, seams: true, colour, meanDepth }
                                  : { counts, lodRule: job.lodRule, cells: true }),
         { coloured: !!colour, buried });
       return { ...page, ms: performance.now() - t0 };
     }
     if (buried())
-      return { records: new Uint32Array(0), attrs: colour ? new Uint32Array(0) : null, count: 0, borderStart: 0, quads: 0,
+      return { records: new Uint32Array(0), attrs: colour ? new Uint32Array(0) : null, count: 0, borderStart: 0, quads: 0, openQuads: [0, 0, 0, 0, 0, 0],
                occupied: CHUNK_SIDE ** 3, recordCount: 0, buriedChunk: true, ms: performance.now() - t0 };
-    const c = expandChunk(store, snap.root, snap.D, { lod, cx, cy, cz },
+    const c = expandChunk(store, root, snap.D, { lod, cx, cy, cz },
                           { classes, counts, lodRule: job.lodRule, seams: true, colour, meanDepth });
-    return { records: c.records, attrs: c.attrs || null, count: c.count, borderStart: c.borderStart, quads: c.quads,
+    return { records: c.records, attrs: c.attrs || null, count: c.count, borderStart: c.borderStart, quads: c.quads, openQuads: c.openQuads,
              occupied: c.occupied, recordCount: c.count, ms: performance.now() - t0 };
+  };
+  /* Take an edit's tail (§4b): the new nodes, their counts and poses, and the ops
+     the colour table hasn't seen. Only edits make a table, so a world never edited
+     keeps its plain field and doesn't pay a lookup. A world with no colour ignores
+     the ops, as it has no words for them to change. */
+  run.tail = ({ from, keys, counts: c, poses: p, edits }) => {
+    store.grow(from, keys);                 // throws if a tail was lost
+    const top = store.maxId;
+    if (top >= C.length){
+      const len = Math.max(top + 1, C.length * 2), C2 = new Float64Array(len); C2.set(C); C = C2;
+      if (P){ const P2 = new Uint8Array(len); P2.set(P); P = P2; }
+    }
+    C.set(c, from);
+    if (P && p) P.set(p, from);
+    if (edits && base){
+      if (!table){ table = createBlockTable(); colour = editedField(base, table); }
+      table.sync(edits);
+    }
+  };
+  return run;
+}
+
+/* ---- 4b. tails --------------------------------------------------------------
+   What a worker needs to follow an edit. Ids are append-only, so that's the new
+   end of the keys, their counts and poses, and the colour ops it hasn't seen:
+   under 1 KB a click on clay and terrain, against sending a whole snapshot to each
+   worker (79 MB for D = 12 caves, realtimecsg.md §4.2). Postmessage is enough.
+
+   **Ordering is what makes this right.** The streamer calls `publish` when an edit
+   opens, before any job can name its root, and the page posts the tail on the same
+   port its jobs use. A port keeps its messages in order, and a worker runs one at a
+   time, so a job always runs with exactly the table and nodes it was dispatched
+   with: a job already on the port runs before a later tail reaches the worker, and
+   its colourRev says so. The simulator runs a job at dispatch, which is the same
+   order.
+
+   Make the tailer alongside worldSnapshot, as it starts from what the snapshot
+   holds. Each worker gets every tail. */
+export function createTailer(store, { counts, classes = null, log = null }){
+  let next = store.maxId + 1, epoch = 0, seen = 0;
+  return () => {
+    counts.update(); classes?.update();
+    const from = next, top = store.maxId, n = top - from + 1;
+    const c = new Float64Array(n), p = classes ? new Uint8Array(n) : null;
+    for (let i = 0; i < n; i++){ c[i] = counts.of(from + i); if (p) p[i] = classes.pose(from + i); }
+    let edits = null;
+    if (log && (log.epoch !== epoch || log.count !== seen)){
+      edits = log.delta(epoch, seen);
+      epoch = edits.epoch; seen = edits.count;
+    }
+    next = top + 1;
+    return { from, keys: store.keysFrom(from), counts: c, poses: p, edits };
   };
 }

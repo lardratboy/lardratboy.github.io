@@ -27,7 +27,7 @@
    the chunk's shown cells (Q13: only shown voxels get a word). See
    cellAttr for the coarse mean.
    ===================================================================== */
-import { EMPTY, FIRST_NODE } from './dag-core.js';
+import { EMPTY, FIRST_NODE, isFull } from './dag-core.js';
 import { attrOf8 } from './attr-core.js';
 
 export const CHUNK_LEVELS = 6, CHUNK_SIDE = 64;
@@ -77,6 +77,16 @@ export const boundaryBits = (x, y, z) =>
 export function shownMask(r, openSides){
   const [x, y, z] = mortonXYZ(cellOf(r));
   return maskOf(r) | (boundaryBits(x, y, z) & openSides);
+}
+/* How many faces a chunk shows under some open sides, without its records (the
+   main thread drops them after upload). An open side adds only the boundary faces
+   its cells didn't already show, and each face lies on one side, so the sides add
+   up: `quads` plus an `openQuads[side]` for each side that's open. Draw the seam
+   tail with it, as the viewer does whenever a side is open. */
+export function quadsShown(quads, openQuads, openSides){
+  let q = quads;
+  for (let s = 0; s < 6; s++) if (openSides >> s & 1) q += openQuads[s];
+  return q;
 }
 
 /* ---- addressing --------------------------------------------------------
@@ -389,12 +399,14 @@ export function expandChunk(store, root, D, chunk, opts = {}){
   const records = new Uint32Array(n), attrs = colour ? new Uint32Array(n) : null;
   let count = 0, quads = 0, tail = null, tailAttrs = null, tn = 0;
   if (opts.seams){ tail = new Uint32Array(Math.min(n, 6 * 64 * 64)); if (colour) tailAttrs = new Uint32Array(tail.length); }
-  const fullCount = 8 ** (lod + 1), X0 = cx * 64, Y0 = cy * 64, Z0 = cz * 64;
+  const X0 = cx * 64, Y0 = cy * 64, Z0 = cz * 64;
   const cs = 2 ** lod, attrAt = (i, x, y, z) => cellAttr(store, counts, colour, ids[i], lod, meanDepth, (X0 + x) * cs, (Y0 + y) * cs, (Z0 + z) * cs);
   const coarseFull = (x, y, z) => {
     const id = nodeAt(store, root, D, lod + 1, (X0 + x) >> 1, (Y0 + y) >> 1, (Z0 + z) >> 1);
-    return id !== EMPTY && counts.of(id) === fullCount;
+    return id !== EMPTY && isFull(store, counts, id, lod + 1);
   };
+  const openQuads = [0, 0, 0, 0, 0, 0];
+  const tallyOpen = b => { for (let s = 0; b; s++, b >>= 1) if (b & 1) openQuads[s]++; };
   for (let i = 0; i < n; i++){
     const p = xyz[i], x = p & 255, y = p >> 8 & 255, z = p >> 16;
     const g = gIndex(x, y, z);
@@ -409,19 +421,21 @@ export function expandChunk(store, root, D, chunk, opts = {}){
              || (b & 16 && !coarseFull(x, y, z + 1)) || (b & 32 && !coarseFull(x, y, z - 1)))){
         if (tailAttrs) tailAttrs[tn] = attrAt(i, x, y, z);
         tail[tn++] = packRecord(cells[i], 0, poses[i]);
+        tallyOpen(b);
       }
       continue;
     }
     if (attrs) attrs[count] = attrAt(i, x, y, z);
     records[count++] = packRecord(cells[i], m, poses[i]);
     quads += popcount6(m);
+    tallyOpen(boundaryBits(x, y, z) & ~m);
   }
   const cellSize = 2 ** lod, span = CHUNK_SIDE * cellSize;
   let recs = records.slice(0, count), words = attrs ? attrs.slice(0, count) : null;
   if (tail){ recs = new Uint32Array(count + tn); recs.set(records.subarray(0, count)); recs.set(tail.subarray(0, tn), count); }
   if (tailAttrs){ words = new Uint32Array(count + tn); words.set(attrs.subarray(0, count)); words.set(tailAttrs.subarray(0, tn), count); }
   const out = {
-    records: recs, count, borderStart: count, borderCount: tn, quads, occupied: n, buried: n - count,
+    records: recs, count, borderStart: count, borderCount: tn, quads, openQuads, occupied: n, buried: n - count,
     lod, lodRule: rule, chunk: [cx, cy, cz], origin: [cx * span, cy * span, cz * span], cellSize,
     bytes: recs.byteLength, keptVoxels: counts ? keptVoxels : NaN,
   };

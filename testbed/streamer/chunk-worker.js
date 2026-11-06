@@ -10,7 +10,12 @@
    result goes back as transferable buffers: 4 bytes a record and 4 of
    attribute (step 6), or a ray page's grid, bricks and attribute block
    (steps 5 and 6). The world's colour field is rebuilt here from the
-   snapshot's descriptor (colours.js). */
+   snapshot's descriptor (colours.js).
+
+   An edit arrives as a tail (stream-core §4b) on this same port, ahead of any
+   job naming its root, and a job says which root it reads. A tail that doesn't
+   fit throws here, and the pool's onerror restarts the worker, which gets the
+   snapshot and every tail again. */
 import { createJobRunner } from './stream-core.js';
 import { colourOf } from './colours.js';
 
@@ -19,6 +24,11 @@ self.onmessage = ({ data }) => {
   if (data.type === 'world'){
     runner = createJobRunner(data.snap, colourOf);
     revision = data.revision;
+    return;
+  }
+  if (data.type === 'tail'){
+    if (!runner || data.revision !== revision) throw new Error(`a tail for world ${data.revision} (have ${revision})`);
+    runner.tail(data.tail);
     return;
   }
   try {

@@ -12,7 +12,15 @@
    worker gets its own copy, §8.4), and a restarted worker gets it again
    before its first job. Jobs carry that epoch, so a worker can refuse a
    job meant for another world. The streamer's revision is a different
-   thing (which results are stale) and never reaches the worker. */
+   thing (which results are stale) and never reaches the worker.
+
+   An edit reaches a worker as a tail (stream-core §4b), on the port its
+   jobs use, so a job runs with exactly the nodes and colour table it was
+   dispatched with. The pool keeps every tail of the world, because a worker
+   that restarts has only the snapshot: it gets that and all of them, in
+   order, before its first job. So do the workers that weren't ready yet and
+   the main-thread runner, which is built late. Under 1 KB a click, so about
+   18 MB for an hour of nonstop clicking (docs/edit-mode-log.md §2). */
 import { createJobRunner } from './stream-core.js';
 import { colourOf } from './colours.js';
 
@@ -22,6 +30,7 @@ export class StreamPool {
     this.workerCount = workerCount;
     this.slots = [];
     this.world = null;               // { snap, revision }
+    this.tails = [];                 // every edit's tail for this world, in order
     this.runner = null;              // the main-thread runner, built lazily
     this.mode = workerCount ? 'starting workers' : 'compatibility';
     this.suspended = false;
@@ -32,6 +41,7 @@ export class StreamPool {
 
   setWorld(snap, revision){
     this.world = { snap, revision };
+    this.tails = [];
     this.runner = null;
     for (const s of this.slots) if (s.ready && !s.dead) this._sendWorld(s);
   }
@@ -39,6 +49,16 @@ export class StreamPool {
     if (!this.world) return;
     slot.worker.postMessage({ type: 'world', snap: this.world.snap, revision: this.world.revision });
     slot.revision = this.world.revision;
+    for (const tail of this.tails) slot.worker.postMessage({ type: 'tail', tail, revision: this.world.revision });
+  }
+  /* What the streamer's publish hands the page: an edit's new nodes and colour
+     ops. Called before any job can name the new root. A slot that isn't ready
+     has nothing to keep up with, as it gets every tail when it is. */
+  tail(tail){
+    this.tails.push(tail);
+    this.runner?.tail(tail);
+    for (const s of this.slots) if (s.ready && !s.dead && s.revision === this.world.revision)
+      s.worker.postMessage({ type: 'tail', tail, revision: this.world.revision });
   }
 
   start(){
@@ -106,7 +126,10 @@ export class StreamPool {
     if (this.mode === 'compatibility'){
       const job = this.streamer.nextJob();
       if (!job) return;
-      this.runner ||= createJobRunner(this.world.snap, colourOf);
+      if (!this.runner){
+        this.runner = createJobRunner(this.world.snap, colourOf);
+        for (const tail of this.tails) this.runner.tail(tail);
+      }
       try { this.completed++; this.streamer.complete(job, this.runner(job)); }
       catch (e){ this.streamer.fail(job, e.message); }
       return;
@@ -123,7 +146,7 @@ export class StreamPool {
         // streamer bumps its revision on any flush (a new rayLod, say), and
         // the worker's world is still good then (docs/ray-log.md §4).
         slot.worker.postMessage({ type: 'expand', jobId: job.jobId, world: this.world.revision, lod: job.lod,
-                                  cx: job.cx, cy: job.cy, cz: job.cz, lodRule: job.lodRule, kind: job.kind });
+                                  cx: job.cx, cy: job.cy, cz: job.cz, lodRule: job.lodRule, kind: job.kind, root: job.root });
       } catch (e){ slot.fail(e.message); }
     }
   }

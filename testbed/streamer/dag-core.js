@@ -225,6 +225,10 @@ export function createStore(){
      node keys (level + 8 child ids, 9 words a node) in id order. storeView
      reads it back. Copied, so the store can keep growing. */
   const snapshot = () => ({ keys: nodes.keys.slice(0, nodes.size * 9) });
+  /* The keys of every node from id `from` on: what an edit adds. Ids only ever
+     append, so this is all a worker's view needs to catch up (storeView's grow,
+     docs/realtimecsg.md §4.2). */
+  const keysFrom = from => nodes.keys.slice((from - FIRST_NODE) * 9, nodes.size * 9);
 
   // The §8.5 oracle query: walk D levels, one octant per level.
   function query(root, D, x, y, z){
@@ -329,7 +333,7 @@ export function createStore(){
     return map;
   }
 
-  return { intern, levelOf, child, fromDense, fromRadix4, fromField, solid, snapshot, query, expand, transform, union, graft, importKeys,
+  return { intern, levelOf, child, fromDense, fromRadix4, fromField, solid, snapshot, keysFrom, query, expand, transform, union, graft, importKeys,
            get size(){ return nodes.size; }, get maxId(){ return nodes.size + FIRST_NODE - 1; } };
 }
 
@@ -388,9 +392,16 @@ export function pruneWorld(store, root){
    interns. expandChunk, createCounts and createClasses only ever call
    child, levelOf and maxId, so they run on a view unchanged. The page
    holds a worker-built world as a view too (scatter-build.js): the
-   streamer reads child, maxId and snapshot, so a view has snapshot. */
+   streamer reads child, maxId and snapshot, so a view has snapshot.
+
+   `grow` appends an edit's new nodes (the store's keysFrom), which is how a
+   worker's view follows an edited world without being sent it again. The ids
+   line up because a view and its store both hold every node ever interned, in
+   order, so a tail that doesn't start where the view stopped has lost nodes, and
+   it throws rather than read a wrong child later. size and maxId are getters
+   because createCounts and createClasses read maxId to find what's new. */
 export function storeView({ keys }){
-  const n = keys.length / 9;
+  let n = keys.length / 9;
   const child = (id, o) => keys[(id - FIRST_NODE) * 9 + 1 + o];
   const levelOf = id => id < FIRST_NODE ? 0 : keys[(id - FIRST_NODE) * 9];
   function query(root, D, x, y, z){
@@ -399,7 +410,20 @@ export function storeView({ keys }){
       id = child(id, ((x >> k) & 1) | (((y >> k) & 1) << 1) | (((z >> k) & 1) << 2));
     return id === FULL ? 1 : 0;
   }
-  return { child, levelOf, query, snapshot: () => ({ keys }), size: n, maxId: n + FIRST_NODE - 1 };
+  function grow(from, tail){
+    if (from !== n + FIRST_NODE) throw new Error(`storeView.grow: this view stops at id ${n + FIRST_NODE - 1}, the tail starts at ${from}`);
+    const want = (n * 9) + tail.length;
+    if (want > keys.length){
+      const k2 = new Uint32Array(Math.max(want, keys.length * 2));
+      k2.set(keys.subarray(0, n * 9)); keys = k2;
+    }
+    keys.set(tail, n * 9);
+    n += tail.length / 9;
+  }
+  return { child, levelOf, query, grow,
+           snapshot: () => ({ keys: n * 9 === keys.length ? keys : keys.slice(0, n * 9) }),
+           keysFrom: from => keys.slice((from - FIRST_NODE) * 9, n * 9),
+           get size(){ return n; }, get maxId(){ return n + FIRST_NODE - 1; } };
 }
 
 /* ---- labelled classes (SSVDAG) without materializing anything -----------
@@ -547,6 +571,27 @@ export function createCounts(store){
     update,
     of: id => { if (id >= done) throw new Error(`counts: id ${id} not counted, call update()`); return n[id]; },
   };
+}
+
+/* Is this node completely full? Asking `count === 8^level` is exact only up to
+   level 17: past 2^53 a count can't feel a voxel, so a level-18 node with a
+   one-voxel hole has 8^18 − 1 → 8^18 and passes (docs/edit-log.md §2, where this
+   made a job differ from expandChunk). Hash-consing gives an exact test instead:
+   the solid node of a level has eight identical children, each the solid node
+   below it, and nothing else does. So above level 17 walk down those; the count
+   has already turned away nearly everything, and a read-only storeView can do it,
+   having no solid() to ask. At most 8 reads a level, on the few nodes that pass
+   the count. Below level 18 this is the count test, at the count test's price. */
+export const COUNT_EXACT_LEVEL = 17;
+const POW8 = Float64Array.from({ length: 64 }, (_, k) => 8 ** k);
+export function isFull(store, counts, id, level){
+  if (counts.of(id) !== POW8[level]) return false;
+  for (let k = level; k > COUNT_EXACT_LEVEL; k--){
+    const c = store.child(id, 0);
+    for (let o = 1; o < 8; o++) if (store.child(id, o) !== c) return false;
+    id = c;
+  }
+  return level <= COUNT_EXACT_LEVEL || counts.of(id) === POW8[COUNT_EXACT_LEVEL];
 }
 
 /* ---- census -------------------------------------------------------------

@@ -11,6 +11,21 @@
   #hud{ position:fixed; right:10px; bottom:8px; text-align:right; white-space:pre;
         background:rgba(0,0,0,.55); padding:8px 12px; border-radius:6px;
         border:1px solid rgba(255,255,255,.07); pointer-events:none; }
+  /* The buttons that work with the panels hidden (docs/hud-toggle.md). Top right, the
+     one corner neither panel grows into. */
+  #corner{ position:fixed; right:10px; top:8px; display:flex; gap:4px; }
+  #corner button{ background:rgba(0,0,0,.55); color:#8a8a9e; font:inherit; letter-spacing:inherit;
+              padding:2px 8px; border-radius:4px; border:1px solid rgba(255,255,255,.1); cursor:pointer; }
+  #corner button:hover{ color:#b8b8cc; border-color:rgba(255,255,255,.3); }
+  #corner button.on{ color:#c8c8d8; border-color:rgba(122,138,208,.8); }
+  /* The triangle count, while the wireframe is on (docs/wireframe.md). */
+  #tris{ position:fixed; left:10px; bottom:8px; background:rgba(0,0,0,.55); padding:2px 8px; border-radius:4px; color:#8a8a9e;
+         border:1px solid rgba(255,255,255,.07); pointer-events:none; white-space:pre; font-variant-numeric:tabular-nums; }
+  #tris b{ color:#c8c8d8; font-weight:normal; }
+  /* What's left of the HUD when it's off (docs/hud-toggle.md). Same corner, same box.
+     Tabular figures, so the box doesn't shiver as the number changes. */
+  #fps{ position:fixed; right:10px; bottom:8px; background:rgba(0,0,0,.55); padding:2px 8px; border-radius:4px; color:#a0a0b2;
+        border:1px solid rgba(255,255,255,.07); pointer-events:none; font-variant-numeric:tabular-nums; }
   #hud b{ color:#a0a0b2; font-weight:normal; }
   #hud .sec{ color:#3e3e4c; }
   #hud .warn{ color:#d08a5a; }
@@ -66,11 +81,28 @@
   #dropHint{ position:fixed; inset:12px; border:2px dashed #7a8ad0; border-radius:10px; background:rgba(10,10,20,.55);
              color:#b8b8cc; display:flex; align-items:center; justify-content:center; font-size:15px; pointer-events:none; }
   #dropHint[hidden]{ display:none; }
+  /* Edit mode (docs/edit-mode-log.md). Nothing here takes the pointer: in pointer
+     lock there isn't one. The crosshair inverts what's under it, so it shows on
+     every colour of clay, and it isn't on the canvas, so no frame the tests compare
+     holds it. */
+  #cross{ position:fixed; left:50%; top:50%; width:15px; height:15px; margin:-7px 0 0 -7px; pointer-events:none; mix-blend-mode:difference; }
+  #cross::before, #cross::after{ content:''; position:absolute; background:#fff; }
+  #cross::before{ left:7px; top:0; width:1px; height:15px; }
+  #cross::after{ left:0; top:7px; width:15px; height:1px; }
+  #cross[hidden], #editBar[hidden]{ display:none; }
+  #editBar{ position:fixed; left:50%; bottom:10px; transform:translateX(-50%); background:rgba(0,0,0,.65); padding:6px 10px; border-radius:6px;
+            border:1px solid rgba(255,255,255,.1); color:#b8b8cc; pointer-events:none; text-align:center; white-space:pre; }
+  #editSwatches{ margin-bottom:4px; }
+  #editSwatches i{ display:inline-block; width:18px; height:18px; line-height:18px; margin:0 2px; border-radius:3px; font-style:normal; font-size:9px;
+                   color:rgba(255,255,255,.75); text-shadow:0 0 2px #000; outline:1px solid rgba(255,255,255,.15); }
+  #editSwatches i.on{ outline:2px solid #fff; }
+  #editSwatches i[hidden]{ display:none; }
+  #editNote .warn{ color:#d08a5a; }
 </style>
 </head>
 <body>
 <canvas id="gl" tabindex="0"></canvas>
-<div id="ctl">
+<div id="ctl" hidden>
   <label>world <select id="world"></select></label>
   <label id="depthL">depth <select id="depth"></select></label>
   <label id="seedL" hidden>seed <input id="seed" type="number" min="1" max="65535"><button id="seedDown" title="the previous seed ([)">−</button><button id="seedUp" title="the next seed (])">+</button><button id="seedRand" title="a random seed (R)">random</button></label>
@@ -90,6 +122,13 @@
     <label>ground <select id="kitGround"><option value="1">ground and gravity</option><option value="0">floating</option></select></label>
     <label>colour frame <select id="kitColourLevel"></select></label>
     <div id="kitInfo"></div>
+  </div>
+  <div id="clayCtl" hidden>
+    <label>lump <select id="clayLump"></select></label>
+    <label>shape <select id="clayShape"><option value="ball">a ball</option><option value="block">a block</option></select></label>
+    <label>ground <select id="clayGround"><option value="0">none, it floats</option><option value="1">flat ground</option></select></label>
+    <div id="clayInfo"></div>
+    <label>edit <button id="editToggle" title="edit mode: click to break and place blocks (B)">edit mode (B)</button></label>
   </div>
   <div id="fileCtl">
     <label>file <button id="fileOpen" title="open .vdag files (or drop them anywhere on the page)">open…</button><button id="fileExport" title="save the world on screen as one .vdag file">export this world</button></label>
@@ -112,19 +151,31 @@
   <label>cut <select id="freeze"><option value="0">follows the eye</option><option value="1">frozen</option></select></label>
   <div class="keys">drag: look   WASD: move   E/Q: up/down
 shift: ×8   wheel: speed   F: freeze cut
+H: show or hide these panels   T: wireframe
 [ / ]: seed − / +   R: a random seed
 drop .vdag files anywhere to open them
+B: edit mode, on clay and flat ground. Esc leaves
+  left: break   right: place   middle: take a colour
+  wheel or - =: block side   1-8: colour   Z / shift-Z: undo / redo
+  alt-wheel: speed
 pad: L stick move, R stick look, RT/LT up/down
      A or L3 ×8, RB/LB speed ×2/÷2, Y freeze cut
 ?world=&amp;depth=&amp;detail=&amp;max=&amp;workers=&amp;eye=x,y,z
 ?world=lattice:1&amp;lattice=R,nx,ny,nz,gap,turns,axes,align
 ?world=kit:1&amp;kit=D,libs,ornaments,ground,colour
 ?world=caves:&lt;seed&gt;&amp;depth=10..12   (scatter:, lattice:, kit: the same)
+?world=clay&amp;clay=D,lump,shape,ground   (lump 0: flat ground, or empty without ground)
+?hud=1 opens with the panels   ?wire=1 with the wireframe
 ?quiet draws once converged   ?selftest runs streamSelftest()
 ?ray=density|off|0..6   ?density=0.27,0.025   ?stencil=0   ?raymiss=discard   ?bench   raySelftest()
 ?occlusion=queries|depth (off by default)   occlusionSelftest()</div>
 </div>
-<div id="hud"></div>
+<div id="hud" hidden></div>
+<div id="fps" hidden>– fps</div>
+<div id="tris" hidden title="triangles are counted before the GPU culls the back-facing ones"></div>
+<div id="corner"><button id="wireToggle" title="draw the triangles as lines (T)">wireframe (T)</button><button id="hudToggle" title="show or hide the panels (H)">show HUD (H)</button></div>
+<div id="cross" hidden></div>
+<div id="editBar" hidden><div id="editSwatches"></div><div id="editNote"></div></div>
 <div id="dropHint" hidden>drop world files to open them</div>
 <div id="toast" hidden><span id="toastSpin"></span><span id="toastText"></span><span id="toastTime"></span><div id="toastBar"><div></div></div></div>
 
@@ -176,11 +227,17 @@ pad: L stick move, R stick look, RT/LT up/down
    The stencil (docs/stencil-pass.md): the ray pass runs only on the
    pixels of the traced chunks. Their boxes are drawn into a stencil
    first (markTraced), and the full-screen pass is stencil-tested, so a
-   pixel whose ray meets no traced chunk never runs the march. */
-import { createStore, createClasses, createCounts, prune, storeView, OH48 } from './dag-core.js';
-import { mortonXYZ } from './chunk-core.js';
+   pixel whose ray meets no traced chunk never runs the march.
+
+   Edit mode (docs/edit-mode-log.md): B on clay or flat ground. A click is
+   one step of edit-core's log, and the streamer's setRoot opens the
+   transaction that shows it; the section "edit mode" below is the wiring. */
+import { createStore, createClasses, createCounts, prune, storeView, OH48, EMPTY } from './dag-core.js';
+import { mortonXYZ, shownMask, quadsShown } from './chunk-core.js';
 import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
-import { createWorld, createStreamer, worldSnapshot, keyOf, DEFAULTS, clearance as clearanceOf } from './stream-core.js';
+import { createWorld, createStreamer, worldSnapshot, createTailer, keyOf, DEFAULTS, clearance as clearanceOf } from './stream-core.js';
+import { aimAt, aimInAir, pick, boxOf, boxEdges, reachOf, createEditLog, createBlockTable, editedField, replay, createRepeat, PALETTE, MAX_BLOCK_LEVEL, AIR_PER_SIDE } from './edit-core.js';
+import { colourOf } from './colours.js';
 import { StreamPool } from './stream-pool.js';
 import { GLSL_RAY, GLSL_RAY_ATTR, TREE_TEXELS, TREE_W, BRICK_ROW } from './ray-glsl.js';
 import { createBrickPool, installPage, releasePage, buildCoverTree, KIND_RAY, KIND_RASTER, PAGE_WORDS, BRICK_WORDS,
@@ -195,6 +252,7 @@ import { buildScatterInWorkers, buildKitInWorkers, ornamentsKept, isAbort } from
 import { latticeDesc, latticeFromParam, latticeParam, budgetOf, maxCube, stackOf, gapOf } from './lattice-core.js';
 import { kitDesc, kitFromParam, kitParam, sideOf, KIT_LIMITS } from './kit-core.js';
 import { caveDesc } from './cave-core.js';
+import { clayDesc, clayFromParam, clayParam, buildClay, clayPlace, CLAY_LIMITS, CLAY_DEFAULTS } from './clay-core.js';
 
 const $ = id => document.getElementById(id);
 const canvas = $('gl');
@@ -210,7 +268,7 @@ const FACE_OFF = [
   [.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5],[-.5,-.5,.5],   [-.5,-.5,-.5],[-.5,.5,-.5],[.5,.5,-.5],[.5,-.5,-.5]];
 const glslVec3s = a => a.map(v => `vec3(${v.map(x => x.toFixed(1)).join(',')})`).join(',\n  ');
 
-const VS = `#version 300 es
+const rasterVS = hideAlso => `#version 300 es
 precision highp float;
 precision highp int;
 ${GLSL_DECODE}
@@ -238,8 +296,12 @@ void main(){
   vNormal = NORMAL[face];
   vPose = recPose(aRec);
   gl_Position = uViewProj * vec4(p, 1.0);
-  if (!faceShown(aRec, face)) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+  if (!faceShown(aRec, face)${hideAlso}) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
 }`;
+const VS = rasterVS('');
+/* The wireframe's: the same vertices, and lines have no CULL_FACE, so it drops the
+   back-facing faces itself. p is eye-relative. */
+const WIRE_VS = rasterVS(' || dot(NORMAL[face], p) >= 0.0');
 
 /* Shading both passes share, so a voxel looks the same drawn either way.
    Colour mode 5 writes the distance to the eye as a 24-bit number instead
@@ -404,8 +466,10 @@ function link(vs, fs){
 }
 const prog = link(VS, FS);
 const uniformsOf = (p, names) => Object.fromEntries(names.map(n => [n, gl.getUniformLocation(p, n)]));
-const U = uniformsOf(prog, ['uViewProj', 'uEyeN', 'uInvSide', 'uOrigin', 'uCellSize', 'uOpenSides',
-  'uColorMode', 'uChunkColor', 'uLodColor', 'uFog', 'uDepthScale', 'uDrawIndex']);
+const RASTER_UNIFORMS = ['uViewProj', 'uEyeN', 'uInvSide', 'uOrigin', 'uCellSize', 'uOpenSides',
+  'uColorMode', 'uChunkColor', 'uLodColor', 'uFog', 'uDepthScale', 'uDrawIndex'];
+const U = uniformsOf(prog, RASTER_UNIFORMS);
+const wireProg = link(WIRE_VS, FS), WU = uniformsOf(wireProg, RASTER_UNIFORMS);
 /* A miss writes transparent black, and the pass blends over the raster
    (ONE, ONE_MINUS_SRC_ALPHA): a hit's alpha is exactly 1, so it replaces
    the pixel, and a miss leaves it. The first ray pass discarded a miss,
@@ -422,6 +486,45 @@ const RAY_UNIFORMS = ['uTree', 'uPages', 'uBricks', 'uPageAttr', 'uAttrHeap', 'u
 const RAY_PASS_UNIFORMS = [...RAY_UNIFORMS, 'uEyeN', 'uInvSide', 'uLodColors', 'uColorMode', 'uFog', 'uDepthScale'];
 const RU = uniformsOf(rayProg, RAY_PASS_UNIFORMS), RUD = uniformsOf(rayProgDiscard, RAY_PASS_UNIFORMS);
 const emptyVAO = gl.createVertexArray();
+
+/* The block outline (edit-core's boxEdges): each edge an instance, a quad of six
+   vertices widened in pixels, because WebGL's own lines are one device pixel, a
+   hair on a retina screen. Eye-relative like everything raster. It goes on the
+   canvas after the frame's blit, with no depth test (the ray pass writes no depth
+   to test against), so it can show through a rim in front of it. */
+const LINE_VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 aA;
+layout(location = 1) in vec3 aB;
+uniform mat4 uViewProj;
+uniform vec2 uPixel;     // NDC per pixel
+uniform float uWidth;    // pixels
+const ivec2 QUAD[6] = ivec2[6](ivec2(0, -1), ivec2(1, -1), ivec2(1, 1), ivec2(0, -1), ivec2(1, 1), ivec2(0, 1));
+void main(){
+  vec4 a = uViewProj * vec4(aA, 1.0), b = uViewProj * vec4(aB, 1.0);
+  vec2 d = (b.xy / b.w - a.xy / a.w) / uPixel;
+  d = dot(d, d) > 1e-6 ? normalize(d) : vec2(1.0, 0.0);
+  ivec2 q = QUAD[gl_VertexID];
+  vec4 p = q.x == 0 ? a : b;
+  // Half a width past each end, so that corners meet.
+  p.xy += (vec2(-d.y, d.x) * float(q.y) + d * (q.x == 0 ? -1.0 : 1.0)) * 0.5 * uWidth * uPixel * p.w;
+  gl_Position = p;
+}`;
+const LINE_FS = `#version 300 es
+precision highp float;
+uniform vec3 uColour;
+out vec4 outColor;
+void main(){ outColor = vec4(uColour, 1.0); }`;
+const lineProg = link(LINE_VS, LINE_FS), LU = uniformsOf(lineProg, ['uViewProj', 'uPixel', 'uWidth', 'uColour']);
+const lineVAO = gl.createVertexArray(), lineBuf = gl.createBuffer();
+gl.bindVertexArray(lineVAO);
+gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+for (const [at, offset] of [[0, 0], [1, 12]]){
+  gl.enableVertexAttribArray(at);
+  gl.vertexAttribPointer(at, 3, gl.FLOAT, false, 24, offset);
+  gl.vertexAttribDivisor(at, 1);
+}
+gl.bindVertexArray(null);
 
 /* The raster target (docs/ray-depth-plan.md, decision 2): a colour
    renderbuffer and a depth *texture*, one pair per size (the screen, and
@@ -872,10 +975,17 @@ function syncCoverTree(){
   texRows(ray.tree, ray.treeCPU.subarray(0, 4 * TREE_W * rows), 0, rows);
   ray.treeNodes = nodes;
 }
+const CUBE_TRIS = 36, CUBE_LINES = 60;
 const cubeIndex = gl.createBuffer();
 {
-  const idx = new Uint8Array(36);
-  for (let f = 0; f < 6; f++){ const b = 4 * f; idx.set([b, b+1, b+2, b, b+2, b+3], 6 * f); }
+  // The triangles, then their edges for the wireframe: five a face, the diagonal once.
+  // One buffer, because a chunk's VAO holds its binding, and an offset costs nothing.
+  const idx = new Uint8Array(CUBE_TRIS + CUBE_LINES);
+  for (let f = 0; f < 6; f++){
+    const b = 4 * f;
+    idx.set([b, b+1, b+2, b, b+2, b+3], 6 * f);
+    idx.set([b, b+1, b+1, b+2, b+2, b+3, b+3, b, b, b+2], CUBE_TRIS + 10 * f);
+  }
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIndex);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
 }
@@ -956,6 +1066,7 @@ const state = {
   color: +(params.get('color') ?? 8),
   cache: +(params.get('cache') ?? 256),
   seams: params.get('seams') !== '0',
+  wire: params.get('wire') === '1',
   // Which chunks are traced (pathOptions): 'density', the default, each
   // chunk by its records per pixel on screen (stream-core §2b,
   // docs/ray-depth-plan.md); 'off', raster only (step 4); a lod n, every
@@ -1007,6 +1118,10 @@ state.kit = (() => {
   try { return params.has('kit') ? kitFromParam(params.get('kit'), seed) : kitDesc({ seed }); }
   catch (e){ console.warn('?kit refused:', e.message); return kitDesc({ seed }); }
 })();
+state.clay = (() => {
+  try { return params.has('clay') ? clayFromParam(params.get('clay')) : clayDesc(); }
+  catch (e){ console.warn('?clay refused:', e.message); return clayDesc(); }
+})();
 const workerCount = params.has('workers') ? +params.get('workers') : Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
 // The lattice's build threads: short-lived, so up to 8 (a 128³ lattice is
 // ~3 min of work on one thread; docs/lattice3d-log.md §5). ?workers sets both.
@@ -1028,6 +1143,10 @@ const pathLabel = path => path === 'density' ? `by density > ${densityText()}` :
    field of view), and the pixel count, which caps a footprint. */
 const viewportOptions = (w, h) => ({ pxPerRadian: h / (2 * Math.tan(0.45)), screenPixels: w * h });
 const streamer = createStreamer({ install, dispose, detail: state.detail, maxChunks: state.max,
+  // An edit opens: the workers get its nodes and colour ops first, on the port
+  // its jobs will use (stream-core §4b). `gens` says which clicks this edit shows,
+  // for the latency numbers.
+  publish: ({ gen }) => { const E = W?.edit; if (!E) return; E.gens.set(gen, E.serial); pool.tail(E.tailer()); },
   cacheBytes: cacheBytes(state.cache), cacheMax: state.cache ? DEFAULTS.cacheMax : 1,
   lodRuleOf: lod => lod === 0 || state.rule === 'any' ? 'any' : 'adaptive', ...pathOptions(state.path),
   ...viewportOptions(Math.round(innerWidth * Math.min(devicePixelRatio || 1, 2)), Math.round(innerHeight * Math.min(devicePixelRatio || 1, 2))) });
@@ -1059,6 +1178,7 @@ const catalogue = () => {
   out.push({ id: 'lattice:' + state.lattice.seed, label: 'specimen lattice (any R, nx × ny × nz)', group: 'block-showroom specimens' });
   out.push({ id: 'kit:' + state.kit.seed, label: 'kit: nested 4³ assemblies of parts', group: 'kit world' });
   out.push({ id: isCaves(state.world) ? state.world : 'caves:1', label: 'caves under mountains (water, lava)', group: 'natural' });
+  out.push({ id: 'clay', label: 'clay, flat ground or empty', group: 'to sculpt' });
   for (const e of shelf) out.push({ id: e.id, label: e.name, group: 'shelf' });
   return out;
 };
@@ -1073,11 +1193,14 @@ function fillWorlds(){
   fillShelf();
 }
 const isRow = id => id.startsWith('row:'), isScatter = id => id.startsWith('scatter:'), isLattice = id => id.startsWith('lattice:');
-const isKit = id => id.startsWith('kit:'), isCaves = id => /^caves:\d+$/.test(id);
+const isKit = id => id.startsWith('kit:'), isCaves = id => /^caves:\d+$/.test(id), isClay = id => id === 'clay';
 // The kit: 12, 14 and 16 as planned (decision 7), and 10, small enough for the self-test.
 const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: `L=${L} (${(4 ** L).toLocaleString()}³)` }))
   : isKit(id) ? [10, 12, 14, 16].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³, ${(D - 4) / 2} levels)` }))
   : isCaves(id) ? [10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }))
+  // Clay stops at 20 here, though its descriptor goes on: the ray pass holds
+  // the eye as float32 voxels (docs/clay-log.md §3). ?clay= asks for more.
+  : isClay(id) ? [12, 14, 16, 18, 20].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }))
   : isScatter(id) ? [9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${((2 ** D / 128) ** 2).toLocaleString()} specimens)` }))
   : [8, 9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }));
 function fillDepth(){
@@ -1085,6 +1208,7 @@ function fillDepth(){
   // The lattice has no depth to pick: its controls show instead.
   $('depthL').hidden = isLattice(state.world) || isFile(state.world); $('latticeCtl').hidden = !isLattice(state.world);
   $('kitCtl').hidden = !isKit(state.world);
+  $('clayCtl').hidden = !isClay(state.world);
   // A world on the shelf is the depth it is.
   if (isFile(state.world)){ state.depth = shelfEntry(state.world)?.D ?? state.depth; return; }
   if (isLattice(state.world)){ state.depth = state.lattice.D; fillLattice(); return; }
@@ -1092,6 +1216,12 @@ function fillDepth(){
   for (const c of depthChoices(state.world)) sel.add(new Option(c.label, c.v));
   // The kit's depth is its descriptor's.
   if (isKit(state.world)){ state.depth = state.kit.D; sel.value = String(state.depth); fillKit(); return; }
+  // So is clay's, and a depth past the menu's (?clay=) gets a line of its own.
+  if (isClay(state.world)){
+    state.depth = state.clay.D;
+    if (!depthChoices(state.world).some(c => c.v === state.depth)) sel.add(new Option(`D=${state.depth} (from the link)`, state.depth));
+    sel.value = String(state.depth); fillClay(); return;
+  }
   if (state.depth === null || !depthChoices(state.world).some(c => c.v === state.depth))
     state.depth = isRow(state.world) ? 8 : isScatter(state.world) || isCaves(state.world) ? 12 : (state.world === 'shape:gyroid' ? 9 : 10);
   sel.value = String(state.depth);
@@ -1189,6 +1319,31 @@ function bindKit(){
   for (const id of ['kitLibs', 'kitOrn', 'kitShare', 'kitGround', 'kitColourLevel']) $(id).addEventListener('change', scheduleKit);
 }
 
+/* ---- clay's controls (docs/clay-log.md) -----------------------------------
+   One descriptor, four worlds: a lump, a lump on the ground, the ground alone,
+   and nothing. A change rebuilds, and the eye stays, as the kit's controls do:
+   the largest build is about 265 ms, and most are a few. A new depth moves
+   the lump (it sits at the centre), so that one resets the view. */
+function showClay(){
+  const d = state.clay;
+  $('clayInfo').textContent = d.lump ? (W && W.clay && clayParam(W.clay) === clayParam(d) ? `${W.nodes.toLocaleString()} nodes, ${Math.round(W.buildMs)} ms` : '')
+    : d.ground ? 'half the world is solid, so there\'s no floor to reach' : 'empty: nothing to draw';
+}
+function fillClay(){
+  const d = state.clay, sel = $('clayLump');
+  sel.innerHTML = '';
+  for (const n of CLAY_LIMITS.lumps) if (n <= 2 ** (d.D - 1)) sel.add(new Option(n ? `side ${n.toLocaleString()} voxels` : 'none', n));
+  sel.value = String(d.lump); $('clayShape').value = d.shape; $('clayGround').value = d.ground ? '1' : '0';
+  showClay();
+}
+function bindClay(){
+  for (const id of ['clayLump', 'clayShape', 'clayGround']) $(id).addEventListener('change', () => {
+    state.clay = clayDesc({ D: state.clay.D, lump: +$('clayLump').value, shape: $('clayShape').value, ground: $('clayGround').value === '1' });
+    fillClay();
+    loadWorld('keep').catch(e => console.error('clay build failed', e));
+  });
+}
+
 /* ---- the seed (asked for 2026-11-04) -------------------------------------
    Four worlds take a seed: the scatter, the lattice, the kit and the
    caves. It was always the number after the colon in the world id
@@ -1262,8 +1417,9 @@ const mbOf = n => n >= 1e6 ? `${(n / 1e6).toFixed(2)} MB` : n >= 1e4 ? `${(n / 1
 // What a link or a file should say this world was built from.
 function sourceOf(){
   if (isFile(state.world)) return shelfEntry(state.world)?.source ?? null;
-  return { world: state.world, depth: isLattice(state.world) || isKit(state.world) ? null : state.depth,
-           lattice: isLattice(state.world) ? latticeParam(state.lattice) : null, kit: isKit(state.world) ? kitParam(state.kit) : null };
+  return { world: state.world, depth: isLattice(state.world) || isKit(state.world) || isClay(state.world) ? null : state.depth,
+           lattice: isLattice(state.world) ? latticeParam(state.lattice) : null, kit: isKit(state.world) ? kitParam(state.kit) : null,
+           clay: isClay(state.world) ? clayParam(state.clay) : null };
 }
 const colourNote = status => ({
   same: 'colour as written',
@@ -1274,14 +1430,18 @@ const colourNote = status => ({
 })[status] ?? esc(status);
 function showFile(html = ''){
   $('fileInfo').innerHTML = html;
+  if (html.includes('class="warn"')) setHud(true);
 }
 function fillShelf(){
   const onShelf = isFile(state.world);
-  $('shelfAdd').disabled = !W || !!W.file;
+  // Neither a file nor the shelf can hold edits yet (realtimecsg.md §11.8 step 9),
+  // and writing the shape without its block colours would look right and be wrong.
+  const edited = hasEdits();
+  $('shelfAdd').disabled = !W || !!W.file || edited;
   $('shelfRemove').disabled = !onShelf;
   $('shelfExport').disabled = !shelf.length;
   $('shelfExport').textContent = shelf.length ? `export all (${shelf.length})` : 'export all';
-  $('fileExport').disabled = !W;
+  $('fileExport').disabled = !W || edited;
 }
 const currentView = () => ({ eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch });
 const worldName = () => `${W.label}${isSeeded(W.id) ? `, seed ${seedOf(W.id)}` : ''}, D=${W.D}`;
@@ -1346,6 +1506,7 @@ async function openFiles(fileList){
     state.world = added[0].id; state.depth = added[0].D;
     fillWorlds(); fillDepth();
     await loadWorld(true);
+    if (W?.file && colourNote(W.file.colourStatus).includes('class="warn"')) setHud(true);
   }
   return { added, problems };
 }
@@ -1397,6 +1558,7 @@ function goToSource(src){
   try {
     if (src.lattice) state.lattice = latticeFromParam(src.lattice, seedOf(id));
     if (src.kit) state.kit = kitFromParam(src.kit, seedOf(id));
+    if (src.clay) state.clay = clayFromParam(src.clay);
   } catch { /* a link that no longer parses: the current controls stand */ }
 }
 function removeFromShelf(){
@@ -1433,7 +1595,7 @@ let W = null;                    // the current world: { id, store, root, D, sid
 const CLASSES_MAX = 300000;
 async function buildWorld(signal, gen){
   const t0 = performance.now();
-  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, classes = null, file = null;
+  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, clay = null, classes = null, file = null;
   if (isFile(state.world)){
     // Already data: the file's worker read it, or it was added from a world
     // built here. Nothing to build but the counts and the snapshot below.
@@ -1486,6 +1648,13 @@ async function buildWorld(signal, gen){
     ({ store, root, D } = kit);
     label = `kit: ${desc.L} levels of 4³ assemblies${desc.ground ? ' on the ground' : ', floating'}`;
     colour = desc;
+  } else if (isClay(state.world)){
+    // Here, not in workers: it keeps the real store edit mode will add to.
+    // A few ms by default (docs/clay-log.md §2).
+    clay = state.clay;
+    ({ store, root, D } = buildClay(clay));
+    label = !clay.lump ? (clay.ground ? 'flat ground' : 'empty') : `clay: a ${clay.shape} of side ${clay.lump}${clay.ground ? ' on flat ground' : ''}`;
+    colour = clay;
   } else if (isRow(state.world)){
     const row = ROWS[+state.world.slice(4)], a = automatonOf(CORE, row.cfgFor(state.depth));
     ({ root, D } = store.fromRadix4(state.depth, a.start, a.step, a.accept, a.keyOf));
@@ -1513,18 +1682,27 @@ async function buildWorld(signal, gen){
   // Poses for the kit too while it's small: 6,261 nodes by default, but
   // libraries in the hundreds make hundreds of thousands.
   // A file of a world that skips them skips them too.
-  const poseless = scatter || lattice || caves || (file && ['scatter', 'lattice', 'caves'].includes(file.colour?.kind));
+  // Clay skips them for what's coming: createClasses is the slowest thing in an
+  // edit's path, for one debug colour mode (realtimecsg.md §4.2).
+  const poseless = scatter || lattice || caves || clay || (file && ['scatter', 'lattice', 'caves', 'clay'].includes(file.colour?.kind));
   if (!poseless && store.size <= CLASSES_MAX) classes = createClasses(store, OH48);
   const snap = worldSnapshot(store, root, D, { counts, classes, colour });
   const t2 = performance.now();
   W = { id: state.world, label, store, root, D, side: 2 ** D, top: Math.max(0, D - 6), nodes: store.size, voxels: counts.of(root), counts,
-        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, caves, file, colour, source: sourceOf(), classes: classes ? classes.size : null };
+        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, caves, clay, file, colour, source: sourceOf(), classes: classes ? classes.size : null,
+        // Made with the snapshot, as a tailer starts from what the snapshot holds.
+        // Only clay for now: its store is real, here, with an interner (step 5
+        // brings the rest). A clay world off the shelf is a read-only view.
+        edit: clay ? newEdit(store, root, counts) : null };
   ray.frame = null;
   streamer.setWorld(createWorld(store, root, D));
   pool.setWorld(snap, ++worldEpoch);
   dirty = true;
   if (kit) showKit();
+  if (clay) showClay();
   fillShelf();
+  if (edit.on && !W.edit) setEditMode(false);
+  showEdit();
   return true;
 }
 /* Where the eye starts: outside the world's low corner for a row (they
@@ -1549,6 +1727,18 @@ function defaultView(){
   if (W.kit) return { eye: [-0.35 * s, 0.9 * s, -0.45 * s], yaw: 0.68, pitch: -0.5 };
   // Inside the start chamber, facing its first tunnel (cave-core's caveInfo).
   if (W.caves && W.caves.info.view) return W.caves.info.view;
+  // The lump fills about half the view, seen from a little above. Flat ground:
+  // low over it, looking out across it. Empty: where the default lump's view
+  // would be, looking at the centre. The first try put the eye at the centre
+  // itself, so asking for a lump in place (which keeps the eye) buried it, and
+  // the frame went black (stream.test.js's "a lump from nothing").
+  if (W.clay){
+    const { c, centre } = clayPlace(W.clay), yaw = 0.6, pitch = -0.32;
+    if (!W.clay.lump && W.clay.ground) return { eye: [c + 0.5, c + 64, c + 0.5], yaw, pitch: -0.2 };
+    // A block's corners reach √3 further than a ball of the same side.
+    const d = (W.clay.lump && W.clay.shape === 'block' ? 2.5 : 1.9) * (W.clay.lump || CLAY_DEFAULTS.lump), f = [Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), Math.cos(pitch) * Math.cos(yaw)];
+    return { eye: centre.map((v, a) => v - d * f[a]), yaw, pitch };
+  }
   if (/terrain|half-space/.test(W.id)) return { eye: [0.5 * s, 0.78 * s, 0.08 * s], yaw: 0, pitch: -0.35 };
   return { eye: [0.5 * s, 0.55 * s, -0.12 * s], yaw: 0, pitch: -0.08 };
 }
@@ -1595,14 +1785,59 @@ function boxVisible(planes, lo, size){
   return true;
 }
 
+/* ---- the panels ------------------------------------------------------------ */
+/* Both panels, the numbers and the controls, are one switch, and off by default:
+   the world gets the window (docs/hud-toggle.md). Off only hides them. hud() keeps
+   writing, because __stream is refreshed there and the tests read its text.
+
+   Whatever was asked for and only says so in a panel opens them, or it would seem
+   to do nothing: a bench or selftest report, a file that wouldn't open or write,
+   colour from a file that's wrong. The state lives in the link, like the rest of
+   the view, so a reload keeps it. */
+let hudOn = params.get('hud') === '1' || ['bench', 'editbench', 'selftest'].some(p => params.has(p));
+function showPanels(){
+  $('hud').hidden = !hudOn;
+  $('fps').hidden = hudOn;      // under the lock too: it asks nothing of the pointer
+  // There's no pointer under the lock to use the controls or the button with, and
+  // the controls cover a third of a small window.
+  $('ctl').hidden = !hudOn || edit.locked;
+  $('hudToggle').hidden = $('wireToggle').hidden = edit.locked;
+  $('hudToggle').textContent = hudOn ? 'hide HUD (H)' : 'show HUD (H)';
+}
+function setHud(on){
+  hudOn = on;
+  showPanels();
+  linkFlag('hud', on);
+}
+function linkFlag(name, on){
+  const q = new URLSearchParams(location.search);
+  if (on) q.set(name, '1'); else q.delete(name);
+  history.replaceState(null, '', '?' + q);
+}
+function setWire(on){
+  state.wire = on;
+  showWire();
+  linkFlag('wire', on);
+}
+function showWire(){
+  $('wireToggle').classList.toggle('on', state.wire);
+  $('tris').hidden = !state.wire;
+  showTriangles();
+}
+
 /* ---- input --------------------------------------------------------------- */
 const keys = new Set();
 addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  if (editKey(e)) return;
   keys.add(e.code);
   if (e.code === 'KeyF') toggleFreeze();
+  if (e.code === 'KeyH' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setHud(!hudOn);
+  if (e.code === 'KeyT' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setWire(!state.wire);
   // The seed keys leave modified presses alone (cmd-R reloads, and shouldn't roll a seed first).
-  if (!e.metaKey && !e.ctrlKey && !e.altKey){
+  // In edit mode they do nothing: a new seed is a new world, and it would take your
+  // edits with it (realtimecsg.md §11.6).
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && !edit.on){
     if (e.code === 'BracketLeft') stepSeed(-1);
     if (e.code === 'BracketRight') stepSeed(1);
     if (e.code === 'KeyR') setSeed(randomSeed());
@@ -1611,7 +1846,7 @@ addEventListener('keydown', e => {
 addEventListener('keyup', e => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
 let drag = null;
-canvas.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); canvas.focus(); });
+canvas.addEventListener('pointerdown', e => { if (edit.on) return; drag = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); canvas.focus(); });
 canvas.addEventListener('pointermove', e => {
   if (!drag) return;
   cam.yaw -= (e.clientX - drag[0]) * 0.004;
@@ -1620,7 +1855,12 @@ canvas.addEventListener('pointermove', e => {
 });
 canvas.addEventListener('pointerup', () => { drag = null; saveView(); });
 const setSpeed = m => { cam.speedMul = Math.max(1 / 64, Math.min(64, m)); };
-canvas.addEventListener('wheel', e => { e.preventDefault(); setSpeed(cam.speedMul * Math.exp(-e.deltaY * 0.002)); }, { passive: false });
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (edit.on && !e.altKey) editWheel(e.deltaY);
+  // Alt-wheel on a Mac can arrive as deltaX.
+  else setSpeed(cam.speedMul * Math.exp(-(e.deltaY || e.deltaX) * 0.002));
+}, { passive: false });
 const toggleFreeze = () => { state.freeze = !state.freeze; $('freeze').value = state.freeze ? '1' : '0'; dirty = true; };
 /* A gamepad (pad-core.js decides what each stick and button does). The
    Gamepad API has no input events, only a snapshot to poll, so move()
@@ -1640,28 +1880,351 @@ function padInput(){
   return r;
 }
 
+/* ---- edit mode -------------------------------------------------------------
+   Step 4 of realtimecsg.md §11.8 (docs/edit-mode-log.md): clicking on the clay.
+   Every decision is edit-core's or the streamer's, and this section is the wiring:
+   a click runs one step of the log, and setRoot opens the transaction that shows it.
+
+   **The aim reads the log's root, not the shown one.** The log is the truth, and the
+   frame catches up a few frames later. Picking against the shown root, a second
+   click before the flip would break the voxel you just broke, and do nothing. It
+   also means the outline moves at once, which is the first thing you see of a click.
+
+   **A press acts in its own event**, not at the next frame, so a click is in the
+   log before the next frame starts. Held buttons repeat from the frame loop. */
+const edit = { on: false, locked: false, noLock: params.has('nolock'), level: 0, slot: 0, colour: PALETTE[0],
+               aim: null, far: null, repeat: createRepeat(), held: new Map(), wheel: 0, note: '', noteUntil: 0 };
+const newEdit = (store, root, counts) => {
+  const log = createEditLog(root);
+  return { log, base: root, tailer: createTailer(store, { counts, log }), table: createBlockTable(), field: null,
+           serial: 0, pending: [], samples: [], gens: new Map(), shownGen: 0, flip: null, last: null };
+};
+const hasEdits = () => !!W?.edit && (W.edit.log.count > 0 || W.root !== W.edit.base);
+function updateAim(){
+  const E = W?.edit;
+  edit.aim = null; edit.far = null;
+  if (!edit.on || !E) return null;
+  const root = E.log.root, d = fwd();
+  edit.aim = aimAt(W.store, root, W.D, cam.eye, d, edit.level) || aimInAir(root, W.D, cam.eye, d, edit.level);
+  // Out of reach: say how far, or nothing happens and you can't tell why.
+  if (!edit.aim) edit.far = pick(W.store, root, W.D, cam.eye, d)?.t ?? null;
+  return edit.aim;
+}
+/* One step of the log, and the transaction that shows it. `kind`: break, place,
+   undo, redo. Returns true if the world changed. */
+function editStep(kind){
+  const E = W?.edit;
+  if (!E) return false;
+  const t0 = performance.now();
+  let step = null;
+  if (kind === 'undo') step = E.log.undo();
+  else if (kind === 'redo') step = E.log.redo();
+  else {
+    const a = updateAim();
+    if (kind === 'break' && a?.breakAt) step = E.log.erase(W.store, W.D, a.breakAt);
+    if (kind === 'place' && a?.placeAt) step = E.log.place(W.store, W.D, a.placeAt, edit.colour);
+  }
+  if (!step) return false;
+  const logged = performance.now();
+  E.serial++;
+  streamer.setRoot(E.log.root, step);
+  E.pending.push({ serial: E.serial, kind, t: t0, frame: frameTick, logMs: logged - t0, setRootMs: performance.now() - logged });
+  updateAim();
+  showEdit();
+  fillShelf();
+  return true;
+}
+/* Middle click: the colour under the crosshair, blocks included, since it reads
+   the same field the workers do (§11.5). The table is built here only when asked. */
+function takeColour(){
+  const E = W?.edit, a = updateAim();
+  if (!E || !a?.hit || !W.colour) return false;
+  E.field ||= editedField(colourOf(W.colour), E.table);
+  E.table.sync(E.log.delta(E.table.epoch, E.table.seen));
+  edit.colour = E.field(a.hit.x + 0.5, a.hit.y + 0.5, a.hit.z + 0.5);
+  edit.slot = -1;
+  showEdit();
+  return true;
+}
+const setSlot = i => { edit.slot = i; edit.colour = PALETTE[i]; showEdit(); };
+const setLevel = l => { edit.level = Math.max(0, Math.min(MAX_BLOCK_LEVEL, l)); updateAim(); showEdit(); };
+/* A trackpad sends many small deltas and a wheel a few large ones, so steps come
+   from what's added up, and a trackpad's flick doesn't jump through every size. */
+function editWheel(dy){
+  edit.wheel += dy;
+  if (Math.abs(edit.wheel) < 60) return;
+  setLevel(edit.level - Math.sign(edit.wheel));
+  edit.wheel = 0;
+}
+function say(html, ms = 2500){ edit.note = html; edit.noteUntil = performance.now() + ms; showEdit(); }
+function setEditMode(on, { lock = true } = {}){
+  if (on && !W?.edit){ say('<span class="warn">edit mode works on clay and flat ground so far</span>'); return false; }
+  edit.on = on;
+  edit.repeat.clear(); edit.held.clear(); edit.wheel = 0;
+  keys.clear();
+  $('cross').hidden = !on;
+  if (on){ canvas.focus(); edit.noLock = params.has('nolock') || !lock; lockPointer(); updateAim(); }
+  else { if (document.pointerLockElement === canvas) document.exitPointerLock(); edit.aim = null; saveView(); }
+  showEdit();
+  return on;
+}
+/* Pointer lock can be refused: no gesture, Chrome's second or so after Esc, a
+   browser without it. Then the click acts anyway, and looking is by moving the
+   mouse as far as the window lets you, or the arrow keys. */
+function lockPointer(){
+  if (edit.noLock || !canvas.requestPointerLock) return;
+  try { const p = canvas.requestPointerLock(); if (p?.catch) p.catch(() => {}); } catch { edit.noLock = true; }
+}
+document.addEventListener('pointerlockerror', () => { if (edit.on){ edit.noLock = true; say('no pointer lock: the arrow keys look'); } });
+document.addEventListener('pointerlockchange', () => {
+  const locked = document.pointerLockElement === canvas, lost = edit.locked && !locked;
+  edit.locked = locked;
+  showPanels();
+  // The browser's own Esc only tells us this way, and it means "let go of my mouse".
+  if (lost && edit.on) setEditMode(false);
+});
+function editKey(e){
+  const mod = e.metaKey || e.ctrlKey || e.altKey;
+  if (e.code === 'KeyB' && !mod && !e.repeat){ setEditMode(!edit.on); return true; }
+  if (!edit.on) return false;
+  if (e.code === 'Escape'){ setEditMode(false); return true; }
+  // Held Z repeats at the keyboard's rate: an edit that's waiting jumps to the latest.
+  if (e.code === 'KeyZ'){ e.preventDefault(); editStep(e.shiftKey ? 'redo' : 'undo'); return true; }
+  if (mod) return false;
+  const digit = /^Digit([1-8])$/.exec(e.code);
+  if (digit){ setSlot(+digit[1] - 1); return true; }
+  if (e.code === 'Minus'){ setLevel(edit.level - 1); return true; }
+  if (e.code === 'Equal'){ setLevel(edit.level + 1); return true; }
+  return false;
+}
+canvas.addEventListener('mousedown', e => {
+  if (!edit.on) return;
+  e.preventDefault();
+  if (!edit.locked && !edit.noLock){ lockPointer(); return; }   // this click only takes the mouse back
+  if (e.button === 1){ takeColour(); return; }
+  // Ctrl-click is a Mac's right click, and arrives as button 0.
+  const kind = e.button === 2 || (e.button === 0 && e.ctrlKey) ? 'place' : e.button === 0 ? 'break' : null;
+  if (!kind) return;
+  edit.held.set(e.button, kind);
+  edit.repeat.press(kind, performance.now());
+  editStep(kind);
+});
+addEventListener('mouseup', e => {
+  const kind = edit.held.get(e.button);
+  if (kind){ edit.held.delete(e.button); edit.repeat.release(kind); }
+});
+addEventListener('blur', () => { edit.repeat.clear(); edit.held.clear(); });
+canvas.addEventListener('contextmenu', e => { if (edit.on) e.preventDefault(); });
+canvas.addEventListener('mousemove', e => {
+  if (!edit.on) return;
+  cam.yaw -= e.movementX * 0.002;
+  cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch - e.movementY * 0.002));
+});
+/* After service: did the frame just move to a new root? This frame's draw shows
+   it. The near plane follows the distance to the nearest voxel, and a block placed
+   closer than that would be cut until the next read, so that's read here. In an
+   empty world it was infinite, and near was 64. */
+function editFlipped(){
+  const E = W?.edit, S = streamer.S;
+  if (!E || S.shownGen === E.shownGen) return;
+  E.shownGen = S.shownGen;
+  W.root = S.world.root; W.nodes = W.store.size; W.voxels = W.counts.of(W.root);
+  view.clear = clearance();
+  E.flip = { chunks: S.stats.lastFlipInstalls, bytes: S.stats.lastFlip, covered: E.gens.get(S.shownGen) ?? E.serial };
+  E.gens.delete(S.shownGen);
+  fillShelf();
+}
+/* After the draw: the first real latency number (§11.8 step 4). A click's time is
+   from its event to the end of the frame that submits it, in main-thread time. The
+   GPU and the display come after this, and can't be seen from here. */
+function editDrawn(){
+  const E = W?.edit;
+  if (!E?.flip) return;
+  const now = performance.now(), { chunks, bytes, covered } = E.flip;
+  E.flip = null;
+  while (E.pending.length && E.pending[0].serial <= covered){
+    const p = E.pending.shift();
+    E.last = { kind: p.kind, ms: now - p.t, frames: frameTick - p.frame, chunks, bytes, logMs: p.logMs, setRootMs: p.setRootMs };
+    E.samples.push(E.last);
+    if (E.samples.length > 512) E.samples.shift();
+  }
+}
+const medianOf = a => { const s = [...a].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : NaN; };
+/* The bar under the crosshair: what a click would do, and why it won't. */
+function showEdit(){
+  const bar = $('editBar'), E = W?.edit, now = performance.now(), note = now < edit.noteUntil ? edit.note : '';
+  $('editToggle').textContent = edit.on ? 'leave edit mode (B)' : 'edit mode (B)';
+  bar.hidden = !edit.on && !note;
+  if (bar.hidden) return;
+  const sw = $('editSwatches');
+  sw.hidden = !edit.on;
+  if (!sw.children.length){
+    const c = rgb => `rgb(${rgb & 255},${rgb >> 8 & 255},${rgb >> 16 & 255})`;
+    edit.swatch = c;
+    const taken = document.createElement('i');
+    taken.title = 'the colour you took (middle click)'; sw.append(taken);
+    PALETTE.forEach((rgb, i) => { const el = document.createElement('i'); el.textContent = i + 1; el.style.background = c(rgb); sw.append(el); });
+  }
+  [...sw.children].forEach((el, i) => el.classList.toggle('on', i - 1 === edit.slot));
+  sw.children[0].hidden = edit.slot >= 0;
+  if (edit.slot < 0) sw.children[0].style.background = edit.swatch(edit.colour);
+  if (!edit.on){ $('editNote').innerHTML = note; return; }
+  const side = 2 ** edit.level, ops = E ? E.log.count : 0;
+  const why = note ? note
+    : edit.aim?.hit ? ''
+    : edit.aim ? `nothing here yet: a block goes in the air, ${AIR_PER_SIDE * side} voxels on`
+    : edit.far !== null ? `<span class="warn">${Math.round(edit.far).toLocaleString()} voxels off, reach ${reachOf(edit.level).toLocaleString()}: fly closer, or a larger block</span>`
+    : 'nothing to click that way';
+  $('editNote').innerHTML = `block side ${side}   ${ops ? `${ops} edit${ops === 1 ? '' : 's'}, not saved: a link or a file can't hold them yet` : 'no edits'}` + (why ? `\n${why}` : '');
+}
+/* The outline, after the frame's blit: white for the block a left click breaks,
+   the colour you hold for the one a right click places. Each is drawn dark and
+   wide first, so it shows on anything.
+
+   It has a near plane of its own. The frame's follows the nearest voxel, and in an
+   empty world that's 64 voxels, past where the first block would go, so with the
+   frame's plane its outline wasn't there at all (§11.4's trap, which the test for
+   the block itself didn't catch). x and y don't depend on near, so the outline
+   still sits on the frame's cubes, and there's no depth test for it to disagree with. */
+/* The wireframe (docs/wireframe.md). A pass after the whole frame, on the canvas, like
+   the outline: renderView runs exactly as it would, so occlusion keeps its depth, the
+   streamer its choices and the tests their frames, and what's drawn here is what that
+   frame drew and no more. So the frame is paid for twice, and the fps says so.
+
+   Every triangle's edges, as gl.LINES, one pixel, seen through each other: WebGL2 has
+   no polygon mode. No depth test either, since nothing here is solid: the chunks go far
+   first (renderView sorted them near first), so near lines paint over far ones.
+
+   A traced chunk has no triangles of its own. It has the box the ray pass is stencilled
+   to, so it gets that box's outline, in the blue the path colour gives traced chunks. */
+let wireList = [];
+function drawWire(w, h){
+  if (!W) return;
+  const M = viewProj(w / h, view.near, view.far), planes = frustumPlanes(M), dpr = Math.min(devicePixelRatio || 1, 2);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0.027, 0.027, 0.039, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.STENCIL_TEST); gl.disable(gl.BLEND);
+  gl.useProgram(wireProg);
+  gl.uniformMatrix4fv(WU.uViewProj, false, M);
+  gl.uniform3f(WU.uEyeN, cam.eye[0] / W.side, cam.eye[1] / W.side, cam.eye[2] / W.side);
+  gl.uniform1f(WU.uInvSide, 1 / W.side);
+  gl.uniform1i(WU.uColorMode, state.color);
+  gl.uniform1f(WU.uFog, 1 / (1.5 * W.side));
+  gl.uniform1f(WU.uDepthScale, 1 / (8 * W.side));
+  for (let i = wireList.length - 1; i >= 0; i--){
+    const { d, e, rel, open, n } = wireList[i];
+    gl.uniform3f(WU.uOrigin, rel[0], rel[1], rel[2]);
+    gl.uniform1f(WU.uCellSize, e.cellSize);
+    gl.uniform1ui(WU.uOpenSides, open);
+    gl.uniform3fv(WU.uLodColor, LOD_COLORS[d.lod]);
+    gl.uniform3fv(WU.uChunkColor, chunkColor(d));
+    gl.bindVertexArray(e.gpu.vao);
+    gl.drawElementsInstanced(gl.LINES, CUBE_LINES, gl.UNSIGNED_BYTE, CUBE_TRIS, n);
+  }
+  const f = fwd(), near = view.near * 1.01, runs = [];
+  let words = 0;
+  for (const d of streamer.frame.draw){
+    if (streamer.entry(d.key)?.kind !== 'page') continue;
+    if (!boxVisible(planes, d.lo.map((v, a) => v - cam.eye[a]), d.size)) continue;
+    const edges = boxEdges(d.lo, d.lo.map(v => v + d.size), cam.eye, f, near);
+    runs.push(edges); words += edges.length;
+  }
+  if (words){
+    const all = new Float32Array(words);
+    let at = 0;
+    for (const r of runs){ all.set(r, at); at += r.length; }
+    gl.useProgram(lineProg);
+    gl.uniformMatrix4fv(LU.uViewProj, false, M);
+    gl.uniform2f(LU.uPixel, 2 / w, 2 / h);
+    gl.uniform1f(LU.uWidth, dpr);
+    gl.uniform3f(LU.uColour, 0.42, 0.66, 0.9);
+    gl.bindVertexArray(lineVAO);
+    gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, all, gl.STREAM_DRAW);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, words / 6);
+  }
+  gl.bindVertexArray(null);
+}
+/* The count beside it. A cube is 12 triangles to the GPU whatever it shows: the vertex
+   shader collapses a hidden face to a point after it's been sent. So the headline is what
+   can reach the screen, the exposed faces plus the traced chunks' stencil boxes and the
+   ray pass's one triangle, and "sent" is the raster's cost in vertices. Occlusion's
+   boxes aren't in it: they ask a question and draw nothing. */
+function showTriangles(){
+  if (!state.wire) return;
+  const boxes = 12 * view.marked, screen = view.rayTriangle ? 1 : 0;
+  $('tris').innerHTML = `<b>${k(view.triangles + boxes + screen)}</b> triangles\n` +
+    `raster ${k(view.triangles)} exposed of ${k(12 * view.instances)} sent` +
+    (view.rayChunks ? `\ntraced ${view.rayChunks} chunks: ${k(boxes)} in boxes, ${screen} full-screen` : '');
+}
+function drawOutline(w, h){
+  const a = edit.aim;
+  if (!a) return;
+  const near = 0.05, M = viewProj(w / h, near, view.far), f = fwd(), dpr = Math.min(devicePixelRatio || 1, 2);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, h);
+  gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.STENCIL_TEST); gl.disable(gl.BLEND);
+  gl.useProgram(lineProg);
+  gl.uniformMatrix4fv(LU.uViewProj, false, M);
+  gl.uniform2f(LU.uPixel, 2 / w, 2 / h);
+  gl.bindVertexArray(lineVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+  const box = (target, rgb) => {
+    const { lo, hi } = boxOf(target), edges = boxEdges(lo, hi, cam.eye, f, near * 1.01);
+    if (!edges.length) return;
+    gl.bufferData(gl.ARRAY_BUFFER, edges, gl.STREAM_DRAW);
+    for (const [width, colour] of [[3 * dpr, [0, 0, 0]], [1.25 * dpr, rgb]]){
+      gl.uniform1f(LU.uWidth, width);
+      gl.uniform3fv(LU.uColour, colour);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, edges.length / 6);
+    }
+  };
+  if (a.placeAt) box(a.placeAt, [(edit.colour & 255) / 255, (edit.colour >> 8 & 255) / 255, (edit.colour >> 16 & 255) / 255]);
+  if (a.breakAt) box(a.breakAt, [1, 1, 1]);
+  gl.bindVertexArray(null);
+}
+// For the console and the tests.
+window.__edit = {
+  mode: setEditMode, step: editStep, take: takeColour, aim: updateAim, slot: setSlot, level: setLevel,
+  look: (eye, yaw, pitch) => { cam.eye = eye.slice(); cam.yaw = yaw; cam.pitch = pitch; dirty = true; updateAim(); },
+  state: () => { const E = W?.edit; return { on: edit.on, locked: edit.locked, noLock: edit.noLock, level: edit.level, slot: edit.slot, colour: edit.colour,
+    held: edit.repeat.held, aim: edit.aim ? { breakAt: edit.aim.breakAt, placeAt: edit.aim.placeAt } : null, far: edit.far, editable: !!E,
+    ops: E ? E.log.count : null, canUndo: E ? E.log.canUndo : null, canRedo: E ? E.log.canRedo : null, root: E ? E.log.root : null, shownRoot: streamer.S.world?.root ?? null,
+    pending: E ? E.pending.length : null, last: E ? E.last : null, samples: E ? E.samples.length : null, editing: streamer.editing,
+    yaw: cam.yaw, pitch: cam.pitch, voxels: W?.voxels ?? null, exportDisabled: $('fileExport').disabled, addDisabled: $('shelfAdd').disabled,
+    cross: !$('cross').hidden, bar: $('editBar').hidden ? null : $('editBar').textContent }; },
+};
+
 /* ---- controls and permalink ---------------------------------------------- */
 function saveView(){
   const q = new URLSearchParams(location.search);
   // A shelf world's link is what it was built from: a link can't hold the file.
   const src = sourceOf();
-  for (const [k, v] of [['world', src?.world], ['depth', src?.depth], ['lattice', src?.lattice], ['kit', src?.kit]])
+  for (const [k, v] of [['world', src?.world], ['depth', src?.depth], ['lattice', src?.lattice], ['kit', src?.kit], ['clay', src?.clay]])
     if (v == null) q.delete(k); else q.set(k, v);
   q.set('eye', cam.eye.map(v => Math.round(v)).join(','));
   q.set('yaw', cam.yaw.toFixed(3)); q.set('pitch', cam.pitch.toFixed(3));
   history.replaceState(null, '', '?' + q);
 }
 function bindControls(){
+  showPanels();
+  showWire();
+  $('hudToggle').addEventListener('click', e => { e.currentTarget.blur(); setHud(!hudOn); });
+  $('wireToggle').addEventListener('click', e => { e.currentTarget.blur(); setWire(!state.wire); });
   $('detail').value = state.detail; $('detailV').textContent = state.detail;
   $('max').value = String(state.max); $('rule').value = state.rule; $('color').value = String(state.color);
   $('cache').value = String(state.cache); $('seams').value = state.seams ? '1' : '0';
   $('ray').value = state.path;
   $('ray').addEventListener('change', () => setPath($('ray').value));
   $('world').addEventListener('change', () => { state.world = $('world').value; state.depth = null; fillDepth(); loadWorld(true); });
-  bindLattice(); bindKit(); bindSeed(); bindFiles();
+  bindLattice(); bindKit(); bindClay(); bindSeed(); bindFiles();
+  $('editToggle').addEventListener('click', e => { e.currentTarget.blur(); setEditMode(!edit.on); });
   $('depth').addEventListener('change', () => {
     state.depth = +$('depth').value;
     if (isKit(state.world)){ const d = kitFromControls(state.depth); if (!d) return; state.kit = d; fillKit(); }
+    if (isClay(state.world)){ state.clay = clayDesc({ ...state.clay, D: state.depth }); fillClay(); }
     loadWorld(true);
   });
   $('detail').addEventListener('input', () => { state.detail = +$('detail').value; $('detailV').textContent = state.detail; streamer.setOptions({ detail: state.detail }); dirty = true; });
@@ -1705,6 +2268,7 @@ function loadWorld(resetView){
   const ac = buildAbort = new AbortController();
   setBuilding('building ' + (isLattice(state.world) ? `the lattice, R=${state.lattice.R}, ${state.lattice.n.join('×')}`
     : isKit(state.world) ? `the kit, D=${state.kit.D}` : isCaves(state.world) ? `the caves, D=${state.depth}`
+    : isClay(state.world) ? `clay, D=${state.clay.D}`
     : isFile(state.world) ? shelfEntry(state.world)?.name ?? state.world : state.world) + ' …', null, true);
   // Let the message paint before a multi-second fromField. The scatter
   // and lattice worlds build in workers, so the page keeps drawing the
@@ -1754,7 +2318,7 @@ function setBuilding(text, fraction, fresh = false){
 
 /* ---- the frame ------------------------------------------------------------- */
 let dirty = true, lastEye = [NaN, NaN, NaN], lastT = performance.now(), frameMs = 16, auto = true;
-const view = { culled: 0, instances: 0, drawn: 0, near: 1, clear: 0, voxels: 0,
+const view = { culled: 0, instances: 0, triangles: 0, rayTriangle: false, marked: 0, drawn: 0, near: 1, clear: 0, voxels: 0,
                occluded: 0, occludedCubes: 0, queried: 0, nearEye: 0, occlPollMs: 0, occlRunMs: 0 };
 const LOD_COLORS = Array.from({ length: 24 }, (_, l) => {
   const h = (l * 0.137 + 0.58) % 1, c = 0.5, x = c * (1 - Math.abs((h * 6) % 2 - 1)), m = 0.32;
@@ -1807,7 +2371,9 @@ function frame({ draw: doDraw = true } = {}){
   }
   pool.dispatch();
   streamer.service();
+  editFlipped();
   if (doDraw) draw();
+  editDrawn();
 }
 function draw(){
   const dpr = Math.min(devicePixelRatio || 1, 2);
@@ -1815,6 +2381,8 @@ function draw(){
   if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; streamer.setOptions(viewportOptions(w, h)); dirty = true; }
   canvas.style.width = innerWidth + 'px'; canvas.style.height = innerHeight + 'px';
   renderView(w, h, state.color, true, undefined, 'both', null, occlusionOf());
+  if (state.wire) drawWire(w, h);
+  if (edit.on){ updateAim(); drawOutline(w, h); }
 }
 
 /* GPU time per pass (EXT_disjoint_timer_query_webgl2, where the browser
@@ -1902,7 +2470,8 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
   // entry carries its DAG node.
   view.voxels = 0;
   for (const { d, rel } of list) if (boxVisible(planes, rel, d.size)) view.voxels += W.counts.of(d.id);
-  view.culled = 0; view.instances = 0; view.drawn = 0; view.drawList = [];
+  view.culled = 0; view.instances = 0; view.triangles = 0; view.rayTriangle = false; view.drawn = 0; view.drawList = [];
+  wireList = [];
   view.occluded = 0; view.occludedCubes = 0; view.queried = 0; view.nearEye = 0; view.occlPollMs = 0; view.occlRunMs = 0;
   view.rayChunks = list.filter(q => q.e.kind === 'page').length;
   const rayPass = view.rayChunks > 0 && doRay;
@@ -1943,7 +2512,8 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
       view.drawList[view.drawn] = d.key;
       gl.bindVertexArray(e.gpu.vao);
       gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_BYTE, 0, n);
-      view.drawn++; view.instances += n;
+      view.drawn++; view.instances += n; view.triangles += 2 * quadsShown(e.quads, e.openQuads, open);
+      if (state.wire) wireList.push({ d, e, rel, open, n });
     }
     gl.bindVertexArray(null);
     if (occl){
@@ -1979,6 +2549,7 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
     if (!discardMiss){ gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); }
     gl.bindVertexArray(emptyVAO);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    view.rayTriangle = true;
     gl.bindVertexArray(null);
     gl.disable(gl.BLEND);
     gl.disable(gl.STENCIL_TEST);
@@ -2056,6 +2627,9 @@ function hud(){
     `<span class="sec">words</span> ${mb(4 * [...S.cache.values()].reduce((a, e) => a + (e.words || 0), 0))} of the cache${ray.pageCount ? `, heap ${mb(4 * ray.heapAlloc.used)} of ${mb(4 * ray.heapAlloc.capacity)}` : ''}${ray.heapFull ? `  <span class="warn">heap full: ${ray.heapFull} pages without words</span>` : ''}\n` +
     `<span class="sec">gpu</span> ${timerExt ? `raster ${Number.isFinite(timers.raster) ? timers.raster.toFixed(2) : '–'} ms  ray ${Number.isFinite(timers.ray) ? timers.ray.toFixed(2) : '–'} ms` : 'no timer extension'}\n` +
     `<span class="sec">frame</span> ${frameMs.toFixed(1)} ms rAF interval  cut ${S.stats.selectMs.toFixed(2)}  cover ${S.stats.coverMs.toFixed(2)}  upload ${(S.stats.lastUpload / 1024).toFixed(0)} KB` +
+    (W.edit && W.edit.last ? `\n<span class="sec">edit</span> ${W.edit.last.kind}: <b>${W.edit.last.ms.toFixed(0)} ms</b> click to frame, ${W.edit.last.frames} frames, ` +
+      `${W.edit.last.chunks} chunks, ${(W.edit.last.bytes / 1024).toFixed(0)} KB, setRoot ${W.edit.last.setRootMs.toFixed(2)} ms  ` +
+      `median of ${W.edit.samples.length}: ${medianOf(W.edit.samples.map(x => x.ms)).toFixed(0)} ms` : '') +
     (benchHud.status || benchHud.text ? `\n<span class="bench">${benchHud.status || benchHud.text}</span>` : '');
   window.__stream = { state: { ...state }, world: { id: W.id, D: W.D, nodes: W.nodes, buildMs: W.buildMs,
       scatter: W.scatter ? { specimens: W.scatter.layout.cells.length, skipped: W.scatter.skipped, blocks: W.scatter.blocks,
@@ -2065,7 +2639,7 @@ function hud(){
       kit: W.kit ? { param: kitParam(W.kit.desc), seed: W.kit.desc.seed, nodes: W.kit.nodes, dropped: W.kit.dropped, classes: W.classes, ms: W.kit.totalMs } : null,
       caves: W.caves ? { desc: W.caves.desc, info: W.caves.info, threads: W.caves.threads, fellBack: W.caves.fellBack || null, ms: W.caves.ms } : null,
       file: W.file ? { name: W.file.name, fileName: W.file.fileName, colourStatus: W.file.colourStatus } : null },
-    eye: cam.eye.slice(), view: { ...view }, gpu: { ...gpu },
+    edit: window.__edit.state(), eye: cam.eye.slice(), view: { ...view }, gpu: { ...gpu },
     cut: sel ? { leaves: sel.leaves.length, nodes: sel.nodes.size, capped: sel.capped } : null,
     resident: S.cache.size, cacheBytes: S.cacheBytes, missing, drawn: fr.draw.length, holes: fr.holes.length,
     pending: S.pending.size, mode: pool.mode, stats: { ...S.stats },
@@ -2075,19 +2649,35 @@ function hud(){
     gpuMs: { raster: timers.raster, ray: timers.ray } };
 }
 
+/* The fps corner: frames counted over half a second, not 1000 / frameMs. frameMs clamps
+   each frame to 100 ms, which suits move() and would have this read 10 fps on a page
+   doing 2. A frame longer than the window counts as what it is, and only a tab coming
+   back restarts the count, because rAF stops while it's hidden and that isn't a slow frame. */
+const fps = { from: 0, frames: 0 };
+document.addEventListener('visibilitychange', () => { fps.from = 0; });
+function countFrame(now){
+  if (!fps.from){ fps.from = now; fps.frames = 0; return; }
+  fps.frames++;
+  if (now - fps.from < 500) return;
+  const rate = fps.frames * 1000 / (now - fps.from);
+  $('fps').textContent = `${rate.toFixed(rate < 10 ? 1 : 0)} fps`;
+  fps.from = now; fps.frames = 0;
+}
 let hudTick = 0;
 function loop(now){
+  countFrame(now);
   const dt = Math.min(100, now - lastT); lastT = now;
   frameMs = frameMs * 0.9 + dt * 0.1;
   if (auto){
     move(dt);
+    if (edit.on) for (const kind of edit.repeat.due(now)) editStep(kind);
     pollTimers();
     // ?quiet: don't draw until the view has converged, so that a slow GPU
     // (SwiftShader, in test/browser/stream-shots.mjs) doesn't hold up the
     // once-a-frame admission while the cut fills.
     const quiet = params.has('quiet') && !isConverged();
     frame({ draw: !quiet });
-    if (hudTick++ % 6 === 0) hud();
+    if (hudTick++ % 6 === 0){ hud(); showEdit(); showTriangles(); }
   }
   requestAnimationFrame(loop);
 }
@@ -2111,9 +2701,24 @@ function loop(now){
    streamed, its colour field rebuilt in the workers from its descriptor. Frames don't draw, because SwiftShader can't draw a million
    cubes per frame; a draw at the end of each phase must light pixels. */
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-function invariants(phase, report, { noHoles }){
+const gensSeen = { revision: -1, flips: 0, of: new Map() };
+function invariants(phase, report, { noHoles, oneRoot = false }){
   const S = streamer.S, fr = streamer.frame, drawn = new Set(fr.draw.map(d => d.key));
   const bad = msg => { if (report.violations.length < 20) report.violations.push(`${phase} frame ${report.frames}: ${msg}`); };
+  // Edits (stream-core §2c, §3), as frameChecker holds them: an entry is never
+  // replaced by an older build, and a flip leaves nothing drawn out of date.
+  if (gensSeen.revision !== S.revision){ gensSeen.revision = S.revision; gensSeen.flips = S.stats.flips; gensSeen.of.clear(); }
+  for (const e of S.cache.values()){
+    if (e.gen < (gensSeen.of.get(e.key) ?? 0)) bad(`${e.key} went back to generation ${e.gen}`);
+    gensSeen.of.set(e.key, e.gen);
+  }
+  if (S.stats.flips !== gensSeen.flips){
+    gensSeen.flips = S.stats.flips;
+    for (const d of fr.draw) if (!streamer.current(d.key) && (S.failures.get(d.key) || 0) < 2) bad(`${d.key} drawn out of date after a flip`);
+  }
+  // With a still, settled eye, on every frame: no frame mixes two roots, as
+  // frameChecker's oneRoot. editSelftest asks for it.
+  if (oneRoot) for (const d of fr.draw) if (!streamer.current(d.key) && (S.failures.get(d.key) || 0) < 2) bad(`${d.key} drawn out of date, the frame mixes roots`);
   for (const d of fr.draw){
     const e = S.cache.get(d.key);
     if (!e) bad(`${d.key} drawn, not resident`);
@@ -2159,10 +2764,11 @@ function invariants(phase, report, { noHoles }){
     if (streamer.kindOf(c.key) !== k){ bad(`${c.key} wants ${streamer.kindOf(c.key)}, the rule says ${k}`); break; }
   }
 }
-// Converged: the whole cut resident, each chunk in the kind it wants.
+// Converged: the whole cut resident, each chunk in the kind it wants and up to
+// date, and no edit waiting.
 const isConverged = () => {
   const S = streamer.S, sel = streamer.sel;
-  return sel && S.pending.size === 0 && S.results.length === 0 && [...sel.nodes.keys()].every(key => S.cache.has(key) && !streamer.stale(key))
+  return sel && !streamer.editing && S.pending.size === 0 && S.results.length === 0 && [...sel.nodes.keys()].every(key => S.cache.has(key) && !streamer.stale(key))
       && streamer.frame.holes.length === 0;
 };
 function litPixels(){
@@ -2263,6 +2869,26 @@ window.streamSelftest = async function streamSelftest(opts = {}){
   report.caves = { nodes: W.nodes, voxels: W.voxels, D: W.D, threads: W.caves.threads, fellBack: W.caves.fellBack || null,
                    chambers: W.caves.info.chambers, eye: cam.eye.map(Math.round), clear: clearance(), buildMs: Math.round(W.buildMs),
                    words: [...streamer.S.cache.values()].reduce((a, e) => a + (e.words || 0), 0) };
+  // 8. Clay (docs/clay-log.md): built here, at the menu's deepest. The ball
+  // and the flat ground are held to Node's numbers; the empty world has
+  // nothing to draw and nothing to wait for, and mustn't trip on that.
+  const savedClay = state.clay;
+  report.clay = {};
+  for (const [name, over] of [['lump', {}], ['flat', { lump: 0, ground: true }], ['empty', { lump: 0, ground: false }]]){
+    state.world = 'clay'; state.clay = clayDesc(over); fillWorlds(); fillDepth();
+    await loadWorld(true);
+    await run('switch to ' + name, { until: isConverged });
+    report.clay[name] = { param: clayParam(W.clay), nodes: W.nodes, voxels: W.voxels, D: W.D, label: W.label, cut: streamer.S.sel?.nodes.size ?? 0, select: $('world').value,
+                          ctlShown: !$('clayCtl').hidden, url: new URLSearchParams(location.search).get('clay'), buildMs: Math.round(W.buildMs),
+                          words: [...streamer.S.cache.values()].reduce((a, e) => a + (e.words || 0), 0), near: view.near };
+  }
+  // 8b. Back from nothing: a lump through the real control, keeping the eye.
+  { const eye = cam.eye.slice();
+    $('clayLump').value = '64'; $('clayLump').dispatchEvent(new Event('change'));
+    for (let i = 0; i < 2000 && !(W.clay?.lump === 64 && !buildAbort); i++) await sleep(10);
+    await run('a lump from nothing', { until: isConverged });
+    report.clay.fromNothing = { voxels: W.voxels, eyeKept: eye.every((v, a) => v === cam.eye[a]) }; }
+  state.clay = savedClay;
   report.glError = gl.getError();
   report.mode = pool.mode; report.completed = pool.completed; report.discarded = streamer.S.stats.discarded;
   report.gpu = { ...gpu };
@@ -2994,6 +3620,7 @@ function benchText(r){
    your first bench: it isn't a default, and each row costs two timings. */
 const BENCH_MODES = ['off', 'off/queries', 'off/depth', 'density', 'density/queries', 'density/depth', 'density/discard', 'density/full', '3', '1', '0'];
 window.streamBench = async function streamBench({ frames = 120, modes = BENCH_MODES, clock } = {}){
+  setHud(true);   // its progress and report are read from the HUD
   if (clock === 'timer' && !timerExt) return { error: 'EXT_disjoint_timer_query_webgl2 is not available in this browser' };
   const useTimer = clock ? clock === 'timer' : !!timerExt;
   const saved = { auto, path: state.path, stencil: state.stencil, rayMiss: state.rayMiss, occlusion: state.occlusion }, rows = [], withoutOf = new Map();
@@ -3094,6 +3721,35 @@ window.__ray = {
   classifyPagesCPU, traceCPU, classifyProbe, traceProbe, attrProbe, boundProbe, maskProbe, hitAttrCPU,
 };
 
+/* ---- raster against ray, on the world on screen ------------------------------
+   The same view through each path alone, with no flight history to pick kinds.
+   hitOnly: a pixel one path hit and the other didn't, the silhouette and any
+   hole. colour: both hit, and a channel differs by more than `tolerance` (the
+   shading's normals and the words should agree, so a few are grazes). It's how
+   docs/clay-log.md §3 measures where the ray pass's float32 eye stops being good
+   enough (experiments/clay-depth.mjs). */
+window.rasterVsRay = async function rasterVsRay({ width = 320, height = 240, tolerance = 8, settleMs = 180000 } = {}){
+  const savedAuto = auto, savedPath = state.path;
+  auto = false;
+  const settle = async () => {
+    const end = performance.now() + settleMs;
+    for (let f = 0; performance.now() < end; f++){ frame({ draw: false }); if (f > 2 && isConverged()) return true; await sleep(8); }
+    return false;
+  };
+  const shot = async path => { setPath(path); dirty = true; const converged = await settle(); return { converged, pixels: renderPixels(width, height, 8) }; };
+  const raster = await shot('off'), traced = await shot('0');
+  let lit = 0, hitOnly = 0, colour = 0;
+  const a = raster.pixels, b = traced.pixels;
+  for (let i = 0; i < a.length; i += 4){
+    const hitA = a[i + 3] > 0, hitB = b[i + 3] > 0;
+    if (hitA || hitB) lit++;
+    if (hitA !== hitB){ hitOnly++; continue; }
+    if (hitA && Math.max(Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2])) > tolerance) colour++;
+  }
+  setPath(savedPath); auto = savedAuto; dirty = true;
+  return { eye: cam.eye.slice(), lit, hitOnly, colour, width, height, converged: raster.converged && traced.converged };
+};
+
 /* ---- fileSelftest: world files through the real controls ------------------
    Real clicks, a real file input and a real drop, with only the browser's
    download replaced by a capture. Every world built here is saved, the shelf
@@ -3102,7 +3758,7 @@ window.__ray = {
    no flight history can pick different kinds (test/browser/file.test.js holds
    the report). The words reach the screen, so that's the colour too. */
 window.fileSelftest = async function fileSelftest(opts = {}){
-  const t0 = performance.now(), savedAuto = auto, savedPath = state.path, savedLattice = state.lattice, savedKit = state.kit;
+  const t0 = performance.now(), savedAuto = auto, savedPath = state.path, savedLattice = state.lattice, savedKit = state.kit, savedClay = state.clay;
   auto = false;
   const report = { worlds: [], glError: 0 };
   const W_ = 160, H_ = 120, settleMs = opts.settleMs ?? 180000;
@@ -3167,6 +3823,7 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       { world: 'scatter:1', depth: 9, pin: [55656241, 29773] },
       { world: 'lattice:1', lattice: latticeDesc({ R: 11, n: [6, 5, 4], rotate: true }), pin: [24412, 3184] },
       { world: 'caves:1', depth: 10, pin: [386153834, 83692] },
+      { world: 'clay', clay: clayDesc({ D: 20, lump: 64, ground: true }) },
       { world: 'shape:sphere', depth: 8 },
       { world: 'row:146', depth: 6 },
     ];
@@ -3175,6 +3832,7 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       state.world = c.world; state.depth = c.depth ?? null;
       if (c.kit) state.kit = c.kit;
       if (c.lattice) state.lattice = c.lattice;
+      if (c.clay) state.clay = c.clay;
       fillWorlds(); fillDepth();
       await loadWorld(true);
       c.voxels = W.voxels; c.nodes = W.nodes; c.source = W.source; c.eye = cam.eye.slice(); c.yaw = cam.yaw; c.pitch = cam.pitch;
@@ -3235,8 +3893,9 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       ['cut.vdag', all.bytes.subarray(0, all.bytes.length >> 1), /damaged/],
       ['flipped.vdag', (() => { const b = one.bytes.slice(), at = b.length - 3; b[at] ^= 0xff; return b; })(), /damaged/],
     ]){
+      setHud(false);
       const said = await opened(viaDrop, [[name, bytes]]);
-      report.bad.push({ name, said, matched: want.test(said), stayed: W.id === staying && shelf.length === shelfSize, warned: !!$('fileInfo').querySelector('.warn') });
+      report.bad.push({ name, said, matched: want.test(said), stayed: W.id === staying && shelf.length === shelfSize, warned: !!$('fileInfo').querySelector('.warn'), panels: !$('ctl').hidden });
     }
     // One good and one bad together: the good one still opens.
     report.mixed = await opened(viaDrop, [['bad.vdag', new Uint8Array(9)], [one.name, one.bytes]]);
@@ -3259,9 +3918,10 @@ window.fileSelftest = async function fileSelftest(opts = {}){
     { const s = createStore(), root = s.fromField(7, fieldOf(SHAPES.find(x => x.name === 'sphere'), 7)).root;
       const file = await core.writeVdag([{ keys: s.snapshot().keys, root, D: 7, name: '<img src=x onerror="window.__pwned=1">', colour: { kind: 'shape', name: 'sphere', D: 7 } }],
                                         { colourOf: () => () => 12345 });
+      setHud(false);
       await opened(viaDrop, [['<b>odd</b>.vdag', file]]);
       dirty = true; await settle(); frame({ draw: false }); hud(); await sleep(50);
-      report.stale = { status: W.file?.colourStatus, warned: /has changed since/.test($('hud').textContent), imgInHud: !!$('hud').querySelector('img, b b'), imgInInfo: !!$('fileInfo').querySelector('img, b'),
+      report.stale = { status: W.file?.colourStatus, panels: !$('hud').hidden, warned: /has changed since/.test($('hud').textContent), imgInHud: !!$('hud').querySelector('img, b b'), imgInInfo: !!$('fileInfo').querySelector('img, b'),
                        option: [...$('world').options].some(o => o.textContent.startsWith('<img')), pwned: !!window.__pwned, noUrl: !new URLSearchParams(location.search).has('world') }; }
     // 9. A D = 5 world can't be streamed, and an empty one has nothing to show.
     { const s = createStore(), small = s.solid(5);
@@ -3296,7 +3956,7 @@ window.fileSelftest = async function fileSelftest(opts = {}){
     HTMLAnchorElement.prototype.click = anchorClick;
     URL.createObjectURL = makeUrl;
     setPath(savedPath); auto = savedAuto;
-    state.lattice = savedLattice; state.kit = savedKit;
+    state.lattice = savedLattice; state.kit = savedKit; state.clay = savedClay;
   }
   report.ms = Math.round(performance.now() - t0);
   window.__fileSelftest = report;
@@ -3304,6 +3964,383 @@ window.fileSelftest = async function fileSelftest(opts = {}){
 };
 
 /* ---- boot ------------------------------------------------------------------ */
+/* ---- edit mode, held to a twin -----------------------------------------------
+   editSelftest(): clicks through editStep, on the real streamer, pool and workers.
+   The Node tests hold the transaction, so this is the check that threads and
+   buffers agree with them: tails really reach a worker, in order, through a worker
+   dying mid-way, and the frame comes out right.
+
+   A world is edited, then has to draw **the same frame, byte for byte**, raster only
+   and ray only, as:
+     - itself before any edit, after undoing every step (root back to the first id);
+     - itself after redoing every step (the workers' tables rebuild on the epoch);
+     - a twin: a new store that replays the log, with workers that start with it,
+       so none of this edit's history is in it, only the ops.
+   Every frame between is held to invariants(), with oneRoot on: the eye is still,
+   so no frame may draw anything out of date. */
+const EDIT_WORLDS = {
+  lump: { over: {}, eye: c => [c + 3, c + 170, c + 5], clicks: 40 },
+  flat: { over: { lump: 0, ground: true }, eye: c => [c + 3, c + 35, c + 5], clicks: 14 },
+  ballOnGround: { over: { ground: true }, eye: c => [c + 400, c + 35, c + 5], clicks: 14 },
+};
+const EDIT_LOOK = { yaw: Math.atan2(0.02, 0.03), pitch: -1.5 };
+function mulberry(seed){ let s = seed >>> 0; return () => { s = (s + 0x6d2b79f5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+/* The wireframe, held to the records (docs/wireframe.md). Open it on a block seen from a
+   corner, so most of what could go wrong lands on an empty pixel: a back face's lines,
+   a hidden face's, a wrong index. The oracle projects every front-facing shown face's
+   edges itself, in float64, from shownMask. Every lit pixel must be within a pixel of
+   one, every edge's middle within a pixel of a lit one, and the count must be what the
+   records say. Then a frame must be the same bytes with the wire on, after it has run,
+   and with only traced chunks there must be boxes and no raster. countOnly is for a big
+   view with seams between lods, which this block doesn't have: just the count, open
+   sides and all, since the oracle's pixels cost a lot there. */
+window.wireSelftest = async function wireSelftest({ countOnly = false } = {}){
+  const report = {}, saved = { path: state.path, color: state.color, wire: state.wire };
+  const W_ = canvas.width, H_ = canvas.height;
+  const settle = async () => {
+    const end = performance.now() + 120000;
+    for (let f = 0; performance.now() < end; f++){ if (f > 2 && isConverged()) return true; await sleep(16); }
+    return false;
+  };
+  // draw() and readPixels in one task: the canvas keeps nothing past it.
+  const canvasPixels = () => { draw(); const px = new Uint8Array(4 * W_ * H_); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, W_, H_, gl.RGBA, gl.UNSIGNED_BYTE, px); return px; };
+  const isLit = (px, i) => Math.abs(px[4 * i] - 7) > 2 || Math.abs(px[4 * i + 1] - 7) > 2 || Math.abs(px[4 * i + 2] - 10) > 2;
+  const same = (a, b) => { let n = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++; return n; };
+  try {
+    state.color = 4; state.wire = true; showWire();
+    streamer.setOptions({ keepRecords: true });
+    setPath('off');
+    await loadWorld('keep');
+    report.converged = await settle();
+    const px = canvasPixels(), M = viewProj(W_ / H_, view.near, view.far);
+    // The records' own count, as the shader decides what's shown.
+    let faces = 0, opens = 0;
+    const want = new Uint8Array(W_ * H_), mids = [];
+    const toPixel = p => {
+      const c = [0, 1, 2, 3].map(r => M[r] * p[0] + M[4 + r] * p[1] + M[8 + r] * p[2] + M[12 + r]);
+      return [(c[0] / c[3] + 1) / 2 * W_, (c[1] / c[3] + 1) / 2 * H_];
+    };
+    const mark = (x, y) => { const X = Math.floor(x), Y = Math.floor(y); if (X >= 0 && Y >= 0 && X < W_ && Y < H_) want[Y * W_ + X] = 1; };
+    const NORMALS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    for (const { e, rel, open, n } of wireList){
+      if (open) opens++;
+      for (let j = 0; j < n; j++){
+        const r = e.records[j], shown = shownMask(r, open), [x, y, z] = mortonXYZ(r & 0x3ffff);
+        const centre = [rel[0] + (x + 0.5) * e.cellSize, rel[1] + (y + 0.5) * e.cellSize, rel[2] + (z + 0.5) * e.cellSize];
+        for (let f = 0; f < 6; f++){
+          if (!(shown >> f & 1)) continue;
+          faces++;
+          if (countOnly) continue;
+          const pts = [0, 1, 2, 3].map(c => centre.map((v, a) => v + FACE_OFF[4 * f + c][a] * e.cellSize));
+          if (dot(NORMALS[f], pts[0]) >= 0) continue;
+          for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0], [0, 2]]){
+            const A = toPixel(pts[a]), B = toPixel(pts[b]), steps = Math.ceil(Math.hypot(B[0] - A[0], B[1] - A[1]) * 2) + 1;
+            for (let s = 0; s <= steps; s++) mark(A[0] + (B[0] - A[0]) * s / steps, A[1] + (B[1] - A[1]) * s / steps);
+            mids.push([(A[0] + B[0]) / 2, (A[1] + B[1]) / 2]);
+          }
+        }
+      }
+    }
+    if (countOnly) return { converged: report.converged, chunks: wireList.length, opens, faces, triangles: view.triangles };
+    const near = (grid, X, Y) => { for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++){ const x = X + dx, y = Y + dy; if (x >= 0 && y >= 0 && x < W_ && y < H_ && grid(y * W_ + x)) return true; } return false; };
+    let lit = 0, stray = 0, missing = 0;
+    for (let Y = 0; Y < H_; Y++) for (let X = 0; X < W_; X++){
+      if (!isLit(px, Y * W_ + X)) continue;
+      lit++;
+      if (!near(i => want[i], X, Y)) stray++;
+    }
+    for (const [x, y] of mids){
+      const X = Math.floor(x), Y = Math.floor(y);
+      if (X >= 0 && Y >= 0 && X < W_ && Y < H_ && !near(i => isLit(px, i), X, Y)) missing++;
+    }
+    report.raster = { lit, stray, missing, edges: mids.length, chunks: wireList.length, opens, faces, triangles: view.triangles, instances: view.instances, text: $('tris').textContent };
+    // Off and on, the frame itself: the pass leaves nothing behind for the next one.
+    const withWire = renderPixels(160, 120, 8);
+    state.wire = false; showWire();
+    const solid = canvasPixels(), plain = renderPixels(160, 120, 8);
+    state.wire = true; showWire();
+    canvasPixels();
+    report.frameDiffers = same(withWire, plain);
+    report.wireDiffersFromSolid = same(px, solid);
+    state.wire = false; showWire();
+    report.solidAgain = same(canvasPixels(), solid);
+    state.wire = true; showWire();
+    // Only traced chunks: no raster, a box each.
+    streamer.setOptions({ keepRecords: false });
+    setPath('0');
+    report.rayConverged = await settle();
+    const rayPx = canvasPixels();
+    let rayLit = 0;
+    for (let i = 0; i < W_ * H_; i++) if (isLit(rayPx, i)) rayLit++;
+    showTriangles();
+    report.ray = { lit: rayLit, instances: view.instances, triangles: view.triangles, rayChunks: view.rayChunks, marked: view.marked, rayTriangle: view.rayTriangle, text: $('tris').textContent };
+  } finally {
+    streamer.setOptions({ keepRecords: false });
+    state.color = saved.color; state.wire = saved.wire; showWire();
+    setPath(saved.path);
+  }
+  return report;
+};
+window.editSelftest = async function editSelftest(opts = {}){
+  const t0 = performance.now(), saved = { auto, path: state.path, clay: state.clay, max: state.max };
+  auto = false;
+  const report = { worlds: [], violations: [], frames: 0, glError: 0 };
+  const W_ = 160, H_ = 120, settleMs = opts.settleMs ?? 300000;
+  const pump = async (n, phase, { oneRoot = true } = {}) => {
+    for (let f = 0; f < n; f++){
+      frame({ draw: false });
+      report.frames++;
+      invariants(phase, report, { noHoles: true, oneRoot });
+      await sleep(4);
+    }
+  };
+  const settle = async (phase, { oneRoot = true } = {}) => {
+    const end = performance.now() + settleMs;
+    for (let f = 0; performance.now() < end; f++){
+      await pump(1, phase, { oneRoot });
+      if (f > 2 && isConverged()) return true;
+    }
+    return false;
+  };
+  const differ = (a, b) => { let n = 0; for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) n++; return n; };
+  const lit = a => { let n = 0; for (let i = 3; i < a.length; i += 4) if (a[i]) n++; return n; };
+  // Each path alone. The kinds come from the path, not from the flight's history.
+  const frames = async phase => {
+    const out = {};
+    for (const path of ['off', '0']){
+      setPath(path); dirty = true;
+      out['settled' + path] = await settle(phase + ' ' + path, { oneRoot: false });
+      view.clear = clearance();
+      out[path] = renderPixels(W_, H_, 8);
+    }
+    setPath('density'); dirty = true;
+    return out;
+  };
+  const compare = (r, name, a, b) => {
+    r[name] = { raster: differ(a.off, b.off), ray: differ(a['0'], b['0']), settled: a.settledoff && a.settled0 && b.settledoff && b.settled0 };
+  };
+  const open = async (name, over, eye) => {
+    state.world = 'clay'; state.clay = clayDesc(over); fillWorlds(); fillDepth();
+    await loadWorld(true);
+    const c = 2 ** (W.D - 1);
+    if (eye){ cam.eye = eye(c); cam.yaw = EDIT_LOOK.yaw; cam.pitch = EDIT_LOOK.pitch; }
+    setEditMode(true, { lock: false });
+    dirty = true;
+  };
+  const failedBefore = () => streamer.S.stats.failed;
+  try {
+    for (const name of opts.worlds ?? Object.keys(EDIT_WORLDS)){
+      const def = EDIT_WORLDS[name], rand = mulberry(11), r = { name };
+      await open(name, def.over, def.eye);
+      report.lock = edit.noLock;
+      r.param = clayParam(W.clay); r.mode = pool.mode;
+      const voxels0 = W.voxels, root0 = W.root, base = await frames(name + ' before');
+      await settle(name + ' density');
+      const rootsHeld = new Set([root0]), look = { yaw: cam.yaw, pitch: cam.pitch };
+      // One death, in the first world: a slot only restarts once (stream-pool.js).
+      const clicks = opts.clicks ?? def.clicks, killAt = pool.liveWorkers > 1 && !report.killed ? clicks >> 1 : -1;
+      let done = 0, misses = 0;
+      // Mixed sizes and colours, near the same spot, with no frames between some of
+      // them: clicks faster than jobs, so a later edit jumps over a waiting one.
+      for (let i = 0; i < clicks; i++){
+        cam.yaw = look.yaw + (rand() - 0.5) * 0.4; cam.pitch = look.pitch + (rand() - 0.5) * 0.15;
+        edit.level = [0, 0, 0, 1, 3, 6][Math.floor(rand() * 6)];
+        setSlot(Math.floor(rand() * PALETTE.length));
+        const kind = rand() < 0.6 ? 'place' : 'break';
+        if (editStep(kind)){ done++; rootsHeld.add(W.edit.log.root); } else misses++;
+        if (i === killAt){ const slot = pool.slots.find(s => !s.dead && s.ready); slot.fail('editSelftest: a worker died'); report.killed = name; r.killedAt = i; }
+        await pump(Math.floor(rand() * 4), name + ' clicks');
+        if (!rootsHeld.has(streamer.S.world.root)) report.violations.push(`${name}: showing root ${streamer.S.world.root}, which the log never held`);
+      }
+      // Place red, break it, place blue: the same root with another colour, §5's trap.
+      cam.yaw = look.yaw; cam.pitch = look.pitch; edit.level = 0;
+      setSlot(5); const a0 = editStep('place'), redRoot = W.edit.log.root;
+      await pump(2, name + ' recolour');
+      const b0 = editStep('break');
+      await pump(2, name + ' recolour');
+      setSlot(4); const c0 = editStep('place');
+      r.recolour = { steps: [a0, b0, c0], sameRoot: redRoot === W.edit.log.root };
+      // What's under the crosshair is that blue block, with no frame having shown it
+      // yet: taking its colour reads the log, not the screen, or the world's field.
+      setSlot(0);
+      r.taken = takeColour() && edit.colour === PALETTE[4];
+      // Two breaks with no frame between them take two voxels: the second aims at
+      // what the first left, not at what's on screen.
+      { const v0 = (W.counts.update(), W.counts.of(W.edit.log.root)), n0 = W.edit.log.count;
+        const twice = [editStep('break'), editStep('break')];
+        W.counts.update();
+        // (Past 2^53 a count can't feel a voxel: flat ground's says nothing.)
+        r.doubleBreak = { twice, ops: W.edit.log.count - n0, voxels: v0 < 2 ** 53 ? v0 - W.counts.of(W.edit.log.root) : 2 }; }
+      await settle(name + ' rest');
+      /* The same trap with nothing to rebuild it but the paint. Red is on screen, and
+         an edit two chunks away is open, so a break and a blue place both wait behind
+         it and the next edit jumps straight past them: that chunk's ids come out the
+         same, and only setRoot's paint says its colour moved. */
+      { const chunkOf = t => [t.X >> 6, t.Y >> 6, t.Z >> 6];
+        cam.yaw = look.yaw; cam.pitch = look.pitch; edit.level = 0; setSlot(5);
+        const red = editStep('place'), at = updateAim().breakAt, rootRed = W.edit.log.root;
+        await settle(name + ' paint');
+        let away = null;
+        for (let i = 0; i < 2048 && !away; i++){
+          cam.yaw = look.yaw + (i & 63) * Math.PI / 32; cam.pitch = -1.5 + (i >> 6) * 0.04;
+          const t = updateAim()?.placeAt, a = t && chunkOf(t), b = chunkOf(at);
+          if (a && Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2])) >= 2) away = t;
+        }
+        const opened = !!away && editStep('place');
+        cam.yaw = look.yaw; cam.pitch = look.pitch;
+        const hit = updateAim()?.breakAt, gone = editStep('break');
+        setSlot(4);
+        const blue = editStep('place'), again = updateAim()?.breakAt;
+        r.paintOnly = { red, opened, gone, blue, sameBlock: hit?.X === at.X && hit?.Y === at.Y && hit?.Z === at.Z && again?.X === at.X && again?.Y === at.Y && again?.Z === at.Z };
+        await settle(name + ' paint rest'); }
+      r.ops = W.edit.log.count; r.done = done; r.misses = misses; r.flips = streamer.S.stats.flips;
+      r.exportDisabled = $('fileExport').disabled && $('shelfAdd').disabled;
+      r.voxels = W.voxels; r.voxelsEqualLog = W.voxels === W.counts.of(W.edit.log.root);
+      r.samples = W.edit.samples.length;
+      const edited = await frames(name + ' edited');
+      await settle(name + ' density');
+      // Every step back, some of them in a burst.
+      const steps = W.edit.log.count;
+      for (let i = 0; i < steps; i++){ editStep('undo'); await pump(Math.floor(rand() * 3), name + ' undo'); }
+      await settle(name + ' undone');
+      r.undone = { root: W.root === root0, voxels: W.voxels === voxels0, exportEnabled: !$('fileExport').disabled && !$('shelfAdd').disabled, canRedo: W.edit.log.canRedo };
+      const undone = await frames(name + ' undone');
+      compare(r, 'undoneVsBase', undone, base);
+      await settle(name + ' density');
+      for (let i = 0; i < steps; i++){ editStep('redo'); await pump(Math.floor(rand() * 3), name + ' redo'); }
+      await settle(name + ' redone');
+      const redone = await frames(name + ' redone');
+      compare(r, 'redoneVsEdited', redone, edited);
+      r.failed = failedBefore();
+      // The twin: the log's ops in a store of their own, and workers given them
+      // once, with no history. It shares nothing with the world above but the ops.
+      { const E = W.edit, store = createStore(), { root: start } = buildClay(W.clay, store), root = replay(store, W.D, start, E.log.ops());
+        const counts = createCounts(store), snap = worldSnapshot(store, root, W.D, { counts, colour: W.colour }), delta = E.log.delta(-1, 0);
+        r.twinVoxels = counts.of(root) === W.voxels;
+        W = { ...W, store, root, counts, edit: null, voxels: counts.of(root) };
+        ray.frame = null;
+        streamer.setWorld(createWorld(store, root, W.D));
+        pool.setWorld(snap, ++worldEpoch);
+        pool.tail({ from: store.maxId + 1, keys: new Uint32Array(0), counts: new Float64Array(0), poses: null, edits: delta }); }
+      dirty = true;
+      const twin = await frames(name + ' twin');
+      compare(r, 'twinVsEdited', twin, edited);
+      r.lit = lit(edited.off); r.changed = differ(edited.off, base.off);
+      report.worlds.push(r);
+    }
+    // The empty world: the first block goes in the air, and breaking it empties
+    // the world again. Nothing can be drawn before it or after.
+    { const r = { name: 'empty' };
+      await open('empty', { lump: 0, ground: false });
+      await settle('empty');
+      r.clearBefore = (view.clear = clearance()) === Infinity ? 'infinite' : view.clear;
+      setEditMode(false);
+      r.before = litPixels();
+      setEditMode(true, { lock: false });
+      // Its outline is all there is on screen, 16 voxels off with the frame's near at 64.
+      r.aim = !!updateAim() && !updateAim().hit;
+      r.outline = litPixels();
+      r.breakRefused = !editStep('break');
+      edit.level = 2; setSlot(6);
+      r.placed = editStep('place');
+      await settle('first block');
+      r.clearAfter = view.clear;
+      r.voxels = W.voxels;
+      cam.yaw += 0;
+      r.lit = litPixels();
+      r.aimHit = !!updateAim()?.hit;
+      r.broke = editStep('break');
+      await settle('emptied again');
+      r.voxelsAfter = W.voxels; r.rootEmpty = W.root === EMPTY;
+      setEditMode(false);
+      r.after = litPixels();
+      report.worlds.push(r); }
+    // A miss on a world with something in it, and out of reach: nothing happens.
+    { const r = { name: 'misses' };
+      await open('misses', { lump: 64 }, null);
+      const ops0 = W.edit.log.count;
+      cam.yaw = Math.PI + 0.6; cam.pitch = 0.3;   // away from the lump
+      r.skyPlace = editStep('place'); r.skyBreak = editStep('break');
+      // The lump is ahead, and past a voxel's reach of 128.
+      const v = defaultView(), f0 = [Math.cos(v.pitch) * Math.sin(v.yaw), Math.sin(v.pitch), Math.cos(v.pitch) * Math.cos(v.yaw)];
+      cam.yaw = v.yaw; cam.pitch = v.pitch; cam.eye = v.eye.map((x, a) => x - 500 * f0[a]);
+      edit.level = 0; updateAim();
+      r.far = edit.far; r.reach = reachOf(0);
+      r.farPlace = editStep('place');
+      r.ops = W.edit.log.count - ops0;
+      report.worlds.push(r); }
+    // Off clay: refused, and the mode doesn't stick to a world that can't.
+    { state.world = 'shape:sphere'; state.depth = 8; fillWorlds(); fillDepth();
+      await loadWorld(true);
+      report.offClay = { leftMode: !edit.on, refused: setEditMode(true) === false, still: !edit.on, step: editStep('break') }; }
+  } finally {
+    setEditMode(false);
+    state.clay = saved.clay; setPath(saved.path);
+    auto = saved.auto;
+  }
+  report.glError = gl.getError();
+  report.mode = pool.mode;
+  report.liveWorkers = pool.liveWorkers;
+  report.ms = Math.round(performance.now() - t0);
+  window.__editSelftest = report;
+  return report;
+};
+
+/* ---- what a click costs, on this machine ---------------------------------------
+   editBench(), or ?editbench: the first real latency number (§11.8 step 4). The
+   page's own loop runs, drawing on your GPU, while clicks land at the rate of a held
+   button, on the three views experiments/edit-stream.mjs simulated. Each row's time
+   is from the click to the end of the frame that submits its flip. Paste the HUD's
+   text into docs/edit-mode-log.md §5. */
+window.editBench = async function editBench({ clicks = 16, gapMs = 200, worlds = Object.keys(EDIT_WORLDS) } = {}){
+  setHud(true);   // its progress and report are read from the HUD
+  const savedClay = state.clay, rows = [], status = t => { benchHud.status = t; hud(); };
+  const nextFrame = () => new Promise(r => requestAnimationFrame(r));
+  const until = async (test, ms) => { const end = performance.now() + ms; while (performance.now() < end){ if (test()) return true; await nextFrame(); } return false; };
+  const stat = a => ({ median: medianOf(a), most: a.length ? Math.max(...a) : NaN });
+  for (const name of worlds){
+    status(`edit bench: ${name}, loading`);
+    state.world = 'clay'; state.clay = clayDesc(EDIT_WORLDS[name].over); fillWorlds(); fillDepth();
+    await loadWorld(true);
+    cam.eye = EDIT_WORLDS[name].eye(2 ** (W.D - 1)); cam.yaw = EDIT_LOOK.yaw; cam.pitch = EDIT_LOOK.pitch; dirty = true;
+    const converged = await until(isConverged, 300000);
+    setEditMode(true, { lock: false });
+    for (const kind of ['place', 'break']){
+      status(`edit bench: ${name}, ${kind}`);
+      const E = W.edit, rand = mulberry(7);
+      E.samples.length = 0;
+      let misses = 0, late = 0;
+      for (let i = 0; i < clicks; i++){
+        cam.yaw = EDIT_LOOK.yaw + (rand() - 0.5) * 0.4; cam.pitch = EDIT_LOOK.pitch + (rand() - 0.5) * 0.15;
+        await nextFrame();
+        if (!editStep(kind)){ misses++; continue; }
+        const t = performance.now();
+        if (!await until(() => !E.pending.length, 15000)) late++;
+        await sleep(Math.max(0, gapMs - (performance.now() - t)));
+      }
+      const S = E.samples, frameIntervals = frameMs;
+      rows.push({ world: name, kind, clicks: S.length, misses, late, converged, cut: streamer.S.sel?.nodes.size ?? 0,
+                  ms: stat(S.map(x => x.ms)), frames: stat(S.map(x => x.frames)), chunks: stat(S.map(x => x.chunks)),
+                  kb: stat(S.map(x => x.bytes / 1024)), setRootMs: stat(S.map(x => x.setRootMs)), logMs: stat(S.map(x => x.logMs)), frameMs: frameIntervals });
+      // Back to the world as it was. The same view and seed would otherwise have
+      // the break row take back the blocks the place row just put there, 2 chunks
+      // in the air, and not the 14 of breaking the ground (my first run did).
+      while (E.log.canUndo) editStep('undo');
+      await until(isConverged, 120000);
+    }
+    setEditMode(false);
+  }
+  state.clay = savedClay;
+  benchHud.status = '';
+  return { renderer: rendererName(), size: [canvas.width, canvas.height], workers: pool.liveWorkers, mode: pool.mode, rows };
+};
+function editBenchText(r){
+  const two = s => `${s.median.toFixed(s.median < 10 ? 2 : 0)} / ${s.most.toFixed(s.most < 10 ? 2 : 0)}`;
+  return `<b>edit bench</b> ${r.renderer}, ${r.size.join('×')}, ${r.workers} workers; median / most\n` + r.rows.map(x =>
+    `  ${x.world} ${x.kind} (${x.clicks} clicks, cut ${x.cut}): <b>${two(x.ms)} ms</b>, ${two(x.frames)} frames, ${two(x.chunks)} chunks, ${two(x.kb)} KB, setRoot ${two(x.setRootMs)} ms, log ${two(x.logMs)} ms, rAF ${x.frameMs.toFixed(1)} ms` +
+    (x.misses ? `, ${x.misses} misses` : '') + (x.late ? ` <span class="warn">${x.late} late</span>` : '') + (x.converged ? '' : ' <span class="warn">not converged</span>')).join('\n');
+}
+
 async function boot(){
   bindControls();
   fillWorlds(); fillDepth();
@@ -3327,6 +4364,17 @@ async function boot(){
     } catch (e){
       console.error('streamBench failed', e);
       benchHud.text = `<b>bench</b> <span class="warn">failed: ${e && e.message || e}</span> (the console has the stack)`;
+    }
+    hud();
+  }
+  if (params.has('editbench')){
+    try {
+      const r = await editBench();
+      console.log('editBench', JSON.stringify(r, null, 1));
+      benchHud.text = editBenchText(r);
+    } catch (e){
+      console.error('editBench failed', e);
+      benchHud.text = `<b>edit bench</b> <span class="warn">failed: ${e && e.message || e}</span> (the console has the stack)`;
     }
     hud();
   }

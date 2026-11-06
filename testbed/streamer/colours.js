@@ -20,6 +20,9 @@
                                   strata, the surface's grass, rock and
                                   snow, water and lava. No table: the
                                   field rebuilds the plan, ~0.6 s at D = 12
+     { kind: 'clay', D, lump, … } the clay and flat worlds' (clay-core.js,
+                                  clayColour): clay above the centre plane,
+                                  ground below it. Nothing to rebuild
      null                         no colour: jobs emit no words
    colourOf(desc) turns it into a field on whichever side asks: the
    worker, the pool's main-thread fallback, Node's simulator and the tests.
@@ -39,6 +42,7 @@ import { scatterColour } from './scatter-core.js';
 import { latticeColour } from './lattice-core.js';
 import { kitColour } from './kit-core.js';
 import { caveColour } from './cave-core.js';
+import { clayColour } from './clay-core.js';
 
 const TAU = 2 * Math.PI;
 function hash3(i, j, k){
@@ -76,5 +80,6 @@ export function colourOf(desc){
   if (desc.kind === 'lattice') return latticeColour(desc, rgb8);
   if (desc.kind === 'kit') return kitColour(desc, rgb8);
   if (desc.kind === 'caves') return caveColour(desc, rgb8);
+  if (desc.kind === 'clay') return clayColour(desc, rgb8);
   throw new Error(`colourOf: unknown kind '${desc.kind}'`);
 }

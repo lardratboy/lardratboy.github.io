@@ -46,7 +46,7 @@
    (attrAtCPU); a cell outside the mask (the ray started inside the
    solid) has none.
    ===================================================================== */
-import { EMPTY, FIRST_NODE } from './dag-core.js';
+import { EMPTY, FIRST_NODE, isFull } from './dag-core.js';
 import { CHUNK_LEVELS, mortonOf, nodeAt, cellOf } from './chunk-core.js';
 
 export const PAGE_WORDS = 512, BRICK_WORDS = 16, TREE_WORDS = 12;
@@ -403,7 +403,7 @@ export function pageJob(store, root, D, counts, chunk, expand, { coloured = fals
     const block = ex ? pageAttrBlock(ex.records, ex.attrs) : { attr: new Uint32Array(0), attrAt: new Uint32Array(PAGE_WORDS).fill(ATTR_NONE), shown: 0 };
     return { ...counted, ...block };
   };
-  if (id >= FIRST_NODE && counts.of(id) === 8 ** (lod + CHUNK_LEVELS))
+  if (id >= FIRST_NODE && isFull(store, counts, id, lod + CHUNK_LEVELS))
     return withAttrs({ ...fullPage(store, root, D, chunk), fullChunk: true }, coloured && !buried() ? expand() : null);
   const ex = expand();
   return withAttrs(pageFromCells(store, root, D, chunk, ex.cells), ex);
