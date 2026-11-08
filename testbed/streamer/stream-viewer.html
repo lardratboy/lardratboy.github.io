@@ -1060,6 +1060,15 @@ function dispose(entry){
 
 /* ---- state ------------------------------------------------------------- */
 const OCCLUSION_MODES = ['off', 'queries', 'depth'];
+/* The colour mode nobody picked follows the world: attribute where the world
+   has a colour field, gamut where it has none (a world file with no colour, a
+   voxelized asset's shape: colororgeneralfields.md §3). Attribute with no field
+   drew such a world almost black, and that read as broken. autoColour is the
+   mode this chose last, or null once a mode was picked: by ?color=, by the
+   menu, or by code that sets state.color to anything else (wireSelftest's
+   plain), which the comparison in colourForWorld notices without being told. */
+const COLOUR_ATTR = 8, COLOUR_GAMUT = 3;
+let autoColour = params.has('color') ? null : COLOUR_ATTR;
 const state = {
   // (A link can't name a file: saveView writes what a shelf world was built from.)
   world: /^file:/.test(params.get('world') || '') ? 'row:142' : params.get('world') || 'row:142',
@@ -1702,12 +1711,18 @@ async function buildWorld(signal, gen){
   streamer.setWorld(createWorld(store, root, D));
   pool.setWorld(snap, ++worldEpoch);
   dirty = true;
+  colourForWorld();
   if (kit) showKit();
   if (clay) showClay();
   fillShelf();
   if (edit.on && !W.edit) setEditMode(false);
   showEdit();
   return true;
+}
+function colourForWorld(){
+  if (autoColour === null || state.color !== autoColour) return;
+  autoColour = state.color = W.colour ? COLOUR_ATTR : COLOUR_GAMUT;
+  $('color').value = String(state.color);
 }
 /* Where the eye starts: outside the world's low corner for a row (they
    fill the cube), above the middle for terrain and the half-space, and
@@ -2234,7 +2249,7 @@ function bindControls(){
   $('detail').addEventListener('input', () => { state.detail = +$('detail').value; $('detailV').textContent = state.detail; streamer.setOptions({ detail: state.detail }); dirty = true; });
   $('max').addEventListener('change', () => { state.max = +$('max').value; streamer.setOptions({ maxChunks: state.max }); dirty = true; });
   $('rule').addEventListener('change', () => { state.rule = $('rule').value; loadWorld(false); });
-  $('color').addEventListener('change', () => { state.color = +$('color').value; });
+  $('color').addEventListener('change', () => { state.color = +$('color').value; autoColour = null; });
   $('cache').addEventListener('change', () => {
     state.cache = +$('cache').value;
     streamer.setOptions({ cacheBytes: cacheBytes(state.cache), cacheMax: state.cache ? DEFAULTS.cacheMax : 1 });
@@ -4175,7 +4190,8 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       report.bareMessage = await opened(viaDrop, [['all-solid-d10.vdag', file]]);
       dirty = true;
       const converged = await settle(), px = renderPixels(W_, H_, 8);
-      report.bare = { name: W.file?.name, voxels: W.voxels, colourStatus: W.file?.colourStatus, colour: W.colour, converged, lit: lit(px), failed: streamer.S.stats.failed }; }
+      report.bare = { name: W.file?.name, voxels: W.voxels, colourStatus: W.file?.colourStatus, colour: W.colour, converged, lit: lit(px), failed: streamer.S.stats.failed,
+                      colourMode: state.color, menu: $('color').value }; }
     // 8. Stale colour: a print no field here gives. And a name that's markup.
     { const s = createStore(), root = s.fromField(7, fieldOf(SHAPES.find(x => x.name === 'sphere'), 7)).root;
       const file = await core.writeVdag([{ keys: s.snapshot().keys, root, D: 7, name: '<img src=x onerror="window.__pwned=1">', colour: { kind: 'shape', name: 'sphere', D: 7 } }],
@@ -4183,7 +4199,7 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       setHud(false);
       await opened(viaDrop, [['<b>odd</b>.vdag', file]]);
       dirty = true; await settle(); frame({ draw: false }); hud(); await sleep(50);
-      report.stale = { status: W.file?.colourStatus, panels: !$('hud').hidden, warned: /has changed since/.test($('hud').textContent), imgInHud: !!$('hud').querySelector('img, b b'), imgInInfo: !!$('fileInfo').querySelector('img, b'),
+      report.stale = { colourMode: state.color, status: W.file?.colourStatus, panels: !$('hud').hidden, warned: /has changed since/.test($('hud').textContent), imgInHud: !!$('hud').querySelector('img, b b'), imgInInfo: !!$('fileInfo').querySelector('img, b'),
                        option: [...$('world').options].some(o => o.textContent.startsWith('<img')), pwned: !!window.__pwned, noUrl: !new URLSearchParams(location.search).has('world') }; }
     // 9. A D = 5 world can't be streamed, and an empty one has nothing to show.
     { const s = createStore(), small = s.solid(5);
