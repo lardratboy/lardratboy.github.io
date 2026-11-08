@@ -17,7 +17,8 @@
    3. createStreamer: the cache, the job order, admission under the
       per-frame budgets, and LRU eviction (5–7), i.e. block-showroom's
       Virtualiser and GenerationPool.service(), keyed by (lod, chunk).
-   4. createJobRunner: what a worker does with a job. One expandChunk.
+   4. createJobRunner: what a worker does with a job. One expandChunk, run
+      as job-core's fastChunk, its byte-for-byte faster twin.
 
    Edits come in through setRoot and §3b, and a worker follows them through
    tails (§4b). docs/edit-stream-log.md has the reasoning.
@@ -29,6 +30,7 @@
    ===================================================================== */
 import { EMPTY, FULL, FIRST_NODE, storeView, isFull } from './dag-core.js';
 import { CHUNK_LEVELS, CHUNK_SIDE, chunkNode, expandChunk } from './chunk-core.js';
+import { fastChunk, createJobCache } from './job-core.js';
 import { pageJob, RUN_HEAD, ATTR_NONE } from './ray-core.js';
 import { createBlockTable, editedField } from './edit-core.js';
 
@@ -858,14 +860,24 @@ export { resultBytes };
    passed in rather than imported, so this file keeps its imports and a
    test can hand in any field. With a colour, every records job also
    returns `attrs`, one word per record (step 6), and meanDepth is the
-   coarse mean's depth (chunk-core's cellAttr). */
+   coarse mean's depth (chunk-core's cellAttr).
+
+   A records job is expandChunk with seams, computed by job-core's fastChunk
+   (computedags.md §9 step 1): shells for full nodes, masks for per-brick
+   rules, and a cached seam test. Without colour that's 4–12× on the cut of
+   every world we bench; with it, colour is most of what's left, and the job
+   is 1.4–3.7× (6× on flat ground; docs/job-speed-log.md). Held to expandChunk byte for byte by
+   test/job-core.test.js. The runner keeps its mask cache for the snapshot's
+   life, since ids never change meaning, tails included. A page job still
+   expands with expandChunk: it needs every kept cell, buried ones too, which
+   is what the shells skip. */
 export const MEAN_DEPTH = 1;
 export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH } = {}){
   const store = storeView(snap);
   let C = snap.counts, P = snap.poses;
   const base = snap.colour && colourOf ? colourOf(snap.colour) : null;
   let colour = base, table = null;
-  const counts = { of: id => C[id] }, classes = P ? { pose: id => P[id] } : null;
+  const counts = { of: id => C[id] }, classes = P ? { pose: id => P[id] } : null, cache = createJobCache();
   const full = (root, lod, x, y, z) => {
     const id = chunkNode(store, root, snap.D, lod, x, y, z).id;
     return id !== EMPTY && isFull(store, counts, id, lod + CHUNK_LEVELS);
@@ -887,8 +899,8 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
     if (buried())
       return { records: new Uint32Array(0), attrs: colour ? new Uint32Array(0) : null, count: 0, borderStart: 0, quads: 0, openQuads: [0, 0, 0, 0, 0, 0],
                occupied: CHUNK_SIDE ** 3, recordCount: 0, buriedChunk: true, ms: performance.now() - t0 };
-    const c = expandChunk(store, root, snap.D, { lod, cx, cy, cz },
-                          { classes, counts, lodRule: job.lodRule, seams: true, colour, meanDepth });
+    const c = fastChunk(store, root, snap.D, { lod, cx, cy, cz },
+                        { classes, counts, lodRule: job.lodRule, colour, meanDepth, cache });
     return { records: c.records, attrs: c.attrs || null, count: c.count, borderStart: c.borderStart, quads: c.quads, openQuads: c.openQuads,
              occupied: c.occupied, recordCount: c.count, ms: performance.now() - t0 };
   };
@@ -910,6 +922,7 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
       table.sync(edits);
     }
   };
+  run.cache = cache;
   return run;
 }
 
