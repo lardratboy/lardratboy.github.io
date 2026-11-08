@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>compute probe (docs/computedags.md)</title>
+<style>
+  body { background: #101014; color: #dde; font: 14px/1.45 ui-monospace, Menlo, monospace; margin: 2em; }
+  button { font: inherit; padding: .4em 1em; } pre { white-space: pre-wrap; }
+</style>
+<h1>Compute probe</h1>
+<p>The first numbers for docs/computedags.md. Three kernels, each held exactly to the CPU code it stands for. Serve the folder, press run, paste the text back. <code>?quick</code> runs small worlds.</p>
+<button id="go">run</button> <span id="state"></span>
+<pre id="out"></pre>
+<script type="module">
+/* Three questions, on whichever GPU this browser has:
+     1. point: a walk from the root to a voxel, the hardest thing a GPU does with a
+        DAG (pointer chasing, a cache miss a level), and what an actor's collision is.
+        Held to store.query, word for word.
+     2. job: webgpuquest.md's spike. A lod-0, colourless chunk job: for each of 64³
+        cells, walk from the chunk's node; if solid, test six neighbours, using the
+        six neighbouring chunks' nodes for the apron; emit a record through an atomic
+        counter. Deliberately the dumbest kernel: it visits every cell, where
+        expandChunk skips empty subtrees. Held to expandChunk's records as a set,
+        chunk by chunk (the GPU's order isn't Morton order).
+     3. intern: hash-consing with nothing bigger than a 32-bit atomic. WGSL
+        has no 64-bit atomics, and Molenaar & Eisemann's table rests on 8-byte ones
+        because their items live in the table. Ours needn't: candidates are already
+        in a buffer, written by an earlier dispatch, and the table holds 32-bit
+        indices into it, so a comparison reads immutable words and a CAS claims a
+        slot. No spinlock, no half-written keys, no duplicates. Safari can't compile the
+        CAS, so there's an exchange version too (INTERN_INSERT, INTERN_SEARCH). Both are
+        held to createStore's intern: the same number of unique keys, every candidate
+        pointing to a winner with its own key.
+   Timing is a fence (see run), since a browser may not offer timestamp-query. Readback
+   is timed apart: a generated chunk has to reach WebGL2 by the CPU unless the renderer
+   moves too. */
+import { createStore, EMPTY, FIRST_NODE } from '../dag-core.js';
+import { expandChunk, chunkNode, mortonOf } from '../chunk-core.js';
+import { SHAPES, fieldOf } from './shapes.mjs';
+import { kitDesc, buildKit } from '../kit-core.js';
+import { caveDesc, buildCaves } from '../cave-core.js';
+
+const WALK = /* wgsl */`
+  @group(0) @binding(0) var<storage, read> keys: array<u32>;
+  fn childOf(id: u32, o: u32) -> u32 { return keys[(id - 2u) * 9u + 1u + o]; }
+`;
+const POINT = WALK + /* wgsl */`
+  struct P { n: u32, root: u32, D: u32, pad: u32 }
+  @group(0) @binding(1) var<uniform> p: P;
+  @group(0) @binding(2) var<storage, read> pts: array<u32>;
+  @group(0) @binding(3) var<storage, read_write> out: array<u32>;
+  @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) g: vec3u) {
+    let i = g.x;
+    if (i >= p.n) { return; }
+    let x = pts[3u * i]; let y = pts[3u * i + 1u]; let z = pts[3u * i + 2u];
+    var id = p.root;
+    var k = i32(p.D) - 1;
+    loop {
+      if (k < 0 || id < 2u) { break; }
+      let b = u32(k);
+      id = childOf(id, ((x >> b) & 1u) | (((y >> b) & 1u) << 1u) | (((z >> b) & 1u) << 2u));
+      k -= 1;
+    }
+    out[i] = select(0u, 1u, id == 1u);
+  }`;
+const JOB = WALK + /* wgsl */`
+  // A chunk's seven nodes: its own, then +x -x +y -y +z -z: the stamp's seven.
+  struct Chunk { n: array<u32, 7> }
+  @group(0) @binding(1) var<storage, read> chunks: array<Chunk>;
+  @group(0) @binding(2) var<storage, read_write> counter: array<atomic<u32>>;
+  @group(0) @binding(3) var<storage, read_write> out: array<vec2u>;
+  fn occ(start: u32, x: u32, y: u32, z: u32) -> bool {
+    var id = start;
+    var k = 5i;
+    loop {
+      if (k < 0 || id < 2u) { break; }
+      let b = u32(k);
+      id = childOf(id, ((x >> b) & 1u) | (((y >> b) & 1u) << 1u) | (((z >> b) & 1u) << 2u));
+      k -= 1;
+    }
+    return id == 1u;
+  }
+  fn spread(v: u32) -> u32 {
+    var s = 0u;
+    for (var b = 0u; b < 6u; b++) { if (((v >> b) & 1u) != 0u) { s |= 1u << (3u * b); } }
+    return s;
+  }
+  @compute @workgroup_size(4, 4, 4) fn main(@builtin(global_invocation_id) g: vec3u) {
+    let c = g.z >> 6u; let x = g.x; let y = g.y; let z = g.z & 63u;
+    let own = chunks[c].n[0];
+    if (!occ(own, x, y, z)) { return; }
+    var m = 0u;
+    if (x == 63u) { if (!occ(chunks[c].n[1], 0u, y, z)) { m |= 1u; } } else if (!occ(own, x + 1u, y, z)) { m |= 1u; }
+    if (x == 0u)  { if (!occ(chunks[c].n[2], 63u, y, z)) { m |= 2u; } } else if (!occ(own, x - 1u, y, z)) { m |= 2u; }
+    if (y == 63u) { if (!occ(chunks[c].n[3], x, 0u, z)) { m |= 4u; } } else if (!occ(own, x, y + 1u, z)) { m |= 4u; }
+    if (y == 0u)  { if (!occ(chunks[c].n[4], x, 63u, z)) { m |= 8u; } } else if (!occ(own, x, y - 1u, z)) { m |= 8u; }
+    if (z == 63u) { if (!occ(chunks[c].n[5], x, y, 0u)) { m |= 16u; } } else if (!occ(own, x, y, z + 1u)) { m |= 16u; }
+    if (z == 0u)  { if (!occ(chunks[c].n[6], x, y, 63u)) { m |= 32u; } } else if (!occ(own, x, y, z - 1u)) { m |= 32u; }
+    if (m == 0u) { return; }
+    let i = atomicAdd(&counter[0], 1u);
+    if (i < arrayLength(&out)) {
+      out[i] = vec2u(c, spread(x) | (spread(y) << 1u) | (spread(z) << 2u) | (m << 18u));
+    }
+  }`;
+const INTERN = /* wgsl */`
+  struct P { n: u32, mask: u32, a: u32, b: u32 }
+  @group(0) @binding(0) var<storage, read> cand: array<u32>;
+  @group(0) @binding(1) var<uniform> p: P;
+  @group(0) @binding(2) var<storage, read_write> table: array<atomic<u32>>;
+  @group(0) @binding(3) var<storage, read_write> leader: array<u32>;
+  fn same(i: u32, j: u32) -> bool {
+    for (var k = 0u; k < 9u; k++) { if (cand[9u * i + k] != cand[9u * j + k]) { return false; } }
+    return true;
+  }
+  @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) g: vec3u) {
+    let i = g.x;
+    if (i >= p.n) { return; }
+    var h = 0x811c9dc5u;
+    for (var k = 0u; k < 9u; k++) { h = (h ^ cand[9u * i + k]) * 0x01000193u; h ^= h >> 15u; }
+    h &= p.mask;
+    loop {
+      let r = atomicCompareExchangeWeak(&table[h], 0u, i + 1u);
+      if (r.exchanged) { leader[i] = i; return; }
+      if (r.old_value == 0u) { continue; }     // a weak CAS may fail spuriously
+      let j = r.old_value - 1u;
+      if (same(i, j)) { leader[i] = j; return; }
+      h = (h + 1u) & p.mask;
+    }
+  }`;
+
+/* The same job with no compare-and-swap at all, because Safari can't compile one.
+   Safari 27.2 refuses the CAS kernel above: WebKit's generated Metal helper
+   instantiates a struct with decltype(compare), which is `thread unsigned int`, and
+   Metal refuses a field with an address space. The fault is in the helper, not in how
+   this kernel calls it, so I'd expect any use to fail (only this one was tried).
+
+   atomicExchange does the job with two passes. Insert: hold an item and walk the
+   probe sequence. A slot already holding your key means you're done. Otherwise swap
+   your item in: an empty slot ends the walk, the same key ends it, and a different
+   key is now the item in your hand, carried on from the next slot.
+   Search, once all that's over: walk from the hash to the first slot with your key.
+   Why it's right, with no locks:
+     - Slots never go empty once filled, and an item only moves forward along a path
+       it was already on. So no gap ever opens between a key's hash and its place.
+     - A key is dropped only on seeing a copy of itself in a slot, and a swap moves
+       that copy to a hand, never loses it. So every key survives.
+     - Races can leave a key in two slots. Search takes the first, and the table is
+       frozen by then, so every candidate with that key names the same leader.
+   Each candidate fills at most one empty slot, so a table of 2n never fills up. */
+const INTERN_XCHG_COMMON = /* wgsl */`
+  struct P { n: u32, mask: u32, a: u32, b: u32 }
+  @group(0) @binding(0) var<storage, read> cand: array<u32>;
+  @group(0) @binding(1) var<uniform> p: P;
+  @group(0) @binding(2) var<storage, read_write> table: array<atomic<u32>>;
+  @group(0) @binding(3) var<storage, read_write> leader: array<u32>;
+  fn same(i: u32, j: u32) -> bool {
+    for (var k = 0u; k < 9u; k++) { if (cand[9u * i + k] != cand[9u * j + k]) { return false; } }
+    return true;
+  }
+  fn start(i: u32) -> u32 {
+    var h = 0x811c9dc5u;
+    for (var k = 0u; k < 9u; k++) { h = (h ^ cand[9u * i + k]) * 0x01000193u; h ^= h >> 15u; }
+    return h & p.mask;
+  }`;
+const INTERN_INSERT = INTERN_XCHG_COMMON + /* wgsl */`
+  @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) g: vec3u) {
+    let i = g.x;
+    if (i >= p.n) { return; }
+    var item = i;
+    var h = start(i);
+    loop {
+      let seen = atomicLoad(&table[h]);
+      if (seen != 0u && same(item, seen - 1u)) { return; }
+      let old = atomicExchange(&table[h], item + 1u);
+      if (old == 0u || same(item, old - 1u)) { return; }
+      item = old - 1u;
+      h = (h + 1u) & p.mask;
+    }
+  }`;
+const INTERN_SEARCH = INTERN_XCHG_COMMON + /* wgsl */`
+  @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) g: vec3u) {
+    let i = g.x;
+    if (i >= p.n) { return; }
+    var h = start(i);
+    loop {
+      let s = atomicLoad(&table[h]);
+      if (s == 0u) { leader[i] = 0xffffffffu; return; }  // a lost key: the oracle sees it
+      if (same(i, s - 1u)) { leader[i] = s - 1u; return; }
+      h = (h + 1u) & p.mask;
+    }
+  }`;
+
+const rng = seed => () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0) / 2 ** 32; };
+const median = a => [...a].sort((x, y) => x - y)[a.length >> 1];
+const log = s => { document.getElementById('out').textContent += s + '\n'; console.log(s); };
+
+function surfacePoints(store, root, D, n){
+  const r = rng(12345), out = new Uint32Array(n * 3), side = 2 ** D, opts = new Uint8Array(8);
+  for (let i = 0; i < n; i++){
+    let id = root, x = 0, y = 0, z = 0;
+    for (let k = D - 1; k >= 0 && id >= FIRST_NODE; k--){
+      let m = 0;
+      for (let o = 0; o < 8; o++) if (store.child(id, o) !== EMPTY) opts[m++] = o;
+      if (!m) break;
+      const o = opts[Math.floor(r() * m)];
+      id = store.child(id, o); x = 2 * x + (o & 1); y = 2 * y + (o >> 1 & 1); z = 2 * z + (o >> 2);
+    }
+    const j = () => Math.floor(r() * 17) - 8, c = v => Math.max(0, Math.min(side - 1, v));
+    out[3 * i] = c(x + j()); out[3 * i + 1] = c(y + j()); out[3 * i + 2] = c(z + j());
+  }
+  return out;
+}
+/* Chunks that hold a surface: found by the same random descent, so they're chunks
+   a flight would ask for at lod 0, not the empties a uniform sample finds. */
+function surfaceChunks(store, root, D, n){
+  const pts = surfacePoints(store, root, D, n * 8), seen = new Set(), out = [];
+  for (let i = 0; i < n * 8 && out.length < n; i++){
+    const cx = pts[3 * i] >> 6, cy = pts[3 * i + 1] >> 6, cz = pts[3 * i + 2] >> 6, key = `${cx},${cy},${cz}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (chunkNode(store, root, D, 0, cx, cy, cz).id !== EMPTY) out.push({ lod: 0, cx, cy, cz });
+  }
+  return out;
+}
+const SIDES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+
+let gpuError = null;
+async function gpu(){
+  if (!navigator.gpu) throw new Error('no navigator.gpu');
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) throw new Error('no adapter');
+  const device = await adapter.requestDevice({ requiredFeatures: adapter.features.has('timestamp-query') ? ['timestamp-query'] : [], requiredLimits: {
+    maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+    maxBufferSize: adapter.limits.maxBufferSize,
+  } });
+  // A rejected command buffer runs nothing and its clocks still read: fatal, or a
+  // validation error looks like a very fast GPU. (It did, once. The oracles caught it.)
+  device.addEventListener('uncapturederror', e => { gpuError ||= e.error.message; log('GPU ERROR: ' + e.error.message); });
+  return { adapter, device };
+}
+function mk(device, data, usage = GPUBufferUsage.STORAGE){
+  const b = device.createBuffer({ size: Math.max(16, (data.byteLength + 3) & ~3), usage: usage | GPUBufferUsage.COPY_DST, mappedAtCreation: true });
+  new data.constructor(b.getMappedRange()).set(data); b.unmap();
+  return b;
+}
+const empty = (device, size) => device.createBuffer({ size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+async function read(device, src, size){
+  const t0 = performance.now(), dst = device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const e = device.createCommandEncoder(); e.copyBufferToBuffer(src, 0, dst, 0, size); device.queue.submit([e.finish()]);
+  await dst.mapAsync(GPUMapMode.READ);
+  const out = dst.getMappedRange().slice(0);
+  dst.destroy();
+  return { bytes: out, ms: performance.now() - t0 };
+}
+/* Three clocks. `fence`, the time reported, is a 4-byte copy in the same submit into
+   a mapped buffer, so the map can't resolve before the work is done; it reads about
+   0.7 ms on a pass that does nothing, which is its floor, and it includes any queue
+   writes before the pass (intern's table clear). `done` is onSubmittedWorkDone, which
+   agrees with it. `stamp` is the GPU's own count of the pass, where the browser offers
+   timestamp-query. On passes past ~5 ms the three agree within 5%. Below that, read
+   them as "under a millisecond" and no finer. */
+const timing = { last: null, repeat: 1 };
+let fenceSrc = null;
+const fenceSource = device => fenceSrc ||= device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_SRC });
+async function run(device, pipeline, entries, x, y = 1, z = 1){
+  const steps = (Array.isArray(pipeline) ? pipeline : [pipeline]).map(p => [p, device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map((buffer, binding) => ({ binding, resource: { buffer } })) })]);
+  const stamps = device.features.has('timestamp-query');
+  const qs = stamps ? device.createQuerySet({ type: 'timestamp', count: 2 }) : null;
+  const res = stamps ? device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : null;
+  const rd = stamps ? device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) : null;
+  const fence = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const e = device.createCommandEncoder(), pass = e.beginComputePass(stamps ? { timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : {});
+  for (const [p, bind] of steps){
+    pass.setPipeline(p); pass.setBindGroup(0, bind);
+    for (let r = 0; r < timing.repeat; r++) pass.dispatchWorkgroups(x, y, z);
+  }
+  pass.end();
+  e.copyBufferToBuffer(fenceSource(device), 0, fence, 0, 4);
+  if (stamps){ e.resolveQuerySet(qs, 0, 2, res, 0); e.copyBufferToBuffer(res, 0, rd, 0, 16); }
+  const cb = e.finish(), t0 = performance.now();
+  device.queue.submit([cb]);
+  const done = device.queue.onSubmittedWorkDone().then(() => performance.now() - t0);
+  await fence.mapAsync(GPUMapMode.READ);
+  const ms = performance.now() - t0, doneMs = await done;
+  fence.destroy();
+  let stamp = null;
+  if (stamps){
+    await rd.mapAsync(GPUMapMode.READ);
+    const t = new BigUint64Array(rd.getMappedRange());
+    stamp = Number(t[1] - t[0]) / 1e6;
+    rd.destroy(); res.destroy(); qs.destroy();
+  }
+  timing.last = { fence: ms, done: doneMs, stamp };
+  (timing.all ||= []).push(timing.last);
+  return ms;
+}
+const clocks = () => { const a = timing.all || []; timing.all = []; const m = k => median(a.map(x => x[k] ?? NaN)); return { fenceMs: m('fence'), doneMs: m('done'), stampMs: m('stamp'), coldFenceMs: a[0]?.fence, coldStampMs: a[0]?.stamp }; };
+const compile = (device, code, layout = 'auto') => device.createComputePipelineAsync({ layout, compute: { module: device.createShaderModule({ code }), entryPoint: 'main' } });
+
+async function pointProbe(device, w, n, reps){
+  const pts = surfacePoints(w.store, w.root, w.D, n), want = new Uint32Array(n);
+  const js = [];
+  for (let r = 0; r < 3; r++){
+    const t0 = performance.now();
+    for (let i = 0; i < n; i++) want[i] = w.store.query(w.root, w.D, pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]);
+    js.push(performance.now() - t0);
+  }
+  const pipeline = await compile(device, POINT), out = empty(device, n * 4);
+  const entries = [w.keysBuf, mk(device, new Uint32Array([n, w.root, w.D, 0]), GPUBufferUsage.UNIFORM), mk(device, pts), out];
+  const ms = [];
+  // 2M walks is under a millisecond, below the fence's own overhead (~0.7 ms): the
+  // same walks 32 times in one pass, so the clock has something to read. Repeats
+  // run warm, so the first run is reported too.
+  timing.repeat = 32;
+  for (let r = 0; r < reps; r++) ms.push(await run(device, pipeline, entries, Math.ceil(n / 64)));
+  timing.repeat = 1;
+  const got = new Uint32Array((await read(device, out, n * 4)).bytes);
+  let bad = 0; for (let i = 0; i < n; i++) if (got[i] !== want[i]) bad++;
+  return { ...clocks(), n, repeat: 32, jsMs: median(js), gpuMs: median(ms), jsNsEach: median(js) / n * 1e6, gpuNsEach: median(ms) / (32 * n) * 1e6, ratio: 32 * median(js) / median(ms), bad };
+}
+async function jobProbe(device, w, count, reps){
+  const list = surfaceChunks(w.store, w.root, w.D, count), n = list.length;
+  const want = [], js = [];
+  let total = 0;
+  for (let r = 0; r < 3; r++){
+    const t0 = performance.now(); want.length = 0; total = 0;
+    for (const c of list){ const o = expandChunk(w.store, w.root, w.D, c); want.push(o.records); total += o.records.length; }
+    js.push(performance.now() - t0);
+  }
+  const seven = new Uint32Array(n * 7);
+  list.forEach((c, i) => {
+    seven[7 * i] = chunkNode(w.store, w.root, w.D, 0, c.cx, c.cy, c.cz).id;
+    SIDES.forEach((d, s) => { seven[7 * i + 1 + s] = chunkNode(w.store, w.root, w.D, 0, c.cx + d[0], c.cy + d[1], c.cz + d[2]).id; });
+  });
+  const pipeline = await compile(device, JOB), counter = empty(device, 16), cap = total + 1024, out = empty(device, cap * 8);
+  const entries = [w.keysBuf, mk(device, seven), counter, out], ms = [];
+  for (let r = 0; r < reps; r++){
+    device.queue.writeBuffer(counter, 0, new Uint32Array(4));
+    ms.push(await run(device, pipeline, entries, 16, 16, 16 * n));
+  }
+  const c = await read(device, counter, 16), raw = new Uint32Array(c.bytes)[0];
+  // More records than the CPU's is already wrong; read what fits, and say so.
+  const got = Math.min(raw, cap), back = await read(device, out, got * 8), pairs = new Uint32Array(back.bytes);
+  const per = want.map(() => []);
+  for (let i = 0; i < got; i++) per[pairs[2 * i]].push(pairs[2 * i + 1]);
+  // Long enough to read through a slow clock (Firefox's fence ticks every 100 ms or
+  // so): 64 batches in one pass, after the oracle's counter has been read. The output
+  // overflows on purpose; the kernel drops what doesn't fit, and nothing reads it.
+  const before = clocks();
+  timing.repeat = 64;
+  const longMs = await run(device, pipeline, entries, 16, 16, 16 * n);
+  timing.repeat = 1;
+  timing.all = [];
+  let bad = raw > total ? 1 : 0;
+  per.forEach((a, i) => {
+    const b = Uint32Array.from(a).sort(), e = Uint32Array.from(want[i]).sort();
+    if (b.length !== e.length) { bad++; return; }
+    for (let j = 0; j < b.length; j++) if (b[j] !== e[j]) { bad++; return; }
+  });
+  return { ...before, longMs, longChunksPerS: 64 * n / longMs * 1000, chunks: n, records: total, recordsPerChunk: Math.round(total / n), jsMsPerChunk: median(js) / n, gpuMsPerChunk: median(ms) / n,
+           ratioOneThread: median(js) / median(ms), ratioFourWorkersIdeal: median(js) / 4 / median(ms),
+           readbackMs: back.ms, readbackMB: got * 8 / 2 ** 20, badChunks: bad };
+}
+/* Candidates as a level's parents would be: every level-k node under the sampled
+   chunks, once per place, children already resolved to ids. */
+function candidates(w, level, limit){
+  const list = surfaceChunks(w.store, w.root, w.D, 4096), out = new Uint32Array(limit * 9);
+  let n = 0;
+  const walk = (id, k) => {
+    if (n >= limit || id < FIRST_NODE) return;
+    if (k === level){
+      out[9 * n] = level;
+      for (let o = 0; o < 8; o++) out[9 * n + 1 + o] = w.store.child(id, o);
+      n++;
+      return;
+    }
+    for (let o = 0; o < 8; o++) walk(w.store.child(id, o), k - 1);
+  };
+  for (const c of list){ if (n >= limit) break; const s = chunkNode(w.store, w.root, w.D, 0, c.cx, c.cy, c.cz); walk(s.id, s.level); }
+  return out.subarray(0, n * 9);
+}
+async function internProbe(device, w, level, limit, reps, kernel){
+  const cand = candidates(w, level, limit), n = cand.length / 9;
+  const js = []; let unique = 0;
+  for (let r = 0; r < 3; r++){
+    const s = createStore(), ch = new Uint32Array(8), t0 = performance.now();
+    for (let i = 0; i < n; i++){ for (let o = 0; o < 8; o++) ch[o] = cand[9 * i + 1 + o]; s.intern(level, ch); }
+    js.push(performance.now() - t0);
+    unique = s.snapshot().keys.length / 9;
+  }
+  let size = 16; while (size < n * 2) size *= 2;
+  // One layout for both exchange passes: 'auto' drops what a shader doesn't use, and
+  // insert never touches `leader`.
+  const shared = kernel === 'cas' ? 'auto' : device.createPipelineLayout({ bindGroupLayouts: [device.createBindGroupLayout({ entries: ['read-only-storage', 'uniform', 'storage', 'storage'].map((type, binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type } })) })] });
+  const pipeline = kernel === 'cas' ? await compile(device, INTERN) : [await compile(device, INTERN_INSERT, shared), await compile(device, INTERN_SEARCH, shared)], table = empty(device, size * 4), leader = empty(device, n * 4), ms = [];
+  const entries = [mk(device, cand), mk(device, new Uint32Array([n, size - 1, 0, 0]), GPUBufferUsage.UNIFORM), table, leader];
+  for (let r = 0; r < reps; r++){
+    device.queue.writeBuffer(table, 0, new Uint32Array(size));
+    ms.push(await run(device, pipeline, entries, Math.ceil(n / 64)));
+  }
+  const L = new Uint32Array((await read(device, leader, n * 4)).bytes);
+  let winners = 0, bad = 0;
+  for (let i = 0; i < n; i++){
+    if (L[i] === i) winners++;
+    else if (L[L[i]] !== L[i]) bad++;
+    for (let k = 0; k < 9; k++) if (cand[9 * i + k] !== cand[9 * L[i] + k]) { bad++; break; }
+  }
+  if (winners !== unique) bad++;
+  return { ...clocks(), kernel, level, candidates: n, unique, winners, bad, jsMs: median(js), gpuMs: median(ms), jsMperS: n / median(js) / 1000, gpuMperS: n / median(ms) / 1000, ratio: median(js) / median(ms) };
+}
+
+/* Can a worker do this? The clean design is a GPU job runner beside the JS ones in
+   stream-pool.js (docs/computedags.md §6), and the spec exposes GPU to workers, but a
+   browser has to say so. */
+const workerCheck = () => new Promise(resolve => {
+  const src = `(async () => { let r = { gpu: !!navigator.gpu, adapter: false };
+    try { const a = await navigator.gpu?.requestAdapter(); r.adapter = !!a; if (a) { await a.requestDevice(); r.device = true; } } catch (e) { r.error = String(e); }
+    postMessage(r); })()`;
+  const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+  w.onmessage = e => { resolve(e.data); w.terminate(); };
+  w.onerror = e => { resolve({ error: e.message || 'worker failed' }); w.terminate(); };
+  setTimeout(() => resolve({ error: 'no answer in 5 s' }), 5000);
+});
+/* Safari puts the whole generated Metal in its message. Keep what the compiler said. */
+const shortError = e => { const m = String(e.message || e), i = m.search(/error:? /i), j = m.indexOf('error program_source'); return m.slice(Math.max(0, j >= 0 ? j : i), Math.max(0, j >= 0 ? j : i) + 400); };
+const refused = new Map();
+window.computeProbe = async ({ quick = false, reps = 7 } = {}) => {
+  const { adapter, device } = await gpu(), info = adapter.info || {};
+  const report = { ua: navigator.userAgent, adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description, fallback: adapter.isFallbackAdapter ?? info.isFallbackAdapter },
+    features: ['timestamp-query', 'subgroups', 'shader-f16', 'indirect-first-instance'].filter(f => adapter.features.has(f)),
+    limits: Object.fromEntries(['maxStorageBufferBindingSize', 'maxBufferSize', 'maxComputeInvocationsPerWorkgroup', 'maxComputeWorkgroupSizeX', 'maxComputeWorkgroupStorageSize', 'maxComputeWorkgroupsPerDimension', 'maxStorageBuffersPerShaderStage'].map(k => [k, adapter.limits[k]])),
+    worker: await workerCheck(), worlds: [] };
+  // What the fence reads on nothing: straight after the last one, and after waiting
+  // 37 ms. A clock that only ticks every T reads about T and T − 37.
+  const nap = ms => new Promise(r => setTimeout(r, ms)), floor = [], after = [];
+  for (let i = 0; i < 9; i++) floor.push(await run(device, [], [], 0));
+  for (let i = 0; i < 9; i++){ await nap(37); after.push(await run(device, [], [], 0)); }
+  // And with empty submits every 2 ms: Firefox polls on a 100 ms timer (bug 1870699),
+  // and a submit is said to poll too. If this reads low, a job runner can beat the tick.
+  const pump = setInterval(() => device.queue.submit([]), 2), pumped = [];
+  for (let i = 0; i < 9; i++) pumped.push(await run(device, [], [], 0));
+  clearInterval(pump);
+  timing.all = [];
+  report.fenceFloorMs = median(floor); report.fenceFloorAfter37Ms = median(after); report.fenceFloorPumpedMs = median(pumped);
+  log(JSON.stringify({ ua: report.ua, fenceFloorMs: report.fenceFloorMs, fenceFloorAfter37Ms: report.fenceFloorAfter37Ms, fenceFloorPumpedMs: report.fenceFloorPumpedMs, adapter: report.adapter, features: report.features, limits: report.limits, worker: report.worker }, null, 1));
+  const shapeWorld = (name, D) => { const s = SHAPES.find(x => x.name === name), store = createStore(), { root } = store.fromField(D, fieldOf(s, D)); return { name: `${name} D=${D}`, store, root, D }; };
+  const kit = D => { const k = buildKit(kitDesc({ D })); return { name: `kit D=${D}`, store: k.store, root: k.root, D }; };
+  const caves = D => { const c = buildCaves(caveDesc({ D })); return { name: `caves D=${D}`, store: c.store, root: c.root, D }; };
+  const makers = quick ? [() => shapeWorld('hills', 10), () => kit(10)]
+                       : [() => shapeWorld('hills', 12), () => shapeWorld('gyroid', 11), () => kit(14), () => kit(16), () => caves(12)];
+  const N = quick ? 100000 : 2000000, C = quick ? 32 : 256, I = quick ? 200000 : 4000000;
+  for (const make of makers){
+    const w = make(), { keys } = w.store.snapshot();
+    w.keysBuf = mk(device, keys);
+    const row = { world: w.name, nodes: keys.length / 9, MB: keys.byteLength / 2 ** 20 };
+    log(`\n${w.name}: ${row.nodes} nodes, ${row.MB.toFixed(1)} MB`);
+    row.point = await pointProbe(device, w, N, reps); log('point ' + JSON.stringify(row.point));
+    row.job = await jobProbe(device, w, C, reps); log('job   ' + JSON.stringify(row.job));
+    row.intern = [];
+    for (const kernel of ['cas', 'exchange']) for (const level of [1, 3]){
+      if (refused.has(kernel)) continue;
+      try { const r = await internProbe(device, w, level, I, reps, kernel); row.intern.push(r); log('intern ' + JSON.stringify(r)); }
+      catch (e) { refused.set(kernel, shortError(e)); log(`intern ${kernel} won't compile here: ${refused.get(kernel)}`); }
+    }
+    if (gpuError) throw new Error('GPU validation: ' + gpuError);
+    report.worlds.push(row);
+    w.keysBuf.destroy();
+  }
+  report.refused = Object.fromEntries(refused);
+  window.__probe = report;
+  return report;
+};
+document.getElementById('go').onclick = async () => {
+  const state = document.getElementById('state');
+  state.textContent = 'running, this takes a minute or two…';
+  try { await computeProbe({ quick: location.search.includes('quick') }); state.textContent = 'done'; }
+  catch (e) { state.textContent = 'failed: ' + e.message; log(String(e.stack || e)); }
+};
+</script>

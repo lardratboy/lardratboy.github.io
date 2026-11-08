@@ -149,6 +149,8 @@
   <label>occlusion <select id="occlusion"><option value="off">off (draw every chunk)</option><option value="queries">skip hidden: occlusion queries</option><option value="depth">skip hidden: depth readback</option></select></label>
   <label>seams <select id="seams"><option value="1">open sides + tail</option><option value="0">off (cracks)</option></select></label>
   <label>cut <select id="freeze"><option value="0">follows the eye</option><option value="1">frozen</option></select></label>
+  <label>actors <select id="actors"><option value="0">none</option><option>10</option><option>100</option><option>300</option><option>1000</option></select>
+    <button id="actorsForward" title="advance the actors 10 seconds at once">fast forward 10 s</button></label>
   <div class="keys">drag: look   WASD: move   E/Q: up/down
 shift: ×8   wheel: speed   F: freeze cut
 H: show or hide these panels   T: wireframe
@@ -246,8 +248,10 @@ import { attrRGB } from './attr-core.js';
 import { readPad, pickPad, PAD } from './pad-core.js';
 import { createOcclusion, nearEye, nearRadius, hiddenByTiles, OCCLUSION } from './occlusion-core.js';
 import { SHAPES, fieldOf } from './experiments/shapes.mjs';
+import { dagWorld, createActors, spawnNear, tickFliers, advanceFliers, regather, restHits, rescue, diffBox, trapped, mix as actorMix, FLIER, ONE as ACTOR_ONE, MAX_D as ACTOR_MAX_D } from './actor-core.js';
+import { actorBody, bodyRecords, makeBody, turnMap, turnedBox } from './body-core.js';
 import { sliceCore, rowsOf, automatonOf, AXIS_NAMES } from './testbed-rows.js';
-import { scatterDesc, groundOf } from './scatter-core.js';
+import { scatterDesc, groundOf, rotateOcc, PROPER } from './scatter-core.js';
 import { buildScatterInWorkers, buildKitInWorkers, ornamentsKept, isAbort } from './scatter-build.js';
 import { latticeDesc, latticeFromParam, latticeParam, budgetOf, maxCube, stackOf, gapOf } from './lattice-core.js';
 import { kitDesc, kitFromParam, kitParam, sideOf, KIT_LIMITS } from './kit-core.js';
@@ -2240,6 +2244,10 @@ function bindControls(){
   setOcclusion(state.occlusion ?? occlusionDefault(state.world));
   $('occlusion').addEventListener('change', () => setOcclusion($('occlusion').value, { chosen: true }));
   $('freeze').addEventListener('change', () => { state.freeze = $('freeze').value === '1'; dirty = true; });
+  $('actors').value = String(actors.n);
+  if ($('actors').value !== String(actors.n)){ const o = document.createElement('option'); o.textContent = String(actors.n); $('actors').append(o); $('actors').value = o.textContent; }
+  $('actors').addEventListener('change', () => setActors(+$('actors').value));
+  $('actorsForward').addEventListener('click', e => { e.currentTarget.blur(); forwardActors(600); });
 }
 /* A new path only changes which kind each chunk wants: the chunks of the
    old kind are drawn until their replacements arrive (stream-core §2b).
@@ -2316,9 +2324,250 @@ function setBuilding(text, fraction, fresh = false){
   if (!W) $('hud').textContent = text;
 }
 
+/* ---- actors (docs/actors.md §9 steps 2 and 3, docs/actors-log.md) ---------------
+   Fliers in the world: actor-core.js decides every move, body-core.js what each
+   one is, and this section only ticks them, keeps them near the eye, and draws
+   them. ?actors=N, or the panel.
+
+   **Ticks are fixed, 60 a second, whatever the display's rate**, so a flier
+   covers the same ground on a 120 Hz screen as on a 60 Hz one, and a frame
+   that took long runs up to four ticks to catch up (the rest is dropped:
+   a tab coming back doesn't fast-forward by the minutes it was hidden). Each
+   actor is drawn between last tick and this one (`old` and `pos`, which the
+   core keeps anyway), so the motion is as smooth as the display, not 60 Hz.
+
+   **The world is the log's root**, as the aim's is (edit mode): an actor
+   shouldn't stand on a floor already broken. A new root is a new dagWorld,
+   which drops every room from the old one (actor-core's `stale` mutant),
+   and **rescues whoever the edit trapped** (asked for 2026-11-07): a flier
+   under a placed block, or sealed in by one, is spawned again nearby. Only
+   fliers within reach of what the edit changed (diffBox) are asked.
+
+   **The leash and the regather** (actors.md §10, Q8): the core pulls each
+   flier toward the eye past LEASH voxels, and twice a second the page asks
+   for anything past 16 × LEASH back, for when the eye jumps or outruns them.
+   **Personal space** (asked for 2026-11-07, "near the player but not
+   overlap"): inside SPACE voxels of the eye a flier is pushed away
+   (actor-core's spaceOf), so they keep to a shell round the eye, between
+   SPACE and LEASH. Charging the nearest flier at 120 voxels a second, faster
+   than they fly, a simulated eye overlapped 78 to 111 actor-ticks in 20 s
+   without it and none with it (docs/actors-log.md, step 3b). Spawns and
+   rescues avoid it too when they can.
+
+   **Bodies (step 3)**: slot i is a block-showroom specimen of R = 3 to 11,
+   turned one of 24 ways, both from hashes of the slot (body-core's
+   actorBody). One record buffer a body, made once by expandChunk; the
+   shader turns each cube about the body's box, so all 24 turns share it.
+   One draw an actor, with its turn and place as uniforms: 100 draws of a
+   few hundred cubes. The pass draws into the raster target after the
+   occlusion queries (so an actor can't hide a chunk from them, and the
+   queries' answers stay what they were) and before the ray pass, which is
+   bounded by the raster's depth, so a flier hides ray content behind it and
+   ray content in front of it overwrites it, like any raster surface. With
+   no actors the pass doesn't run at all: the frame is today's, call for call
+   (actorSelftest holds it byte for byte). */
+const TICK_MS = 1000 / 60, LEASH = 48, SPACE = 16, ACTORS_MAX = 4096;
+const actors = {
+  n: Math.max(0, Math.min(ACTORS_MAX, Math.floor(+params.get('actors') || 0))), seed: 1,
+  A: null, of: null, world: null, acc: 0, alpha: 1, bodies: [],
+  alive: 0, tickMs: 0, probes: 0, regathered: 0, rescued: 0, rescueMs: 0, forwardMs: 0, note: '',
+  stats: { probes: 0, roomSaves: 0, roomFinds: 0 },
+};
+const BODY_VS = `#version 300 es
+precision highp float;
+precision highp int;
+${GLSL_DECODE}
+layout(location = 0) in uint aRec;
+layout(location = 1) in uint aAttr;
+uniform mat4 uViewProj;
+uniform mat3 uTurn;        // the actor's turn: body-core's turnMap, a rotation
+uniform vec3 uShift;       // turnMap's offset, less the turned box's corner, plus the actor's, eye-relative
+const vec3 CORNER[24] = vec3[24](
+  ${glslVec3s(FACE_OFF)});
+const vec3 NORMAL[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
+out vec3 vRel;
+out vec3 vNormal;
+flat out uint vAttr;
+void main(){
+  uint corner = uint(gl_VertexID), face = corner / 4u;
+  // The cube in the body's own frame (its voxel is its cell: lod 0, origin 0),
+  // then turned about the body's box with its faces.
+  vec3 p = uTurn * (vec3(recCell(aRec)) + 0.5 + CORNER[corner]) + uShift;
+  vRel = p;
+  vNormal = uTurn * NORMAL[face];
+  vAttr = aAttr;
+  gl_Position = uViewProj * vec4(p, 1.0);
+  if (!faceShown(aRec, face)) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}`;
+const BODY_FS = `#version 300 es
+precision highp float;
+precision highp int;
+in vec3 vRel;
+in vec3 vNormal;
+flat in uint vAttr;
+${GLSL_SHADE}
+${GLSL_ATTR}
+void main(){ outColor = shadeOut(attrColour(vAttr), vNormal, vRel); }`;
+const bodyProg = link(BODY_VS, BODY_FS);
+const BODY_U = uniformsOf(bodyProg, ['uViewProj', 'uTurn', 'uShift', 'uOpenSides', 'uColorMode', 'uFog', 'uDepthScale']);
+
+/* A body's records on the GPU, made the first time an actor of it is drawn:
+   records, then their words, in one buffer, like a chunk's (install). */
+const bodyGL = new Map();
+function bodyVAO(body){
+  let g = bodyGL.get(body);
+  if (g) return g;
+  bodyRecords(body);
+  const n = body.records.length, both = new Uint32Array(2 * n), vao = gl.createVertexArray(), buf = gl.createBuffer();
+  both.set(body.records); both.set(body.attrs, n);
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIndex);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, both, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribIPointer(0, 1, gl.UNSIGNED_INT, 4, 0);
+  gl.vertexAttribDivisor(0, 1);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_INT, 4, 4 * n);
+  gl.vertexAttribDivisor(1, 1);
+  gl.bindVertexArray(null);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  g = { vao, buf, n };
+  bodyGL.set(body, g);
+  return g;
+}
+
+function setActors(n){
+  actors.n = Math.max(0, Math.min(ACTORS_MAX, Math.floor(n) || 0));
+  actors.A = null; actors.of = null; actors.forwardMs = 0;
+  $('actors').value = String(actors.n);
+  const q = new URLSearchParams(location.search);
+  if (actors.n) q.set('actors', actors.n); else q.delete('actors');
+  history.replaceState(null, '', '?' + q);
+}
+/* The world an actor moves in: the log's root on an edited world, else the
+   shown one. When the root moves under a population (a click, an undo), the
+   new world rescues anyone the change trapped. */
+function actorWorld(){
+  const root = W.edit ? W.edit.log.root : W.root, was = actors.world;
+  if (!was || was.store !== W.store || was.root !== root){
+    actors.world = dagWorld(W.store, root, W.D);
+    if (was && was.store === W.store && actors.A && actors.of === W){
+      const t0 = performance.now(), changed = diffBox(W.store, was.root, root, W.D);
+      if (changed) actors.rescued += rescue(actors.world, actors.A, actorParams(), { changed }).length;
+      actors.rescueMs = performance.now() - t0;
+    }
+  }
+  return actors.world;
+}
+const eyeVoxel = () => cam.eye.map(v => Math.floor(v));
+// Slot i's body, turn and box (body-core), the same for the page and its twin.
+const bodyOfSlot = i => actorBody(actors.seed, i);
+// Every spawn: at the slot's body's box, within LEASH of `at`, never in rock or a sealed pocket,
+// and outside the eye's personal space when there's room.
+const spawnSlot = (world, A, i, at) => spawnNear(world, A, i, actors.bodies[i].size, actors.seed, at, LEASH, 32, FLIER.trap, actorLeash());
+// The population for this world: made on the first tick after a world or N
+// changes, spawned within LEASH of the eye. Slots with nowhere to go (the eye
+// in rock, or outside the world) stay dead until the regather finds a place.
+function ensureActors(){
+  if (actors.A && actors.of === W) return actors.A;
+  actors.note = '';
+  if (W.D > ACTOR_MAX_D){ actors.note = `no actors past D = ${ACTOR_MAX_D}`; actors.A = null; return null; }
+  actors.bodies = Array.from({ length: actors.n }, (_, i) => bodyOfSlot(i));
+  actors.world = null;
+  const world = actorWorld(), A = createActors(actors.n), at = eyeVoxel();
+  for (let i = 0; i < A.N; i++) spawnSlot(world, A, i, at);
+  actors.A = A; actors.of = W; actors.acc = 0; actors.alpha = 1;
+  return A;
+}
+const actorLeash = () => ({ at: cam.eye.map(v => Math.round(v * ACTOR_ONE)), radius: LEASH, shift: 4, max: 256, inner: SPACE, innerShift: 2, innerMax: 192 });
+const actorParams = () => ({ ...FLIER, seed: actors.seed, leash: actorLeash() });
+function tickActorsOnce(){
+  const A = actors.A, world = actorWorld();
+  tickFliers(world, A, actorParams(), { stats: actors.stats });
+  if (A.t % 30 === 0) actors.regathered += regather(world, A, actors.seed, eyeVoxel(), LEASH, 16 * LEASH, 8, FLIER.trap, actorLeash());
+}
+function stepActors(dt){
+  if (!actors.n || !W || !ensureActors()) return;
+  actors.acc += dt;
+  const t0 = performance.now(), s = actors.stats;
+  s.probes = 0;
+  let k = 0;
+  for (; actors.acc >= TICK_MS && k < 4; k++){ tickActorsOnce(); actors.acc -= TICK_MS; }
+  if (actors.acc >= TICK_MS) actors.acc = TICK_MS;
+  actors.alpha = actors.acc / TICK_MS;
+  if (k){
+    const A = actors.A;
+    actors.alive = A.alive.reduce((a, v) => a + v, 0);
+    actors.tickMs = actors.tickMs * 0.9 + (performance.now() - t0) / k * 0.1;
+    actors.probes = actors.probes * 0.9 + s.probes / k / Math.max(1, actors.alive) * 0.1;
+  }
+}
+// Q6: time can be advanced. The same ticks in a loop, with the eye held where it is.
+function forwardActors(n){
+  if (!actors.n || !W || !ensureActors()) return;
+  const t0 = performance.now();
+  for (let k = 0; k < n; k++) tickActorsOnce();
+  actors.forwardMs = performance.now() - t0;
+  actors.alpha = 1;
+}
+// Actor i's box's low corner as drawn, between last tick and this one, in voxels.
+const drawnLo = (A, i, t) => [0, 1, 2].map(a => { const o = A.old[3 * i + a]; return (o + (A.pos[3 * i + a] - o) * t) / ACTOR_ONE; });
+// How far the nearest actor's box is from the eye, as drawn (for the near plane).
+// The box holds the whole body, so this is never farther than the body.
+function actorClearance(){
+  const A = actors.A, e = cam.eye, t = actors.alpha;
+  let best = Infinity;
+  for (let i = 0; i < A.N; i++){
+    if (!A.alive[i]) continue;
+    const lo = drawnLo(A, i, t);
+    let d2 = 0;
+    for (let a = 0; a < 3; a++){
+      const hi = lo[a] + A.size[3 * i + a], g = e[a] < lo[a] ? lo[a] - e[a] : e[a] > hi ? e[a] - hi : 0;
+      d2 += g * g;
+    }
+    if (d2 < best) best = d2;
+  }
+  return Math.sqrt(best);
+}
+/* Into T's raster colour and depth, with the frame's matrix: a draw an actor
+   in view, of its body's cubes. The turn is body-core's turnMap, w = M·x + o
+   on the body's R³ box; the actor's box is the turned body's tight box, whose
+   corner `off` sits at the actor's position. So a point x of the body lands
+   at M·x + (o − off + lo − eye), eye-relative. */
+const TURN_GL = new Float32Array(9);
+function drawActors(M, planes, T, w, h, colorMode){
+  const A = actors.A, e = cam.eye, t = actors.alpha;
+  let n = 0;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.fb);
+  gl.viewport(0, 0, w, h);
+  gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE);
+  gl.useProgram(bodyProg);
+  gl.uniformMatrix4fv(BODY_U.uViewProj, false, M);
+  gl.uniform1ui(BODY_U.uOpenSides, 0);
+  gl.uniform1i(BODY_U.uColorMode, colorMode);
+  gl.uniform1f(BODY_U.uFog, 1 / (1.5 * W.side));
+  gl.uniform1f(BODY_U.uDepthScale, 1 / (8 * W.side));
+  for (let i = 0; i < A.N; i++){
+    if (!A.alive[i]) continue;
+    const lo = drawnLo(A, i, t).map((v, a) => v - e[a]);
+    const side = Math.max(A.size[3 * i], A.size[3 * i + 1], A.size[3 * i + 2]);
+    if (!boxVisible(planes, lo, side)) continue;
+    const b = actors.bodies[i], g = bodyVAO(b.body), { M: R, o } = turnMap(b.e, b.body.R);
+    for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) TURN_GL[3 * c + r] = R[3 * r + c];     // GL is column major
+    gl.uniformMatrix3fv(BODY_U.uTurn, false, TURN_GL);
+    gl.uniform3f(BODY_U.uShift, o[0] - b.off[0] + lo[0], o[1] - b.off[1] + lo[1], o[2] - b.off[2] + lo[2]);
+    gl.bindVertexArray(g.vao);
+    gl.drawElementsInstanced(gl.TRIANGLES, CUBE_TRIS, gl.UNSIGNED_BYTE, 0, g.n);
+    n++;
+  }
+  gl.bindVertexArray(null);
+  view.actors = n;
+}
+
 /* ---- the frame ------------------------------------------------------------- */
 let dirty = true, lastEye = [NaN, NaN, NaN], lastT = performance.now(), frameMs = 16, auto = true;
-const view = { culled: 0, instances: 0, triangles: 0, rayTriangle: false, marked: 0, drawn: 0, near: 1, clear: 0, voxels: 0,
+const view = { culled: 0, instances: 0, triangles: 0, rayTriangle: false, marked: 0, drawn: 0, near: 1, clear: 0, voxels: 0, actors: 0,
                occluded: 0, occludedCubes: 0, queried: 0, nearEye: 0, occlPollMs: 0, occlRunMs: 0 };
 const LOD_COLORS = Array.from({ length: 24 }, (_, l) => {
   const h = (l * 0.137 + 0.58) % 1, c = 0.5, x = c * (1 - Math.abs((h * 6) % 2 - 1)), m = 0.32;
@@ -2443,7 +2692,11 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
   if (!W){ blit(); return; }
   syncCoverTree();
   gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE);
-  view.near = Math.max(0.05, Math.min(64, 0.5 * (view.clear || clearance())));
+  // Half the clearance, and with actors half the way to the nearest of them
+  // too: the first fliers came out notched, cut by a near plane set for the
+  // rock 60 voxels off while they flew 20 from the eye. Without actors this
+  // is the line it always was.
+  view.near = Math.max(0.05, Math.min(64, 0.5 * Math.min(view.clear || clearance(), actors.A && actors.n ? actorClearance() : Infinity)));
   const far = view.far = 4 * W.side + Math.hypot(...cam.eye);
   const M = viewProj(w / h, view.near, far), planes = frustumPlanes(M);
   const run = timeIt ? timed : (_, fn) => fn();
@@ -2522,6 +2775,10 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
       view.occlRunMs = performance.now() - t;
       view.queried = asks.length; occl.occ.end();
     }
+    // Actors after the queries, so they can't hide a chunk from them, and
+    // before the ray pass, which then stops at them like any raster surface.
+    view.actors = 0;
+    if (actors.A && actors.n) drawActors(M, planes, T, w, h, colorMode);
     if (!rayPass) blit();
   });
   view.marked = 0;
@@ -2626,6 +2883,9 @@ function hud(){
     (ray.pageCount ? `<span class="sec">ray</span> ${ray.pageCount} pages, ${ray.brickPool.size.toLocaleString()} bricks (${ray.uploads.toLocaleString()} uploaded), tree ${ray.treeNodes}\n` : '') +
     `<span class="sec">words</span> ${mb(4 * [...S.cache.values()].reduce((a, e) => a + (e.words || 0), 0))} of the cache${ray.pageCount ? `, heap ${mb(4 * ray.heapAlloc.used)} of ${mb(4 * ray.heapAlloc.capacity)}` : ''}${ray.heapFull ? `  <span class="warn">heap full: ${ray.heapFull} pages without words</span>` : ''}\n` +
     `<span class="sec">gpu</span> ${timerExt ? `raster ${Number.isFinite(timers.raster) ? timers.raster.toFixed(2) : '–'} ms  ray ${Number.isFinite(timers.ray) ? timers.ray.toFixed(2) : '–'} ms` : 'no timer extension'}\n` +
+    (actors.n ? `<span class="sec">actors</span> ${actors.alive} of ${actors.n} alive, ${view.actors} drawn  tick ${actors.tickMs.toFixed(2)} ms, ${actors.probes.toFixed(2)} probes an actor, ` +
+      `t = ${actors.A ? actors.A.t : 0}${actors.regathered ? `, ${actors.regathered} regathered` : ''}${actors.rescued ? `, ${actors.rescued} rescued (last ${actors.rescueMs.toFixed(1)} ms)` : ''}${actors.forwardMs ? `  fast forward 10 s: ${actors.forwardMs.toFixed(0)} ms` : ''}` +
+      `${actors.note ? `  <span class="warn">${actors.note}</span>` : ''}\n` : '') +
     `<span class="sec">frame</span> ${frameMs.toFixed(1)} ms rAF interval  cut ${S.stats.selectMs.toFixed(2)}  cover ${S.stats.coverMs.toFixed(2)}  upload ${(S.stats.lastUpload / 1024).toFixed(0)} KB` +
     (W.edit && W.edit.last ? `\n<span class="sec">edit</span> ${W.edit.last.kind}: <b>${W.edit.last.ms.toFixed(0)} ms</b> click to frame, ${W.edit.last.frames} frames, ` +
       `${W.edit.last.chunks} chunks, ${(W.edit.last.bytes / 1024).toFixed(0)} KB, setRoot ${W.edit.last.setRootMs.toFixed(2)} ms  ` +
@@ -2646,7 +2906,8 @@ function hud(){
     occlusion: { mode: state.occlusion, ...(occlusion ? { ...occlusion.occ.stats, inFlight: occlusion.inFlight } : {}) },
     ray: { path: state.path, density: state.density, switching, pages: ray.pageCount, bricks: ray.brickPool.size, uploads: ray.uploads, tree: ray.treeNodes,
            heapWords: ray.heapAlloc.used, heapFull: ray.heapFull },
-    gpuMs: { raster: timers.raster, ray: timers.ray } };
+    gpuMs: { raster: timers.raster, ray: timers.ray },
+    actors: { n: actors.n, alive: actors.alive, t: actors.A ? actors.A.t : 0, tickMs: actors.tickMs, probes: actors.probes, drawn: view.actors, regathered: actors.regathered, rescued: actors.rescued } };
 }
 
 /* The fps corner: frames counted over half a second, not 1000 / frameMs. frameMs clamps
@@ -2670,6 +2931,7 @@ function loop(now){
   frameMs = frameMs * 0.9 + dt * 0.1;
   if (auto){
     move(dt);
+    stepActors(dt);
     if (edit.on) for (const kind of edit.repeat.due(now)) editStep(kind);
     pollTimers();
     // ?quiet: don't draw until the view has converged, so that a slow GPU
@@ -3994,6 +4256,195 @@ function mulberry(seed){ let s = seed >>> 0; return () => { s = (s + 0x6d2b79f5)
    and with only traced chunks there must be boxes and no raster. countOnly is for a big
    view with seams between lods, which this block doesn't have: just the count, open
    sides and all, since the oracle's pixels cost a lot there. */
+/* actorSelftest() (docs/actors-log.md steps 2 and 3): fliers on the real page.
+     frame     with none, the frame is the one drawn before any were made, byte
+               for byte, raster only and ray only: the pass leaves nothing behind
+     drawn     with them, it isn't: some are in view and light pixels
+     ticks     every tick of the page's population: no box at rest in rock,
+               against the world they moved in, which is the log's root
+     leash     after 10 s, they're near the eye
+     twin      a population ticked by the core alone, beside the page's, with the
+               same seed and eye, gives the same bytes: the page adds nothing
+     near      a flier 8 voxels ahead is what the centre pixel shows, at its own
+               distance (where the eye's ray enters it): the near plane is pulled in for it (the first fliers
+               were cut by one set for rock 50 voxels off). Its body is a solid cube of 4
+     turns     a lopsided body (arms of 4, 3 and 2 from a corner: no turn looks like
+               another) in each of the 24 turns, 12 voxels ahead: every pixel's distance
+               against a CPU ray cast of scatter-core's rotateOcc at the actor's box. Only
+               pixels on the cast's own silhouette may differ
+     trapped   a block placed over one flier, and another sealed in a hollow room of
+               26 blocks: after the next tick both are alive, clear of rock and not
+               sealed, and the room's one is outside it. Then every block is undone
+   It ticks by hand, with the frame loop held (auto), so nothing moves between. */
+window.actorSelftest = async function actorSelftest({ n = 100 } = {}){
+  const report = { paths: {} }, saved = { n: actors.n, path: state.path, auto };
+  const settle = async () => {
+    const end = performance.now() + 120000;
+    for (let f = 0; performance.now() < end; f++){ frame({ draw: false }); if (f > 2 && isConverged()) return true; await sleep(16); }
+    return false;
+  };
+  const diff = (a, b) => { let k = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) k++; return k; };
+  const hashOf = A => { let h = A.t; for (const arr of [A.alive, A.size, A.pos, A.vel, A.epoch, A.until]) for (let i = 0; i < arr.length; i++) h = actorMix(h, arr[i]); return h; };
+  try {
+    auto = false;
+    for (const path of ['off', '0']){
+      setPath(path);
+      const r = report.paths[path] = { converged: await settle() };
+      setActors(0);
+      const before = renderPixels(160, 120, 8);
+      setActors(n);
+      let rock = 0, wrongRoot = 0;
+      for (let k = 0; k < 60; k++){
+        stepActors(TICK_MS);
+        const A = actors.A, w = actorWorld();
+        if (w.root !== (W.edit ? W.edit.log.root : W.root)) wrongRoot++;
+        for (let i = 0; i < A.N; i++) if (A.alive[i] && restHits(w, A, i)) rock++;
+      }
+      const withThem = renderPixels(160, 120, 8);
+      r.drawn = view.actors; r.alive = actors.alive; r.t = actors.A.t; r.rock = rock; r.wrongRoot = wrongRoot;
+      setActors(0);
+      const after = renderPixels(160, 120, 8);
+      r.differsWith = diff(before, withThem); r.differsAfter = diff(before, after);
+    }
+    // The leash and the twin: 600 ticks with the eye still, then where they are.
+    setPath(saved.path);
+    setActors(n);
+    stepActors(TICK_MS);
+    const twin = createActors(n), world = actorWorld(), at = eyeVoxel();
+    for (let i = 0; i < n; i++) spawnNear(world, twin, i, actorBody(actors.seed, i).size, actors.seed, at, LEASH, 32, FLIER.trap, actorLeash());
+    tickFliers(world, twin, actorParams());
+    if (twin.t % 30 === 0) regather(world, twin, actors.seed, at, LEASH, 16 * LEASH, 8, FLIER.trap, actorLeash());
+    forwardActors(600);
+    for (let k = 0; k < 600; k++){
+      tickFliers(world, twin, actorParams());
+      if (twin.t % 30 === 0) regather(world, twin, actors.seed, at, LEASH, 16 * LEASH, 8, FLIER.trap, actorLeash());
+    }
+    report.twin = hashOf(twin) === hashOf(actors.A);
+    const A = actors.A;
+    let near = 0;
+    for (let i = 0; i < n; i++) if (A.alive[i] && [0, 1, 2].every(a => Math.abs(A.pos[3 * i + a] / ACTOR_ONE + A.size[3 * i + a] / 2 - cam.eye[a]) < LEASH + 24)) near++;
+    report.leash = { alive: actors.alive, near, forwardMs: actors.forwardMs, t: A.t };
+    // One flier, a solid cube of 4, its near face 6 voxels straight ahead.
+    const f = fwd(), slot0 = actors.bodies[0], cube = makeBody(new Uint8Array(64).fill(1), 4);
+    for (let i = 0; i < n; i++) A.alive[i] = i === 0 ? 1 : 0;
+    actors.bodies[0] = { k: -1, e: 0, body: cube, size: [4, 4, 4], off: [0, 0, 0] };
+    for (let a = 0; a < 3; a++){ A.size[a] = 4; A.pos[a] = A.old[a] = Math.round((cam.eye[a] + 8 * f[a] - 2) * ACTOR_ONE); }
+    actors.alpha = 1;
+    const dist = renderDistances(161, 121, 'raster')[60 * 161 + 80];
+    // Where the eye's ray enters a cube of 4 centred 8 along it: 8 − 2 / max |f|.
+    report.nearFlier = { dist, want: 8 - 2 / Math.max(...f.map(Math.abs)), clear: view.clear, near: view.near };
+    report.turns = turnProbe(A);
+    actors.bodies[0] = slot0;
+    report.trapped = trapProbe(n);
+  } finally {
+    setActors(saved.n);
+    setPath(saved.path);
+    auto = saved.auto;
+  }
+  report.glError = gl.getError();
+  return report;
+};
+
+/* The turns' probe: actor 0 alone, a lopsided body in every turn, 12 voxels
+   ahead. The oracle turns the occupancy with scatter-core's rotateOcc (which
+   body-core.test holds turnMap to), sets it at the actor's box less the turned
+   box's corner, and casts each pixel's ray at every voxel, in float64. A
+   pixel the cast hits must show the cast's distance; one it misses must show
+   what the frame shows without the actor, byte for byte. Pixels where the
+   cast's own answer changes from a neighbour's are a silhouette, where the
+   pixel centre is a graze: counted, not failed. */
+function turnProbe(A){
+  const w = 161, h = 121, R = 4, occ = new Uint8Array(R ** 3);
+  for (const v of [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [0, 1, 0], [0, 2, 0], [0, 0, 1]]) occ[v[0] + R * (v[1] + R * v[2])] = 1;
+  const body = makeBody(occ, R), f = fwd(), out = { turns: 0, covered: 0, bad: 0, edge: 0, first: [] };
+  A.alive[0] = 0;
+  const bare = renderDistances(w, h, 'raster'), basis = rayBasis(w / h);
+  A.alive[0] = 1;
+  for (const e of PROPER){
+    const { lo: off, size } = turnedBox(body, e);
+    actors.bodies[0] = { k: -1, e, body, size, off };
+    for (let a = 0; a < 3; a++){ A.size[a] = size[a]; A.pos[a] = A.old[a] = Math.round((cam.eye[a] + 12 * f[a] - size[a] / 2) * ACTOR_ONE); }
+    actors.alpha = 1;
+    const got = renderDistances(w, h, 'raster'), rot = rotateOcc(occ, R, e), base = [0, 1, 2].map(a => A.pos[a] / ACTOR_ONE - off[a] - cam.eye[a]);
+    const boxes = [];
+    for (let z = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) if (rot[x + R * (y + R * z)]) boxes.push([x + base[0], y + base[1], z + base[2]]);
+    const cast = new Float64Array(w * h).fill(-1);
+    for (let i = 0; i < w * h; i++){
+      const px = i % w, py = (i / w) | 0, nx = (px + 0.5) / w * 2 - 1, ny = (py + 0.5) / h * 2 - 1;
+      let d = basis.fwd.map((v, a) => v + nx * basis.rightT[a] + ny * basis.upT[a]);
+      const len = Math.hypot(...d); d = d.map(v => v / len);
+      let best = Infinity;
+      for (const b of boxes){
+        let t0 = 0, t1 = Infinity;
+        for (let a = 0; a < 3 && t0 <= t1; a++){
+          if (d[a] === 0){ if (b[a] > 0 || b[a] + 1 < 0) t0 = Infinity; continue; }
+          const ta = b[a] / d[a], tb = (b[a] + 1) / d[a];
+          t0 = Math.max(t0, Math.min(ta, tb)); t1 = Math.min(t1, Math.max(ta, tb));
+        }
+        if (t0 <= t1 && t0 < best) best = t0;
+      }
+      if (best < Infinity && (bare[i] < 0 || best < bare[i])) cast[i] = best;
+    }
+    for (let i = 0; i < w * h; i++){
+      const hit = cast[i] >= 0;
+      if (hit) out.covered++;
+      const ok = hit ? got[i] >= 0 && Math.abs(got[i] - cast[i]) < 0.02 : got[i] === bare[i];
+      if (ok) continue;
+      const px = i % w, py = (i / w) | 0;
+      const edge = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => {
+        const x = px + dx, y = py + dy;
+        if (x < 0 || y < 0 || x >= w || y >= h) return false;
+        const j = x + w * y;
+        return (cast[j] >= 0) !== hit || (hit && Math.abs(cast[j] - cast[i]) > 0.5);
+      });
+      if (edge){ out.edge++; continue; }
+      out.bad++;
+      if (out.first.length < 4) out.first.push({ e, px: [px, py], got: got[i], cast: cast[i], bare: bare[i] });
+    }
+    out.turns++;
+  }
+  return out;
+}
+/* The trapped probe, on a world with edits (clay): see actorSelftest. Blocks go
+   in through the log, as a click's do, and setRoot, so the streamer sees what a
+   click would; the actors see the log's root on their next tick. */
+function trapProbe(n){
+  const E = W.edit, out = { ran: !!E };
+  if (!E) return out;
+  const A = actors.A, place = (level, X, Y, Z) => { const step = E.log.place(W.store, W.D, { level, X, Y, Z }, PALETTE[2]); if (step){ E.serial++; streamer.setRoot(E.log.root, step); } return !!step; };
+  const centre = i => [0, 1, 2].map(a => Math.floor(A.pos[3 * i + a] / ACTOR_ONE + A.size[3 * i + a] / 2));
+  const before = E.log.count, rescued0 = actors.rescued;
+  for (let i = 0; i < n; i++) A.alive[i] = 0;
+  // Two fliers in open air 100 voxels above the eye, 48 apart (the test's view
+  // looks down at the clay, so ahead is rock).
+  const world0 = actorWorld(), spots = [24, -24].map(s => [Math.floor(cam.eye[0]) + s, Math.floor(cam.eye[1]) + 100, Math.floor(cam.eye[2])]);
+  const fit = [0, 1];
+  for (const i of fit){
+    A.alive[i] = 1;
+    const S = 16, cell = spots[i].map(v => Math.floor(v / S) * S + 2);    // inside its 16-cell, 2 in from the corner
+    for (let a = 0; a < 3; a++){ A.size[3 * i + a] = 5; A.pos[3 * i + a] = A.old[3 * i + a] = cell[a] * ACTOR_ONE; }
+  }
+  out.clearBefore = !trapped(world0, A, 0, FLIER.trap) && !trapped(world0, A, 1, FLIER.trap);
+  // Flier 0: a block of 16 over it.
+  const c0 = centre(0).map(v => v >> 4);
+  out.placedOver = place(4, ...c0);
+  // Flier 1: the 26 cells of 16 round its own.
+  const c1 = centre(1).map(v => v >> 4);
+  let shell = 0;
+  for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++)
+    if (dx || dy || dz) shell += place(4, c1[0] + dx, c1[1] + dy, c1[2] + dz);
+  out.shell = shell;
+  const held1 = centre(1);
+  const world = actorWorld();          // the new root: the rescue
+  stepActors(TICK_MS);
+  out.rescued = actors.rescued - rescued0;
+  out.after = [0, 1].map(i => ({ alive: !!A.alive[i], trap: A.alive[i] ? trapped(world, A, i, FLIER.trap) : 'dead', at: centre(i) }));
+  out.outOfRoom = held1.map(v => v >> 4).join() !== centre(1).map(v => v >> 4).join();
+  while (E.log.count > before) editStep('undo');
+  out.undone = E.log.count === before;
+  return out;
+}
+
 window.wireSelftest = async function wireSelftest({ countOnly = false } = {}){
   const report = {}, saved = { path: state.path, color: state.color, wire: state.wire };
   const W_ = canvas.width, H_ = canvas.height;
