@@ -10,7 +10,9 @@
    result goes back as transferable buffers: 4 bytes a record and 4 of
    attribute (step 6), or a ray page's grid, bricks and attribute block
    (steps 5 and 6). The world's colour field is rebuilt here from the
-   snapshot's descriptor (colours.js).
+   snapshot's descriptor (colours.js); a baked one's words came in the
+   snapshot, and the field is built over this worker's view of the keys
+   (glb-colour step 5).
 
    An edit arrives as a tail (stream-core §4b) on this same port, ahead of any
    job naming its root, and a job says which root it reads. A tail that doesn't

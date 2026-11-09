@@ -23,9 +23,20 @@
      { kind: 'clay', D, lump, … } the clay and flat worlds' (clay-core.js,
                                   clayColour): clay above the centre plane,
                                   ground below it. Nothing to rebuild
+     { kind: 'baked', skin, words, bits }
+                                  an imported asset's own colours
+                                  (baked-core.js, createBaked): data, not a
+                                  name. `skin` is a root among the
+                                  snapshot's keys, `words` one rgb8 word per
+                                  skin voxel in rank order. They travel with
+                                  the snapshot, so the field is built over
+                                  the world the runner holds: the second
+                                  argument, { store, counts, D }
+                                  (glb-colour-plan step 5)
      null                         no colour: jobs emit no words
-   colourOf(desc) turns it into a field on whichever side asks: the
+   colourOf(desc, world) turns it into a field on whichever side asks: the
    worker, the pool's main-thread fallback, Node's simulator and the tests.
+   Only a baked field reads `world`; a named one is its descriptor alone.
    A field takes a point in voxel units (voxel i's centre is i + 0.5) and
    returns 8-bit RGB packed by attr-core's rgb8.
 
@@ -43,6 +54,7 @@ import { latticeColour } from './lattice-core.js';
 import { kitColour } from './kit-core.js';
 import { caveColour } from './cave-core.js';
 import { clayColour } from './clay-core.js';
+import { createBaked } from './baked-core.js';
 
 const TAU = 2 * Math.PI;
 function hash3(i, j, k){
@@ -68,8 +80,12 @@ export function rowColour(D){
   };
 }
 
-export function colourOf(desc){
+export function colourOf(desc, world = null){
   if (!desc) return null;
+  if (desc.kind === 'baked'){
+    if (!world) throw new Error('colourOf: a baked field needs the world it was baked for ({ store, counts, D })');
+    return createBaked(world.store, desc.skin, world.D, desc.words, { counts: world.counts });
+  }
   if (desc.kind === 'row') return rowColour(desc.D);
   if (desc.kind === 'shape'){
     const shape = SHAPES.find(s => s.name === desc.name);

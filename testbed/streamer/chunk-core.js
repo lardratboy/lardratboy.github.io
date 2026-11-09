@@ -269,7 +269,19 @@ function brick(ctx, id, k, X0, Y0, Z0, index, pose){
    channels, quantized once at the end (decision 6): averaging 6-bit words
    lod by lod would round at every level. The field gets voxel units, a
    level-f cell's centre being its corner + 2^f / 2 (corner + 0.5 for a
-   voxel). */
+   voxel).
+
+   A field may answer the mean itself: `colour.mean(level, x, y, z, out)`,
+   the cell's mean as three 8-bit channels in floats (docs/glb-colour-plan.md
+   step 3). A baked field does (baked-core.js): its words are only for the
+   skin, so sampling it at sub-cell centres would read air and insides, but
+   a cell's skin is one rank range, and its mean is exact at every lod, in
+   at most 126 word reads. When `mean` is there it is asked at every lod,
+   lod 0 included (where it is the voxel's own word, or the fallback
+   unrounded, so quantized once like every mean), and the walk isn't; the
+   cell's corner names the cell. A field without `mean` (every named field)
+   takes the walk exactly as before, byte for byte. meanDepth is the walk's
+   knob and means nothing to `mean`. */
 const ACC = new Float64Array(3);
 function meanUnder(store, counts, colour, id, level, floor, x, y, z){
   if (id === EMPTY) return;
@@ -284,6 +296,10 @@ function meanUnder(store, counts, colour, id, level, floor, x, y, z){
               x + (o & 1) * h, y + (o >> 1 & 1) * h, z + (o >> 2) * h);
 }
 export function cellAttr(store, counts, colour, id, lod, meanDepth, x, y, z){
+  if (colour.mean){
+    colour.mean(lod, x, y, z, ACC);
+    return attrOf8(ACC[0], ACC[1], ACC[2]);
+  }
   if (lod === 0){
     const c = colour(x + 0.5, y + 0.5, z + 0.5);
     return attrOf8(c & 255, c >> 8 & 255, c >> 16 & 255);

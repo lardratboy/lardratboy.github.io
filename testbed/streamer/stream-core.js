@@ -834,7 +834,9 @@ export function clearance(world, eye, budget = 4096){
 /* `colour` is the world's colour descriptor (colours.js), not a function:
    the snapshot is posted to workers, and a worker turns it back into a
    field with the colourOf it was handed (docs/attrs-plan.md, decision 2).
-   null means no attributes. */
+   null means no attributes. A baked one ({ kind: 'baked', skin, words })
+   is data: its words go with the snapshot, cloned to each worker as the
+   keys are, and its skin's nodes are among the keys (glb-colour-plan §3). */
 export function worldSnapshot(store, root, D, { counts, classes = null, colour = null } = {}){
   const top = store.maxId, c = new Float64Array(top + 1), poses = classes ? new Uint8Array(top + 1) : null;
   c[FULL] = 1;
@@ -858,7 +860,9 @@ export { resultBytes };
 
 /* colourOf (colours.js) resolves the snapshot's colour descriptor. It is
    passed in rather than imported, so this file keeps its imports and a
-   test can hand in any field. With a colour, every records job also
+   test can hand in any field. It's asked as colourOf(desc, { store, counts,
+   D }): a baked descriptor carries its words and names its skin's root, and
+   the field is built over the runner's own view of the keys. With a colour, every records job also
    returns `attrs`, one word per record (step 6), and meanDepth is the
    coarse mean's depth (chunk-core's cellAttr).
 
@@ -875,9 +879,12 @@ export const MEAN_DEPTH = 1;
 export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH } = {}){
   const store = storeView(snap);
   let C = snap.counts, P = snap.poses;
-  const base = snap.colour && colourOf ? colourOf(snap.colour) : null;
-  let colour = base, table = null;
   const counts = { of: id => C[id] }, classes = P ? { pose: id => P[id] } : null, cache = createJobCache();
+  // A baked field (glb-colour step 5) is data in the snapshot, the skin's nodes
+  // among the keys, so colourOf builds it over this side's own view and counts.
+  // A named field ignores them.
+  const base = snap.colour && colourOf ? colourOf(snap.colour, { store, counts, D: snap.D }) : null;
+  let colour = base, table = null;
   const full = (root, lod, x, y, z) => {
     const id = chunkNode(store, root, snap.D, lod, x, y, z).id;
     return id !== EMPTY && isFull(store, counts, id, lod + CHUNK_LEVELS);

@@ -1440,6 +1440,7 @@ const colourNote = status => ({
   unknown: '<span class="warn">this page can\'t make the colour the file names, so it\'s drawn without</span>',
   unchecked: 'colour not checked (the file has no print to compare)',
   none: 'no colour in the file',
+  baked: 'baked colour from the file',
 })[status] ?? esc(status);
 function showFile(html = ''){
   $('fileInfo').innerHTML = html;
@@ -1615,6 +1616,11 @@ async function buildWorld(signal, gen){
     file = shelfEntry(state.world);
     if (!file) throw new Error(`${state.world} isn't on the shelf`);
     store = storeView({ keys: file.keys });
+    // A baked colour ({ kind: 'baked', skin, words }) goes into the snapshot
+    // as it is: the words are cloned to every worker with the keys, which hold
+    // the skin's nodes, and each worker builds the field over its own view
+    // (colours.js, glb-colour-plan step 5). The pool keeps the snapshot, so a
+    // restarted worker and the main-thread runner get the words too.
     ({ root, D, colour } = file);
     label = file.name;
   } else if (isScatter(state.world)){
@@ -4046,12 +4052,13 @@ window.fileSelftest = async function fileSelftest(opts = {}){
   };
   const differ = (a, b) => { let n = 0; for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) n++; return n; };
   const lit = a => { let n = 0; for (let i = 3; i < a.length; i += 4) if (a[i]) n++; return n; };
-  const frames = async () => {
+  // In attribute colour by default (renderPixels' mode, whatever the menu says).
+  const frames = async (mode = COLOUR_ATTR) => {
     const out = {};
     for (const path of ['off', '0']){
       setPath(path); dirty = true;
       out['converged' + path] = await settle();
-      out[path] = renderPixels(W_, H_, 8);
+      out[path] = renderPixels(W_, H_, mode);
     }
     return out;
   };
@@ -4094,7 +4101,85 @@ window.fileSelftest = async function fileSelftest(opts = {}){
     await sleep(40);
     await until(() => !buildAbort && W.id === id);
   };
+  /* 10. Baked worlds (glb-colour step 5). Run alone with { only: 'baked' },
+     which file.test.js does again on a page with ?workers=0, so the
+     main-thread runner is held to the same frames as the workers.
+     a. The twin. A D = 6 world is one chunk, drawn at lod 0 only, and at
+        lod 0 a baked word is its own voxel's word. So the sphere baked with
+        the named sphere's colour at every voxel that can show (an empty face
+        neighbour, outside counting as empty) must draw the named sphere's
+        frame byte for byte, raster only and ray only: the rank order, the
+        words' trip to the workers and both paths' words at once. Every
+        worker is failed as the baked one opens, so it is drawn by restarted
+        workers, which have only what the pool hands them again.
+     b. A ball whose shell is its skin, words at six bits, at D = 7, where
+        lod 1 draws too, so coarse means reach the screen. It opens in
+        attribute mode, and draws something other than the plain ball; in
+        gamut, the plain ball's frame byte for byte (the shape is untouched).
+        Exporting it writes the same bytes it was opened from.
+     The selftest's frames never run move(), where view.clear follows the
+     eye, so each opened world sets it: the near plane was the last world's,
+     64 voxels, and cut the front off both small worlds. */
+  const bakedStep = async () => {
+    const core = await import('./vdag-core.js');
+    const morton = (i, D) => { const p = [0, 0, 0]; for (let l = 0; l < D; l++) for (let a = 0; a < 3; a++) p[a] |= (i >> 3 * l + a & 1) << l; return p; };
+    { const D = 6, R = 64, sphere = SHAPES.find(x => x.name === 'sphere'), named = { kind: 'shape', name: 'sphere', D };
+      const s = createStore(), root = s.fromField(D, fieldOf(sphere, D)).root, cell = fieldOf(sphere, D), shape = new Uint8Array(R ** 3);
+      for (let z = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) shape[x + R * (y + R * z)] = cell(0, x, y, z) === 1 ? 1 : 0;
+      const at = (x, y, z) => x >= 0 && y >= 0 && z >= 0 && x < R && y < R && z < R && shape[x + R * (y + R * z)];
+      const skinOcc = new Uint8Array(R ** 3), f = colourOf(named), words = [];
+      for (let i = 0; i < R ** 3; i++){
+        const [x, y, z] = morton(i, D);
+        if (!at(x, y, z) || (at(x + 1, y, z) && at(x - 1, y, z) && at(x, y + 1, z) && at(x, y - 1, z) && at(x, y, z + 1) && at(x, y, z - 1))) continue;
+        skinOcc[x + R * (y + R * z)] = 1; words.push(f(x + 0.5, y + 0.5, z + 0.5));
+      }
+      const skin = s.fromDense(skinOcc, R).root, fileView = { eye: [32.5, 40.5, -18], yaw: 0.1, pitch: -0.2 }, keys = s.snapshot().keys;
+      const namedFile = await core.writeVdag([{ keys, root, D, name: 'sphere', colour: named, view: fileView }], { colourOf });
+      const bakedFile = await core.writeVdag([{ keys, root, D, name: 'baked sphere', colour: { kind: 'baked', skin, words: Uint32Array.from(words) }, view: fileView }]);
+      setHud(false);
+      await opened(viaDrop, [['sphere.vdag', namedFile]]);
+      view.clear = clearance();
+      const want = await frames(), namedMode = state.color, failed0 = streamer.S.stats.failed;
+      const said = await opened(viaDrop, [['baked-sphere.vdag', bakedFile]]);
+      view.clear = clearance();
+      let killed = 0;
+      for (const slot of pool.slots) if (!slot.dead && slot.ready){ slot.fail('fileSelftest: a worker died'); killed++; }
+      const got = await frames();
+      report.bakedTwin = { said, status: W.file?.colourStatus, colourMode: state.color, namedMode, skinVoxels: words.length, killed, mode: pool.mode,
+                           restarted: pool.slots.filter(sl => sl.restarts > 0).length, live: pool.liveWorkers,
+                           converged: want.convergedoff && want.converged0 && got.convergedoff && got.converged0,
+                           differRaster: differ(got.off, want.off), differRay: differ(got['0'], want['0']), lit: lit(want.off),
+                           failed: streamer.S.stats.failed - failed0 }; }
+    { const D = 7, R = 128, shape = new Uint32Array(R ** 3), skinOcc = new Uint32Array(R ** 3);
+      for (let z = 0, i = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++, i++){
+        const d2 = (x + 0.5 - 64) ** 2 + (y + 0.5 - 64) ** 2 + (z + 0.5 - 64) ** 2;
+        if (d2 < 40 * 40){ shape[i] = 1; if (d2 >= 37 * 37) skinOcc[i] = 1; }
+      }
+      const s = createStore(), root = s.fromDense(shape, R).root, skin = s.fromDense(skinOcc, R).root, n = createCounts(s).of(skin);
+      const words = Uint32Array.from({ length: n }, (_, i) => Math.imul(i + 1, 2654435761) >>> 8);
+      const fileView = { eye: [64.5, 70.5, -30], yaw: 0, pitch: -0.05 }, keys = s.snapshot().keys;
+      const plainFile = await core.writeVdag([{ keys, root, D, name: 'ball', view: fileView }]);
+      const bakedFile = await core.writeVdag([{ keys, root, D, name: 'baked ball', colour: { kind: 'baked', skin, words, bits: 6 }, view: fileView }]);
+      setHud(false);
+      await opened(viaDrop, [['ball.vdag', plainFile]]);
+      view.clear = clearance();
+      const plain = await frames(), plainGamut = await frames(COLOUR_GAMUT), plainMode = state.color, failed0 = streamer.S.stats.failed;
+      const said = await opened(viaDrop, [['baked-ball.vdag', bakedFile]]);
+      view.clear = clearance();
+      const f = await frames(), gamut = await frames(COLOUR_GAMUT), colourMode = state.color;
+      frame({ draw: false }); hud(); await sleep(50);
+      const note = /baked colour from the file/.test($('hud').textContent), lods = [...new Set([...streamer.S.cache.values()].map(e => e.lod))].sort();
+      report.baked = { said, status: W.file?.colourStatus, colourMode, plainMode, bits: W.file?.colour?.bits, words: W.file?.colour?.words?.length, wantWords: n,
+                       snapWords: pool.world?.snap?.colour?.words?.length, lods,
+                       converged: [plain, plainGamut, f, gamut].every(x => x.convergedoff && x.converged0),
+                       differRaster: differ(f.off, plain.off), differRay: differ(f['0'], plain['0']),
+                       gamutRaster: differ(gamut.off, plainGamut.off), gamutRay: differ(gamut['0'], plainGamut['0']),
+                       lit: lit(f.off), failed: streamer.S.stats.failed - failed0, note };
+      const back = await clickExport('fileExport');
+      report.baked.rewriteSame = back.bytes.length === bakedFile.length && back.bytes.every((v, i) => v === bakedFile[i]); }
+  };
   try {
+    if (opts.only === 'baked'){ await bakedStep(); report.mode = pool.mode; report.glError = gl.getError(); return report; }
     const CASES = opts.cases || [
       { world: 'kit:1', kit: kitDesc({ D: 10 }), pin: [76250785, 3092] },
       { world: 'scatter:1', depth: 9, pin: [55656241, 29773] },
@@ -4206,7 +4291,9 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       const file = await core.writeVdag([{ keys: s.snapshot().keys, root: small, D: 5, name: 'small' }, { keys: s.snapshot().keys, root: 0, D: 8, name: 'nothing' }]);
       const said = await opened(viaDrop, [['small.vdag', file]]);
       report.small = { said, refused: /D = 5/.test(said) && /empty/.test(said) }; }
-    // 10. Supersession. A file opened while a slow build runs wins and the
+    // 10. Baked worlds (glb-colour step 5): below, in bakedStep.
+    await bakedStep();
+    // 11. Supersession. A file opened while a slow build runs wins and the
     // build never lands; a world asked for while a file reads wins, and the
     // file's worlds wait on the shelf.
     { state.world = 'lattice:1'; state.lattice = latticeDesc({ R: 64, n: 4 }); fillWorlds(); fillDepth();

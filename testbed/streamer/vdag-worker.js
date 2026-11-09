@@ -17,6 +17,7 @@ self.onmessage = async ({ data }) => {
       for (const w of worlds){
         transfer.push(w.keys.buffer);
         if (w.colour?.table) transfer.push(w.colour.table.buffer);
+        if (w.colour?.words) transfer.push(w.colour.words.buffer);
       }
       self.postMessage({ done: true, worlds, bytes }, transfer);
     } else if (data.op === 'write'){

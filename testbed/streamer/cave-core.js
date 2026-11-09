@@ -445,9 +445,39 @@ export function heightsOf(plan, x0, z0, n){
 
 const AND = (a, b) => a === 0 || b === 0 ? 0 : a === 1 && b === 1 ? 1 : -1;
 const OR = (a, b) => a === 1 || b === 1 ? 1 : a === 0 && b === 0 ? 0 : -1;
+const NOT = a => a === -1 ? -1 : 1 - a;
 
-/* The fromField classifier, in world node coordinates, for the cells over
-   `hts`'s columns (plan §2):
+/* The pool term split by kind, for the labels: out.p is poolTerm's answer
+   (1 all in some pool, 0 none, −1 part), out.w and out.l the same for
+   water pools and lava pools alone. A kind is "all" only when a box of
+   that kind holds the whole cell and no box of the other kind touches it:
+   where boxes of both kinds overlap, poolAt's order picks a voxel's pool,
+   so the cell is split down to the voxels, which ask poolAt itself. */
+function poolKinds(plan, k, X, Y, Z, out){
+  if (k === 0){
+    const ch = poolAt(plan, X, Y, Z);
+    out.p = ch ? 1 : 0; out.w = ch && !ch.pool.lava ? 1 : 0; out.l = ch && ch.pool.lava ? 1 : 0;
+    return;
+  }
+  const s = 2 ** k, x0 = X * s, y0 = Y * s, z0 = Z * s, x1 = x0 + s - 1, y1 = y0 + s - 1, z1 = z0 + s - 1, G = plan.G, N = plan.N;
+  const a = [x0, y0, z0].map(v => Math.max(0, Math.floor(v / G))), b = [x1, y1, z1].map(v => Math.min(N - 1, Math.floor(v / G)));
+  let all = 0, any = false;
+  const touch = [false, false], hold = [false, false];
+  for (let k2 = a[2]; k2 <= b[2]; k2++) for (let j2 = a[1]; j2 <= b[1]; j2++) for (let i2 = a[0]; i2 <= b[0]; i2++){
+    for (const ch of plan.poolHomes[i2 + N * (j2 + N * k2)]){
+      const [bl, bh] = ch.box, L = Math.min(bh[1], ch.pool.level), kind = ch.pool.lava ? 1 : 0;
+      if (x1 < bl[0] || x0 > bh[0] || z1 < bl[2] || z0 > bh[2] || y1 < bl[1] || y0 > L) continue;
+      touch[kind] = true; any = true;
+      if (x0 >= bl[0] && x1 <= bh[0] && z0 >= bl[2] && z1 <= bh[2] && y0 >= bl[1] && y1 <= L){ hold[kind] = true; all = 1; }
+    }
+  }
+  out.p = all ? 1 : any ? -1 : 0;
+  out.w = !touch[0] ? 0 : hold[0] && !touch[1] ? 1 : -1;
+  out.l = !touch[1] ? 0 : hold[1] && !touch[0] ? 1 : -1;
+}
+
+/* The cave and pool terms of a cell, shared by caveCell (occupancy) and
+   caveLabelCell (labels), in world node coordinates:
    - fromField asks a cell's children right after the cell itself (depth
      first), so the last answer at level k + 1 is the parent's while its
      children are asked. A term the parent decided (no cave here, all
@@ -460,20 +490,22 @@ const OR = (a, b) => a === 1 || b === 1 ? 1 : a === 0 && b === 0 ? 0 : -1;
      list is only known to be ≥ G.
    The values don't change, only which primitives are tried, so the DAG is
    the one `fast: false` gives (the tests build both). In the sketch the
-   shortcuts took D = 12 from 504 s to 38.5 s. */
-export function caveCell(plan, hts, { fast = true, stats = null } = {}){
-  const { D, seaY, G } = plan, { mins, maxs } = hts;
+   shortcuts took D = 12 from 504 s to 38.5 s.
+   Returns { c, p, w, l }: carved, in a pool, and (kinds: true) in a water
+   or a lava pool, each 1 / 0 / −1. p, w and l are −1 where c is 0 (not
+   asked: nothing uncarved is pool). The object is reused. A caller that
+   answers without asking for the terms (caveCell's sea and sky) leaves
+   the level's memory as it was, which only costs its children the
+   inheritance: the memory is keyed by the cell's coordinates. */
+function cellTerms(plan, { fast = true, stats = null, kinds = false } = {}){
+  const { D, G } = plan;
   const mx_ = new Int32Array(D + 2).fill(-1), my_ = new Int32Array(D + 2), mz_ = new Int32Array(D + 2);
-  const mc = new Int8Array(D + 2), mp = new Int8Array(D + 2), mok = new Uint8Array(D + 2), mn_ = new Int32Array(D + 2);
+  const mc = new Int8Array(D + 2), mp = new Int8Array(D + 2), mw = new Int8Array(D + 2), mlv = new Int8Array(D + 2);
+  const mok = new Uint8Array(D + 2), mn_ = new Int32Array(D + 2);
   const ml = Array.from({ length: D + 2 }, () => new Int32Array(plan.maxList)), vals = new Float64Array(plan.maxList);
+  const out = { c: 0, p: -1, w: -1, l: -1 };
   return (k, X, Y, Z) => {
-    if (stats) stats.calls[k]++;
-    const s = 2 ** k, y0 = Y * s, y1 = y0 + s - 1;
-    if (y1 <= seaY) return 1;
-    const sea = y0 <= seaY ? -1 : 0, n = hts.n >> k, h = (X - (hts.x0 >> k)) + n * (Z - (hts.z0 >> k));
-    const t = y1 <= mins[k][h] ? 1 : y0 > maxs[k][h] ? 0 : -1;
-    if (t === 0) return sea;
-    const up = k + 1, inherit = fast && mx_[up] === X >> 1 && my_[up] === Y >> 1 && mz_[up] === Z >> 1;
+    const s = 2 ** k, up = k + 1, inherit = fast && mx_[up] === X >> 1 && my_[up] === Y >> 1 && mz_[up] === Z >> 1;
     // the caves, by their own bound
     let c;
     mok[k] = 0;
@@ -492,20 +524,90 @@ export function caveCell(plan, hts, { fast = true, stats = null } = {}){
         else {
           c = v > rho ? 0 : v < -rho ? 1 : -1;
           if (fast && c === -1 && dmin + 2 * rg < G - 1){
-            const out = ml[k]; let m = 0;
-            for (let q = 0; q < len; q++) if (vals[q] <= dmin + 2 * rg) out[m++] = list[q];
+            const keep = ml[k]; let m = 0;
+            for (let q = 0; q < len; q++) if (vals[q] <= dmin + 2 * rg) keep[m++] = list[q];
             mn_[k] = m; mok[k] = 1;
           }
         }
       }
     }
-    const notC = c === -1 ? -1 : 1 - c;
-    let p = -1;
-    if (notC !== 1) p = inherit && mp[up] !== -1 ? mp[up] : poolTerm(plan, k, X, Y, Z);
-    mx_[k] = X; my_[k] = Y; mz_[k] = Z; mc[k] = c; mp[k] = p;
+    let p = -1, w = -1, l = -1;
+    if (c !== 0){
+      if (inherit && mp[up] !== -1 && (!kinds || (mw[up] !== -1 && mlv[up] !== -1))){ p = mp[up]; w = mw[up]; l = mlv[up]; }
+      else if (kinds){ poolKinds(plan, k, X, Y, Z, out); p = out.p; w = out.w; l = out.l; }
+      else p = poolTerm(plan, k, X, Y, Z);
+    }
+    mx_[k] = X; my_[k] = Y; mz_[k] = Z; mc[k] = c; mp[k] = p; mw[k] = w; mlv[k] = l;
+    out.c = c; out.p = p; out.w = w; out.l = l;
+    return out;
+  };
+}
+
+/* The fromField classifier, in world node coordinates, for the cells over
+   `hts`'s columns (plan §2): the sea and the column tops first, which
+   decide most cells with no cave term at all, then the terms above. */
+export function caveCell(plan, hts, { fast = true, stats = null } = {}){
+  const { seaY } = plan, { mins, maxs } = hts, terms = cellTerms(plan, { fast, stats });
+  return (k, X, Y, Z) => {
+    if (stats) stats.calls[k]++;
+    const s = 2 ** k, y0 = Y * s, y1 = y0 + s - 1;
+    if (y1 <= seaY) return 1;
+    const sea = y0 <= seaY ? -1 : 0, n = hts.n >> k, h = (X - (hts.x0 >> k)) + n * (Z - (hts.z0 >> k));
+    const t = y1 <= mins[k][h] ? 1 : y0 > maxs[k][h] ? 0 : -1;
+    if (t === 0) return sea;
+    const { c, p } = terms(k, X, Y, Z), notC = NOT(c);
     const v = OR(sea, AND(t, notC === 1 ? 1 : OR(notC, p)));
     if (stats && v === -1) stats.split[k]++;
     return v;
+  };
+}
+
+/* ---- labels (docs/multidag-attributes.md §3 shape B, §8 E1) ------------
+   What fills a voxel, as a label: the caves' first label DAG. Sea and pool
+   water are two labels (the colour field tells them apart), so a reader
+   that only wants "wet" merges them. 0 is air. */
+export const AIR = 0, ROCK = 1, SEA = 2, WATER = 3, LAVA = 4;
+export const CAVE_LABELS = ['air', 'rock', 'sea', 'water', 'lava'];
+
+/* The label classifier: cell(k, X, Y, Z) is the label every voxel of the
+   cell holds, or −1 (split it). Each label is a three-valued term of the
+   same four facts caveCell uses (under the sea line, under the column
+   top, carved, in a pool of a kind), "1" meaning every voxel of the cell:
+     rock  = top ∧ ¬carved                    (either side of the sea line)
+     sea   = below ∧ ¬rock
+     water = above ∧ top ∧ carved ∧ waterPool, lava the same
+     air   = above ∧ (¬top ∨ (carved ∧ ¬pool))
+   which is voxelKind, rule for rule. Terms are conservative (an AND of
+   two "some"s is "some" even when they're disjoint), so a cell may be
+   split that didn't need it; every voxel is decided, since at level 0
+   every term is.
+
+   masked: true answers for the label DAG of shape B with air as "don't
+   care": the label the cell's occupied voxels share, AIR when it has none,
+   −1 when two labels meet. That DAG needs the shape DAG beside it to say
+   which voxels are there, and in return never splits on the surface. */
+export function caveLabelCell(plan, hts, { fast = true, masked = false } = {}){
+  const { seaY } = plan, { mins, maxs } = hts, terms = cellTerms(plan, { fast, kinds: true });
+  const ind = new Int8Array(5);
+  return (k, X, Y, Z) => {
+    const s = 2 ** k, y0 = Y * s, y1 = y0 + s - 1, n = hts.n >> k, h = (X - (hts.x0 >> k)) + n * (Z - (hts.z0 >> k));
+    const below = y1 <= seaY ? 1 : y0 > seaY ? 0 : -1, above = NOT(below);
+    const t = y1 <= mins[k][h] ? 1 : y0 > maxs[k][h] ? 0 : -1;
+    let c = 0, p = 0, w = 0, l = 0;
+    if (t !== 0) ({ c, p, w, l } = terms(k, X, Y, Z));
+    const rock = AND(t, NOT(c)), wet = AND(above, AND(t, c));
+    ind[ROCK] = rock;
+    ind[SEA] = AND(below, NOT(rock));
+    ind[WATER] = AND(wet, w);
+    ind[LAVA] = AND(wet, l);
+    ind[AIR] = AND(above, OR(NOT(t), AND(c, NOT(p))));
+    if (!masked){
+      for (let L = 0; L < 5; L++) if (ind[L] === 1) return L;
+      return -1;
+    }
+    let only = AIR;
+    for (let L = 1; L < 5; L++) if (ind[L] !== 0){ if (only !== AIR) return -1; only = L; }
+    return only;
   };
 }
 
@@ -517,6 +619,12 @@ export function voxelKind(plan, x, y, z){
   if (y > top) return 'air';
   if (rock()) return 'rock';
   return poolAt(plan, x, y, z) ? 'pool' : 'air';
+}
+// voxelKind as a label, the pool's kind read off the pool poolAt picks.
+const LABEL_OF = { air: AIR, rock: ROCK, sea: SEA };
+export function voxelLabel(plan, x, y, z){
+  const kind = voxelKind(plan, x, y, z);
+  return kind === 'pool' ? (poolAt(plan, x, y, z).pool.lava ? LAVA : WATER) : LABEL_OF[kind];
 }
 
 /* ---- building ---------------------------------------------------------- */
