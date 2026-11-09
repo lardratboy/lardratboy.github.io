@@ -1,0 +1,2271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Levels of Detail — how the engine draws less, far away</title>
+<style>
+:root{
+  --ink:#050508;
+  --ink-2:#0a0a11;
+  --panel:rgba(10,10,18,.72);
+  --rule:rgba(120,150,190,.16);
+  --rule-hi:rgba(0,229,255,.32);
+  --dim:#5a627a;
+  --mid:#8e97ad;
+  --text:#c3c9d6;
+  --live:#00e5ff;
+  --tree:#b98220;   /* chart series: tree (SVO) counts */
+  --dag:#1d9db4;    /* chart series: unique (DAG) counts */
+  --warm:#ffc44f;
+  --mono: ui-monospace,'SF Mono','Cascadia Mono','Roboto Mono',Consolas,monospace;
+  --serif:'Iowan Old Style','Palatino Linotype',Palatino,Charter,Georgia,serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{animation:none!important;transition:none!important}}
+body{
+  background:var(--ink);color:var(--text);
+  font-family:var(--serif);font-size:17px;line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+  background-image:radial-gradient(ellipse 80% 50% at 50% -10%,rgba(0,229,255,.055),transparent 70%);
+  background-repeat:no-repeat;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 28px 140px}
+
+h1{font-family:var(--mono);font-weight:700;letter-spacing:.02em;line-height:1.1;
+   font-size:clamp(30px,5.2vw,58px);color:#e8f6ff}
+h2{font-family:var(--mono);font-size:15px;font-weight:700;letter-spacing:.18em;
+   text-transform:uppercase;color:var(--live)}
+h3{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.16em;
+   text-transform:uppercase;color:var(--dim);margin-bottom:9px}
+p{margin:0 0 15px;max-width:68ch}
+p.lede{font-size:19px;color:#aab3c6;max-width:62ch}
+em{color:#dfe6f2;font-style:italic}
+b,strong{color:#8fd8ff;font-weight:600}
+code{font-family:var(--mono);font-size:.85em;color:#9fe8ff;
+     background:rgba(0,229,255,.07);padding:1px 5px;border-radius:3px;
+     border:1px solid rgba(0,229,255,.12)}
+a{color:var(--live)}
+ul.plain{margin:0 0 15px 1.1em;max-width:66ch}
+ul.plain li{margin:0 0 6px}
+.aside{border-left:2px solid var(--rule-hi);padding-left:16px;color:var(--mid);
+       font-size:15.5px;margin:22px 0;max-width:70ch}
+.aside b{color:#b8e6f7}
+pre.code{font-family:var(--mono);font-size:12px;line-height:1.55;color:#9fb4c8;
+       background:rgba(0,0,0,.35);border:1px solid var(--rule);border-radius:6px;
+       padding:12px 14px;overflow-x:auto;margin:14px 0 18px;max-width:100%}
+pre.code .c{color:#5a6a80}
+pre.code .k{color:#9fe8ff}
+
+header{padding:96px 0 40px;border-bottom:1px solid var(--rule)}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.3em;text-transform:uppercase;
+         color:var(--dim);margin-bottom:22px}
+.formula{font-family:var(--mono);font-size:clamp(11.5px,1.75vw,15px);color:#9fe8ff;
+         margin-top:30px;padding:16px 18px;border:1px solid var(--rule-hi);
+         border-radius:6px;background:rgba(0,229,255,.04);overflow-x:auto;white-space:pre;line-height:1.7}
+.formula .d{color:var(--dim)}
+.hero{display:flex;flex-wrap:wrap;gap:12px 40px;margin-top:30px}
+.hero div{font-family:var(--mono)}
+.hero .n{font-size:30px;color:#e8f6ff;font-weight:700;letter-spacing:.01em}
+.hero .l{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
+
+nav{position:sticky;top:0;z-index:20;background:rgba(5,5,8,.9);
+    backdrop-filter:blur(14px);border-bottom:1px solid var(--rule)}
+nav ol{display:flex;gap:2px;list-style:none;overflow-x:auto;max-width:1180px;
+       margin:0 auto;padding:0 22px;scrollbar-width:none}
+nav ol::-webkit-scrollbar{display:none}
+nav a{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.13em;
+      text-transform:uppercase;color:var(--dim);text-decoration:none;
+      padding:13px 11px;white-space:nowrap;border-bottom:2px solid transparent}
+nav a:hover{color:var(--mid)}
+nav a.on{color:var(--live);border-bottom-color:var(--live)}
+nav a:focus-visible{outline:2px solid var(--live);outline-offset:-4px}
+
+section{padding:76px 0;border-bottom:1px solid var(--rule)}
+.shead{display:flex;align-items:baseline;gap:16px;margin-bottom:26px}
+.snum{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.1em;
+      border:1px solid var(--rule);border-radius:3px;padding:3px 8px;flex:none}
+
+.stage{background:var(--panel);border:1px solid var(--rule);border-radius:10px;
+       padding:20px;margin:26px 0}
+.ctrls{display:flex;flex-wrap:wrap;gap:18px 22px;align-items:flex-end;margin-bottom:16px}
+.cgroup{display:flex;flex-direction:column;gap:7px}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+button{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
+       background:rgba(0,229,255,.05);border:1px solid var(--rule);color:var(--mid);
+       padding:6px 11px;border-radius:4px;cursor:pointer;transition:.14s}
+button:hover{border-color:var(--rule-hi);color:#cfefff}
+button:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+button.on{background:rgba(0,229,255,.14);border-color:var(--live);color:#e6faff}
+button:disabled{opacity:.4;cursor:default}
+input[type=range]{-webkit-appearance:none;appearance:none;width:140px;height:3px;
+       background:#1a2030;border-radius:2px;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;
+       border-radius:50%;background:var(--live);cursor:pointer}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:var(--live)}
+input[type=range]:focus-visible{outline:2px solid var(--live);outline-offset:4px}
+input[type=number]{font-family:var(--mono);font-size:11px;width:62px;padding:5px 6px;
+       background:rgba(0,0,0,.4);color:#cfefff;border:1px solid var(--rule);border-radius:4px}
+input[type=number]:focus-visible{outline:2px solid var(--live);outline-offset:1px}
+label.lbl{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;
+       text-transform:uppercase;color:var(--dim)}
+.val{color:var(--live)}
+
+canvas{display:block;width:100%;background:var(--ink-2);
+       border:1px solid var(--rule);border-radius:6px}
+canvas.paint{cursor:crosshair;touch-action:none}
+canvas.look{cursor:grab;touch-action:none}
+canvas.look:active{cursor:grabbing}
+
+.read{display:flex;flex-wrap:wrap;gap:2px 24px;margin-top:14px;
+      font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+.read span b{color:var(--live);font-weight:600}
+.verdict{font-family:var(--mono);font-size:12px;margin-top:14px;padding:11px 14px;
+      border-radius:5px;border:1px solid rgba(0,229,255,.3);
+      background:rgba(0,229,255,.06);color:#a8ecff;line-height:1.6}
+.warnbox{font-family:var(--mono);font-size:12px;padding:12px 14px;border-radius:5px;
+      border:1px solid rgba(255,196,79,.4);background:rgba(255,196,79,.07);color:#ffd88a;margin:18px 0;display:none}
+
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.twoL{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:18px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--mono);
+        font-size:10px;letter-spacing:.1em;color:var(--dim);margin:4px 0 10px}
+.swatch{display:inline-block;width:14px;height:8px;border-radius:2px;vertical-align:middle;margin-right:6px}
+
+table.dt{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px;margin-top:8px}
+table.dt th{text-align:left;font-weight:600;font-size:9.5px;letter-spacing:.14em;
+      text-transform:uppercase;color:var(--dim);padding:0 10px 9px 0;border-bottom:1px solid var(--rule)}
+table.dt td{padding:7px 10px 7px 0;border-bottom:1px solid rgba(120,150,190,.07);color:var(--mid)}
+table.dt td.k{color:#9fe8ff}
+table.dt td.n{text-align:right;font-variant-numeric:tabular-nums}
+table.dt th.n{text-align:right}
+table.dt tr.hi td{color:#e6faff;background:rgba(0,229,255,.05)}
+
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:10px}
+.gallery figure{background:var(--ink-2);border:1px solid var(--rule);border-radius:6px;padding:6px 6px 8px}
+.gallery canvas{border:0;background:none}
+.gallery figcaption{font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--mid);
+      text-align:center;margin-top:3px}
+.gallery figcaption i{color:var(--dim);font-style:normal}
+
+.path{font-family:var(--mono);font-size:11.5px;color:var(--mid);line-height:1.55}
+.path .step{padding:6px 0 6px 12px;border-left:2px solid var(--rule);margin-left:4px}
+.path .step b{color:#cfefff}
+.path .step .t{color:var(--warm)}
+.path .step.part{border-left-color:var(--live)}
+.path .hint{color:var(--dim)}
+.plan{font-family:var(--mono);font-size:11px;color:var(--dim);line-height:1.75;max-height:380px;overflow:auto}
+.plan .lv{color:var(--mid);margin-top:6px}
+.plan .e{display:inline-block;padding:0 6px;margin:1px 2px;border:1px solid var(--rule);border-radius:3px;color:var(--mid)}
+.plan .e.g{border-bottom:2px solid #6f7a90}
+.plan .e.on{border-color:var(--live);color:#e6faff;background:rgba(0,229,255,.12)}
+
+#tip{position:fixed;z-index:50;pointer-events:none;font-family:var(--mono);font-size:11px;
+     color:#e6faff;background:rgba(12,14,22,.96);border:1px solid var(--rule-hi);border-radius:5px;
+     padding:7px 9px;max-width:300px;line-height:1.5;display:none}
+
+details{margin-top:12px;font-family:var(--mono);font-size:11px;color:var(--mid)}
+details summary{cursor:pointer;color:var(--dim);letter-spacing:.1em}
+
+footer{padding:60px 0 0;font-family:var(--mono);font-size:11px;color:var(--dim);line-height:1.9}
+footer a{color:var(--mid)}
+
+@media(max-width:860px){
+  .two,.twoL{grid-template-columns:1fr}
+  .wrap{padding:0 18px 100px}
+  body{font-size:16px}
+}
+</style>
+<style>
+/* ---- this page's additions to the renderer explainer's look ----------------
+   One colour per lod, the same in every section (LOD_HEX in the script), and the
+   cover's four states as the renderer explainer has them: exact, coarser, finer,
+   hole (#1d9db4 #b58512 #8f6fe0 #e8505c, validated there against #0a0a11). Every
+   legend names its colours in text as well. */
+:root{
+  --exact:#1d9db4; --coarser:#b58512; --finer:#8f6fe0; --hole:#e8505c; --tail:#d070e0;
+  color-scheme:dark;
+}
+select{font-family:var(--mono);font-size:11px;background:#0d1019;color:#cfefff;border:1px solid var(--rule);border-radius:4px;padding:5px 6px}
+select:focus-visible{outline:2px solid var(--live);outline-offset:1px}
+.mono{font-family:var(--mono);font-size:11.5px;color:var(--mid);line-height:1.6}
+.mono b{color:#cfefff}
+.ref{font-family:var(--mono);font-size:.82em;color:#8fb7cc;border-bottom:1px dotted rgba(143,183,204,.45);cursor:copy;white-space:nowrap}
+.ref:hover{color:#e6faff}
+.chipnote{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:6px}
+.verdict:empty{display:none}
+.legend b{font-weight:500;color:var(--mid)}
+table.dt tr.pick{cursor:pointer}
+table.dt tr.pick:hover td{color:#e6faff}
+table.dt tr.cur td{color:#e6faff;background:rgba(0,229,255,.07)}
+table.dt td.good{color:#7fe0a8}
+table.dt td.bad{color:#ff9ca5}
+.three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.panel h3{margin-bottom:6px}
+.bars{display:grid;grid-template-columns:auto 1fr auto;gap:3px 10px;align-items:center;font-family:var(--mono);font-size:11px;margin-top:6px}
+.bars .l{color:var(--mid)}
+.bars .t{height:11px;border-bottom:1px solid rgba(120,150,190,.07);position:relative}
+.bars .b{position:absolute;left:0;top:0;height:11px;border-radius:0 3px 3px 0}
+.bars .b2{position:absolute;top:0;height:11px;opacity:.35;border-radius:0 3px 3px 0}
+.bars .v{color:#e6faff;text-align:right;font-variant-numeric:tabular-nums}
+.ladder td.n{font-variant-numeric:tabular-nums}
+.calc{display:flex;flex-wrap:wrap;gap:6px 20px;align-items:center;font-family:var(--mono);font-size:11.5px;color:var(--mid);margin-top:8px}
+.calc b{color:#e6faff}
+.swatches{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.sw{display:flex;flex-direction:column;align-items:center;font-family:var(--mono);font-size:9.5px;color:var(--dim)}
+.sw i{display:block;width:34px;height:22px;border-radius:3px;border:1px solid rgba(255,255,255,.08);margin-bottom:2px}
+.formula .k{color:#e6faff}
+@media(max-width:860px){.three{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<nav aria-label="Sections">
+  <ol>
+    <li><a href="#s1" data-nav="s1">1 Pyramid</a></li>
+    <li><a href="#s2" data-nav="s2">2 Cut</a></li>
+    <li><a href="#s3" data-nav="s3">3 Pixels</a></li>
+    <li><a href="#s4" data-nav="s4">4 Rules</a></li>
+    <li><a href="#s5" data-nav="s5">5 Adaptive</a></li>
+    <li><a href="#s6" data-nav="s6">6 In 3D</a></li>
+    <li><a href="#s7" data-nav="s7">7 Bricks</a></li>
+    <li><a href="#s8" data-nav="s8">8 Seams</a></li>
+    <li><a href="#s9" data-nav="s9">9 Cover</a></li>
+    <li><a href="#s10" data-nav="s10">10 Colour</a></li>
+    <li><a href="#s11" data-nav="s11">11 Read</a></li>
+  </ol>
+</nav>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">chunk-core.js &nbsp;·&nbsp; stream-core.js &nbsp;·&nbsp; dag-core.js &nbsp;·&nbsp; interactive companion</div>
+  <h1>Levels of Detail</h1>
+  <p class="lede" style="margin-top:22px">Far from the eye, the engine draws the world with bigger cubes. That sounds like one idea, but in the code it is
+  <b>five separate decisions</b>, each made in a different place, and each with a trap that took a measurement to find. This page takes them one at a time,
+  with the real code running on real worlds. Wherever a section uses a 2D model instead, it says so.</p>
+
+  <div class="hero" aria-label="Headline numbers">
+    <div><div class="n">0</div><div class="l">extra data for a coarse lod</div></div>
+    <div><div class="n">8 B</div><div class="l">a voxel count per node</div></div>
+    <div><div class="n">K = 2</div><div class="l">the cut's one knob</div></div>
+    <div><div class="n">8³</div><div class="l">cells: the unit of choice</div></div>
+    <div><div class="n">0.97–1.02</div><div class="l">adaptive's coverage, medians</div></div>
+    <div><div class="n">1</div><div class="l">lod apart, face neighbours</div></div>
+  </div>
+
+  <div class="formula"><span class="d">where?   </span><span class="k">selectChunks</span>  split a chunk while  dist &lt; K · size           <span class="d">§2–3</span>
+<span class="d">what?    </span><span class="k">lodRule</span>       per 8³ brick, keep the k fullest cells          <span class="d">§4–7</span>
+<span class="d">seams?   </span><span class="k">uOpenSides</span>    + the seam tail, for neighbours one lod apart  <span class="d">§8</span>
+<span class="d">when?    </span><span class="k">coverOf</span>       complete beats finer                           <span class="d">§9</span>
+<span class="d">colour?  </span><span class="k">cellAttr</span>      the count-weighted mean, quantized once         <span class="d">§10</span></div>
+</header>
+
+<!-- ============================ 1 ============================ -->
+<section id="s1">
+  <div class="shead"><span class="snum">01</span><h2>The DAG already is the pyramid</h2></div>
+
+  <p>A texture keeps a mip chain: each level is computed from the one below and stored beside it. <b>This engine stores nothing extra for its coarse lods.</b>
+  A node of the DAG at level <i>l</i> is a cube 2<sup>l</sup> voxels on a side, and it either holds something or it doesn't. So "the world at lod <i>l</i>" is
+  just "the DAG, read down to level <i>l</i> and no further". A coarse cell <em>is</em> a node. A chunk at lod <i>l</i> is 64³ of them, which is one node at
+  level <i>l</i> + 6, so asking for a coarse chunk walks only six levels below its own node.</p>
+
+  <table class="dt" style="max-width:860px">
+    <thead><tr><th>word</th><th>what it is</th><th>size in voxels</th></tr></thead>
+    <tbody>
+      <tr><td class="k">level <i>k</i></td><td>a depth in the DAG, counted up from the voxels (level 0) to the root (level D)</td><td class="n">2<sup>k</sup></td></tr>
+      <tr><td class="k">lod <i>l</i></td><td>which level a chunk's cells come from; lod 0 cells are voxels</td><td class="n">—</td></tr>
+      <tr><td class="k">cell</td><td>the thing one cube draws: a level-<i>l</i> node at lod <i>l</i></td><td class="n">2<sup>l</sup></td></tr>
+      <tr><td class="k">brick</td><td>8³ cells, a level-(<i>l</i> + 3) node: where coarse cells are chosen (§7) and where the pose lives</td><td class="n">8 · 2<sup>l</sup></td></tr>
+      <tr><td class="k">chunk</td><td>64³ cells, a level-(<i>l</i> + 6) node: the unit of a job, a cache entry and a draw</td><td class="n">64 · 2<sup>l</sup></td></tr>
+    </tbody>
+  </table>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">World (256³, D = 8)</label><div class="chips" id="pyWorld"></div></div>
+      <div class="cgroup">
+        <label class="lbl" for="pyLod">lod <span class="val" id="pyLodV">0</span></label>
+        <input type="range" id="pyLod" min="0" max="5" step="1" value="0">
+      </div>
+      <div class="cgroup"><label class="lbl">Which coarse cells</label><div class="chips" id="pyRule"></div></div>
+      <div class="cgroup"><label class="lbl">Cell edges</label><div class="chips"><button id="pyEdges">on</button></div></div>
+    </div>
+    <canvas id="cvPy" class="look" data-h="440" tabindex="0" aria-label="The chosen world drawn at the chosen lod as instanced cubes. Drag to orbit, wheel to zoom."></canvas>
+    <div class="read" id="rdPy"></div>
+    <div class="verdict" id="vdPy"></div>
+  </div>
+
+  <p>Slide the lod and watch three things. The cube count falls by about <b>4× a lod</b> on smooth shapes, because what's drawn is a surface, and a surface
+  has a quarter as many cells each time a cell doubles. It falls by more on solids at first, because more of the inside is buried. And on the gyroid,
+  <code>any</code> (keep a cell if it holds anything) visibly <b>fattens the walls</b>, which is §4's problem.</p>
+
+  <h3 style="margin-top:26px">The same world, level by level (census of the real store)</h3>
+  <table class="dt ladder" id="tbLadder" style="max-width:860px"><thead><tr>
+    <th class="n">level</th><th class="n">node side</th><th class="n">nodes in the tree</th><th class="n">unique (DAG)</th><th class="n">shared</th><th>as a chunk</th>
+  </tr></thead><tbody></tbody></table>
+  <p style="margin-top:12px">The tree column is how many cells a coarse lod could draw, before the face test. The DAG column is what is stored: every coarse cell of
+  a level is one of these few nodes. That's why coarse jobs are cheap to ask for, and why §7 can cache a coarse brick's choice per node.</p>
+
+  <p class="aside"><b>The one thing a coarse lod does need: a count.</b> <code>any</code> only needs "is this node empty?", which the DAG answers for free. Every
+  better rule needs <em>how full</em> a node is, so <span class="ref" data-f="dag-core.js" data-q="export function createCounts"></span> keeps one float64 per
+  node, summed children-first. A float64 is exact to 2<sup>53</sup>, so a count is exact up to level 17 (8<sup>17</sup> = 2<sup>51</sup>). Past that, a node
+  missing one voxel has the same count as a full one. That made a job differ from <code>expandChunk</code> once (<code>edit-log.md</code> §2), and it's why
+  <span class="ref" data-f="dag-core.js" data-q="export function isFull"></span> exists: the full node of each level is the one whose eight children are all the full node below,
+  and hash-consing makes that an exact test.</p>
+  <div class="calc" id="f64calc">
+    <label class="lbl" for="f64L">level <span class="val" id="f64LV">17</span></label>
+    <input type="range" id="f64L" min="12" max="24" step="1" value="17">
+    <span id="f64Out"></span>
+  </div>
+</section>
+
+<!-- ============================ 2 ============================ -->
+<section id="s2">
+  <div class="shead"><span class="snum">02</span><h2>Where each lod goes: the cut</h2></div>
+
+  <p>Start from the top chunk, the whole world at its coarsest lod. <b>Split any chunk that is closer to the eye than K of its own sides</b>, skipping the
+  empty children (the DAG names them). What's left when nothing more splits is the <b>cut</b>. Its leaves partition the world, so every voxel is drawn
+  by exactly one chunk, and each leaf is at the coarsest lod the rule allows at its distance. That's the clipmap of <code>ifsandwhats.md</code> §8.4, built as a cut
+  through an octree rather than as nested boxes.</p>
+
+<pre class="code"><span class="c">// selectChunks (stream-core.js), without the heap and the cap</span>
+<span class="k">if</span> (c.lod &gt; minLod &amp;&amp; c.dist &lt; detail * c.size) c.kids = childrenOf(world, c);   <span class="c">// split: 8 children, minus the empty ones</span>
+<span class="k">else</span> leaves.push(c);                                                           <span class="c">// a leaf: drawn at this lod</span></pre>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl" for="deepSel">World</label><select id="deepSel" aria-label="The deep world used by sections 2, 3 and 9"></select></div>
+      <div class="cgroup"><label class="lbl">Looking</label><div class="chips" id="cutPlane"></div></div>
+      <div class="cgroup"><label class="lbl">Zoom on the eye</label><div class="chips" id="cutZoom"></div></div>
+      <div class="cgroup">
+        <label class="lbl" for="kS">Detail K <span class="val" id="kV">2</span></label>
+        <input type="range" id="kS" min="0.5" max="4" step="0.25" value="2">
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="capS">maxChunks <span class="val" id="capV">1,024</span></label>
+        <input type="range" id="capS" min="5" max="14" step="1" value="10">
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="minS">minLod <span class="val" id="minV">0</span></label>
+        <input type="range" id="minS" min="0" max="4" step="1" value="0">
+      </div>
+    </div>
+    <div class="legend" id="cutLeg"></div>
+    <canvas id="cvCut" class="paint" data-h="470" tabindex="0" aria-label="A slice through the world showing the cut's leaves, coloured by lod. Drag the eye marker to move it."></canvas>
+    <div class="twoL" style="margin-top:12px">
+      <div><div class="read" id="rdCut" style="margin-top:0"></div><div class="verdict" id="vdCut"></div></div>
+      <div><h3>Chunks per lod (bright: leaves, faint: split above them)</h3><div class="bars" id="cutBars"></div></div>
+    </div>
+  </div>
+
+  <p>Drag the white eye marker; hover a chunk to see why it stopped splitting. Things to try:</p>
+  <ul class="plain">
+    <li><b>Count the chunks per lod.</b> Each lod's ring is twice as far out as the one inside it, and its chunks are twice as big, so in a uniformly
+      filled world every lod would hold about the same number of chunks. Real content spreads them unevenly (empty chunks are never made, and a ring that
+      grazes the ground holds fewer than one full of buildings), but the count per lod stays bounded. So a world 64× bigger costs about one more ring,
+      not 64× more chunks: the cut grows with the log of the world, which is <code>ifsandwhats.md</code> §5.7's "bounded by screen resolution, not world size".</li>
+    <li><b>Turn K below 1.</b> Red outlines appear: leaves with a face neighbour two or more lods finer. The seam fix (§8) assumes that never happens, and
+      it can't when K ≥ 1 (the proof is below). The viewer's slider stops at 1 for that reason; this one goes lower so you can see it break.</li>
+    <li><b>Drop maxChunks.</b> Splits are taken biggest-looking first (by <code>dist / size</code>, from a heap), so a cap refuses the splits that would
+      show least. Past the cap, the one-lod promise is off, and red can appear even at K = 2.</li>
+    <li><b>Raise minLod.</b> Nothing near the eye gets finer than that lod. It's the clamp a weak machine would use; §3 shows its price.</li>
+  </ul>
+
+  <p class="aside"><b>Why face neighbours differ by at most one lod.</b> Say a leaf <i>c</i> of side <i>S</i> had a neighbour two lods finer across a face. That
+  neighbour's parent <i>p</i> has side <i>S</i>/2 and was split, so it is less than K·<i>S</i>/2 from the eye. It lies inside <i>c</i>'s face neighbour, within
+  <i>S</i>/2 of <i>c</i>, so <i>c</i> is less than K·<i>S</i>/2 + <i>S</i>/2 from the eye. But <i>c</i> is a leaf, so it is at least K·<i>S</i> away. Both hold only if K &lt; 1.
+  (The first version of this comment said √3, which is the bound for boxes touching at a corner. The test found it slack: seams only meet across faces.)
+  <span class="ref" data-f="stream-core.js" data-q="Face neighbours differ by at most one lod"></span></p>
+</section>
+
+<!-- ============================ 3 ============================ -->
+<section id="s3">
+  <div class="shead"><span class="snum">03</span><h2>Why distance over size: a cell's size on screen</h2></div>
+
+  <p>The split rule compares distance with size, and that is the whole reason it works. A cell of side 2<sup>l</sup> at distance <i>d</i> spans
+  about 2<sup>l</sup>/<i>d</i> radians. A leaf stopped splitting because <i>d</i> ≥ K · 64 · 2<sup>l</sup>, so its cells span at most 1/(64K) radians,
+  <b>whatever its lod</b>. Each point below is a leaf of the cut you just made in §2. Its height is the size of one of its cells on screen,
+  from about the chunk's centre, which is <code>chunkFootprint</code>'s side over 64. The thin curves are each lod's cell size as distance grows, and the
+  cut hops from one curve to the next, which gives the sawtooth.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Screen height</label><div class="chips" id="pxScreen"></div></div>
+      <div class="cgroup"><label class="lbl">K and the world</label><div class="mono" id="pxK">from §2</div></div>
+    </div>
+    <div id="pxChart" class="chartwrap"></div>
+    <div class="read" id="rdPx"></div>
+    <div class="verdict" id="vdPx"></div>
+  </div>
+
+  <ul class="plain">
+    <li><b>The dashed line is the ceiling,</b> pxPerRadian / (64 (K + ½)): a leaf that could still split would sit above it. Doubling K halves it, and
+      costs about 8× the chunks per ring (a ring K times as far out, in 3D). Points above it are leaves that weren't <em>allowed</em> to split:
+      lod-0 chunks next to the eye (there is no lod −1), anything at minLod, and anything the cap refused.</li>
+    <li><b>The default isn't a pixel a cell.</b> At K = 2 on a 1080-line screen, cells come out at a few pixels. <code>coverage-findings.md</code> §4 argues
+      that at one pixel a cell, a coarse rule's dither is invisible and only coverage matters; at a few pixels, some of it can show. Worth knowing when
+      you read §4–6's pictures, where the dither is huge on purpose.</li>
+    <li><b>The same rule picks raster or ray.</b> <code>chooseKinds</code> uses this footprint too (cubes per footprint pixel). Since a leaf's footprint
+      is nearly the same at every lod ≥ 1, that rule mostly asks how many cubes a chunk has (<code>stream-core.js</code> §2b).</li>
+  </ul>
+</section>
+
+<!-- ============================ 4 ============================ -->
+<section id="s4">
+  <div class="shead"><span class="snum">04</span><h2>What a coarse cell is: five rules</h2></div>
+
+  <p>The cut says which lod; the next question is what a cell at that lod <em>shows</em>. At lod 0 there's nothing to decide. At lod <i>l</i> a cell holds
+  <i>c</i> of its 8<sup>l</sup> voxels, and a <b>lod rule</b> decides whether to draw it. Cells are binary, drawn or not, so a coarse rule can only choose
+  <em>which</em> cells to keep. Each of the obvious answers is wrong somewhere (<code>coverage-findings.md</code>):</p>
+  <table class="dt" style="max-width:940px">
+    <thead><tr><th>rule</th><th>keeps</th><th>right on</th><th>wrong on</th></tr></thead>
+    <tbody>
+      <tr><td class="k">any</td><td>every cell with <i>c</i> ≥ 1</td><td>smooth solids</td><td>anything porous: fills it in (1.2–6.8× the volume on specimens, 3.6× the coverage on wires)</td></tr>
+      <tr><td class="k">majority</td><td>cells at least half full</td><td>the fewest wrong voxels per cell</td><td>anything thinner than half a cell vanishes: coverage 0.00 on sheets, wires and most testbed rows from lod 2</td></tr>
+      <tr><td class="k">volume</td><td>per brick: the round(<i>C</i> / 8<sup>l</sup>) fullest cells</td><td>volume, to within half a cell</td><td>thin things: fewer, fuller cells block less light (0.46 on sheets)</td></tr>
+      <tr><td class="k">opacity</td><td>per brick: as many cells as a ray through 2<sup>l</sup> independent voxels would hit</td><td>1-voxel sheets</td><td>almost never acts: real content is lumpy, so it caps back to <i>any</i></td></tr>
+      <tr><td class="k">adaptive</td><td>per brick: the same, with the depth <i>measured</i> from the brick (§5)</td><td>everything tested but two cases (medians 0.97–1.02)</td><td>1-voxel sheets (0.49 at lod 3) and dust on a lattice (3.7×)</td></tr>
+    </tbody>
+  </table>
+  <p style="margin-top:14px">What "right" means here is <b>coverage</b>, the measure <code>coverage-plan.md</code> decision 8 chose: along each axis, cut every column into
+  segments one brick deep and count the segments that hit something, coarse over fine. 1.00 means the coarse version blocks as much light as the
+  voxels do. Volume alone can be gamed (right amount, wrong place), and so the table also shows the <b>voxel error</b>: voxels drawn over empty space
+  plus voxels dropped, over the true count.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Content</label><div class="chips" id="l2Preset"></div></div>
+      <div class="cgroup">
+        <label class="lbl" for="l2Lod">lod <span class="val" id="l2LodV">2</span></label>
+        <input type="range" id="l2Lod" min="1" max="4" step="1" value="2">
+      </div>
+      <div class="cgroup"><label class="lbl">Ties broken by</label><div class="chips" id="l2Ties"></div></div>
+      <div class="cgroup"><label class="lbl">Brush</label><div class="chips" id="l2Brush"></div></div>
+    </div>
+    <canvas id="cvL2" class="paint" data-h="430" aria-label="A 2D model: the fine pixels on the left, which you can paint, and the coarse cells the chosen rule keeps on the right."></canvas>
+    <div class="legend" id="l2Leg"></div>
+    <div class="twoL" style="margin-top:6px">
+      <div><table class="dt" id="tbL2"><thead><tr><th>rule</th><th class="n">cells</th><th class="n">volume</th><th class="n">error</th><th class="n">cover →</th><th class="n">cover ↓</th></tr></thead><tbody></tbody></table>
+        <p class="chipnote">Click a row to draw that rule. Green: coverage within 5% of 1.00.</p></div>
+      <div><h3>The brick under the pointer</h3><div class="mono" id="l2Brick">Hover over either panel.</div></div>
+    </div>
+  </div>
+  <p class="chipnote">A 2D teaching model, 128 × 128 pixels: a cell holds 4<sup>l</sup> pixels (not 8<sup>l</sup>), a brick is 8 × 8 cells, and adaptive's
+  root is a square root (a ray crosses √s of s samples in 2D, the cube root in 3D). The rules are otherwise written as <code>keepCount</code> has them.
+  Paint on the left panel (drag; shift or right button erases). §6 runs the real 3D code.</p>
+
+  <p>Try the 1-pixel walls under each rule, then the foam, then the lattice dust. The wall is 2D's version of the 3D sheet: <i>majority</i> deletes it,
+  <i>volume</i> keeps a dashed line, and <i>adaptive</i> keeps a sparser dash than <i>opacity</i>. On the lattice dust, <i>volume</i> is the only rule that's
+  right. Neither failure is a bug in a formula; both come from one number per brick standing in for a correlation that depends on direction (§5).</p>
+</section>
+
+<!-- ============================ 5 ============================ -->
+<section id="s5">
+  <div class="shead"><span class="snum">05</span><h2>Adaptive: one formula, with its depth measured</h2></div>
+
+  <p>The first run showed that <i>volume</i> and <i>opacity</i> are one formula. Suppose a ray through a coarse cell crosses <i>m</i> independent fine
+  samples of density <i>p</i>. It hits one with probability 1 − (1 − <i>p</i>)<sup>m</sup>, so a brick of <i>n</i> cells should keep</p>
+<pre class="code">k = n · (1 − (1 − p)<sup>m</sup>)        <span class="c">m = 1: volume (k = n·p = C / 8^l)     m = 2^l: opacity (every voxel independent)</span></pre>
+  <p>A sweep of <i>m</i> found no single best value: 1 for solids, up to 6 for porous specimens at lod 3. <i>m</i> behaves like a correlation length, so the
+  rule has to measure it, and <b>the brick already holds the measurement</b>. If its voxels were <i>s</i> independent samples per cell, a cell would be
+  occupied with probability <i>q</i> = 1 − (1 − <i>p</i>)<sup>s</sup>. The brick knows <i>q</i> (occupied cells over <i>n</i>) and <i>p</i> (voxels over volume),
+  so it can solve for <i>s</i>, and a ray crosses about the cube root of that:</p>
+<pre class="code">s = log(1 − q) / log(1 − p)     <span class="c">// independent samples per cell</span>
+m = clamp(cbrt(s), 1, 2^l)      <span class="c">// adaptiveDepth: q = 1 carries no evidence, so it's read as 2^l</span>
+k = min(round(n · (1 − (1 − p)^m)), occupied)</pre>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Cases</label><div class="chips" id="adPreset"></div></div>
+      <div class="cgroup">
+        <label class="lbl" for="adLod">lod <span class="val" id="adLodV">2</span></label>
+        <input type="range" id="adLod" min="1" max="5" step="1" value="2">
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="adP">density p <span class="val" id="adPV"></span></label>
+        <input type="range" id="adP" min="-4" max="0" step="0.01" value="-1.5">
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="adQ">occupied cells <span class="val" id="adQV"></span></label>
+        <input type="range" id="adQ" min="0" max="1" step="0.001" value="0.3">
+      </div>
+    </div>
+    <div class="twoL">
+      <div id="adChart" class="chartwrap"></div>
+      <div><div class="mono" id="adRead"></div><div class="verdict" id="vdAd"></div></div>
+    </div>
+  </div>
+  <p class="chipnote">The numbers are <code>keepCount</code> and <code>adaptiveDepth</code> from chunk-core.js, called with a brick of n = 512 cells,
+  C = p · 512 · 8<sup>l</sup> voxels, and the occupied count from the slider. The slider runs from the fewest cells C voxels can fill (one lump) to the most (scattered).</p>
+
+  <p>Drag "occupied cells" from left to right with the density fixed. At the left end the voxels are packed into as few cells as possible, one lump, and
+  <i>m</i> = 1: keep exactly the volume. At the right end the same voxels are spread so every cell gets some, and <i>m</i> = 2<sup>l</sup>: keep what a ray through
+  independent noise would hit. Everything real is in between, and adaptive reads where. The flat-sheet case is the failure written out: <i>q</i> = 1/8 and
+  <i>p</i> = 1/32 read as about 4 samples a cell, so <i>m</i> ≈ 1.6, and 26 of the sheet's 64 cells survive where face-on the sheet is opaque. The
+  test suite holds that 26 by hand.</p>
+</section>
+
+<!-- ============================ 6 ============================ -->
+<section id="s6">
+  <div class="shead"><span class="snum">06</span><h2>The rules on real content, in 3D</h2></div>
+
+  <p>The real <span class="ref" data-f="chunk-core.js" data-q="export function expandChunk"></span>, run over every chunk of a 256³ world, under each rule. The
+  table measures each one as <code>experiments/coverage.mjs</code> does: volume, voxel error, and slab coverage over all three axes, against the world's own
+  voxels. Four worlds are shapes from <code>experiments/shapes.mjs</code>; five are built on this page to break a rule each (the three adversarial worlds
+  of <code>coverage-plan.md</code> decision 11, and two kinds of dust).</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">World (256³)</label><div class="chips" id="r3World"></div></div>
+      <div class="cgroup">
+        <label class="lbl" for="r3Lod">lod <span class="val" id="r3LodV">2</span></label>
+        <input type="range" id="r3Lod" min="1" max="4" step="1" value="2">
+      </div>
+    </div>
+    <div class="twoL">
+      <div><canvas id="cvR3" class="look" data-h="420" tabindex="0" aria-label="The world at the chosen lod under the chosen rule. Drag to orbit."></canvas>
+        <p class="chipnote" id="r3Note"></p></div>
+      <div>
+        <table class="dt" id="tbR3"><thead><tr><th>rule</th><th class="n">cubes</th><th class="n">volume</th><th class="n">error</th><th class="n">coverage</th><th class="n">ms</th></tr></thead><tbody></tbody></table>
+        <p class="chipnote">Click a row to draw it. Coverage within 5% of 1.00 is green; beyond 25%, red.</p>
+        <div class="verdict" id="vdR3"></div>
+      </div>
+    </div>
+  </div>
+  <p>Things to look for: <i>any</i> thickening the foam (watch its volume column climb with the lod); <i>majority</i> erasing the sheet and the wires entirely;
+  <i>adaptive</i> keeping the foam's coverage near 1.00 while drawing fewer cubes than <i>any</i>; and the two places adaptive is wrong: the flat sheet
+  (it thins it out) and the lattice dust (it over-covers). Those two are the deferred "anisotropic adaptive" question, which measures correlation per axis.
+  Dust isn't a target (your call, 2026-10-10: the content will be custom fields).</p>
+</section>
+
+<!-- ============================ 7 ============================ -->
+<section id="s7">
+  <div class="shead"><span class="snum">07</span><h2>Why the choice is made per brick</h2></div>
+
+  <p><i>volume</i>, <i>opacity</i> and <i>adaptive</i> can't decide one cell at a time, since they set a budget for a group. The group is the <b>8³ brick</b>,
+  a node at level <i>l</i> + 3, and that choice of group is load-bearing in three places:</p>
+  <ul class="plain">
+    <li><b>The apron sees what the neighbour draws.</b> A brick nests inside a chunk, so the one-cell apron a job reads from its neighbour (to hide faces)
+      is decided by exactly the bricks the neighbour itself decides with. A group that straddled chunks would make two jobs disagree.</li>
+    <li><b>The choice is a function of the node alone.</b> Count, occupied cells and ties all come from inside the brick's node. So
+      <span class="ref" data-f="job-core.js" data-q="createJobCache"></span> caches a brick's kept cells as a 512-bit mask per (rule, lod, node), and the ray
+      path stores each distinct brick once in its atlas. <code>CLAUDE.md</code> calls this the lod-rule rule: a rule that looked outside its brick would make
+      both caches silently wrong, and <code>ray-core.test.js</code> checks the property.</li>
+    <li><b>A full cell always survives.</b> If a cell is completely full, <i>k</i> ≥ round(<i>n</i>·<i>p</i>) is at least the number of full cells, and
+      full cells sort first. §8's seam proof needs that.</li>
+  </ul>
+
+  <p>Inside a brick, ties are common: every cell a flat sheet crosses holds exactly the same count. Breaking them by Morton index would always drop the brick's
+  high corner first. So <span class="ref" data-f="chunk-core.js" data-q="export const TIE_RANK"></span> is a fixed shuffle of the 512 positions, the same in every brick.</p>
+
+  <div class="stage">
+    <div class="two">
+      <div>
+        <h3>TIE_RANK: the 512 positions of a brick, slice by slice (dark: kept first)</h3>
+        <canvas id="cvTie" data-h="112" aria-label="TIE_RANK shown as eight 8 by 8 slices of a brick, coloured by rank."></canvas>
+      </div>
+      <div>
+        <h3>A 1-voxel sheet at lod 2, adaptive: one 64 × 64 layer of cells</h3>
+        <div class="chips" id="tieMode" style="margin-bottom:8px"></div>
+        <canvas id="cvSheet" data-h="300" aria-label="The cells a flat sheet keeps at lod 2, with ties broken by TIE_RANK or by Morton order."></canvas>
+      </div>
+    </div>
+    <div class="verdict" id="vdTie"></div>
+  </div>
+  <p class="chipnote">The TIE_RANK layer is the real <code>expandChunk</code>'s output. The Morton layer is this page's: the same 26 cells a brick, taken in Morton order instead.</p>
+</section>
+
+<!-- ============================ 8 ============================ -->
+<section id="s8">
+  <div class="shead"><span class="snum">08</span><h2>Seams: where two lods meet</h2></div>
+
+  <p>A job hides a cell's face when the cell next to it is occupied, and for a boundary cell it asks the neighbour chunk <em>at the same lod</em> (the apron).
+  But the neighbour may be drawn at another lod, where that cell may not exist, or may be bigger than what it covers. Then a hidden face has nothing in front of it,
+  and you see through the world. A job can't know how its neighbours will be drawn (that changes with every step of the eye), so the fix happens at draw time,
+  in the shader:</p>
+<pre class="code"><span class="c">// GLSL_DECODE. uOpenSides: one bit per side, set by coverOf when the same-lod neighbour across it isn't drawn.</span>
+<span class="k">uint</span> recShown(uint r){ <span class="k">return</span> recMask(r) | (boundaryBits(recCell(r)) &amp; uOpenSides); }</pre>
+  <p>An open side shows every boundary face. That covers faces of cells that have a record; a cell the apron alone buried has none. So each job appends those
+  cells after its records, as the <b>seam tail</b> (mask 0), drawn only when some side is open. And a tail cell is kept only if the coarser cell across its face,
+  the level-(<i>l</i> + 1) node holding the neighbour, <em>isn't</em> completely full.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Right half drawn at</label><div class="chips" id="smLod"></div></div>
+      <div class="cgroup"><label class="lbl">Coarse rule</label><div class="chips" id="smRule"></div></div>
+      <div class="cgroup"><label class="lbl">Open side</label><div class="chips"><button id="smOpen">on</button></div></div>
+      <div class="cgroup"><label class="lbl">Seam tail</label><div class="chips"><button id="smTail">on</button></div></div>
+      <div class="cgroup"><label class="lbl">Full test</label><div class="chips"><button id="smFull">on</button></div></div>
+      <div class="cgroup"><label class="lbl">Ground</label><div class="chips"><button id="smNew">another</button></div></div>
+    </div>
+    <canvas id="cvSeam" data-h="380" aria-label="A 2D cross-section: a fine chunk on the left, its neighbour at another lod on the right, with cracks marked in red."></canvas>
+    <div class="legend" id="smLeg"></div>
+    <div class="read" id="rdSeam"></div>
+    <div class="verdict" id="vdSeam"></div>
+  </div>
+  <p class="chipnote">A 2D teaching model: a side view, two chunks of 32 × 40 voxels, faces drawn as bright lines. A red slit on the seam is a fine stretch where one side
+  is solid, the other isn't, and no face separates them, which in 3D is a hole into an interior with no faces of its own.</p>
+
+  <p>Things to try: right half at lod 1 with everything on, then turn each fix off. Without the open side, cracks appear on both sides of the seam, including
+  the <em>coarse</em> side, because its apron saw the fine side's coarse cells, which are fatter than what's drawn. Without the tail, cells buried only by
+  the apron still leave cracks. Turn the full test off and the tail grows (every buried boundary cell joins it) without fixing anything more. Then try
+  <b>lod 2</b>, which the cut never makes when K ≥ 1: the full test looks only one level up, and it can drop a tail cell that was needed.</p>
+
+  <p class="aside"><b>Why a full coarser cell needs no tail record</b> (<code>stream-plan.md</code>, decision 11). Take a boundary cell <i>n</i> at lod <i>l</i>,
+  and let <i>P</i> be the level-(<i>l</i> + 1) node holding its neighbour. The neighbour chunk is drawn at <i>l</i> − 1 or <i>l</i> + 1 (one lod apart, §2).
+  If it's finer: <i>P</i> full means its children are full, and full cells are kept by every rule (§7). If it's coarser: <i>P</i> itself is the cell drawn, and
+  a full cell is kept. Either way the space across the face is drawn solid, so no crack can open there. Without this test a solid chunk underground carries its
+  whole boundary shell, about 23K records.</p>
+
+  <h3 style="margin-top:26px">What seams cost on a real world (§6's world, every chunk, one lod)</h3>
+  <table class="dt" id="tbSeam" style="max-width:900px"><thead><tr>
+    <th class="n">lod</th><th class="n">chunks</th><th class="n">records</th><th class="n">buried only by the apron</th><th class="n">in the tail</th><th class="n">dropped by the full test</th><th class="n">tail ÷ records</th>
+  </tr></thead><tbody><tr><td colspan="7">…</td></tr></tbody></table>
+  <p class="chipnote">"Buried only by the apron" is <code>border: 'closed'</code>'s records less the apron's: cells that show a face only when outside counts as empty.
+  At lod 2 and up a 256³ world is one chunk, with no neighbours, so lods 0 and 1 are the ones with seams.</p>
+</section>
+
+<!-- ============================ 9 ============================ -->
+<section id="s9">
+  <div class="shead"><span class="snum">09</span><h2>When lods change: complete beats finer</h2></div>
+
+  <p>The cut is what the eye <em>wants</em>. Jobs take time, so what's on screen is whatever is resident, chosen by
+  <span class="ref" data-f="stream-core.js" data-q="export function coverOf"></span>. Its rule: <b>a region is drawn from its children only if all of them
+  are resident; otherwise its parent stays up.</b> So a region never mixes a chunk with its own descendants (nothing is drawn twice), the picture changes only
+  when a replacement is whole, and the fallback is one lod coarser or finer in normal motion. The top chunk is pinned, so something always covers everything.</p>
+  <p>Below is the real streamer (<code>createStreamer</code>) running the real job (<code>createJobRunner</code>) on the main thread, on §2's world and eye,
+  so you can throttle it and watch the transitions. In the viewer the same jobs run on workers.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Jobs a frame</label><div class="chips" id="cvRate"></div></div>
+      <div class="cgroup"><label class="lbl">Eye</label><div class="chips"><button id="cvFly">fly</button><button id="cvJump">jump</button></div></div>
+      <div class="cgroup"><label class="lbl">Keep split chunks resident</label><div class="chips"><button id="cvSplits">on</button></div></div>
+      <div class="cgroup"><label class="lbl">Cache</label><div class="chips"><button id="cvFlush">flush</button></div></div>
+    </div>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--exact)"></i>drawn as wanted</span>
+      <span><i class="swatch" style="background:var(--coarser)"></i>coarser: a parent standing in</span>
+      <span><i class="swatch" style="background:var(--finer)"></i>finer: children not yet merged</span>
+      <span><i class="swatch" style="background:var(--hole)"></i>hole: nothing to draw</span>
+      <span><i class="swatch" style="background:#fff"></i>open side (seam tail on)</span>
+    </div>
+    <canvas id="cvCover" class="paint" data-h="440" tabindex="0" aria-label="The cover: which resident chunks are drawn, coloured by how they relate to what the cut wants. Drag the eye marker."></canvas>
+    <div class="read" id="rdCover"></div>
+    <div class="verdict" id="vdCover"></div>
+  </div>
+
+  <ul class="plain">
+    <li><b>Pause the jobs, then drag the eye.</b> Moving closer splits leaves: their children are missing, so the parent stays up (coarser, amber).
+      Moving away merges: the parent is missing, so the children stay (finer, violet). Nothing is ever a hole while the pinned top chunk can stand in.</li>
+    <li><b>Turn "keep split chunks resident" off.</b> That's the first version's rule, asking only for leaves. With jobs slow, missing leaves fall back past
+      parents that were never loaded, all the way up; in a simulated flight the whole world was drawn at its coarsest for the entire flight
+      (<code>stream-log.md</code> §3). Keeping the split chunks costs about one chunk for every seven leaves.</li>
+    <li><b>White edges are open sides</b>: the drawn chunk's same-lod neighbour isn't drawn, so its tail shows there (§8). They appear wherever the cover
+      meets a different lod, and only there.</li>
+    <li><b>Order matters.</b> The queue asks for the pinned chunk, then holes, then everything else nearest-looking first (<code>dist / size</code>),
+      so a region a fallback already covers can wait.</li>
+  </ul>
+</section>
+
+<!-- ============================ 10 ============================ -->
+<section id="s10">
+  <div class="shead"><span class="snum">10</span><h2>A coarse cell's colour</h2></div>
+
+  <p>A drawn coarse cell needs a colour. Its word is <b>the mean colour of every voxel under it, weighted by voxel count</b>
+  (<span class="ref" data-f="chunk-core.js" data-q="export function cellAttr"></span>), so it doesn't depend on which lod you start from. Taken exactly, that's
+  8<sup>l</sup> evaluations of the field a cell, 512 at lod 3, which a job can't afford. So the walk descends <code>meanDepth</code> levels below the cell, and each
+  sub-cell at the floor counts as its voxel count times the field at its centre. The default is 1: eight samples, one per child, weighted by the child's count.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">World (256³)</label><div class="chips" id="coWorld"></div></div>
+      <div class="cgroup">
+        <label class="lbl" for="coLod">lod <span class="val" id="coLodV">3</span></label>
+        <input type="range" id="coLod" min="1" max="4" step="1" value="3">
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="coDepth">meanDepth <span class="val" id="coDepthV">1</span></label>
+        <input type="range" id="coDepth" min="0" max="3" step="1" value="1">
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="coLayer">slice z = <span class="val" id="coLayerV"></span></label>
+        <input type="range" id="coLayer" min="0" max="31" step="1" value="16">
+      </div>
+    </div>
+    <div class="three">
+      <div class="panel"><h3 id="coH1">meanDepth 1</h3><canvas id="cvCoA" class="paint" data-h="260" aria-label="The layer's cells, coloured with the chosen meanDepth."></canvas></div>
+      <div class="panel"><h3>the exact mean</h3><canvas id="cvCoB" class="paint" data-h="260" aria-label="The layer's cells, coloured with the exact mean."></canvas></div>
+      <div class="panel"><h3>difference, in 6-bit steps</h3><canvas id="cvCoC" class="paint" data-h="260" aria-label="The difference between the two, in 6-bit steps."></canvas></div>
+    </div>
+    <div class="twoL" style="margin-top:12px">
+      <div><div class="read" id="rdCo" style="margin-top:0"></div><div class="verdict" id="vdCo"></div></div>
+      <div><h3>The cell under the pointer: its eight children</h3><div id="coCell" class="mono">Hover over a cell.</div></div>
+    </div>
+  </div>
+  <p class="chipnote">Every word here is the real <code>cellAttr</code>'s, on the shape's own colour field. "The exact mean" is <code>cellAttr</code> with meanDepth = lod,
+  which samples every voxel. The "rounded at every lod" figure is this page's: the children's 6-bit words averaged and rounded again, level by level.</p>
+
+  <ul class="plain">
+    <li><b>Depth 0 is a single sample</b> at the cell's centre, and it shows hard switches where the field changes inside a cell (terrain's biome bands).
+      Depth 1 kept every word within one 6-bit step of the exact mean on smooth shapes at lods 1–3 (<code>attrs-findings.md</code> §1).</li>
+    <li><b>It slips where the field changes inside half a cell</b>: the gyroid's two sides swap within a sub-cell. <code>attrs-findings.md</code> found that at lod 4 on a
+      D = 10 gyroid, and depth 2 fixed it at 2–10× a plain job. This page's gyroid is D = 8, so its sheet is a quarter as many voxels thick, and the slip comes two lods
+      sooner: try it at lods 3 and 4. What matters is the feature against the cell, not the lod.</li>
+    <li><b>Quantize once.</b> The mean is summed in floats of 8-bit channels and rounded to 6 bits at the end (decision 6). Averaging 6-bit words lod by lod would
+      round at every level; the read-out compares the two.</li>
+    <li><b>A baked field answers the mean itself.</b> An imported asset's words cover only its skin, so sampling sub-cell centres would read air. Its
+      <code>mean</code> sums the cell's skin as one rank range, exactly, at every lod (<code>baked-core.js</code>).</li>
+  </ul>
+</section>
+
+<!-- ============================ 11 ============================ -->
+<section id="s11">
+  <div class="shead"><span class="snum">11</span><h2>Reading order for the code</h2></div>
+  <p>Line numbers are looked up as the page loads, so they're right for the files you're serving. Click one to copy <code>file:line</code>.</p>
+  <table class="dt" style="max-width:980px">
+    <thead><tr><th>#</th><th>where</th><th>what to read for</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><span class="ref" data-f="chunk-core.js" data-q="---- addressing"></span></td><td>A chunk at lod <i>l</i> is a node at level <i>l</i> + 6: <code>nodeAt</code>, <code>chunkNode</code>, and the world smaller than a chunk.</td></tr>
+      <tr><td>2</td><td><span class="ref" data-f="dag-core.js" data-q="export function createCounts"></span> <span class="ref" data-f="dag-core.js" data-q="export function isFull"></span></td><td>The one word per node every rule needs, and the exact full test past level 17.</td></tr>
+      <tr><td>3</td><td><span class="ref" data-f="stream-core.js" data-q="---- 1. the cut"></span></td><td><code>selectChunks</code>: the heap, the cap, minLod, the one-lod proof.</td></tr>
+      <tr><td>4</td><td><span class="ref" data-f="chunk-core.js" data-q="---- coarse cells: which ones a lod keeps"></span></td><td>The five rules, <code>TIE_RANK</code>, <code>adaptiveDepth</code> and <code>keepCount</code>.</td></tr>
+      <tr><td>5</td><td><span class="ref" data-f="chunk-core.js" data-q="function walk(ctx"></span> <span class="ref" data-f="chunk-core.js" data-q="function brick(ctx"></span></td><td>Where the walk hands a brick to the per-brick rule, and the sort.</td></tr>
+      <tr><td>6</td><td><span class="ref" data-f="chunk-core.js" data-q="---- seams between lods"></span> <span class="ref" data-f="chunk-core.js" data-q="const coarseFull"></span></td><td><code>boundaryBits</code>, <code>shownMask</code>, the tail and its full test.</td></tr>
+      <tr><td>7</td><td><span class="ref" data-f="chunk-glsl.js" data-q="uint  recShown"></span></td><td>The shader's half of seams: one line.</td></tr>
+      <tr><td>8</td><td><span class="ref" data-f="stream-core.js" data-q="---- 2. the cover"></span></td><td><code>coverOf</code>: complete beats finer, the four states, and <code>open</code>.</td></tr>
+      <tr><td>9</td><td><span class="ref" data-f="stream-core.js" data-q="lodRuleOf:"></span></td><td>Where the decided rule is chosen per lod: <i>any</i> at 0, <i>adaptive</i> above.</td></tr>
+      <tr><td>10</td><td><span class="ref" data-f="chunk-core.js" data-q="---- attributes: a shown cell's word"></span></td><td><code>cellAttr</code>, <code>meanUnder</code>, and the baked field's <code>mean</code> hook.</td></tr>
+      <tr><td>11</td><td><span class="ref" data-f="job-core.js" data-q="createJobCache"></span></td><td>The fast job's per-node brick masks, which rest on §7's rule.</td></tr>
+      <tr><td>12</td><td><span class="ref" data-f="docs/coverage-findings.md" data-q="## 3. *adaptive*"></span> <span class="ref" data-f="docs/stream-plan.md" data-q="Why a full cell needs no tail record"></span></td><td>The measurements and proofs behind §4–8.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:30px">What this page leaves out</h3>
+  <ul class="plain">
+    <li><b>Edits across lods.</b> A click changes every node on its path to the root, so it reaches every lod's chunk over it. The streamer tells which entries
+      are still right by their stamp, the seven node ids a job reads (<code>edit-stream-log.md</code>).</li>
+    <li><b>The ray path's lods.</b> A traced chunk is a page of deduplicated 8³ bricks under the same rules, chosen per chunk by density (the renderer explainer, §8–9).</li>
+    <li><b>Partial coverage.</b> A binary cell can only match a mean by dithering. Drawing a coarse cell part-transparent is parked with dust (<code>coverage-findings.md</code>, question 3).</li>
+  </ul>
+</section>
+
+<footer>
+  Companion pages: <a href="renderer-explainer.html">the renderer explainer</a> (the big picture), <a href="dagskits-explainer.html">DAGs and kits</a> (the store
+  the lods read). Notes on this page: <code>docs/lod-explainer.md</code>. Serve the folder (<code>npm run serve</code>); the page imports the cores unchanged.
+</footer>
+
+</div>
+<div id="tip" role="tooltip"></div>
+
+<script type="module">
+/* LOD EXPLAINER
+   ---------------------------------------------------------------------
+   A study companion for the level-of-detail half of the engine, asked for on
+   2026-11-09 as a sibling of renderer-explainer.html and dagskits-explainer.html,
+   "concentrating on how the LOD system works in detail".
+
+   The engine's LOD is five decisions in four files, so the page takes them one
+   at a time: where each lod goes (selectChunks), what a coarse cell shows (the
+   lod rules, adaptive's formula, the 8³ brick), where two lods meet (open sides
+   and the seam tail), what's drawn while lods change (coverOf), and a coarse
+   cell's colour (cellAttr). The cores are imported unchanged, and every number
+   in a read-out is measured here. Three things are this page's own, and each
+   says so where it's shown:
+     - §4 and §8's pictures are 2D models (rule2D, the seam model). They follow
+       chunk-core's formulas with 2D's exponents, and §6 runs the real 3D code;
+     - §7's Morton layer (the same kept counts, taken in Morton order) and §10's
+       "rounded at every lod" figure, which exist to show what the code avoids;
+     - §9 runs the real streamer and the real job runner on the main thread,
+       throttled, so a person can watch transitions. The viewer runs the same
+       jobs on workers.
+
+   A section initialises the first time it scrolls into view (`whenSeen`), since
+   the 256³ worlds take a moment each to build. */
+import { createStore, createCounts, census, isFull, COUNT_EXACT_LEVEL, EMPTY, FULL, FIRST_NODE } from './dag-core.js';
+import { expandChunk, expandWorld, nodeAt, mortonOf, cellAttr, keepCount, adaptiveDepth, TIE_RANK } from './chunk-core.js';
+import { createWorld, selectChunks, createStreamer, createJobRunner, worldSnapshot, chunkFootprint, keyOf, SIDES, DEFAULTS, clearance } from './stream-core.js';
+import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
+import { attrRGB, packAttr, to6 } from './attr-core.js';
+import { kitDesc, buildKit } from './kit-core.js';
+import { SHAPES, fieldOf, colourFieldOf } from './experiments/shapes.mjs';
+
+/* ---- small things ---------------------------------------------------------- */
+const $ = id => document.getElementById(id);
+const fmt = n => Math.round(n).toLocaleString('en-US');
+const si = n => n >= 1e12 ? (n / 1e12).toFixed(2) + ' T' : n >= 1e9 ? (n / 1e9).toFixed(2) + ' G' : n >= 1e6 ? (n / 1e6).toFixed(2) + ' M' : n >= 1e4 ? (n / 1e3).toFixed(1) + ' K' : fmt(n);
+const kb = b => b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(2) + ' MB';
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const f2 = v => Number.isFinite(v) ? v.toFixed(2) : '–';
+const RULES = ['any', 'majority', 'volume', 'opacity', 'adaptive'];
+const RULE_HEX = { any: '#c9a24a', majority: '#e0707a', volume: '#62b0e8', opacity: '#a888f0', adaptive: '#4fd2a0' };
+const hexRGB = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+/* One colour per lod, the same in every section: cyan for the finest, through
+   blue and violet to warm for the coarse rings. */
+const LOD_HEX = ['#5fd4ff', '#4f9cff', '#7f84ff', '#a77cf0', '#d070c8', '#ee6f8e', '#f08a5a', '#e0a83c', '#c4c040', '#8cc860', '#5cc0a0', '#4aa8c0', '#6a8ab0', '#8a7aa0', '#a07a90', '#b08080', '#c09070'];
+const lodHex = l => LOD_HEX[Math.min(l, LOD_HEX.length - 1)];
+const rgbCss = w => { const [r, g, b] = attrRGB(w); return `rgb(${Math.round(r * 255 / 63)},${Math.round(g * 255 / 63)},${Math.round(b * 255 / 63)})`; };
+const later = f => new Promise(res => setTimeout(() => res(f()), 0));
+
+function fit(cv){
+  const dpr = Math.min(devicePixelRatio || 1, 2), h = +cv.dataset.h;
+  cv.style.height = h + 'px';
+  const w = cv.clientWidth || 600, W2 = Math.round(w * dpr), H2 = Math.round(h * dpr);
+  if (cv.width !== W2 || cv.height !== H2){ cv.width = W2; cv.height = H2; }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  return { g, w, h };
+}
+function chipRow(host, items, onPick, current){
+  host.innerHTML = '';
+  const buttons = new Map();
+  const mark = key => { for (const [k, b] of buttons){ const on = k === key; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); } };
+  for (const [key, label] of items){
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = () => { mark(key); onPick(key); };
+    host.appendChild(b); buttons.set(key, b);
+  }
+  mark(current);
+  return mark;
+}
+function toggle(btn, on, onChange){
+  const paint = () => { btn.classList.toggle('on', on); btn.textContent = on ? 'on' : 'off'; btn.setAttribute('aria-pressed', on); };
+  btn.onclick = () => { on = !on; paint(); onChange(on); };
+  paint();
+}
+const tip = $('tip');
+function showTip(html, ev){
+  tip.innerHTML = html; tip.style.display = 'block';
+  const r = tip.getBoundingClientRect();
+  tip.style.left = Math.min(innerWidth - r.width - 8, ev.clientX + 14) + 'px';
+  tip.style.top = Math.min(innerHeight - r.height - 8, ev.clientY + 14) + 'px';
+}
+const hideTip = () => { tip.style.display = 'none'; };
+addEventListener('scroll', hideTip, { passive: true });
+
+/* A section does its work the first time it's on screen, and §9's streamer only
+   while it is. */
+const seen = new Set();
+const whenSeen = (id, f) => {
+  let done = false;
+  new IntersectionObserver(es => {
+    for (const e of es){
+      if (e.isIntersecting) seen.add(id); else seen.delete(id);
+      if (e.isIntersecting && !done){ done = true; f(); }
+    }
+  }, { rootMargin: '200px 0px' }).observe($(id));
+};
+{ // nav: mark the section in view
+  const links = [...document.querySelectorAll('nav a')];
+  const io = new IntersectionObserver(es => {
+    for (const e of es) if (e.isIntersecting) for (const a of links) a.classList.toggle('on', a.dataset.nav === e.target.id);
+  }, { rootMargin: '-45% 0px -50% 0px' });
+  for (const a of links) io.observe($(a.dataset.nav));
+}
+
+/* ---- source references (the renderer explainer's) -----------------------------
+   A .ref names a file and a string in it, and shows file:line, looked up now, so
+   line numbers can't go stale. Click to copy. */
+const sources = new Map();
+const sourceOf = f => { if (!sources.has(f)) sources.set(f, fetch('./' + f).then(r => r.ok ? r.text() : '').catch(() => '')); return sources.get(f); };
+async function fillRefs(){
+  for (const el of document.querySelectorAll('.ref[data-f]')){
+    if (el.dataset.done) continue;
+    el.dataset.done = 1;
+    const { f, q } = el.dataset, base = f.replace(/^.*\//, '');
+    el.textContent = base; el.title = 'copy ' + f;
+    el.onclick = () => { navigator.clipboard?.writeText(el.dataset.at || f); el.style.color = '#ffc44f'; setTimeout(() => { el.style.color = ''; }, 400); };
+    const text = await sourceOf(f), i = q ? text.indexOf(q) : -1;
+    if (i < 0){ el.title = `${f}: "${q}" not found`; continue; }
+    const line = text.slice(0, i).split('\n').length;
+    el.textContent = `${base}:${line}`; el.dataset.at = `${f}:${line}`; el.title = `copy ${f}:${line}`;
+  }
+}
+fillRefs();
+
+/* ---- a small instanced-cube view -------------------------------------------------
+   The viewer's raster idea in miniature: one buffer of 4-byte records a chunk, one
+   drawElementsInstanced of a shared cube, and GLSL_DECODE (imported, unchanged)
+   rebuilding each cube from its record. The origin is eye-relative, as in the viewer.
+   It adds cell edges (from the cube's own 0–1 coordinates) so a coarse cell's size
+   shows, faded out when cells are only a few pixels across. */
+const FACE_OFF = [
+  [.5,-.5,-.5],[.5,.5,-.5],[.5,.5,.5],[.5,-.5,.5],   [-.5,-.5,.5],[-.5,.5,.5],[-.5,.5,-.5],[-.5,-.5,-.5],
+  [-.5,.5,-.5],[-.5,.5,.5],[.5,.5,.5],[.5,.5,-.5],   [-.5,-.5,.5],[-.5,-.5,-.5],[.5,-.5,-.5],[.5,-.5,.5],
+  [.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5],[-.5,-.5,.5],   [-.5,-.5,-.5],[-.5,.5,-.5],[.5,.5,-.5],[.5,-.5,-.5]];
+const CUBE_VS = `#version 300 es
+precision highp float;
+precision highp int;
+${GLSL_DECODE}
+layout(location = 0) in uint aRec;
+layout(location = 1) in uint aAttr;
+uniform mat4 uViewProj;
+const vec3 CORNER[24] = vec3[24](
+  ${FACE_OFF.map(v => `vec3(${v.map(x => x.toFixed(1)).join(',')})`).join(',\n  ')});
+const vec3 NORMAL[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
+out vec3 vNormal;
+out vec3 vLocal;
+flat out uint vAttr;
+void main(){
+  uint corner = uint(gl_VertexID), face = corner / 4u;
+  vec3 p = recCentre(aRec) + CORNER[corner] * uCellSize;
+  vNormal = NORMAL[face];
+  vLocal = CORNER[corner] + 0.5;
+  vAttr = aAttr;
+  gl_Position = uViewProj * vec4(p, 1.0);
+  if (!faceShown(aRec, face)) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}`;
+const CUBE_FS = `#version 300 es
+precision highp float;
+precision highp int;
+${GLSL_ATTR}
+in vec3 vNormal;
+in vec3 vLocal;
+flat in uint vAttr;
+uniform vec3 uBase;
+uniform bool uUseAttr;
+uniform float uEdges;
+out vec4 outColor;
+void main(){
+  vec3 base = uUseAttr ? attrColour(vAttr) : uBase;
+  float shade = 0.55 + 0.45 * max(dot(vNormal, normalize(vec3(0.5, 0.8, 0.35))), 0.0)
+              + 0.12 * max(dot(vNormal, normalize(vec3(-0.6, -0.2, -0.7))), 0.0);
+  vec3 fw = max(fwidth(vLocal), vec3(1e-6)), q = min(vLocal, 1.0 - vLocal) / fw;
+  q = mix(q, vec3(1e9), abs(vNormal));
+  float edge = 1.0 - smoothstep(0.6, 1.6, min(q.x, min(q.y, q.z)));
+  edge *= 1.0 - smoothstep(0.12, 0.3, max(fw.x, max(fw.y, fw.z)));
+  outColor = vec4(base * shade * (1.0 - 0.45 * edge * uEdges), 1.0);
+}`;
+function programOf(g, vs, fs){
+  const compile = (type, src) => {
+    const s = g.createShader(type);
+    g.shaderSource(s, src); g.compileShader(s);
+    if (!g.getShaderParameter(s, g.COMPILE_STATUS)) throw new Error(g.getShaderInfoLog(s));
+    return s;
+  };
+  const p = g.createProgram();
+  g.attachShader(p, compile(g.VERTEX_SHADER, vs)); g.attachShader(p, compile(g.FRAGMENT_SHADER, fs));
+  g.linkProgram(p);
+  if (!g.getProgramParameter(p, g.LINK_STATUS)) throw new Error(g.getProgramInfoLog(p));
+  const U = {};
+  for (let i = 0, n = g.getProgramParameter(p, g.ACTIVE_UNIFORMS); i < n; i++){
+    const name = g.getActiveUniform(p, i).name.replace(/\[0\]$/, '');
+    U[name] = g.getUniformLocation(p, name);
+  }
+  return { p, U };
+}
+const fwdOf = (yaw, pitch) => [Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), Math.cos(pitch) * Math.cos(yaw)];
+const cross = (a, b) => [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]];
+const norm = a => { const l = Math.hypot(...a) || 1; return a.map(v => v / l); };
+function mul4(A, B){
+  const C = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++){ let s = 0; for (let k = 0; k < 4; k++) s += A[k * 4 + r] * B[c * 4 + k]; C[c * 4 + r] = s; }
+  return C;
+}
+function viewProj(fwd, aspect, near, far){
+  const f = 1 / Math.tan(0.45);
+  const P = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), -1, 0, 0, 2 * far * near / (near - far), 0];
+  const z = fwd.map(v => -v), x = norm(cross([0, 1, 0], z)), y = cross(z, x);
+  return mul4(P, [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, 0, 0, 0, 1]);
+}
+const views = [];
+function createCubeView(cv){
+  const V = { cv, yaw: 0.75, pitch: 0.42, dist: 1.5, size: 256, parts: [], dirty: true, edges: 1, base: [0.62, 0.7, 0.8], useAttr: false };
+  const g = V.g = cv.getContext('webgl2', { antialias: true, alpha: false });
+  views.push(V);
+  if (!g){ V.failed = true; return V; }
+  V.prog = programOf(g, CUBE_VS, CUBE_FS);
+  V.cube = g.createBuffer();
+  const idx = new Uint8Array(36);
+  for (let f = 0; f < 6; f++){ const b = 4 * f; idx.set([b, b + 1, b + 2, b, b + 2, b + 3], 6 * f); }
+  g.bindBuffer(g.ELEMENT_ARRAY_BUFFER, V.cube);
+  g.bufferData(g.ELEMENT_ARRAY_BUFFER, idx, g.STATIC_DRAW);
+  let drag = null;
+  cv.addEventListener('pointerdown', ev => { drag = [ev.clientX, ev.clientY]; cv.setPointerCapture(ev.pointerId); cv.focus(); });
+  cv.addEventListener('pointermove', ev => {
+    if (!drag) return;
+    V.yaw -= (ev.clientX - drag[0]) * 0.008;
+    V.pitch = clamp(V.pitch + (ev.clientY - drag[1]) * 0.008, -1.5, 1.5);
+    drag = [ev.clientX, ev.clientY]; V.dirty = true;
+  });
+  cv.addEventListener('pointerup', () => { drag = null; });
+  // The wheel zooms only once the canvas has focus, so it never steals the page's scroll.
+  cv.addEventListener('wheel', ev => { if (document.activeElement !== cv) return; ev.preventDefault(); V.dist = clamp(V.dist * Math.exp(ev.deltaY * 0.001), 0.2, 4); V.dirty = true; }, { passive: false });
+  addEventListener('resize', () => { V.dirty = true; });
+  /* parts: [{ records, attrs, origin, cellSize }], one VAO each. */
+  V.set = (parts, { useAttr = false, base = null } = {}) => {
+    for (const p of V.parts){ g.deleteVertexArray(p.vao); g.deleteBuffer(p.buf); }
+    V.parts = [];
+    V.useAttr = useAttr; if (base) V.base = base;
+    for (const c of parts){
+      const n = c.records.length;
+      if (!n) continue;
+      const both = new Uint32Array(2 * n);
+      both.set(c.records); if (c.attrs) both.set(c.attrs, n);
+      const vao = g.createVertexArray(), buf = g.createBuffer();
+      g.bindVertexArray(vao);
+      g.bindBuffer(g.ELEMENT_ARRAY_BUFFER, V.cube);
+      g.bindBuffer(g.ARRAY_BUFFER, buf);
+      g.bufferData(g.ARRAY_BUFFER, both, g.STATIC_DRAW);
+      g.enableVertexAttribArray(0); g.vertexAttribIPointer(0, 1, g.UNSIGNED_INT, 4, 0); g.vertexAttribDivisor(0, 1);
+      g.enableVertexAttribArray(1); g.vertexAttribIPointer(1, 1, g.UNSIGNED_INT, 4, 4 * n); g.vertexAttribDivisor(1, 1);
+      g.bindVertexArray(null);
+      V.parts.push({ vao, buf, n, origin: c.origin, cellSize: c.cellSize });
+    }
+    V.dirty = true;
+  };
+  V.draw = () => {
+    if (!V.dirty) return;
+    V.dirty = false;
+    const h = +cv.dataset.h, dpr = Math.min(devicePixelRatio || 1, 2);
+    cv.style.height = h + 'px';
+    const w = Math.max(16, Math.round(cv.clientWidth * dpr)), H2 = Math.round(h * dpr);
+    if (cv.width !== w || cv.height !== H2){ cv.width = w; cv.height = H2; }
+    g.viewport(0, 0, w, H2);
+    g.clearColor(0.039, 0.039, 0.067, 1);
+    g.clear(g.COLOR_BUFFER_BIT | g.DEPTH_BUFFER_BIT);
+    if (!V.parts.length) return;
+    // An orbit round the world's centre: the camera sits back along -fwd.
+    const f = fwdOf(V.yaw, -V.pitch), c = V.size / 2, d = V.dist * V.size;
+    const eye = [c - f[0] * d, c - f[1] * d, c - f[2] * d];
+    const { p, U } = V.prog;
+    g.useProgram(p);
+    g.enable(g.DEPTH_TEST); g.enable(g.CULL_FACE);
+    g.uniformMatrix4fv(U.uViewProj, false, viewProj(f, w / H2, V.size * 0.004, V.size * 8));
+    g.uniform3fv(U.uBase, V.base);
+    g.uniform1i(U.uUseAttr, V.useAttr ? 1 : 0);
+    g.uniform1f(U.uEdges, V.edges);
+    g.uniform1ui(U.uOpenSides, 0);
+    for (const part of V.parts){
+      g.uniform3f(U.uOrigin, part.origin[0] - eye[0], part.origin[1] - eye[1], part.origin[2] - eye[2]);
+      g.uniform1f(U.uCellSize, part.cellSize);
+      g.bindVertexArray(part.vao);
+      g.drawElementsInstanced(g.TRIANGLES, 36, g.UNSIGNED_BYTE, 0, part.n);
+    }
+    g.bindVertexArray(null);
+  };
+  return V;
+}
+const ticks = [];
+/* Draw now if the section is on screen, else mark it stale and draw when it returns:
+   §9's flight moves the shared eye 60 times a second, and §2 and §3 needn't follow
+   it off screen. */
+function lazy(id, f){
+  let stale = false;
+  ticks.push(() => { if (stale && seen.has(id)){ stale = false; f(); } });
+  return () => { if (seen.has(id)) f(); else stale = true; };
+}
+(function loop(){
+  for (const V of views) if (!V.failed) V.draw();
+  for (const t of ticks) t();
+  requestAnimationFrame(loop);
+})();
+
+/* ---- the 256³ worlds (§1, §6, §8, §10) ----------------------------------------------
+   Five shapes from experiments/shapes.mjs, through fromField as every experiment
+   builds them, and five worlds made here to break one rule each: the three
+   adversarial worlds of coverage-plan.md decision 11 (a flat sheet, a wire lattice;
+   the tilted sheet is left out) and two kinds of dust, plus a foam of random balls
+   for porous content. Built once each, when first asked for. */
+const D8 = 8, R8 = 256;
+function mulberry(seed){ return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const I8 = (x, y, z) => x + R8 * (y + R8 * z);
+const DENSE = {
+  // 4,000 balls of radius 3–7 inside a ball of radius 110: porous, lumpy, like a specimen.
+  foam(){
+    const occ = new Uint8Array(R8 ** 3), rnd = mulberry(7);
+    for (let i = 0; i < 4000; i++){
+      let x, y, z;
+      do { x = rnd() * 2 - 1; y = rnd() * 2 - 1; z = rnd() * 2 - 1; } while (x * x + y * y + z * z > 1);
+      const cx = 128 + 110 * x, cy = 128 + 110 * y, cz = 128 + 110 * z, r = 3 + 4 * rnd(), r2 = r * r;
+      for (let k = Math.floor(cz - r); k <= cz + r; k++) for (let j = Math.floor(cy - r); j <= cy + r; j++) for (let ii = Math.floor(cx - r); ii <= cx + r; ii++){
+        const dx = ii + 0.5 - cx, dy = j + 0.5 - cy, dz = k + 0.5 - cz;
+        if (dx * dx + dy * dy + dz * dz <= r2 && ii >= 0 && j >= 0 && k >= 0 && ii < R8 && j < R8 && k < R8) occ[I8(ii, j, k)] = 1;
+      }
+    }
+    return occ;
+  },
+  // y = 101, one voxel thick: correlated along two axes, adaptive's blind spot.
+  sheet(){ const occ = new Uint8Array(R8 ** 3); for (let z = 0; z < R8; z++) for (let x = 0; x < R8; x++) occ[I8(x, 101, z)] = 1; return occ; },
+  // 1-voxel wires along all three axes, every 16 voxels.
+  wires(){
+    const occ = new Uint8Array(R8 ** 3);
+    for (let z = 0; z < R8; z++) for (let y = 0; y < R8; y++) for (let x = 0; x < R8; x++)
+      if ((x % 16 === 8) + (y % 16 === 8) + (z % 16 === 8) >= 2) occ[I8(x, y, z)] = 1;
+    return occ;
+  },
+  // Independent voxels at 2% in a 192³ box: what opacity's formula assumes.
+  dust(){
+    const occ = new Uint8Array(R8 ** 3), rnd = mulberry(11);
+    for (let z = 32; z < 224; z++) for (let y = 32; y < 224; y++) for (let x = 32; x < 224; x++) if (rnd() < 0.02) occ[I8(x, y, z)] = 1;
+    return occ;
+  },
+  // 4,096 points on a 16-voxel lattice: the testbed's "···V" rows, adaptive's other failure.
+  lattice(){
+    const occ = new Uint8Array(R8 ** 3);
+    for (let z = 8; z < R8; z += 16) for (let y = 8; y < R8; y += 16) for (let x = 8; x < R8; x += 16) occ[I8(x, y, z)] = 1;
+    return occ;
+  },
+};
+const LAB_DEFS = [
+  { id: 'sphere', label: 'sphere', shape: 'sphere', kind: 'solid smooth' },
+  { id: 'terrain', label: 'terrain', shape: 'terrain', kind: 'solid smooth' },
+  { id: 'shell', label: 'shell', shape: 'shell', kind: 'a 13-voxel wall' },
+  { id: 'gyroid', label: 'gyroid', shape: 'gyroid', kind: 'porous, smooth' },
+  { id: 'blob', label: 'blob', shape: 'blob', kind: 'solid smooth' },
+  { id: 'foam', label: 'foam', dense: 'foam', kind: 'porous, lumpy' },
+  { id: 'sheet', label: '1-voxel sheet', dense: 'sheet', kind: 'adversarial' },
+  { id: 'wires', label: 'wire lattice', dense: 'wires', kind: 'adversarial' },
+  { id: 'dust', label: 'dust 2%', dense: 'dust', kind: 'independent noise' },
+  { id: 'lattice', label: 'lattice dust', dense: 'lattice', kind: 'adversarial' },
+];
+const labCache = new Map();
+function labWorld(id){
+  if (labCache.has(id)) return labCache.get(id);
+  const def = LAB_DEFS.find(d => d.id === id), store = createStore(), t0 = performance.now();
+  let root, colour = null;
+  if (def.shape){
+    const s = SHAPES.find(x => x.name === def.shape);
+    root = store.fromField(D8, fieldOf(s, D8)).root;
+    colour = colourFieldOf(s, D8);
+  } else root = store.fromDense(DENSE[def.dense](), R8).root;
+  const counts = createCounts(store);
+  const w = { id, def, store, root, D: D8, counts, colour, voxels: counts.of(root), buildMs: performance.now() - t0, expands: new Map(), fine: new Map(), occ: null };
+  labCache.set(id, w);
+  return w;
+}
+/* The world's voxels as a dense grid, from the DAG: a full node fills its block
+   (isFull, never a count compared with 8^k: §1's aside). */
+function denseOf(w){
+  if (w.occ) return w.occ;
+  const occ = new Uint8Array(R8 ** 3), { store, counts } = w;
+  const fill = (id, k, x, y, z) => {
+    if (id === EMPTY) return;
+    if (id === FULL || isFull(store, counts, id, k)){
+      const s = 2 ** k;
+      for (let c = z; c < z + s; c++) for (let b = y; b < y + s; b++) occ.fill(1, I8(x, b, c), I8(x, b, c) + s);
+      return;
+    }
+    const h = 2 ** (k - 1);
+    for (let o = 0; o < 8; o++) fill(store.child(id, o), k - 1, x + (o & 1) * h, y + (o >> 1 & 1) * h, z + (o >> 2) * h);
+  };
+  fill(w.root, D8, 0, 0, 0);
+  return w.occ = occ;
+}
+/* Every chunk of the world at one lod under one rule, cached. `cells` keeps the
+   kept cells (buried ones too) for coverage. */
+function expandAll(w, lod, rule, { colour = false, cells = false } = {}){
+  const key = `${lod}|${lod ? rule : 'any'}|${colour ? 1 : 0}|${cells ? 1 : 0}`;
+  let e = w.expands.get(key);
+  if (e) return e;
+  const t0 = performance.now();
+  const chunks = expandWorld(w.store, w.root, w.D, lod, { counts: w.counts, lodRule: lod ? rule : 'any', colour: colour ? w.colour : null, cells });
+  const ms = performance.now() - t0;
+  let cubes = 0, kept = 0, keptVoxels = 0;
+  for (const c of chunks){ cubes += c.count; kept += c.occupied; keptVoxels += c.keptVoxels; }
+  e = { chunks, ms, cubes, kept, keptVoxels, lod, rule };
+  w.expands.set(key, e);
+  return e;
+}
+/* Slab coverage, coverage-plan.md decision 8: along each axis, cut every column into
+   segments one brick deep (8 coarse cells, 8·2^lod voxels) and count the segments that
+   hit something, coarse over fine. A coarse column stands for 4^lod fine ones. */
+function fineHits(w, lod){
+  if (w.fine.has(lod)) return w.fine.get(lod);
+  const occ = denseOf(w), L = 8 << lod, S = [1, R8, R8 * R8];
+  let hits = 0;
+  for (let a = 0; a < 3; a++){
+    const s = S[a], su = S[(a + 1) % 3], sv = S[(a + 2) % 3];
+    for (let u = 0; u < R8; u++) for (let v = 0; v < R8; v++){
+      const base = u * su + v * sv;
+      for (let t0 = 0; t0 < R8; t0 += L){
+        for (let t = t0; t < t0 + L; t++) if (occ[base + t * s]){ hits++; break; }
+      }
+    }
+  }
+  w.fine.set(lod, hits);
+  return hits;
+}
+function coverageOf(w, e){
+  const lod = e.lod, Rc = R8 >> lod, grid = new Uint8Array(Rc ** 3);
+  for (const c of e.chunks){
+    const [cx, cy, cz] = c.chunk;
+    for (let i = 0; i < c.cells.length; i++){
+      const p = c.cells[i], x = cx * 64 + (p & 255), y = cy * 64 + (p >> 8 & 255), z = cz * 64 + (p >> 16);
+      grid[x + Rc * (y + Rc * z)] = 1;
+    }
+  }
+  const S = [1, Rc, Rc * Rc];
+  let hits = 0;
+  for (let a = 0; a < 3; a++){
+    const s = S[a], su = S[(a + 1) % 3], sv = S[(a + 2) % 3];
+    for (let u = 0; u < Rc; u++) for (let v = 0; v < Rc; v++){
+      const base = u * su + v * sv;
+      for (let t0 = 0; t0 < Rc; t0 += 8) for (let t = t0; t < t0 + 8; t++) if (grid[base + t * s]){ hits++; break; }
+    }
+  }
+  return hits * 4 ** lod / fineHits(w, lod);
+}
+// Voxel error, exact from the counts: drawn over empty space plus dropped, over the true count.
+const voxelError = (w, e) => (e.kept * 8 ** e.lod - 2 * e.keptVoxels + w.voxels) / w.voxels;
+const volumeRatio = (w, e) => e.kept * 8 ** e.lod / w.voxels;
+
+/* ================= §1: the pyramid ================================================= */
+const PY = { world: 'sphere', lod: 0, rule: 'any', view: null, busy: false };
+function initPyramid(){
+  PY.view = createCubeView($('cvPy'));
+  if (PY.view.failed) $('rdPy').textContent = 'No WebGL2 here: the read-outs still run.';
+  chipRow($('pyWorld'), [['sphere', 'sphere'], ['terrain', 'terrain'], ['gyroid', 'gyroid'], ['foam', 'foam']], k => { PY.world = k; pyLadder(); pyRun(); }, PY.world);
+  chipRow($('pyRule'), [['any', 'any'], ['adaptive', 'adaptive (the decided rule)']], k => { PY.rule = k; pyRun(); }, PY.rule);
+  $('pyLod').oninput = () => { PY.lod = +$('pyLod').value; $('pyLodV').textContent = PY.lod; pyLadder(); pyRun(); };
+  toggle($('pyEdges'), true, on => { PY.view.edges = on ? 1 : 0; PY.view.dirty = true; });
+  $('f64L').oninput = f64;
+  f64();
+  pyLadder(); pyRun();
+}
+async function pyRun(){
+  if (PY.busy){ PY.again = true; return; }
+  PY.busy = true;
+  $('vdPy').textContent = 'expanding…';
+  await later(() => {});
+  const w = labWorld(PY.world), lod = PY.lod, e = expandAll(w, lod, PY.rule, { colour: !!w.colour });
+  PY.view.set(e.chunks, { useAttr: !!w.colour, base: hexRGB('#9fb4c8') });
+  const base = expandAll(w, 0, 'any', { colour: !!w.colour }), cs = 2 ** lod;
+  $('rdPy').innerHTML = `<span>cell side <b>${cs} voxel${cs > 1 ? 's' : ''}</b></span><span>chunks <b>${e.chunks.length}</b></span>` +
+    `<span>cells kept <b>${fmt(e.kept)}</b></span><span>cubes drawn <b>${fmt(e.cubes)}</b></span><span>records + words <b>${kb(8 * e.cubes)}</b></span>` +
+    `<span>expanded in <b>${e.ms.toFixed(0)} ms</b></span>`;
+  $('vdPy').textContent = lod === 0
+    ? `Lod 0: every voxel a cell. ${fmt(e.cubes)} cubes show a face, out of ${si(w.voxels)} voxels: the rest are buried and get no record. Slide the lod.`
+    : `Lod ${lod}: ${fmt(e.cubes)} cubes, ${(base.cubes / Math.max(1, e.cubes)).toFixed(1)}× fewer than lod 0 (a surface alone would give ${4 ** lod}×). ` +
+      `Each cube is a level-${lod} node of the same DAG; nothing was stored for this lod. Chunks: ${e.chunks.length}, each a level-${lod + 6} node${lod + 6 > D8 ? ' (here bigger than the world, which sits in its low corner)' : ''}.`;
+  PY.busy = false;
+  if (PY.again){ PY.again = false; pyRun(); }
+}
+function pyLadder(){
+  const w = labWorld(PY.world), c = census(w.store, [w.root]);
+  const rows = [];
+  for (let k = 0; k <= D8; k++){
+    const tree = c.svo[k], dag = k === 0 ? null : c.dag[k];
+    rows.push(`<tr${k === PY.lod ? ' class="hi"' : ''}><td class="n">${k}</td><td class="n">${2 ** k}</td><td class="n">${fmt(tree)}</td>` +
+      `<td class="n">${dag == null ? '1 (FULL)' : fmt(dag)}</td><td class="n">${dag ? (tree / dag).toFixed(1) + '×' : '–'}</td>` +
+      `<td>${k <= 5 ? `cells of lod ${k}` : ''}${k >= 6 ? `${k <= 5 ? '; ' : ''}one chunk of lod ${k - 6}` : ''}</td></tr>`);
+  }
+  document.querySelector('#tbLadder tbody').innerHTML = rows.join('');
+}
+function f64(){
+  const L = +$('f64L').value, full = 8 ** L, less = full - 1;
+  $('f64LV').textContent = L;
+  const same = less === full;
+  $('f64Out').innerHTML = `8<sup>${L}</sup> = 2<sup>${3 * L}</sup> = <b>${full.toLocaleString('en-US')}</b>. One voxel short, as a float64: ` +
+    `<b style="color:${same ? '#ff9ca5' : '#7fe0a8'}">${same ? 'the same number' : 'a different number'}</b>` +
+    `${same ? ` (2<sup>${3 * L}</sup> − 1 needs ${3 * L} bits; a double holds 53)` : ''}. <code>COUNT_EXACT_LEVEL</code> = ${COUNT_EXACT_LEVEL}.`;
+}
+whenSeen('s1', initPyramid);
+
+/* ---- the deep worlds (§2, §3, §9) ------------------------------------------------
+   Worlds big enough for many lods, and cheap to build on the main thread: kits
+   compose in tens of ms at any depth; the two shapes take longer at D = 10. One
+   world and one eye are shared by §2, §3 and §9, so the cut you make in §2 is the
+   one §3 measures and §9 streams. */
+const DEEP_DEFS = [
+  { id: 'kit14', label: 'kit, D = 14', kit: 14, eye: [0.02, 0.12, 0.02] },
+  { id: 'kit16', label: 'kit, D = 16', kit: 16, eye: [0.02, 0.12, 0.02] },
+  { id: 'kit12', label: 'kit, D = 12', kit: 12, eye: [0.02, 0.12, 0.02] },
+  { id: 'terrain10', label: 'terrain, D = 10', shape: 'terrain', D: 10, eye: [0.5, 0.532, 0.146] },
+  { id: 'sphere10', label: 'sphere, D = 10', shape: 'sphere', D: 10, eye: [0.5, 0.55, 0.03] },
+];
+const DW = { def: null, store: null, root: EMPTY, D: 0, side: 1, world: null, counts: null, eye: [0, 0, 0], sel: null, selMs: 0, listeners: [] };
+const CUT = { K: 2, cap: 1024, minLod: 0, plane: 'side', zoom: 1 };
+function loadDeep(id){
+  const def = DEEP_DEFS.find(d => d.id === id) || DEEP_DEFS[0];
+  let store, root, D;
+  if (def.kit){ const b = buildKit(kitDesc({ D: def.kit })); store = b.store; root = b.root; D = def.kit; }
+  else { store = createStore(); D = def.D; root = store.fromField(D, fieldOf(SHAPES.find(s => s.name === def.shape), D)).root; }
+  Object.assign(DW, { def, store, root, D, side: 2 ** D, world: createWorld(store, root, D), counts: createCounts(store) });
+  DW.eye = def.eye.map(f => f * DW.side);
+  // A view chosen by fraction can land inside something at another depth.
+  for (let i = 0; i < 40 && clearance(DW.world, DW.eye, 512).d < 1; i++) DW.eye[1] += DW.side / 128;
+  recut();
+  for (const f of DW.listeners) f('world');
+}
+function recut(){
+  const t0 = performance.now();
+  DW.sel = selectChunks(DW.world, DW.eye, { detail: CUT.K, maxChunks: CUT.cap, minLod: CUT.minLod });
+  DW.selMs = performance.now() - t0;
+  DW.jumps = jumpsOf(DW.sel);
+}
+const deepChanged = what => { for (const f of DW.listeners) f(what); };
+/* Leaves with a face neighbour two or more lods finer: the same-lod neighbour was
+   split, and one of its children facing this leaf was split again. */
+function jumpsOf(sel){
+  const bad = new Set();
+  for (const c of sel.leaves){
+    for (const [dx, dy, dz] of SIDES){
+      const nb = sel.nodes.get(keyOf(c.lod, c.x + dx, c.y + dy, c.z + dz));
+      if (!nb || !nb.kids) continue;
+      const facing = k => (dx === 0 || k.x === 2 * nb.x + (dx > 0 ? 0 : 1)) && (dy === 0 || k.y === 2 * nb.y + (dy > 0 ? 0 : 1)) && (dz === 0 || k.z === 2 * nb.z + (dz > 0 ? 0 : 1));
+      if (nb.kids.some(k => facing(k) && k.kids)){ bad.add(c.key); break; }
+    }
+  }
+  return bad;
+}
+const pxPerRadianOf = H => H / (2 * Math.tan(0.45));
+// A leaf's cell on screen: chunkFootprint's side (from about the chunk's centre) over 64.
+const cellPx = (c, P) => Math.sqrt(chunkFootprint(c, { pxPerRadian: P, screenPixels: Infinity })) / 64;
+
+/* ---- a slice map: the world cut by a plane through the eye ----------------------
+   Shared by §2 and §9. 'side' looks along z (y up), 'top' looks down y. At zoom 1
+   the whole world is in view; zoomed, the view follows the eye. The white ring is
+   the eye: drag it. */
+const axesOf = plane => plane === 'top' ? { u: 0, v: 2, w: 1, flip: false } : { u: 0, v: 1, w: 2, flip: true };
+function makeSliceMap(cv, { paint, tipFor }){
+  const M = { cv, hover: null, drag: false, geo: null };
+  M.draw = () => {
+    if (!DW.sel) return;
+    const { g, w, h } = fit(cv), { u, v, w: ax, flip } = axesOf(CUT.plane), side = DW.side;
+    const sv = side / CUT.zoom * 1.04, su = sv * w / h, scale = h / sv;
+    const centre = (a, span) => CUT.zoom === 1 ? side / 2 : (span >= side ? side / 2 : clamp(DW.eye[a], span / 2, side - span / 2));
+    const u0 = centre(u, su) - su / 2, v0 = centre(v, sv) - sv / 2;
+    const s = clamp(DW.eye[ax], 0, side - 1e-6);
+    const X = a => (a - u0) * scale, Y = b => flip ? h - (b - v0) * scale : (b - v0) * scale;
+    const geo = M.geo = { u, v, ax, flip, u0, v0, scale, h, X, Y, s, inSlice: c => c.lo[ax] <= s && s < c.lo[ax] + c.size,
+      rect: c => { const x0 = X(c.lo[u]), x1 = X(c.lo[u] + c.size), y0 = Y(c.lo[v]), y1 = Y(c.lo[v] + c.size); return [Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0)]; } };
+    g.fillStyle = '#07070c'; g.fillRect(0, 0, w, h);
+    g.strokeStyle = 'rgba(120,150,190,.35)'; g.lineWidth = 1;
+    g.strokeRect(Math.min(X(0), X(side)), Math.min(Y(0), Y(side)), side * scale, side * scale);
+    paint(g, geo);
+    if (M.hover && geo.inSlice(M.hover)){
+      const [x, y, rw, rh] = geo.rect(M.hover);
+      g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(x + 1, y + 1, rw - 2, rh - 2);
+    }
+    const ex = X(DW.eye[u]), ey = Y(DW.eye[v]);
+    g.strokeStyle = '#fff'; g.lineWidth = 2; g.beginPath(); g.arc(ex, ey, 7, 0, 2 * Math.PI); g.stroke();
+    g.fillStyle = '#fff'; g.beginPath(); g.arc(ex, ey, 2.5, 0, 2 * Math.PI); g.fill();
+    g.fillStyle = 'rgba(200,214,232,.75)'; g.font = '10px ui-monospace, monospace';
+    const name = ['x', 'y', 'z'];
+    g.fillText(`slice ${name[ax]} = ${fmt(s)} through the eye · ${name[u]} → · ${name[v]} ${flip ? '↑' : '↓'} · world side ${fmt(side)}`, 10, h - 10);
+  };
+  const at = ev => {
+    const r = cv.getBoundingClientRect(), G = M.geo, px = ev.clientX - r.left, py = ev.clientY - r.top;
+    return { px, py, a: G.u0 + px / G.scale, b: G.flip ? G.v0 + (G.h - py) / G.scale : G.v0 + py / G.scale };
+  };
+  const pick = (a, b) => {
+    const G = M.geo;
+    for (const c of M.items ? M.items() : []) if (G.inSlice(c) && c.lo[G.u] <= a && a < c.lo[G.u] + c.size && c.lo[G.v] <= b && b < c.lo[G.v] + c.size) return c;
+    return null;
+  };
+  cv.addEventListener('pointerdown', ev => {
+    if (!M.geo) return;
+    const { px, py } = at(ev), G = M.geo;
+    if (Math.hypot(px - G.X(DW.eye[G.u]), py - G.Y(DW.eye[G.v])) < 16){ M.drag = true; cv.setPointerCapture(ev.pointerId); ev.preventDefault(); hideTip(); }
+  });
+  cv.addEventListener('pointermove', ev => {
+    if (!M.geo) return;
+    const { a, b } = at(ev), G = M.geo, side = DW.side;
+    if (M.drag){
+      DW.eye[G.u] = clamp(a, -side / 4, side * 1.25); DW.eye[G.v] = clamp(b, -side / 4, side * 1.25);
+      recut(); deepChanged('eye');
+      return;
+    }
+    const c = pick(a, b);
+    if (c !== M.hover){ M.hover = c; M.draw(); }
+    if (c && tipFor) showTip(tipFor(c), ev); else hideTip();
+  });
+  cv.addEventListener('pointerup', () => { M.drag = false; });
+  cv.addEventListener('pointerleave', () => { M.hover = null; hideTip(); M.draw(); });
+  addEventListener('resize', () => M.draw());
+  return M;
+}
+
+/* ================= §2: the cut ===================================================== */
+let cutMap = null;
+function initCut(){
+  const sel = $('deepSel');
+  sel.innerHTML = DEEP_DEFS.map(d => `<option value="${d.id}">${d.label}</option>`).join('');
+  sel.onchange = () => { $('vdCut').textContent = 'building…'; setTimeout(() => loadDeep(sel.value), 20); };
+  cutMap = makeSliceMap($('cvCut'), {
+    paint(g, G){
+      for (const c of DW.sel.leaves){
+        if (!G.inSlice(c)) continue;
+        const [x, y, w, h] = G.rect(c);
+        g.fillStyle = lodHex(c.lod); g.globalAlpha = 0.82; g.fillRect(x, y, w, h); g.globalAlpha = 1;
+        if (w > 4){ g.strokeStyle = 'rgba(5,5,8,.85)'; g.lineWidth = 1; g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1); }
+        if (DW.jumps.has(c.key)){ g.strokeStyle = '#ff3b4e'; g.lineWidth = 2.5; g.strokeRect(x + 1.5, y + 1.5, w - 3, h - 3); }
+      }
+    },
+    tipFor(c){
+      const K = CUT.K, lines = [`<b>lod ${c.lod}</b> · side ${fmt(c.size)} voxels · cells of ${2 ** c.lod}`, `dist to its box ${fmt(c.dist)} · K · size = ${fmt(K * c.size)}`];
+      if (c.lod <= CUT.minLod) lines.push(c.lod === 0 ? 'lod 0 is the finest: it can\'t split' : `minLod = ${CUT.minLod}: not allowed to split`);
+      else if (c.dist < K * c.size) lines.push('close enough to split, but refused by maxChunks');
+      else lines.push('dist ≥ K · size: stays a leaf');
+      lines.push(`a cell ≈ ${cellPx(c, pxPerRadianOf(1080)).toFixed(1)} px on a 1080-line screen`);
+      if (DW.jumps.has(c.key)) lines.push('<span style="color:#ff9ca5">a face neighbour is two or more lods finer</span>');
+      return lines.join('<br>');
+    },
+  });
+  cutMap.items = () => DW.sel.leaves;
+  chipRow($('cutPlane'), [['side', 'from the side'], ['top', 'from above']], k => { CUT.plane = k; deepChanged('view'); }, CUT.plane);
+  chipRow($('cutZoom'), [[1, 'whole world'], [4, '×4'], [16, '×16'], [64, '×64']], z => { CUT.zoom = z; deepChanged('view'); }, 1);
+  $('kS').oninput = () => { CUT.K = +$('kS').value; $('kV').textContent = CUT.K; $('kV').style.color = CUT.K < 1 ? '#ff9ca5' : ''; recut(); deepChanged('cut'); };
+  $('capS').oninput = () => { CUT.cap = 2 ** +$('capS').value; $('capV').textContent = fmt(CUT.cap); recut(); deepChanged('cut'); };
+  $('minS').oninput = () => { CUT.minLod = +$('minS').value; $('minV').textContent = CUT.minLod; recut(); deepChanged('cut'); };
+  const redraw = lazy('s2', () => { cutMap.draw(); cutRead(); });
+  DW.listeners.push(redraw);
+  seen.add('s2');
+  loadDeep(DEEP_DEFS[0].id);
+}
+function cutRead(){
+  const sel = DW.sel, leaves = new Map(), split = new Map();
+  for (const c of sel.nodes.values()) (c.kids ? split : leaves).set(c.lod, ((c.kids ? split : leaves).get(c.lod) || 0) + 1);
+  const lods = [...new Set([...leaves.keys(), ...split.keys()])].sort((a, b) => a - b);
+  $('cutLeg').innerHTML = `<span>leaves of the cut, by lod:</span>` + lods.map(l => `<span><i class="swatch" style="background:${lodHex(l)}"></i>${l}</span>`).join('') +
+    `<span style="margin-left:8px"><i class="swatch" style="background:none;border:2px solid #ff3b4e;height:9px"></i>neighbour ≥ 2 lods finer</span>`;
+  const max = Math.max(1, ...lods.map(l => (leaves.get(l) || 0) + (split.get(l) || 0)));
+  $('cutBars').innerHTML = lods.map(l => {
+    const a = leaves.get(l) || 0, b = split.get(l) || 0;
+    return `<span class="l">lod ${l}</span><span class="t"><span class="b" style="width:${100 * a / max}%;background:${lodHex(l)}"></span>` +
+      `<span class="b2" style="left:${100 * a / max}%;width:${100 * b / max}%;background:${lodHex(l)}"></span></span><span class="v">${a}${b ? ` + ${b}` : ''}</span>`;
+  }).join('');
+  $('rdCut').innerHTML = `<span>leaves <b>${fmt(sel.leaves.length)}</b></span><span>split above them <b>${fmt(sel.nodes.size - sel.leaves.length)}</b></span>` +
+    `<span>refused by the cap <b>${fmt(sel.capped)}</b></span><span>two-lod jumps <b style="${DW.jumps.size ? 'color:#ff9ca5' : ''}">${DW.jumps.size}</b></span>` +
+    `<span>cut in <b>${DW.selMs.toFixed(2)} ms</b></span><span>world <b>${si(DW.counts.of(DW.root))} voxels, ${fmt(DW.store.size)} nodes</b></span>`;
+  $('vdCut').textContent = DW.jumps.size
+    ? `${DW.jumps.size} leaves have a face neighbour two or more lods finer${CUT.K < 1 ? ', because K < 1' : sel.capped ? ', because the cap refused splits' : ''}. §8's full test only looks one lod up, so a seam here can crack.`
+    : `${sel.leaves.length} leaves over ${lods.length} lods, at most ${Math.max(...lods.map(l => leaves.get(l) || 0))} in any one. No face neighbours two lods apart${sel.capped ? ', though the cap is refusing splits, so that is luck, not a promise' : ''}.`;
+}
+initCut();   // at load: §3 and §9 read its world and cut
+whenSeen('s2', () => {});   // only to keep `seen` up to date for §2
+
+/* ================= §3: pixels per cell ============================================== */
+const PX = { H: 1080 };
+function initPx(){
+  chipRow($('pxScreen'), [[720, '720'], [1080, '1080'], [1440, '1440'], [2160, '2160 (4K)']], H => { PX.H = H; pxDraw(); }, PX.H);
+  const redraw = lazy('s3', pxDraw);
+  DW.listeners.push(what => { if (what !== 'view') redraw(); });
+  addEventListener('resize', pxDraw);
+  pxDraw();
+}
+function pxDraw(){
+  if (!DW.sel) return;
+  const host = $('pxChart'), W = Math.max(320, host.clientWidth || 900), H = 330, P = pxPerRadianOf(PX.H), K = CUT.K;
+  const ml = 46, mr = 14, mt = 12, mb = 36, iw = W - ml - mr, ih = H - mt - mb;
+  const xMax = DW.D + 2, yMin = -3, yMax = 6.5;
+  const X = lx => ml + iw * clamp(lx / xMax, 0, 1), Y = ly => mt + ih * (1 - (clamp(ly, yMin, yMax) - yMin) / (yMax - yMin));
+  const parts = [];
+  for (let k = 0; k <= xMax; k += 2) parts.push(`<line x1="${X(k)}" x2="${X(k)}" y1="${mt}" y2="${mt + ih}" stroke="rgba(120,150,190,.08)"/><text x="${X(k)}" y="${H - 18}" fill="#6f7a90" font-size="10" text-anchor="middle">${fmt(2 ** k)}</text>`);
+  for (let k = Math.ceil(yMin); k <= yMax; k++) parts.push(`<line x1="${ml}" x2="${ml + iw}" y1="${Y(k)}" y2="${Y(k)}" stroke="rgba(120,150,190,${k === 0 ? .25 : .08})"/><text x="${ml - 6}" y="${Y(k) + 3}" fill="#6f7a90" font-size="10" text-anchor="end">${2 ** k >= 1 ? 2 ** k : '1/' + 2 ** -k}</text>`);
+  parts.push(`<text x="${ml + iw / 2}" y="${H - 3}" fill="#8e97ad" font-size="10" text-anchor="middle">distance from the eye to the chunk, voxels (log)</text>`);
+  parts.push(`<text x="12" y="${mt + ih / 2}" fill="#8e97ad" font-size="10" text-anchor="middle" transform="rotate(-90 12 ${mt + ih / 2})">pixels a cell</text>`);
+  const lods = [...new Set(DW.sel.leaves.map(c => c.lod))].sort((a, b) => a - b);
+  for (const l of lods){   // each lod's cell size against distance
+    const pts = [];
+    for (let i = 0; i <= 80; i++){ const lx = xMax * i / 80, d = 2 ** lx, px = P * 2 ** l / (d + 32 * 2 ** l); pts.push(`${X(lx).toFixed(1)},${Y(Math.log2(px)).toFixed(1)}`); }
+    parts.push(`<polyline points="${pts.join(' ')}" fill="none" stroke="${lodHex(l)}" stroke-opacity=".35" stroke-width="1"/>`);
+  }
+  const ceil = P / (64 * (K + 0.5));
+  parts.push(`<line x1="${ml}" x2="${ml + iw}" y1="${Y(Math.log2(ceil))}" y2="${Y(Math.log2(ceil))}" stroke="#e6faff" stroke-dasharray="5 4" stroke-width="1.2"/>`);
+  parts.push(`<text x="${ml + iw - 4}" y="${Y(Math.log2(ceil)) - 5}" fill="#e6faff" font-size="10" text-anchor="end">ceiling P / 64(K + ½) = ${ceil.toFixed(1)} px</text>`);
+  const vals = [], above = new Map();
+  for (const c of DW.sel.leaves){
+    const px = cellPx(c, P), lx = Math.log2(Math.max(c.dist, 1));
+    parts.push(`<circle cx="${X(lx).toFixed(1)}" cy="${Y(Math.log2(px)).toFixed(1)}" r="2.6" fill="${lodHex(c.lod)}" fill-opacity=".85"><title>lod ${c.lod}, dist ${fmt(c.dist)}, ${px.toFixed(2)} px a cell</title></circle>`);
+    if (px > ceil * 1.0001) above.set(c.lod, (above.get(c.lod) || 0) + 1); else vals.push(px);
+  }
+  host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="ui-monospace, monospace" role="img" aria-label="Each leaf of the cut: distance against a cell's size on screen, with each lod's curve and the ceiling.">${parts.join('')}</svg>`;
+  vals.sort((a, b) => a - b);
+  const med = vals.length ? vals[vals.length >> 1] : NaN;
+  $('pxK').innerHTML = `K = <b>${K}</b>, ${DW.def.label}, ${DW.sel.leaves.length} leaves`;
+  $('rdPx').innerHTML = `<span>pxPerRadian <b>${P.toFixed(0)}</b></span><span>ceiling <b>${ceil.toFixed(2)} px</b></span><span>median under it <b>${f2(med)} px</b></span>` +
+    `<span>smallest <b>${f2(vals[0])} px</b></span><span>above it <b>${[...above.values()].reduce((a, b) => a + b, 0)}</b>${above.size ? ` (lod ${[...above.keys()].join(', ')})` : ''}</span>`;
+  $('vdPx').textContent = `On a ${PX.H}-line screen at K = ${K}, a leaf's cells come out at ${f2(vals[0])}–${ceil.toFixed(1)} px, median ${f2(med)}, at every lod alike. ` +
+    `For one pixel a cell you'd need K ≈ ${(P / 64 - 0.5).toFixed(0)}, about ${Math.round(((P / 64 - 0.5) / K) ** 3)}× the chunks per ring.` +
+    (above.size ? ` The ${[...above.values()].reduce((a, b) => a + b, 0)} points above the ceiling are leaves that were close enough to split and weren't allowed to: ` +
+      `${CUT.minLod ? `minLod is ${CUT.minLod}` : 'lod 0 has nothing finer'}${DW.sel.capped ? ', or the cap refused them' : ''}.` : '');
+}
+whenSeen('s3', initPx);
+
+/* ================= §4: the five rules, in a 2D model ================================
+   rule2D is keepCount and chunk-core's brick() written again for a plane: a cell
+   holds 4^lod pixels, a brick is 8 × 8 cells, and adaptive's m is the square root of
+   s (a ray crosses √s of s independent samples in 2D; the cube root in 3D). Ties go
+   by a fixed shuffle of the brick's 64 positions (TIE_RANK's hash) or by Morton
+   order. The coverage and error are coverage.mjs's measures, in 2D. */
+const N2 = 128;
+const L2 = { px: new Uint8Array(N2 * N2), lod: 2, rule: 'adaptive', ties: 'shuffle', brush: 1, preset: 'walls', hover: null, all: null, geo: null };
+const SHUF64 = (() => {
+  const h = i => { let x = Math.imul(i + 0x9e37, 0x85ebca6b); x ^= x >>> 13; x = Math.imul(x, 0xc2b2ae35); return (x ^ x >>> 16) >>> 0; };
+  const order = Array.from({ length: 64 }, (_, i) => i).sort((a, b) => h(a) - h(b) || a - b), r = new Uint8Array(64);
+  order.forEach((i, k) => { r[i] = k; });
+  return r;
+})();
+const MORT64 = (() => { const r = new Uint8Array(64); for (let j = 0; j < 8; j++) for (let i = 0; i < 8; i++){ let m = 0; for (let b = 0; b < 3; b++) m |= (i >> b & 1) << 2 * b | (j >> b & 1) << 2 * b + 1; r[i + 8 * j] = m; } return r; })();
+function rule2D(px, lod, rule, ties){
+  const c = 1 << lod, nc = N2 >> lod, cv = c * c, cnt = new Uint16Array(nc * nc), keep = new Uint8Array(nc * nc), bricks = [];
+  for (let y = 0; y < N2; y++) for (let x = 0; x < N2; x++) if (px[x + N2 * y]) cnt[(x >> lod) + nc * (y >> lod)]++;
+  const rank = ties === 'shuffle' ? SHUF64 : MORT64, nb = nc >> 3;
+  for (let by = 0; by < nb; by++) for (let bx = 0; bx < nb; bx++){
+    const list = [];
+    let C = 0;
+    for (let j = 0; j < 8; j++) for (let i = 0; i < 8; i++){
+      const ci = (bx * 8 + i) + nc * (by * 8 + j), k = cnt[ci];
+      if (k){ list.push({ ci, k, local: i + 8 * j }); C += k; }
+    }
+    const n = 64, occ = list.length, p = C / (n * cv), q = occ / n;
+    const s = q >= 1 || p >= 1 || !occ ? Infinity : Math.log(1 - q) / Math.log(1 - p);
+    const mAd = Number.isFinite(s) ? Math.min(c, Math.max(1, Math.sqrt(s))) : c;
+    const info = { bx, by, C, n, occ, p, q, s, mAd, m: null, k: occ };
+    if (rule === 'any') for (const e of list) keep[e.ci] = 1;
+    else if (rule === 'majority'){ info.k = 0; for (const e of list) if (2 * e.k >= cv){ keep[e.ci] = 1; info.k++; } }
+    else if (occ){
+      const m = rule === 'volume' ? 1 : rule === 'opacity' ? c : mAd;
+      info.m = m;
+      const k = Math.min(occ, rule === 'volume' ? Math.round(C / cv) : Math.round(n * (1 - (1 - p) ** m)));
+      info.k = k;
+      list.sort((a, b) => b.k - a.k || rank[a.local] - rank[b.local]);
+      for (let t = 0; t < k; t++) keep[list[t].ci] = 1;
+    }
+    bricks.push(info);
+  }
+  // Metrics: volume, voxel error, and slab coverage along rows (→) and columns (↓).
+  let V = 0, kept = 0, keptPx = 0;
+  for (let i = 0; i < px.length; i++) V += px[i];
+  for (let i = 0; i < keep.length; i++) if (keep[i]){ kept++; keptPx += cnt[i]; }
+  const L = 8 * c, cov = [0, 0];
+  for (let a = 0; a < 2; a++){
+    let fine = 0, coarse = 0;
+    for (let line = 0; line < N2; line++) for (let t0 = 0; t0 < N2; t0 += L){
+      for (let t = t0; t < t0 + L; t++) if (px[a ? line + N2 * t : t + N2 * line]){ fine++; break; }
+    }
+    for (let line = 0; line < nc; line++) for (let t0 = 0; t0 < nc; t0 += 8){
+      for (let t = t0; t < t0 + 8; t++) if (keep[a ? line + nc * t : t + nc * line]){ coarse++; break; }
+    }
+    cov[a] = fine ? coarse * c / fine : NaN;
+  }
+  return { lod, c, nc, cv, cnt, keep, bricks, V, kept, vol: V ? kept * cv / V : NaN, err: V ? (kept * cv - 2 * keptPx + V) / V : NaN, cov };
+}
+const P2 = {
+  walls(px){   // a 1-pixel wall, a tilted one and a 1-pixel ring: 2D's sheets
+    for (let x = 0; x < N2; x++) px[x + N2 * 21] = 1;
+    for (let x = 0; x < N2; x++){ const y = Math.round(118 - 0.42 * x); px[x + N2 * y] = 1; }
+    for (let a = 0; a < 2000; a++){ const t = a / 2000 * 2 * Math.PI, x = Math.round(84 + 24 * Math.cos(t)), y = Math.round(76 + 24 * Math.sin(t)); px[x + N2 * y] = 1; }
+  },
+  ball(px){ for (let y = 0; y < N2; y++) for (let x = 0; x < N2; x++) if ((x + 0.5 - 63.3) ** 2 + (y + 0.5 - 61.7) ** 2 <= 46 ** 2) px[x + N2 * y] = 1; },
+  terrain(px){
+    for (let x = 0; x < N2; x++){
+      const h = 70 + 18 * Math.sin(x / 13) + 7 * Math.sin(x / 5.3 + 1) + 3 * Math.sin(x / 1.7);
+      for (let y = 0; y < N2; y++) if (y > h && (x - 70) ** 2 / 400 + (y - 104) ** 2 / 64 > 1) px[x + N2 * y] = 1;
+    }
+  },
+  foam(px){
+    const rnd = mulberry(3);
+    for (let i = 0; i < 230; i++){
+      let x, y; do { x = rnd() * 2 - 1; y = rnd() * 2 - 1; } while (x * x + y * y > 1);
+      const cx = 64 + 56 * x, cy = 64 + 56 * y, r = 1.2 + 3 * rnd();
+      for (let j = Math.floor(cy - r); j <= cy + r; j++) for (let i2 = Math.floor(cx - r); i2 <= cx + r; i2++)
+        if (i2 >= 0 && j >= 0 && i2 < N2 && j < N2 && (i2 + 0.5 - cx) ** 2 + (j + 0.5 - cy) ** 2 <= r * r) px[i2 + N2 * j] = 1;
+    }
+  },
+  dust(px){ const rnd = mulberry(5); for (let y = 16; y < 112; y++) for (let x = 16; x < 112; x++) if (rnd() < 0.05) px[x + N2 * y] = 1; },
+  grid(px){ for (let y = 4; y < N2; y += 8) for (let x = 4; x < N2; x += 8) px[x + N2 * y] = 1; },
+  clear(){},
+};
+function l2Compute(){
+  L2.all = {};
+  for (const r of RULES) L2.all[r] = rule2D(L2.px, L2.lod, r, L2.ties);
+}
+function initL2(){
+  const cv = $('cvL2');
+  chipRow($('l2Preset'), [['walls', 'thin walls'], ['ball', 'ball'], ['terrain', 'terrain'], ['foam', 'foam'], ['dust', 'dust 5%'], ['grid', 'lattice dust'], ['clear', 'clear']],
+    k => { L2.preset = k; L2.px.fill(0); P2[k](L2.px); l2Update(); }, L2.preset);
+  chipRow($('l2Ties'), [['shuffle', 'a fixed shuffle'], ['morton', 'Morton order']], k => { L2.ties = k; l2Update(); }, L2.ties);
+  chipRow($('l2Brush'), [[1, '1 px'], [2, '2 px'], [4, '4 px'], [8, '8 px']], k => { L2.brush = k; }, L2.brush);
+  $('l2Lod').oninput = () => { L2.lod = +$('l2Lod').value; $('l2LodV').textContent = L2.lod; l2Update(); };
+  $('l2Leg').innerHTML = `<span><i class="swatch" style="background:#9fb4c8"></i>fine pixels</span><span><i class="swatch" style="background:${RULE_HEX.adaptive}"></i>a kept coarse cell (the rule's colour)</span>` +
+    `<span><i class="swatch" style="background:none;border:1px solid #e8505c;height:8px"></i>occupied, dropped</span><span><i class="swatch" style="background:none;border:1px solid #6f7a90;height:8px"></i>8 × 8-cell bricks</span>`;
+  const at = ev => {
+    const G = L2.geo; if (!G) return null;
+    const r = cv.getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top;
+    for (const [side, ox] of [['L', G.xL], ['R', G.xR]]){
+      const x = Math.floor((mx - ox) / G.ps), y = Math.floor((my - G.y0) / G.ps);
+      if (x >= 0 && y >= 0 && x < N2 && y < N2) return { side, x, y };
+    }
+    return null;
+  };
+  let painting = 0;
+  const paintAt = p => {
+    const b = L2.brush, x0 = p.x - (b >> 1), y0 = p.y - (b >> 1);
+    for (let y = y0; y < y0 + b; y++) for (let x = x0; x < x0 + b; x++) if (x >= 0 && y >= 0 && x < N2 && y < N2) L2.px[x + N2 * y] = painting > 0 ? 1 : 0;
+    l2Update();
+  };
+  cv.addEventListener('contextmenu', ev => ev.preventDefault());
+  cv.addEventListener('pointerdown', ev => {
+    const p = at(ev);
+    if (!p || p.side !== 'L') return;
+    painting = ev.shiftKey || ev.button === 2 ? -1 : 1;
+    cv.setPointerCapture(ev.pointerId); paintAt(p);
+  });
+  cv.addEventListener('pointermove', ev => {
+    const p = at(ev);
+    if (painting && p && p.side === 'L'){ paintAt(p); return; }
+    const hb = p ? ((p.x >> L2.lod) >> 3) + ':' + ((p.y >> L2.lod) >> 3) : null;
+    if (hb !== L2.hover){ L2.hover = hb; l2Draw(); l2Brick(); }
+  });
+  cv.addEventListener('pointerup', () => { painting = 0; });
+  cv.addEventListener('pointerleave', () => { L2.hover = null; l2Draw(); l2Brick(); });
+  addEventListener('resize', l2Draw);
+  P2[L2.preset](L2.px);
+  l2Update();
+}
+let l2Pending = false;
+function l2Update(){
+  if (l2Pending) return;
+  l2Pending = true;
+  requestAnimationFrame(() => { l2Pending = false; l2Compute(); l2Draw(); l2Table(); l2Brick(); });
+}
+function l2Draw(){
+  const cv = $('cvL2'), { g, w, h } = fit(cv), gap = 34;
+  const S = Math.max(120, Math.min((w - gap - 8) / 2, h - 26)), ps = S / N2, xL = (w - (2 * S + gap)) / 2, xR = xL + S + gap, y0 = 20;
+  L2.geo = { xL, xR, y0, ps, S };
+  const res = L2.all[L2.rule], { c, nc, keep, cnt } = res, cs = c * ps;
+  // The fine pixels as an image, drawn twice: bright on the left, faint under the cells on the right.
+  const img = (rgba) => {
+    const off = new OffscreenCanvas(N2, N2), og = off.getContext('2d'), data = og.createImageData(N2, N2);
+    for (let i = 0; i < N2 * N2; i++) if (L2.px[i]) data.data.set(rgba, 4 * i);
+    og.putImageData(data, 0, 0);
+    return off;
+  };
+  g.imageSmoothingEnabled = false;
+  for (const ox of [xL, xR]){ g.fillStyle = '#0d1019'; g.fillRect(ox, y0, S, S); }
+  g.drawImage(img([159, 180, 200, 255]), xL, y0, S, S);
+  g.drawImage(img([70, 84, 104, 255]), xR, y0, S, S);
+  const col = RULE_HEX[L2.rule];
+  for (let j = 0; j < nc; j++) for (let i = 0; i < nc; i++){
+    const k = i + nc * j;
+    if (keep[k]){ g.fillStyle = col; g.globalAlpha = 0.78; g.fillRect(xR + i * cs, y0 + j * cs, cs, cs); g.globalAlpha = 1; }
+    else if (cnt[k] && cs >= 3){ g.strokeStyle = 'rgba(232,80,92,.7)'; g.lineWidth = 1; g.strokeRect(xR + i * cs + 0.5, y0 + j * cs + 0.5, cs - 1, cs - 1); }
+  }
+  if (cs >= 6){   // cell lines, faint
+    g.strokeStyle = 'rgba(5,5,8,.35)'; g.lineWidth = 1; g.beginPath();
+    for (let i = 1; i < nc; i++){ g.moveTo(xR + i * cs, y0); g.lineTo(xR + i * cs, y0 + S); g.moveTo(xR, y0 + i * cs); g.lineTo(xR + S, y0 + i * cs); }
+    g.stroke();
+  }
+  const bs = 8 * cs;
+  g.strokeStyle = 'rgba(111,122,144,.6)'; g.lineWidth = 1;
+  for (const ox of [xL, xR]){
+    g.beginPath();
+    for (let i = 0; i <= N2 / (8 * c); i++){ g.moveTo(ox + i * bs, y0); g.lineTo(ox + i * bs, y0 + S); g.moveTo(ox, y0 + i * bs); g.lineTo(ox + S, y0 + i * bs); }
+    g.stroke();
+  }
+  if (L2.hover){
+    const [bx, by] = L2.hover.split(':').map(Number);
+    g.strokeStyle = '#fff'; g.lineWidth = 2;
+    for (const ox of [xL, xR]) g.strokeRect(ox + bx * bs + 1, y0 + by * bs + 1, bs - 2, bs - 2);
+  }
+  g.fillStyle = '#8e97ad'; g.font = '10.5px ui-monospace, monospace';
+  g.fillText('fine pixels (lod 0): paint here', xL, 13);
+  g.fillText(`lod ${L2.lod} under ${L2.rule}: cells of ${c} × ${c}`, xR, 13);
+}
+function l2Table(){
+  const rows = RULES.map(r => {
+    const m = L2.all[r], good = v => Number.isFinite(v) && Math.abs(v - 1) <= 0.05 ? 'good' : Number.isFinite(v) && Math.abs(v - 1) > 0.25 ? 'bad' : '';
+    return `<tr class="pick${r === L2.rule ? ' cur' : ''}" data-r="${r}"><td class="k"><i class="swatch" style="background:${RULE_HEX[r]}"></i>${r}</td><td class="n">${fmt(m.kept)}</td>` +
+      `<td class="n">${f2(m.vol)}</td><td class="n">${f2(m.err)}</td><td class="n ${good(m.cov[0])}">${f2(m.cov[0])}</td><td class="n ${good(m.cov[1])}">${f2(m.cov[1])}</td></tr>`;
+  });
+  const tb = document.querySelector('#tbL2 tbody');
+  tb.innerHTML = rows.join('');
+  for (const tr of tb.querySelectorAll('tr')) tr.onclick = () => { L2.rule = tr.dataset.r; l2Draw(); l2Table(); l2Brick(); };
+}
+function l2Brick(){
+  const host = $('l2Brick');
+  if (!L2.hover){ host.innerHTML = `Hover over a brick to see the numbers its rule uses. Here, at lod ${L2.lod}, a cell holds ${4 ** L2.lod} pixels and a brick ${fmt(64 * 4 ** L2.lod)}.`; return; }
+  const [bx, by] = L2.hover.split(':').map(Number), nb = L2.all.any.nc >> 3, i = bx + nb * by;
+  const b = L2.all[L2.rule].bricks[i];
+  if (!b || !b.occ){ host.innerHTML = `Brick (${bx}, ${by}) is empty: no rule has anything to keep.`; return; }
+  const ks = RULES.map(r => `${r} <b>${L2.all[r].bricks[i].k}</b>`).join(' · ');
+  host.innerHTML = `brick (${bx}, ${by}): C = <b>${fmt(b.C)}</b> pixels, n = 64 cells, <b>${b.occ}</b> occupied<br>` +
+    `p = C / (n · ${4 ** L2.lod}) = <b>${b.p.toFixed(4)}</b> · q = occupied / n = <b>${b.q.toFixed(3)}</b><br>` +
+    `s = log(1 − q) / log(1 − p) = <b>${Number.isFinite(b.s) ? b.s.toFixed(2) : '∞ (q = 1: no evidence)'}</b> · adaptive's m = √s, clamped to [1, ${1 << L2.lod}] = <b>${b.mAd.toFixed(2)}</b><br>` +
+    `kept: ${ks}`;
+}
+whenSeen('s4', initL2);
+
+/* ================= §5: adaptive's formula ============================================ */
+const AD = { lod: 2, lp: Math.log10(1 / 32), t: 0.3, n: 512 };
+function adNumbers(){
+  const n = AD.n, v = 8 ** AD.lod, p0 = 10 ** AD.lp, C = Math.max(1, Math.round(p0 * n * v));
+  const lo = Math.max(1, Math.ceil(C / v)), hi = Math.min(n, C), occ = Math.round(lo + AD.t * (hi - lo)), p = C / (n * v), q = occ / n;
+  const s = q >= 1 || p >= 1 ? Infinity : Math.log(1 - q) / Math.log(1 - p);
+  return { n, v, C, lo, hi, occ, p, q, s, m: adaptiveDepth(C, n, AD.lod, occ),
+           k: { volume: keepCount('volume', C, n, AD.lod, occ), opacity: keepCount('opacity', C, n, AD.lod, occ), adaptive: keepCount('adaptive', C, n, AD.lod, occ), any: occ },
+           qInd: 1 - (1 - p) ** v };
+}
+function adSet(lod, C, occ){
+  AD.lod = lod; AD.lp = Math.log10(C / (AD.n * 8 ** lod));
+  const v = 8 ** lod, lo = Math.max(1, Math.ceil(C / v)), hi = Math.min(AD.n, C);
+  AD.t = hi > lo ? (occ - lo) / (hi - lo) : 0;
+  $('adLod').value = lod; $('adP').value = AD.lp; $('adQ').value = AD.t;
+}
+function initAd(){
+  const cases = {
+    lump: () => adSet(2, 8192, 128),
+    sheet: () => adSet(2, 1024, 64),
+    noise: () => { const C = 328, p = C / (512 * 64); adSet(2, C, Math.round(512 * (1 - (1 - p) ** 64))); },
+    sponge: () => adSet(3, 40000, 300),
+    dust: () => adSet(3, 64, 64),
+  };
+  chipRow($('adPreset'), [['lump', 'one solid lump'], ['sheet', 'a 1-voxel sheet, lod 2'], ['noise', 'independent noise'], ['sponge', 'a sponge'], ['dust', 'lattice dust, lod 3']],
+    k => { cases[k](); adDraw(); }, 'sheet');
+  cases.sheet();
+  for (const id of ['adLod', 'adP', 'adQ']) $(id).oninput = () => { AD.lod = +$('adLod').value; AD.lp = +$('adP').value; AD.t = +$('adQ').value; adDraw(); };
+  addEventListener('resize', adDraw);
+  adDraw();
+}
+function adDraw(){
+  const A = adNumbers(), top = 2 ** AD.lod;
+  $('adLodV').textContent = AD.lod; $('adPV').textContent = A.p < 0.01 ? A.p.toExponential(2) : A.p.toFixed(3);
+  $('adQV').textContent = `${A.occ} of 512`;
+  const host = $('adChart'), W = Math.max(300, host.clientWidth || 520), H = 300, ml = 44, mr = 16, mt = 14, mb = 34, iw = W - ml - mr, ih = H - mt - mb;
+  const curve = m => A.n * (1 - (1 - A.p) ** m), yMax = Math.max(8, Math.min(A.n, Math.max(A.occ, curve(top)) * 1.15));
+  const X = m => ml + iw * (AD.lod ? Math.log2(m) / AD.lod : 0), Y = k => mt + ih * (1 - Math.min(k, yMax) / yMax);
+  const parts = [];
+  for (let e = 0; e <= AD.lod; e++) parts.push(`<line x1="${X(2 ** e)}" x2="${X(2 ** e)}" y1="${mt}" y2="${mt + ih}" stroke="rgba(120,150,190,.08)"/><text x="${X(2 ** e)}" y="${H - 16}" fill="#6f7a90" font-size="10" text-anchor="middle">${2 ** e}</text>`);
+  for (let i = 0; i <= 4; i++){ const k = yMax * i / 4; parts.push(`<line x1="${ml}" x2="${ml + iw}" y1="${Y(k)}" y2="${Y(k)}" stroke="rgba(120,150,190,.08)"/><text x="${ml - 6}" y="${Y(k) + 3}" fill="#6f7a90" font-size="10" text-anchor="end">${Math.round(k)}</text>`); }
+  parts.push(`<text x="${ml + iw / 2}" y="${H - 2}" fill="#8e97ad" font-size="10" text-anchor="middle">m: independent samples a ray crosses in one cell (log)</text>`);
+  parts.push(`<text x="11" y="${mt + ih / 2}" fill="#8e97ad" font-size="10" text-anchor="middle" transform="rotate(-90 11 ${mt + ih / 2})">cells kept, of 512</text>`);
+  const pts = [];
+  for (let i = 0; i <= 60; i++){ const m = 2 ** (AD.lod * i / 60); pts.push(`${X(m).toFixed(1)},${Y(curve(m)).toFixed(1)}`); }
+  parts.push(`<polyline points="${pts.join(' ')}" fill="none" stroke="#8e97ad" stroke-width="1.5"/>`);
+  parts.push(`<line x1="${ml}" x2="${ml + iw}" y1="${Y(A.occ)}" y2="${Y(A.occ)}" stroke="${RULE_HEX.any}" stroke-dasharray="5 4"/>`);
+  parts.push(`<text x="${ml + 4}" y="${Y(A.occ) - 5}" fill="${RULE_HEX.any}" font-size="10">occupied = ${A.occ}: what any keeps, and every rule's cap</text>`);
+  const mark = (m, k, r, label, dy) => parts.push(`<circle cx="${X(m)}" cy="${Y(k)}" r="5.5" fill="${RULE_HEX[r]}"/><text x="${clamp(X(m), ml + 30, ml + iw - 30)}" y="${Y(k) + dy}" fill="${RULE_HEX[r]}" font-size="10.5" text-anchor="middle">${label} ${k}</text>`);
+  mark(1, A.k.volume, 'volume', 'volume', 16);
+  mark(top, A.k.opacity, 'opacity', 'opacity', -9);
+  mark(A.m, A.k.adaptive, 'adaptive', 'adaptive', A.k.adaptive > yMax * 0.5 ? 18 : -10);
+  host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="ui-monospace, monospace" role="img" aria-label="Cells kept against m, with volume, adaptive and opacity marked.">${parts.join('')}</svg>`;
+  $('adRead').innerHTML = `lod <b>${AD.lod}</b>: a cell holds ${fmt(A.v)} voxels, a brick ${fmt(A.n * A.v)}<br>` +
+    `C = <b>${fmt(A.C)}</b> voxels, p = <b>${A.p < 0.01 ? A.p.toExponential(2) : A.p.toFixed(4)}</b><br>` +
+    `occupied <b>${A.occ}</b> (q = ${A.q.toFixed(3)}); the range is ${A.lo} (one lump) to ${A.hi}<br>` +
+    `independent voxels would occupy q = ${A.qInd.toFixed(3)} (${Math.round(A.n * A.qInd)} cells)<br>` +
+    `s = log(1 − q) / log(1 − p) = <b>${Number.isFinite(A.s) ? A.s.toFixed(2) : '∞'}</b> samples a cell<br>` +
+    `m = clamp(∛s, 1, ${top}) = <b>${A.m.toFixed(3)}</b><br><br>` +
+    `keeps: any <b>${A.k.any}</b> · volume <b>${A.k.volume}</b> · opacity <b>${A.k.opacity}</b> · adaptive <b>${A.k.adaptive}</b>`;
+  const where = A.m <= 1.0001 ? 'one solid lump, so adaptive keeps the volume' : A.m >= top - 1e-9 ? 'as scattered as independent noise (or more), so adaptive keeps what opacity keeps' : `between a lump (m = 1) and noise (m = ${top})`;
+  $('vdAd').textContent = `This brick reads as ${where}. ${A.k.opacity === A.occ && A.k.adaptive < A.occ ? 'Opacity hits the cap here and keeps every occupied cell, like any: that is "almost never acts".' : ''}`;
+}
+whenSeen('s5', initAd);
+
+/* ================= §6: the rules in 3D ================================================ */
+const R3 = { world: 'foam', lod: 2, rule: 'adaptive', view: null, token: 0 };
+function initR3(){
+  R3.view = createCubeView($('cvR3'));
+  chipRow($('r3World'), LAB_DEFS.map(d => [d.id, d.label]), k => { R3.world = k; r3Run(); for (const f of labListeners) f(); }, R3.world);
+  $('r3Lod').oninput = () => { R3.lod = +$('r3Lod').value; $('r3LodV').textContent = R3.lod; r3Run(); };
+  r3Run();
+}
+const labListeners = [];   // §8's seam table follows §6's world
+async function r3Run(){
+  const token = ++R3.token, lod = R3.lod;
+  $('vdR3').textContent = 'building and measuring…';
+  const w = await later(() => labWorld(R3.world));
+  if (token !== R3.token) return;
+  $('r3Note').textContent = `${w.def.label}: ${w.def.kind}, ${si(w.voxels)} voxels, ${fmt(w.store.size)} nodes, built in ${w.buildMs.toFixed(0)} ms.`;
+  const rows = {};
+  const table = () => {
+    const tb = document.querySelector('#tbR3 tbody');
+    tb.innerHTML = RULES.map(r => {
+      const m = rows[r];
+      if (!m) return `<tr><td class="k">${r}</td><td colspan="5" class="n">…</td></tr>`;
+      const cls = Math.abs(m.cov - 1) <= 0.05 ? 'good' : Math.abs(m.cov - 1) > 0.25 ? 'bad' : '';
+      return `<tr class="pick${r === R3.rule ? ' cur' : ''}" data-r="${r}"><td class="k"><i class="swatch" style="background:${RULE_HEX[r]}"></i>${r}</td><td class="n">${fmt(m.cubes)}</td>` +
+        `<td class="n">${f2(m.vol)}</td><td class="n">${f2(m.err)}</td><td class="n ${cls}">${f2(m.cov)}</td><td class="n">${m.ms.toFixed(0)}</td></tr>`;
+    }).join('');
+    for (const tr of tb.querySelectorAll('tr.pick')) tr.onclick = () => { R3.rule = tr.dataset.r; r3Show(w); table(); };
+  };
+  table();
+  await later(() => fineHits(w, lod));
+  for (const r of RULES){
+    if (token !== R3.token) return;
+    const m = await later(() => { const e = expandAll(w, lod, r, { cells: true }); return { cubes: e.cubes, vol: volumeRatio(w, e), err: voxelError(w, e), cov: coverageOf(w, e), ms: e.ms }; });
+    rows[r] = m; table();
+    if (r === R3.rule) r3Show(w);
+  }
+  const best = RULES.reduce((a, b) => Math.abs(rows[a].cov - 1) <= Math.abs(rows[b].cov - 1) ? a : b);
+  $('vdR3').textContent = `Closest coverage to 1.00 here: ${best} (${f2(rows[best].cov)}). Adaptive draws ${fmt(rows.adaptive.cubes)} cubes against any's ${fmt(rows.any.cubes)}, ` +
+    `with coverage ${f2(rows.adaptive.cov)} against ${f2(rows.any.cov)}.` +
+    (R3.world === 'sheet' ? ' The sheet is face-on opaque, and adaptive thins it: this is the documented failure.' : R3.world === 'lattice' ? ' Lattice dust lines up in columns, which adaptive reads as independent: it over-covers, and volume is exactly right.' : '');
+}
+function r3Show(w){
+  const e = expandAll(w, R3.lod, R3.rule, { cells: true });
+  R3.view.set(e.chunks, { base: hexRGB(RULE_HEX[R3.rule]) });
+}
+whenSeen('s6', initR3);
+
+/* ================= §7: bricks and ties ================================================ */
+const TIE = { mode: 'tie', sheet: null };
+function initTie(){
+  chipRow($('tieMode'), [['tie', 'TIE_RANK (the code)'], ['morton', 'Morton order (what it avoids)']], k => { TIE.mode = k; tieDraw(); }, TIE.mode);
+  addEventListener('resize', tieDraw);
+  later(() => {
+    // The real job: the sheet world at lod 2 is one chunk; its sheet is cell layer y = 101 >> 2.
+    const w = labWorld('sheet'), e = expandChunk(w.store, w.root, w.D, { lod: 2 }, { counts: w.counts, lodRule: 'adaptive', cells: true });
+    const Y = 101 >> 2, real = new Uint8Array(64 * 64), morton = new Uint8Array(64 * 64), perBrick = new Uint16Array(64);
+    for (let i = 0; i < e.cells.length; i++){ const p = e.cells[i]; if ((p >> 8 & 255) === Y){ const x = p & 255, z = p >> 16; real[x + 64 * z] = 1; perBrick[(x >> 3) + 8 * (z >> 3)]++; } }
+    const ly = Y & 7, order = Array.from({ length: 64 }, (_, i) => i).sort((a, b) => mortonOf(a & 7, ly, a >> 3) - mortonOf(b & 7, ly, b >> 3));
+    for (let b = 0; b < 64; b++){
+      const bx = b & 7, bz = b >> 3;
+      for (let t = 0; t < perBrick[b]; t++){ const i = order[t]; morton[(bx * 8 + (i & 7)) + 64 * (bz * 8 + (i >> 3))] = 1; }
+    }
+    TIE.sheet = { real, morton, perBrick, m: adaptiveDepth(1024, 512, 2, 64) };
+  }).then(tieDraw);
+  tieDraw();
+}
+function tieDraw(){
+  { // TIE_RANK, eight z slices of the brick, x right and y up
+    const { g, w, h } = fit($('cvTie')), gap = 8, P = Math.min((w - 7 * gap) / 8, h - 22), cs = P / 8;
+    g.font = '10px ui-monospace, monospace';
+    for (let z = 0; z < 8; z++){
+      const ox = z * (P + gap);
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++){
+        const t = TIE_RANK[mortonOf(x, y, z)] / 511;
+        g.fillStyle = `rgb(${Math.round(12 + 150 * t)},${Math.round(40 + 190 * t)},${Math.round(58 + 197 * t)})`;
+        g.fillRect(ox + x * cs, 4 + (7 - y) * cs, cs - 0.5, cs - 0.5);
+      }
+      g.fillStyle = '#8e97ad'; g.fillText(`z = ${z}`, ox, P + 18);
+    }
+  }
+  const { g, w, h } = fit($('cvSheet')), S = Math.min(w, h - 4), cs = S / 64, ox = (w - S) / 2;
+  if (!TIE.sheet){ g.fillStyle = '#6f7a90'; g.font = '11px ui-monospace, monospace'; g.fillText('expanding…', ox + 8, 20); return; }
+  const grid = TIE.mode === 'tie' ? TIE.sheet.real : TIE.sheet.morton;
+  for (let z = 0; z < 64; z++) for (let x = 0; x < 64; x++){
+    g.fillStyle = grid[x + 64 * z] ? RULE_HEX.adaptive : '#1e2634';
+    g.fillRect(ox + x * cs, z * cs, cs - (cs > 4 ? 0.6 : 0), cs - (cs > 4 ? 0.6 : 0));
+  }
+  g.strokeStyle = 'rgba(230,250,255,.5)'; g.lineWidth = 1; g.beginPath();
+  for (let i = 0; i <= 8; i++){ g.moveTo(ox + i * 8 * cs, 0); g.lineTo(ox + i * 8 * cs, S); g.moveTo(ox, i * 8 * cs); g.lineTo(ox + S, i * 8 * cs); }
+  g.stroke();
+  const pb = TIE.sheet.perBrick, ks = [...new Set(pb)];
+  $('vdTie').textContent = `Every brick the sheet crosses has C = 1,024 voxels in 64 equally full cells, so adaptive reads m = ${TIE.sheet.m.toFixed(2)} and keeps ${ks.join(' or ')} of the 64. ` +
+    (TIE.mode === 'tie'
+      ? 'With TIE_RANK the kept cells scatter over the brick. The shuffle is the same in every brick, so the pattern repeats every 8 cells: at a cell a pixel it reads as an even grey, which is what a per-brick dither can do.'
+      : 'In Morton order the same counts pile into the low half of each brick, leaving a regular stripe of holes every 8 cells, which is what TIE_RANK was added to avoid (coverage-plan.md decision 7).');
+}
+whenSeen('s7', initTie);
+
+/* ================= §8: seams, a 2D model ==============================================
+   Two chunks side by side, 32 × 40 voxels each, the left at lod 0 and the right at
+   the lod chosen. Each chunk does what expandChunk does, in 2D: masks against its own
+   lod's grid (so its apron is the neighbour at the same lod), records for cells
+   with a face, and the seam tail for boundary cells the apron alone buried, less
+   those whose coarser cell across is completely full. The open side and the tail
+   are drawn as GLSL_DECODE's recShown and the viewer's borderStart rule say. The
+   rules here are per cell (any, majority), since 2D bricks don't fit a 32-wide chunk. */
+const SM = { W: 64, H: 40, lodB: 1, rule: 'any', open: true, tail: true, full: true, seed: 1, px: null };
+function smGround(seed){
+  const W = SM.W, H = SM.H, rnd = mulberry(seed * 977 + 13), px = new Uint8Array(W * H);
+  const a = rnd() * 6, b = rnd() * 6, base = 14 + rnd() * 6, hs = [];
+  for (let x = 0; x < W; x++){ const h = base + 6 * Math.sin(x * 0.19 + a) + 3 * Math.sin(x * 0.47 + b) + (rnd() - 0.5) * 1.6; hs.push(h); for (let y = 0; y < H; y++) if (y < h) px[x + W * y] = 1; }
+  const cx = 20 + rnd() * 24, cy = 6 + rnd() * 5, rx = 6 + rnd() * 5, ry = 2.2 + rnd() * 1.6;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (((x + 0.5 - cx) / rx) ** 2 + ((y + 0.5 - cy) / ry) ** 2 < 1) px[x + W * y] = 0;
+  const ly = Math.round(Math.max(...hs.slice(24, 42)) + 3 + rnd() * 4), lx = 24 + Math.floor(rnd() * 4);
+  for (let x = lx; x < lx + 15; x++) if (ly < H) px[x + W * ly] = 1;    // a 1-voxel ledge across the seam
+  return px;
+}
+function smModel(){
+  const { W, H, px } = SM, lods = [0, SM.lodB], grids = {};
+  const gridOf = l => {
+    if (grids[l]) return grids[l];
+    const nx = W >> l, ny = H >> l, cnt = new Uint16Array(nx * ny), keep = new Uint8Array(nx * ny);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (px[x + W * y]) cnt[(x >> l) + nx * (y >> l)]++;
+    for (let i = 0; i < keep.length; i++) keep[i] = SM.rule === 'any' ? cnt[i] > 0 : 2 * cnt[i] >= 4 ** l;
+    return grids[l] = { nx, ny, keep, occ: (i, j) => i >= 0 && j >= 0 && i < nx && j < ny && keep[i + nx * j] === 1 };
+  };
+  const blockFull = (l, i, j) => {   // is the level-l cell (i, j) completely full of voxels?
+    const s = 1 << l;
+    if (i < 0 || j < 0 || (i + 1) * s > W || (j + 1) * s > H) return false;
+    for (let y = j * s; y < (j + 1) * s; y++) for (let x = i * s; x < (i + 1) * s; x++) if (!px[x + W * y]) return false;
+    return true;
+  };
+  const open = SM.open && SM.lodB !== 0;
+  const regions = lods.map((l, r) => {
+    const G = gridOf(l), x0 = r === 0 ? 0 : 32 >> l, x1 = r === 0 ? 32 : W >> l, seamI = r === 0 ? x1 - 1 : x0, seamBit = r === 0 ? 1 : 2, across = r === 0 ? 1 : -1;
+    const cells = new Map();
+    let main = 0, tail = 0, dropped = 0;
+    for (let j = 0; j < G.ny; j++) for (let i = x0; i < x1; i++){
+      if (!G.occ(i, j)) continue;
+      const mask = (G.occ(i + 1, j) ? 0 : 1) | (G.occ(i - 1, j) ? 0 : 2) | (G.occ(i, j + 1) ? 0 : 4) | (G.occ(i, j - 1) ? 0 : 8);
+      let kind = mask ? 'main' : 'buried';
+      if (!mask && i === seamI){
+        const closed = G.occ(i + across, j) ? seamBit : 0;   // what the mask would be with the apron empty
+        if (closed){
+          if (SM.full && blockFull(l + 1, (i + across) >> 1, j >> 1)){ kind = 'dropped'; dropped++; }
+          else { kind = 'tail'; tail++; }
+        }
+      }
+      if (kind === 'main') main++;
+      const drawn = kind === 'main' || (kind === 'tail' && open && SM.tail);
+      const shown = drawn ? mask | (open && i === seamI ? seamBit : 0) : 0;
+      cells.set(i + ',' + j, { i, j, kind, drawn, shown });
+    }
+    return { l, G, cells, main, tail, dropped, seamI };
+  });
+  // Cracks: along the seam, a fine row where exactly one side is drawn solid and its face there isn't shown.
+  const cracks = [], [A, B] = regions;
+  for (let y = 0; y < H; y++){
+    const L = A.G.occ(31, y), Ri = 32 >> B.l, Rj = y >> B.l, R = B.G.occ(Ri, Rj);
+    if (L && !R){ const c = A.cells.get('31,' + y); if (!c.drawn || !(c.shown & 1)) cracks.push(y); }
+    else if (R && !L){ const c = B.cells.get(Ri + ',' + Rj); if (!c.drawn || !(c.shown & 2)) cracks.push(y); }
+  }
+  return { regions, cracks, open };
+}
+function initSeam(){
+  SM.px = smGround(SM.seed);
+  chipRow($('smLod'), [[0, 'lod 0 (the same)'], [1, 'lod 1'], [2, 'lod 2 (two apart)']], k => { SM.lodB = k; smDraw(); }, SM.lodB);
+  chipRow($('smRule'), [['any', 'any'], ['majority', 'majority']], k => { SM.rule = k; smDraw(); }, SM.rule);
+  toggle($('smOpen'), SM.open, on => { SM.open = on; smDraw(); });
+  toggle($('smTail'), SM.tail, on => { SM.tail = on; smDraw(); });
+  toggle($('smFull'), SM.full, on => { SM.full = on; smDraw(); });
+  $('smNew').onclick = () => { SM.px = smGround(++SM.seed); smDraw(); };
+  $('smLeg').innerHTML = `<span><i class="swatch" style="background:#2a3344"></i>true voxels</span><span><i class="swatch" style="background:${lodHex(0)};opacity:.45"></i>a cell with a record</span>` +
+    `<span><i class="swatch" style="background:var(--tail)"></i>tail record, drawn</span><span><i class="swatch" style="background:none;border:1px dashed var(--tail);height:8px"></i>tail record, not drawn</span>` +
+    `<span><i class="swatch" style="background:#11151e;border:1px solid #2a3344;height:8px"></i>buried: no record</span><span><i class="swatch" style="background:#cfefff;height:3px"></i>a shown face</span><span><i class="swatch" style="background:#ff3b4e;height:4px"></i>crack</span>`;
+  addEventListener('resize', smDraw);
+  smDraw();
+  labListeners.push(seamTable);
+  seamTable();
+}
+function smDraw(){
+  const { g, w, h } = fit($('cvSeam')), { W, H, px } = SM, M = smModel();
+  const sc = Math.min((w - 20) / W, (h - 30) / H), ox = (w - W * sc) / 2, oy = 20;
+  const RX = (i, l) => ox + (i << l) * sc, RY = (j, l) => oy + (H - ((j + 1) << l)) * sc;
+  g.fillStyle = '#0a0d14'; g.fillRect(ox, oy, W * sc, H * sc);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (px[x + W * y]){ g.fillStyle = '#2a3344'; g.fillRect(ox + x * sc, oy + (H - 1 - y) * sc, sc - 0.5, sc - 0.5); }
+  for (const R of M.regions){
+    const s = (1 << R.l) * sc;
+    for (const c of R.cells.values()){
+      const x = RX(c.i, R.l), y = RY(c.j, R.l);
+      if (c.kind === 'buried' || c.kind === 'dropped'){ g.fillStyle = 'rgba(10,13,20,.72)'; g.fillRect(x + 1, y + 1, s - 2, s - 2); continue; }
+      if (c.kind === 'tail' && !c.drawn){ g.setLineDash([3, 3]); g.strokeStyle = '#d070e0'; g.lineWidth = 1; g.strokeRect(x + 1.5, y + 1.5, s - 3, s - 3); g.setLineDash([]); continue; }
+      g.fillStyle = c.kind === 'tail' ? 'rgba(208,112,224,.55)' : lodHex(R.l); g.globalAlpha = c.kind === 'tail' ? 1 : 0.32; g.fillRect(x + 0.5, y + 0.5, s - 1, s - 1); g.globalAlpha = 1;
+    }
+    g.strokeStyle = '#cfefff'; g.lineWidth = 1.6; g.beginPath();
+    for (const c of R.cells.values()){
+      if (!c.drawn) continue;
+      const x = RX(c.i, R.l), y = RY(c.j, R.l);
+      if (c.shown & 1){ g.moveTo(x + s, y); g.lineTo(x + s, y + s); }
+      if (c.shown & 2){ g.moveTo(x, y); g.lineTo(x, y + s); }
+      if (c.shown & 4){ g.moveTo(x, y); g.lineTo(x + s, y); }
+      if (c.shown & 8){ g.moveTo(x, y + s); g.lineTo(x + s, y + s); }
+    }
+    g.stroke();
+  }
+  g.setLineDash([4, 4]); g.strokeStyle = 'rgba(230,250,255,.35)'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(ox + 32 * sc, oy - 6); g.lineTo(ox + 32 * sc, oy + H * sc + 2); g.stroke(); g.setLineDash([]);
+  g.strokeStyle = '#ff3b4e'; g.lineWidth = 4; g.beginPath();
+  for (const y of M.cracks){ g.moveTo(ox + 32 * sc, oy + (H - 1 - y) * sc); g.lineTo(ox + 32 * sc, oy + (H - y) * sc); }
+  g.stroke();
+  g.fillStyle = '#8e97ad'; g.font = '10.5px ui-monospace, monospace';
+  g.fillText('chunk A: lod 0', ox, 13);
+  g.fillText(`chunk B: lod ${SM.lodB}${M.open ? ' · both sides open' : ''}`, ox + 32 * sc + 6, 13);
+  const [A, B] = M.regions;
+  $('rdSeam').innerHTML = `<span>A: <b>${A.main}</b> records + <b>${A.tail}</b> tail</span><span>B: <b>${B.main}</b> records + <b>${B.tail}</b> tail</span>` +
+    `<span>tail cells dropped by the full test <b>${A.dropped + B.dropped}</b></span><span>uOpenSides <b>${M.open ? 'set' : '0'}</b></span>` +
+    `<span>crack <b style="${M.cracks.length ? 'color:#ff9ca5' : ''}">${M.cracks.length} voxel${M.cracks.length === 1 ? '' : 's'}</b></span>`;
+  let v;
+  if (SM.lodB === 0) v = 'Same lod on both sides: each apron saw exactly what its neighbour draws, so every hidden face is covered. Nothing is open and the tail is not drawn.';
+  else if (!M.cracks.length) v = SM.open && SM.tail
+    ? `No cracks. The open side shows every boundary face, and the tail gives the apron-buried cells a record to show them with.${SM.full ? '' : ' With the full test off, the tail is bigger and fixes nothing more.'}`
+    : `No cracks on this ground, by luck: try another, or the other rule.`;
+  else if (!SM.open) v = `With uOpenSides at 0, both chunks hide faces against what their aprons saw at their own lod. Look at the cracks on chunk B's side: its apron saw chunk A's lod-${SM.lodB} cells, which are ${SM.rule === 'any' ? 'fatter' : 'different from'} what A draws.`;
+  else if (!SM.tail) v = 'The side is open, but the apron-buried cells have no record, so nothing can show their faces. The tail is those records.';
+  else if (SM.lodB === 2) v = 'Two lods apart, everything on, and still a crack: the full test looked one level up and decided a coarser cell was full, but the neighbour is drawn two levels coarser. The cut never makes this when K ≥ 1 (§2).';
+  else v = 'A crack with every fix on, one lod apart. The proof below says that cannot happen, so this is a bug in the page\'s model: please say so.';
+  $('vdSeam').textContent = v;
+}
+async function seamTable(){
+  const tb = document.querySelector('#tbSeam tbody'), w = await later(() => labWorld(R3.world));
+  tb.innerHTML = `<tr><td colspan="7">measuring ${w.def.label}…</td></tr>`;
+  const rows = [];
+  for (const lod of [0, 1]){
+    const rule = DEFAULTS.lodRuleOf(lod);
+    const r = await later(() => {
+      const seams = expandWorld(w.store, w.root, w.D, lod, { counts: w.counts, lodRule: rule, seams: true });
+      const closed = expandWorld(w.store, w.root, w.D, lod, { counts: w.counts, lodRule: rule, border: 'closed' });
+      let rec = 0, tail = 0, cl = 0;
+      for (const c of seams){ rec += c.count; tail += c.borderCount; }
+      for (const c of closed) cl += c.count;
+      return { lod, rule, chunks: seams.length, rec, tail, apronOnly: cl - rec };
+    });
+    rows.push(r);
+  }
+  tb.innerHTML = rows.map(r => `<tr><td class="n">${r.lod} (${r.rule})</td><td class="n">${r.chunks}</td><td class="n">${fmt(r.rec)}</td><td class="n">${fmt(r.apronOnly)}</td>` +
+    `<td class="n">${fmt(r.tail)}</td><td class="n">${fmt(r.apronOnly - r.tail)}</td><td class="n">${r.rec ? (100 * r.tail / r.rec).toFixed(1) + '%' : '–'}</td></tr>`).join('');
+}
+whenSeen('s8', initSeam);
+
+/* ================= §9: the cover, live ================================================
+   The real streamer and the real job runner (createJobRunner, so fastChunk), both on
+   the main thread, at most `rate` jobs a frame and 14 ms. keepRecords stays off, as
+   in the viewer: only the counts matter here. */
+const CV = { s: null, run: null, rate: 4, splits: true, fly: false, jobs: 0, batchMs: 0, map: null, dir: 1, eyeDirty: true, last: 0 };
+function cvReset(){
+  CV.s = createStreamer({ detail: CUT.K, maxChunks: CUT.cap, minLod: CUT.minLod, splitsResident: CV.splits });
+  CV.s.setWorld(DW.world);
+  CV.run = createJobRunner(worldSnapshot(DW.store, DW.root, DW.D, { counts: DW.counts }));
+  CV.jobs = 0; CV.eyeDirty = true;
+}
+function initCover(){
+  CV.map = makeSliceMap($('cvCover'), {
+    paint(g, G){
+      const fr = CV.s.frame, sel = CV.s.sel;
+      if (!sel) return;
+      const col = { exact: '#1d9db4', coarser: '#b58512', finer: '#8f6fe0' };
+      for (const d of fr.draw){
+        if (!G.inSlice(d)) continue;
+        const [x, y, w, h] = G.rect(d), st = sel.leafKeys.has(d.key) ? 'exact' : sel.nodes.has(d.key) ? 'coarser' : 'finer';
+        g.fillStyle = col[st]; g.globalAlpha = 0.8; g.fillRect(x, y, w, h); g.globalAlpha = 1;
+        if (w > 4){ g.strokeStyle = 'rgba(5,5,8,.8)'; g.lineWidth = 1; g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1); }
+      }
+      for (const c of fr.holes){
+        if (!G.inSlice(c)) continue;
+        const [x, y, w, h] = G.rect(c);
+        g.fillStyle = '#e8505c'; g.globalAlpha = 0.85; g.fillRect(x, y, w, h); g.globalAlpha = 1;
+      }
+      g.strokeStyle = '#fff'; g.lineWidth = 2.5; g.beginPath();
+      for (const d of fr.draw){
+        if (!d.open || !G.inSlice(d)) continue;
+        for (let f = 0; f < 6; f++){
+          if (!(d.open >> f & 1)) continue;
+          const a = f >> 1, hi = (f & 1) === 0, lo = d.lo;
+          if (a === G.u){ const x = G.X(lo[a] + (hi ? d.size : 0)); g.moveTo(x, G.Y(lo[G.v])); g.lineTo(x, G.Y(lo[G.v] + d.size)); }
+          else if (a === G.v){ const y = G.Y(lo[a] + (hi ? d.size : 0)); g.moveTo(G.X(lo[G.u]), y); g.lineTo(G.X(lo[G.u] + d.size), y); }
+        }
+      }
+      g.stroke();
+    },
+    tipFor(c){
+      const sel = CV.s.sel, e = CV.s.entry(c.key), FN = ['+X', '−X', '+Y', '−Y', '+Z', '−Z'];
+      const st = sel.leafKeys.has(c.key) ? 'drawn as wanted' : sel.nodes.has(c.key) ? 'coarser: split in the cut, standing in for children not all in' : 'finer: the leaf above it isn\'t resident yet';
+      const open = c.open ? FN.filter((_, f) => c.open >> f & 1).join(' ') : 'none';
+      return `<b>lod ${c.lod}</b> · ${c.key}<br>${st}<br>open sides: ${open}${e ? `<br>${fmt(e.recordCount ?? 0)} cubes · ${kb(e.bytes)}` : ''}`;
+    },
+  });
+  CV.map.items = () => CV.s ? [...CV.s.frame.draw, ...CV.s.frame.holes] : [];
+  chipRow($('cvRate'), [[0, 'paused'], [1, '1'], [4, '4'], [16, '16'], [1e9, 'as many as fit']], k => { CV.rate = k; }, CV.rate);
+  $('cvFly').onclick = () => { CV.fly = !CV.fly; $('cvFly').classList.toggle('on', CV.fly); };
+  $('cvJump').onclick = () => {
+    // Somewhere new but near content: a random column, then down it until something is close.
+    // A jump into open sky lands on chunks already resident as split ones, and shows nothing.
+    const { u, v } = axesOf(CUT.plane), side = DW.side;
+    DW.eye[u] = side * (0.05 + 0.9 * Math.random()); DW.eye[v] = side * 0.97;
+    while (DW.eye[v] > 0 && clearance(DW.world, DW.eye, 256).d > side / 96) DW.eye[v] -= side / 192;
+    DW.eye[v] += side / 192;
+    recut(); deepChanged('eye');
+  };
+  toggle($('cvSplits'), CV.splits, on => { CV.splits = on; CV.s.setOptions({ splitsResident: on }); CV.eyeDirty = true; });
+  $('cvFlush').onclick = cvReset;
+  DW.listeners.push(what => {
+    if (what === 'world') cvReset();
+    else if (what === 'cut'){ CV.s.setOptions({ detail: CUT.K, maxChunks: CUT.cap, minLod: CUT.minLod }); CV.eyeDirty = true; }
+    else if (what === 'eye') CV.eyeDirty = true;
+  });
+  cvReset();
+  ticks.push(cvTick);
+}
+function cvTick(){
+  if (!CV.s || !seen.has('s9')) { CV.last = 0; return; }
+  const now = performance.now(), dt = CV.last ? Math.min(0.1, (now - CV.last) / 1000) : 0;
+  CV.last = now;
+  if (CV.fly){
+    const { u } = axesOf(CUT.plane);
+    DW.eye[u] += CV.dir * DW.side * 0.05 * dt;
+    if (DW.eye[u] > DW.side * 0.95) CV.dir = -1;
+    if (DW.eye[u] < DW.side * 0.05) CV.dir = 1;
+    recut(); deepChanged('eye');
+  }
+  if (CV.eyeDirty){ CV.s.update(DW.eye); CV.eyeDirty = false; }
+  const t0 = performance.now();
+  let n = 0;
+  while (n < CV.rate && performance.now() - t0 < 14){
+    const job = CV.s.nextJob();
+    if (!job) break;
+    CV.s.complete(job, CV.run(job));
+    n++;
+  }
+  if (n){ CV.jobs += n; CV.batchMs = performance.now() - t0; }
+  CV.s.service();
+  CV.map.draw();
+  cvRead();
+}
+function cvRead(){
+  const fr = CV.s.frame, sel = CV.s.sel;
+  if (!sel) return;
+  let exact = 0, coarser = 0, finer = 0;
+  for (const d of fr.draw) sel.leafKeys.has(d.key) ? exact++ : sel.nodes.has(d.key) ? coarser++ : finer++;
+  $('rdCover').innerHTML = `<span>drawn <b>${fr.draw.length}</b></span><span>as wanted <b>${exact}</b></span><span>coarser <b>${coarser}</b></span><span>finer <b>${finer}</b></span>` +
+    `<span>holes <b style="${fr.holes.length ? 'color:#ff9ca5' : ''}">${fr.holes.length}</b></span><span>worst fallback <b>${fr.maxUp} lod${fr.maxUp === 1 ? '' : 's'} up</b></span>` +
+    `<span>resident <b>${CV.s.S.cache.size}</b></span><span>queued <b>${CV.s.S.queue.length}</b></span><span>jobs run <b>${fmt(CV.jobs)}</b></span><span>last batch <b>${CV.batchMs.toFixed(1)} ms</b></span>`;
+  $('vdCover').textContent = fr.holes.length
+    ? `${fr.holes.length} leaves are holes: nothing resident covers them. With split chunks resident that only happens before the first jobs land; turn them off and it's common.`
+    : fr.up || fr.down
+      ? `${fr.up} leaves are under a coarser chunk standing in, ${fr.down} under finer children waiting to merge. The picture changes only when a replacement is whole.`
+      : `Converged: every leaf of the cut is drawn as wanted (${fr.draw.length} chunks). Pause the jobs and drag the eye.`;
+}
+whenSeen('s9', initCover);
+
+/* ================= §10: colour ========================================================
+   One slice (z = const) of a 256³ shape at a coarse lod. Every word is cellAttr's:
+   at the chosen meanDepth, and at meanDepth = lod, which samples every voxel and is
+   the exact mean. The third figure, rounded at every lod, is this page's (q6Up): the
+   children's 6-bit words averaged and rounded again, level by level, which is what
+   decision 6 avoids. */
+const CO = { world: 'terrain', lod: 3, depth: 1, z: null, data: null, hover: null, token: 0 };
+const steps = (a, b) => { const x = attrRGB(a), y = attrRGB(b); return Math.max(Math.abs(x[0] - y[0]), Math.abs(x[1] - y[1]), Math.abs(x[2] - y[2])); };
+function q6Up(w, id, level, x, y, z){
+  if (level === 0){ const c = w.colour(x + 0.5, y + 0.5, z + 0.5); return [to6(c & 255), to6(c >> 8 & 255), to6(c >> 16 & 255), 1]; }
+  let r = 0, g = 0, b = 0, n = 0;
+  const h = 2 ** (level - 1);
+  for (let o = 0; o < 8; o++){
+    const c = w.store.child(id, o);
+    if (c === EMPTY) continue;
+    const [cr, cg, cb, cn] = q6Up(w, c, level - 1, x + (o & 1) * h, y + (o >> 1 & 1) * h, z + (o >> 2) * h);
+    r += cn * cr; g += cn * cg; b += cn * cb; n += cn;
+  }
+  return [Math.round(r / n), Math.round(g / n), Math.round(b / n), n];
+}
+// The slice with the most partly-full cells, where colours mix: a walk that skips full and empty nodes.
+function busiestZ(w, lod){
+  const nc = R8 >> lod, hist = new Uint32Array(nc), full = 8 ** lod;
+  const rec = (id, k, x, y, z) => {
+    if (id === EMPTY) return;
+    if (k === lod){ if (w.counts.of(id) < full) hist[z]++; return; }
+    if (isFull(w.store, w.counts, id, k)) return;
+    const h = 2 ** (k - 1 - lod);
+    for (let o = 0; o < 8; o++) rec(w.store.child(id, o), k - 1, x + (o & 1) * h, y + (o >> 1 & 1) * h, z + (o >> 2) * h);
+  };
+  rec(w.root, D8, 0, 0, 0);
+  let best = nc >> 1;
+  for (let z = 0; z < nc; z++) if (hist[z] > hist[best]) best = z;
+  return best;
+}
+function initColour(){
+  chipRow($('coWorld'), [['terrain', 'terrain'], ['sphere', 'sphere'], ['gyroid', 'gyroid'], ['blob', 'blob'], ['shell', 'shell']], k => { CO.world = k; CO.z = null; coRun(); }, CO.world);
+  $('coLod').oninput = () => { CO.lod = +$('coLod').value; $('coLodV').textContent = CO.lod; CO.z = null; coRun(); };
+  $('coDepth').oninput = () => { CO.depth = +$('coDepth').value; coRun(); };
+  $('coLayer').oninput = () => { CO.z = +$('coLayer').value; coRun(); };
+  for (const id of ['cvCoA', 'cvCoB', 'cvCoC']){
+    const cv = $(id);
+    cv.addEventListener('pointermove', ev => {
+      const D = CO.data; if (!D || !D.geo) return;
+      const r = cv.getBoundingClientRect(), x = Math.floor((ev.clientX - r.left - D.geo.ox) / D.geo.cs), yy = Math.floor((ev.clientY - r.top) / D.geo.cs), y = D.nc - 1 - yy;
+      const key = x >= 0 && y >= 0 && x < D.nc && y < D.nc && D.has[x + D.nc * y] ? x + ',' + y : null;
+      if (key !== CO.hover){ CO.hover = key; coDraw(); coCell(); }
+    });
+    cv.addEventListener('pointerleave', () => { CO.hover = null; coDraw(); coCell(); });
+  }
+  addEventListener('resize', coDraw);
+  coRun();
+}
+async function coRun(){
+  const token = ++CO.token;
+  $('vdCo').textContent = 'computing…';
+  const w = await later(() => labWorld(CO.world));
+  if (token !== CO.token) return;
+  const lod = CO.lod, nc = R8 >> lod, cs = 2 ** lod;
+  CO.depth = Math.min(CO.depth, lod);
+  $('coDepth').max = lod; $('coDepth').value = CO.depth; $('coDepthV').textContent = CO.depth + (CO.depth === lod ? ' (exact)' : '');
+  $('coH1').textContent = `meanDepth ${CO.depth}${CO.depth === 1 ? ' (the default)' : CO.depth === 0 ? ' (a centre sample)' : ''}`;
+  if (CO.z == null) CO.z = await later(() => busiestZ(w, lod));
+  CO.z = Math.min(CO.z, nc - 1);
+  $('coLayer').max = nc - 1; $('coLayer').value = CO.z; $('coLayerV').textContent = CO.z;
+  const D = await later(() => {
+    const A = new Uint32Array(nc * nc), B = new Uint32Array(nc * nc), Q = new Uint32Array(nc * nc), ids = new Uint32Array(nc * nc), has = new Uint8Array(nc * nc), z = CO.z;
+    const t0 = performance.now();
+    let tA = 0;
+    for (let y = 0; y < nc; y++) for (let x = 0; x < nc; x++){
+      const id = nodeAt(w.store, w.root, D8, lod, x, y, z);
+      if (id === EMPTY) continue;
+      const i = x + nc * y, t1 = performance.now();
+      A[i] = cellAttr(w.store, w.counts, w.colour, id, lod, CO.depth, x * cs, y * cs, z * cs);
+      tA += performance.now() - t1;
+      B[i] = cellAttr(w.store, w.counts, w.colour, id, lod, lod, x * cs, y * cs, z * cs);
+      const [r, g, b] = q6Up(w, id, lod, x * cs, y * cs, z * cs);
+      Q[i] = packAttr(r, g, b); ids[i] = id; has[i] = 1;
+    }
+    return { w, lod, nc, cs, z, A, B, Q, ids, has, ms: performance.now() - t0, tA };
+  });
+  if (token !== CO.token) return;
+  CO.data = D;
+  coDraw(); coCell();
+  let n = 0, inA = 0, eqA = 0, eqQ = 0, maxA = 0, maxQ = 0;
+  for (let i = 0; i < D.has.length; i++){
+    if (!D.has[i]) continue;
+    n++;
+    const a = steps(D.A[i], D.B[i]), q = steps(D.Q[i], D.B[i]);
+    if (a <= 1) inA++; if (!a) eqA++; if (!q) eqQ++;
+    maxA = Math.max(maxA, a); maxQ = Math.max(maxQ, q);
+  }
+  const pc = v => n ? (100 * v / n).toFixed(1) + '%' : '–';
+  $('rdCo').innerHTML = `<span>cells in the slice <b>${fmt(n)}</b></span><span>depth ${CO.depth}: exact <b>${pc(eqA)}</b>, within a step <b>${pc(inA)}</b>, worst <b>${maxA}</b></span>` +
+    `<span>cellAttr at depth ${CO.depth} <b>${(D.tA / Math.max(1, n) * 1000).toFixed(1)} µs</b> a cell</span><span>rounded at every lod: exact <b>${pc(eqQ)}</b>, worst <b>${maxQ}</b></span>`;
+  $('vdCo').textContent = CO.depth === lod
+    ? `meanDepth ${lod} samples every one of a cell's ${fmt(8 ** lod)} voxels, so it is the exact mean and the left two panels agree by construction. ` +
+      `Rounding to 6 bits at every level reads the same voxels, yet only ${pc(eqQ)} of its words equal the exact mean (worst ${maxQ} step${maxQ === 1 ? '' : 's'}): summing in floats and rounding once is what makes the word independent of the lod it's built from.`
+    : `At meanDepth ${CO.depth}, ${pc(inA)} of this slice's words are within one 6-bit step of the exact mean (${pc(eqA)} exactly equal), worst ${maxA}, from ${fmt(8 ** CO.depth)} samples a cell instead of up to ${fmt(8 ** lod)}. ` +
+      `For comparison, rounding at every level reads every voxel and still lands exactly on only ${pc(eqQ)} (worst ${maxQ}): the drift is small, but it's why the sum stays in floats until the end.`;
+}
+function coDraw(){
+  const D = CO.data;
+  for (const [id, which] of [['cvCoA', 'A'], ['cvCoB', 'B'], ['cvCoC', 'C']]){
+    const { g, w, h } = fit($(id));
+    if (!D) continue;
+    const cs = Math.min(w, h - 18) / D.nc, ox = (w - cs * D.nc) / 2;
+    D.geo = { cs, ox };
+    g.fillStyle = '#0d1019'; g.fillRect(ox, 0, cs * D.nc, cs * D.nc);
+    const heat = s => s === 0 ? '#1f3a2a' : s === 1 ? '#2f7a4a' : s <= 3 ? '#c8a030' : '#e8505c';
+    for (let y = 0; y < D.nc; y++) for (let x = 0; x < D.nc; x++){
+      const i = x + D.nc * y;
+      if (!D.has[i]) continue;
+      g.fillStyle = which === 'A' ? rgbCss(D.A[i]) : which === 'B' ? rgbCss(D.B[i]) : heat(steps(D.A[i], D.B[i]));
+      g.fillRect(ox + x * cs, (D.nc - 1 - y) * cs, Math.max(1, cs - (cs > 5 ? 0.5 : 0)), Math.max(1, cs - (cs > 5 ? 0.5 : 0)));
+    }
+    if (CO.hover){
+      const [x, y] = CO.hover.split(',').map(Number);
+      g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(ox + x * cs - 1, (D.nc - 1 - y) * cs - 1, cs + 2, cs + 2);
+    }
+    if (which === 'C'){ g.font = '9.5px ui-monospace, monospace'; [['0', '#1f3a2a'], ['1', '#2f7a4a'], ['2–3', '#c8a030'], ['4+', '#e8505c']].forEach(([t, c], k) => { g.fillStyle = c; g.fillRect(ox + 4 + 40 * k, h - 14, 10, 10); g.fillStyle = '#c3c9d6'; g.fillText(t, ox + 17 + 40 * k, h - 5); }); }
+  }
+}
+function coCell(){
+  const D = CO.data, host = $('coCell');
+  if (!D || !CO.hover){ host.innerHTML = 'Hover over a cell to see what its mean is made of.'; return; }
+  const [x, y] = CO.hover.split(',').map(Number), i = x + D.nc * y, id = D.ids[i], { w, lod, cs, z } = D, h = cs / 2;
+  const kids = [];
+  for (let o = 0; o < 8; o++){
+    const c = w.store.child(id, o);
+    if (c === EMPTY){ kids.push(`<div class="sw"><i style="background:none;border-style:dashed"></i>empty</div>`); continue; }
+    const cx = x * cs + (o & 1) * h, cy = y * cs + (o >> 1 & 1) * h, cz = z * cs + (o >> 2) * h, n = lod > 1 ? w.counts.of(c) : 1;
+    const word = cellAttr(w.store, w.counts, w.colour, c, lod - 1, lod - 1, cx, cy, cz);
+    kids.push(`<div class="sw"><i style="background:${rgbCss(word)}"></i>${fmt(n)}</div>`);
+  }
+  const centre = cellAttr(w.store, w.counts, w.colour, id, lod, 0, x * cs, y * cs, z * cs);
+  host.innerHTML = `cell (${x}, ${y}, ${z}) at lod ${lod}: <b>${fmt(w.counts.of(id))}</b> of ${fmt(8 ** lod)} voxels. Children, each its exact mean, with its voxel count:` +
+    `<div class="swatches">${kids.join('')}</div><div class="swatches" style="margin-top:10px">` +
+    `<div class="sw"><i style="background:${rgbCss(centre)}"></i>centre</div><div class="sw"><i style="background:${rgbCss(D.A[i])}"></i>depth ${CO.depth}</div>` +
+    `<div class="sw"><i style="background:${rgbCss(D.B[i])}"></i>exact</div><div class="sw"><i style="background:${rgbCss(D.Q[i])}"></i>rounded</div></div>` +
+    `<div style="margin-top:6px">off by ${steps(centre, D.B[i])} / ${steps(D.A[i], D.B[i])} / 0 / ${steps(D.Q[i], D.B[i])} steps</div>`;
+}
+whenSeen('s10', initColour);
+
+// For the console and for checking the page: every section's state.
+window.__lod = { PY, CUT, DW, L2, AD, R3, TIE, SM, CV, CO, labWorld, seen };
+
+
+
+
+</script>
+</body>
+</html>
