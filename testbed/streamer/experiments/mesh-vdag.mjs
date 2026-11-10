@@ -2,7 +2,7 @@
    §3, with an asset in place of the sketch's stand-ins. Not the engine.
 
      node experiments/mesh-vdag.mjs <asset.glb> [--D=8,10] [--mode=conservative|centres] [--out=dir] [--name=…]
-                                    [--hollow] [--bake=off] [--bits=6|8]
+                                    [--hollow] [--bake=off] [--bits=6|8] [--PNG=0|1]
 
    D = 8 and 10 by default. D = 12 is the hard test, but it takes minutes an
    asset (10 for the knight, against well under one at D ≤ 10) and up to
@@ -13,7 +13,8 @@
    −z, −x and −y, each coloured from the asset's base-colour texture by the
    nearest triangle, which is what a baked word holds. <out> defaults to the
    asset's folder (the folder above it if the .glb sits in one called
-   source/).
+   source/). The previews are written only with --PNG=1; --PNG=0, the
+   default, skips them (the table's "previews s" column reads "off").
 
    The file's colour is baked (glb-colour-plan step 4): the world's colour is
    { kind: 'baked', skin, words }, and vdag-core writes the skin and the
@@ -63,7 +64,12 @@
    be touched, so there is no bake (--bake=off skips it anywhere).
    --hollow writes the skin as the world's shape: the inside is dropped, and
    the words' DAG is the shape (glb-colour-plan §3, decision 5). Seen from
-   outside it's the same voxels, so the previews don't change.
+   outside it's the same voxels, so the previews don't change. But coarse
+   lods aren't: a hollow body is a one-voxel sheet everywhere, and the
+   adaptive rule opens see-through holes in sheets. On the barbarian at
+   D = 10 that's 14.5% of the opaque columns at lod 3, against 7.4% built
+   solid, to save 12% of the file. So build solid (docs/lodacne.md,
+   decided 2026-11-09).
 
    The pieces (the reader, the analysis, the bake, the previews) live in
    mesh-asset.mjs, shared with label-mesh.mjs. */
@@ -83,6 +89,8 @@ if (!file){ console.error('usage: node experiments/mesh-vdag.mjs <asset.glb> [--
 const DEPTHS = opt('D', '8,10').split(',').map(Number), MODE = opt('mode', 'conservative');
 const HOLLOW = args.includes('--hollow'), BAKE = MODE === 'conservative' && opt('bake', 'on') !== 'off', BITS = +opt('bits', '6');
 if (BITS !== 6 && BITS !== 8){ console.error('--bits is 6 or 8'); process.exit(1); }
+const PNG = opt('PNG', '0');
+if (PNG !== '0' && PNG !== '1'){ console.error('--PNG is 0 (no previews) or 1 (front, side and top previews)'); process.exit(1); }
 if (HOLLOW && !BAKE){ console.error('--hollow writes the skin, which needs the bake (conservative mode, no --bake=off)'); process.exit(1); }
 const dir = path.dirname(path.resolve(file)), OUT = path.resolve(opt('out', path.basename(dir) === 'source' ? path.dirname(dir) : dir));
 // A generator's hash or UUID for a file name (Tripo's) says nothing: the
@@ -213,10 +221,13 @@ for (const D of DEPTHS){
       e.bits = bitsCost(st, b.root, D, f8, f6, [0, 1, 2, 3, 4]);
     }
   }
-  const bake = baker(G, M, sample), store = b.store;
-  for (const v of Object.keys(VIEWS)) fs.writeFileSync(path.join(OUT, `${SLUG}-d${D}-${v}.png`), preview(store, world, D, bake, v));
+  // The previews (--PNG=1): baker's colour is used only here, so it isn't built without them.
+  if (PNG === '1'){
+    const bake = baker(G, M, sample), store = b.store;
+    for (const v of Object.keys(VIEWS)) fs.writeFileSync(path.join(OUT, `${SLUG}-d${D}-${v}.png`), preview(store, world, D, bake, v));
+  }
   const t3 = performance.now();
-  say(`| ${D} | ${side} | ${fmt(b.ms / 1000, 1)} | ${fmt(keys.length / 9)} | ${fmt(voxels)} | ${fmt(bytes.length / 1024, 0)} KB | ${fmt((t2 - t1) / 1000, 1)} | ${same ? 'same' : '**differs**'} | ${fmt((t3 - t2) / 1000, 1)} |`);
+  say(`| ${D} | ${side} | ${fmt(b.ms / 1000, 1)} | ${fmt(keys.length / 9)} | ${fmt(voxels)} | ${fmt(bytes.length / 1024, 0)} KB | ${fmt((t2 - t1) / 1000, 1)} | ${same ? 'same' : '**differs**'} | ${PNG === '1' ? fmt((t3 - t2) / 1000, 1) : 'off'} |`);
 }
 if (DEPTHS.includes(8)) say(`\nD = 8 equals the dense oracle voxel for voxel (${MODE}).`);
 if (BAKED.length){

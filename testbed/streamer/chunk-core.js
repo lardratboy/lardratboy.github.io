@@ -142,6 +142,13 @@ let grid = null;
      adaptive  opacity with the depth measured per brick, not assumed (see
                keepCount): m = 1 for a solid, 2^l for independent noise.
 
+     shadow    adaptive, plus whatever keeps the brick's shadow (addShadow):
+               no column of the brick, along x, y or z, that holds an
+               occupied cell is left with no kept cell. adaptive alone
+               drops cells from one-voxel content, which has nothing
+               behind them, and at several pixels a cell that reads as a
+               see-through hole (docs/lodacne.md).
+
    The brick is the pose brick (a node at level lod + 3, Q16). It nests
    inside the chunk, so the apron walk sees exactly what the neighbouring
    chunk draws, and a brick's coarse version depends only on its node.
@@ -149,8 +156,8 @@ let grid = null;
    TIE_RANK, a fixed shuffle of the 512 Morton indices inside a brick.
    Ranking by Morton index itself would always drop the brick's high
    corner first, which leaves regular holes. */
-export const LOD_RULES = ['any', 'majority', 'volume', 'opacity', 'adaptive'];
-export const PER_BRICK = new Set(['volume', 'opacity', 'adaptive']);
+export const LOD_RULES = ['any', 'majority', 'volume', 'opacity', 'adaptive', 'shadow'];
+export const PER_BRICK = new Set(['volume', 'opacity', 'adaptive', 'shadow']);
 export const TIE_RANK = (() => {
   const h = i => { let x = Math.imul(i + 0x9e37, 0x85ebca6b); x ^= x >>> 13; x = Math.imul(x, 0xc2b2ae35); return (x ^ x >>> 16) >>> 0; };
   const order = Array.from({ length: 512 }, (_, i) => i).sort((a, b) => h(a) - h(b) || a - b);
@@ -186,10 +193,62 @@ export function adaptiveDepth(C, n, lod, occupied){
 }
 export function keepCount(rule, C, n, lod, occupied, depth = 2 ** lod){
   const v = 8 ** lod;
-  if (rule === 'adaptive') depth = adaptiveDepth(C, n, lod, occupied);
+  if (rule === 'adaptive' || rule === 'shadow') depth = adaptiveDepth(C, n, lod, occupied);
   const k = rule === 'volume' ? Math.round(C / v)
           : Math.round(n * (1 - (1 - C / (n * v)) ** depth));
   return Math.min(k, occupied);
+}
+
+/* The shadow rule's second pass (docs/lodacne.md §6 A). adaptive has kept
+   its k fullest cells (keep[i] = 1); now the best cell of every column of
+   the brick, along x, y and z, is kept too: the most voxels, ties to the
+   lower TIE_RANK, the sort's own order.
+
+   The rule as stated is "the best cell of each column in which adaptive
+   keeps nothing". The two are the same: adaptive keeps a prefix of that
+   very order, and a column's best cell comes before the rest of its
+   column in it, so a column with any kept cell has its best one kept.
+   (The mutation run found it: "refill every column" survived, being the
+   rule itself.) It also makes the three axes independent, so order
+   doesn't matter. The test's oracle keeps the stated form.
+
+   What it buys: the brick's projection along each axis is the occupied
+   cells' projection, so a column through the world keeps a cell wherever
+   any brick on it had one, and no axis-aligned hole opens. A sheet keeps
+   every cell, since each is its own column along the normal. A closed
+   solid gets a little back too, the bumps adaptive eroded: the knight at
+   D = 10 keeps 1–7% more cells than under adaptive at lods 2–4, against
+   51–210% more for the hollow barbarian (docs/lodacne-results.md). The
+   best cell is the fullest, not the front one, so the surface can still
+   sit a cell or two deeper than any's (dents, 1.4–8.3% of columns there,
+   against adaptive's 3–71%).
+   Oblique views aren't promised: a tilted sheet can put two cells in one
+   column. A function of the brick's cells and counts only, so of its
+   node, as every per-brick rule must be.
+
+   `local` is each cell's Morton index inside the brick, `count` its
+   voxels. A brick has at most 8 cells a side, so a column is one of 64. */
+const S_BEST = new Int16Array(3 * 64);
+function shadowColumn(c, i, local, count){
+  const b = S_BEST[c];
+  if (b < 0 || count[i] > count[b] || (count[i] === count[b] && TIE_RANK[local[i]] < TIE_RANK[local[b]])) S_BEST[c] = i;
+}
+export function addShadow(m, local, count, keep){
+  S_BEST.fill(-1);
+  for (let i = 0; i < m; i++){
+    // The local Morton index's bits: x at 0, 3, 6; y at 1, 4, 7; z at 2, 5, 8.
+    const l = local[i];
+    const x = (l & 1) | (l >> 2 & 2) | (l >> 4 & 4), y = (l >> 1 & 1) | (l >> 3 & 2) | (l >> 5 & 4), z = (l >> 2 & 1) | (l >> 4 & 2) | (l >> 6 & 4);
+    shadowColumn(y | z << 3, i, local, count);          // along x
+    shadowColumn(64 + (x | z << 3), i, local, count);   // along y
+    shadowColumn(128 + (x | y << 3), i, local, count);  // along z
+  }
+  let added = 0;
+  for (let c = 0; c < 3 * 64; c++){
+    const b = S_BEST[c];
+    if (b >= 0 && !keep[b]){ keep[b] = 1; added++; }
+  }
+  return added;
 }
 
 /* Depth-first, octant order, so cells come out in Morton order. `lo`/`hi`
@@ -244,6 +303,7 @@ function brick(ctx, id, k, X0, Y0, Z0, index, pose){
     for (let i = 0; i < m; i++){ B_ORDER[i] = i; B_KEEP[i] = 0; }
     const ord = B_ORDER.subarray(0, m).sort((a, b) => B_COUNT[b] - B_COUNT[a] || TIE_RANK[B_LOCAL[a]] - TIE_RANK[B_LOCAL[b]]);
     for (let i = 0; i < keep; i++) B_KEEP[ord[i]] = 1;
+    if (ctx.rule === 'shadow') addShadow(m, B_LOCAL, B_COUNT, B_KEEP);
   } else B_KEEP.fill(1, 0, m);
   for (let i = 0; i < m; i++){
     if (!B_KEEP[i]) continue;
@@ -329,7 +389,7 @@ const WHOLE_LO = [0, 0, 0], WHOLE_HI = [63, 63, 63];
                      cells are hidden exactly as in the whole world;
                      'closed': outside the chunk counts as empty, so every
                      border face is emitted (the cheap option of §8.2)
-            lodRule  'any' (default), 'majority', 'volume', 'opacity' or
+            lodRule  'any' (default), 'majority', 'volume', 'opacity', 'shadow' or
                      'adaptive':
                      which coarse cells are drawn (see LOD_RULES above)
             counts   createCounts(store) result; needed by every rule but

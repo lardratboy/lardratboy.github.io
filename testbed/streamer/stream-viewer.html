@@ -138,11 +138,11 @@
   </div>
   <label>detail <input id="detail" type="range" min="1" max="4" step="0.25"> <span id="detailV"></span></label>
   <label>max chunks <select id="max"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option></select></label>
-  <label>lod rule <select id="rule"><option value="adaptive">adaptive (lod ≥ 1)</option><option value="any">any</option></select></label>
+  <label>lod rule <select id="rule"><option value="shadow">shadow (lod ≥ 1)</option><option value="any">any</option><option value="adaptive">adaptive (lod ≥ 1)</option></select></label>
   <label>colour <select id="color"><option value="8">attribute (step 6)</option><option value="0">lod</option><option value="1">pose (8³ brick)</option>
     <option value="2">chunk</option><option value="3">gamut</option><option value="4">plain</option><option value="6">path (raster / ray)</option></select></label>
   <label>cache <select id="cache"><option value="256">256 MB</option><option value="64">64 MB</option><option value="16">16 MB</option><option value="0">tiny (1 byte)</option></select></label>
-  <label>path <select id="ray"><option value="density">by density (raster or ray per chunk)</option><option value="off">raster only</option>
+  <label>path <select id="ray"><option value="off">raster only</option><option value="density">by density (raster or ray per chunk)</option>
     <option value="0">ray only</option><option value="1">ray from lod 1</option><option value="2">ray from lod 2</option><option value="3">ray from lod 3</option>
     <option value="4">ray from lod 4</option><option value="5">ray from lod 5</option><option value="6">ray from lod 6</option>
     <option value="checker">checkerboard (self-test)</option></select></label>
@@ -169,7 +169,7 @@ pad: L stick move, R stick look, RT/LT up/down
 ?world=clay&amp;clay=D,lump,shape,ground   (lump 0: flat ground, or empty without ground)
 ?hud=1 opens with the panels   ?wire=1 with the wireframe
 ?quiet draws once converged   ?selftest runs streamSelftest()
-?ray=density|off|0..6   ?density=0.27,0.025   ?stencil=0   ?raymiss=discard   ?bench   raySelftest()
+?ray=off|density|0..6 (raster only by default)   ?rule=shadow|any|adaptive (shadow by default)   ?density=0.27,0.025   ?stencil=0   ?raymiss=discard   ?bench   raySelftest()
 ?occlusion=queries|depth (off by default)   occlusionSelftest()</div>
 </div>
 <div id="hud" hidden></div>
@@ -1073,21 +1073,38 @@ const state = {
   // (A link can't name a file: saveView writes what a shelf world was built from.)
   world: /^file:/.test(params.get('world') || '') ? 'row:142' : params.get('world') || 'row:142',
   depth: params.has('depth') ? +params.get('depth') : null,
-  detail: +(params.get('detail') || DEFAULTS.detail),
+  // Split a chunk while the eye is closer than `detail` chunk sides. 4 on
+  // this page since 2026-11-09 (the streamer's own default is 2): a coarse
+  // cell is drawn half as wide on screen, about 1–4 px instead of 2–7
+  // (docs/lodacne.md §4), and you saw no difference in speed.
+  detail: +(params.get('detail') || 4),
   max: +(params.get('max') || DEFAULTS.maxChunks),
-  rule: params.get('rule') || 'adaptive',
+  // The lod rule for coarse cells (lod 0 is always 'any'). 'shadow' by
+  // default since 2026-11-10: adaptive plus the best cell of every column of
+  // each brick along x, y and z, so no axis-aligned hole opens (chunk-core's
+  // addShadow, docs/lodacne.md §9). Side by side with 'any' on the barbarian
+  // it looked as good, and it draws 62–97% of any's cells on the assets.
+  // 'any' was the default for a day before it (?rule=any): 'adaptive' (Q6,
+  // coverage-findings) thins one-voxel content, and a coarse cell is drawn
+  // 2–7 px wide, so its dropped cells show as see-through holes
+  // (docs/lodacne.md: 14.5% of the opaque columns at lod 3 on a hollow
+  // asset). ?rule=adaptive brings that back, and older benches ran under
+  // it, so add it to compare with them. Anything else reads as the default.
+  rule: ['any', 'adaptive', 'shadow'].includes(params.get('rule')) ? params.get('rule') : 'shadow',
   color: +(params.get('color') ?? 8),
   cache: +(params.get('cache') ?? 256),
   seams: params.get('seams') !== '0',
   wire: params.get('wire') === '1',
-  // Which chunks are traced (pathOptions): 'density', the default, each
+  // Which chunks are traced (pathOptions): 'off', raster only (step 4), the
+  // default again since 2026-11-09, when it felt snappier than density on
+  // your machine (faster, and quicker to follow the mouse); 'density', each
   // chunk by its records per pixel on screen (stream-core §2b,
-  // docs/ray-depth-plan.md); 'off', raster only (step 4); a lod n, every
+  // docs/ray-depth-plan.md), the default from the ray fix until then; a lod n, every
   // chunk at lod ≥ n (step 5's split); 'checker', a checkerboard of kinds
   // for raySelftest, so raster and ray chunks meet everywhere. Step 5 left
   // raster only as the default, since one rayLod couldn't suit both the
   // sparse rows and the dense ones (ray-findings.md, the 2026-11-01 benches).
-  path: params.get('ray') || 'density',
+  path: params.get('ray') || 'off',
   // Records per footprint pixel above which a chunk is traced: for an
   // empty chunk, then for a full one, linear in occupancy between them
   // (stream-core §2b), fitted to your benches (docs/path-occupancy.md):
@@ -1161,7 +1178,7 @@ const streamer = createStreamer({ install, dispose, detail: state.detail, maxChu
   // for the latency numbers.
   publish: ({ gen }) => { const E = W?.edit; if (!E) return; E.gens.set(gen, E.serial); pool.tail(E.tailer()); },
   cacheBytes: cacheBytes(state.cache), cacheMax: state.cache ? DEFAULTS.cacheMax : 1,
-  lodRuleOf: lod => lod === 0 || state.rule === 'any' ? 'any' : 'adaptive', ...pathOptions(state.path),
+  lodRuleOf: lod => lod === 0 ? 'any' : state.rule, ...pathOptions(state.path),
   ...viewportOptions(Math.round(innerWidth * Math.min(devicePixelRatio || 1, 2)), Math.round(innerHeight * Math.min(devicePixelRatio || 1, 2))) });
 const pool = new StreamPool(streamer, { workerCount });
 pool.start();
@@ -3558,8 +3575,15 @@ function compareDistances(a, b){
    from lod 0, and a hybrid terrain (raster at lod 0, ray above), whose
    cover tree has raster leaves for the ray to skip. */
 window.raySelftest = async function raySelftest(opts = {}){
-  const t0 = performance.now(), savedAuto = auto, savedPath = state.path;
+  const t0 = performance.now(), savedAuto = auto, savedPath = state.path, savedDetail = state.detail;
   auto = false;
+  // At detail 2, the cut these cases were made for. At the page's 4
+  // (2026-11-09) the porous row traced from inside is 1,024 chunks at
+  // lod 0 against 400, and its words outgrow the 64 MB heap (179 pages
+  // without words under adaptive, 578 under any): the capacity limit the
+  // heap's comment above describes, not a wrong word. This probe checks
+  // that words are exact, so it keeps the heap from filling.
+  state.detail = opts.detail ?? 2; streamer.setOptions({ detail: state.detail });
   const report = { cases: [], glError: 0 };
   // Until the whole cut is resident, or 120 s: SwiftShader's workers share
   // the CPU with everything else, so frames are not a useful clock.
@@ -3631,6 +3655,7 @@ window.raySelftest = async function raySelftest(opts = {}){
   report.glError = gl.getError();
   report.ms = Math.round(performance.now() - t0);
   setPath(savedPath); auto = savedAuto;
+  state.detail = savedDetail; streamer.setOptions({ detail: state.detail });
   window.__raySelftest = report;
   return report;
 };

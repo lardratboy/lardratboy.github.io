@@ -48,7 +48,7 @@
    worker loads it as is.
    ===================================================================== */
 import { EMPTY, FIRST_NODE, isFull } from './dag-core.js';
-import { CHUNK_LEVELS, BRICK_LEVELS, LOD_RULES, PER_BRICK, TIE_RANK, chunkNode, keepCount,
+import { CHUNK_LEVELS, BRICK_LEVELS, LOD_RULES, PER_BRICK, TIE_RANK, chunkNode, keepCount, addShadow,
          boundaryBits, packRecord, cellAttr } from './chunk-core.js';
 
 /* A full node is filled and shelled when it is at least 2^SHELL_MIN cells on a
@@ -97,7 +97,7 @@ function fillBox(x0, y0, z0, x1, y1, z1){
 
 /* The brick listing that makes a mask: the reference's listCells and sort,
    kept to the letter, since a mask must pick exactly the cells brick() would. */
-const B_LOCAL = new Uint16Array(512), B_COUNT = new Float64Array(512), B_ORDER = new Uint16Array(512);
+const B_LOCAL = new Uint16Array(512), B_COUNT = new Float64Array(512), B_ORDER = new Uint16Array(512), B_KEEP = new Uint8Array(512);
 let bn = 0;
 function listLocals(store, counts, lod, id, j, local){
   if (id === EMPTY) return;
@@ -112,6 +112,14 @@ function makeMask(store, counts, rule, lod, id, k){
   for (let i = 0; i < m; i++) B_ORDER[i] = i;
   const ord = B_ORDER.subarray(0, m).sort((a, b) => B_COUNT[b] - B_COUNT[a] || TIE_RANK[B_LOCAL[a]] - TIE_RANK[B_LOCAL[b]]);
   const mask = new Uint32Array(16);
+  if (rule === 'shadow'){
+    // adaptive's k, then chunk-core's own second pass over the same listing.
+    B_KEEP.fill(0, 0, m);
+    for (let i = 0; i < keep; i++) B_KEEP[ord[i]] = 1;
+    addShadow(m, B_LOCAL, B_COUNT, B_KEEP);
+    for (let i = 0; i < m; i++) if (B_KEEP[i]){ const l = B_LOCAL[i]; mask[l >> 5] |= 1 << (l & 31); }
+    return mask;
+  }
   for (let i = 0; i < keep; i++){ const l = B_LOCAL[ord[i]]; mask[l >> 5] |= 1 << (l & 31); }
   return mask;
 }
