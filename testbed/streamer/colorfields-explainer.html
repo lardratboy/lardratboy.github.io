@@ -1,0 +1,2045 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Colour Fields — how a voxel gets its colour, top to bottom</title>
+<style>
+:root{
+  --ink:#050508;
+  --ink-2:#0a0a11;
+  --panel:rgba(10,10,18,.72);
+  --rule:rgba(120,150,190,.16);
+  --rule-hi:rgba(0,229,255,.32);
+  --dim:#5a627a;
+  --mid:#8e97ad;
+  --text:#c3c9d6;
+  --live:#00e5ff;
+  --warm:#ffc44f;
+  --mono: ui-monospace,'SF Mono','Cascadia Mono','Roboto Mono',Consolas,monospace;
+  --serif:'Iowan Old Style','Palatino Linotype',Palatino,Charter,Georgia,serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{animation:none!important;transition:none!important}}
+body{
+  background:var(--ink);color:var(--text);
+  font-family:var(--serif);font-size:17px;line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+  background-image:radial-gradient(ellipse 80% 50% at 50% -10%,rgba(0,229,255,.055),transparent 70%);
+  background-repeat:no-repeat;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 28px 140px}
+
+h1{font-family:var(--mono);font-weight:700;letter-spacing:.02em;line-height:1.1;
+   font-size:clamp(30px,5.2vw,58px);color:#e8f6ff}
+h2{font-family:var(--mono);font-size:15px;font-weight:700;letter-spacing:.18em;
+   text-transform:uppercase;color:var(--live)}
+h3{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.16em;
+   text-transform:uppercase;color:var(--dim);margin-bottom:9px}
+p{margin:0 0 15px;max-width:68ch}
+p.lede{font-size:19px;color:#aab3c6;max-width:62ch}
+em{color:#dfe6f2;font-style:italic}
+b,strong{color:#8fd8ff;font-weight:600}
+code{font-family:var(--mono);font-size:.85em;color:#9fe8ff;
+     background:rgba(0,229,255,.07);padding:1px 5px;border-radius:3px;
+     border:1px solid rgba(0,229,255,.12)}
+a{color:var(--live)}
+ul.plain{margin:0 0 15px 1.1em;max-width:70ch}
+ul.plain li{margin:0 0 7px}
+.aside{border-left:2px solid var(--rule-hi);padding-left:16px;color:var(--mid);
+       font-size:15.5px;margin:22px 0;max-width:70ch}
+.aside b{color:#b8e6f7}
+pre.code{font-family:var(--mono);font-size:12px;line-height:1.55;color:#9fb4c8;
+       background:rgba(0,0,0,.35);border:1px solid var(--rule);border-radius:6px;
+       padding:12px 14px;overflow-x:auto;margin:14px 0 18px;max-width:100%}
+pre.code .c{color:#5a6a80}
+pre.code .k{color:#9fe8ff}
+
+header{padding:96px 0 40px;border-bottom:1px solid var(--rule)}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.3em;text-transform:uppercase;
+         color:var(--dim);margin-bottom:22px}
+.formula{font-family:var(--mono);font-size:clamp(11px,1.6vw,14px);color:#9fe8ff;
+         margin-top:30px;padding:16px 18px;border:1px solid var(--rule-hi);
+         border-radius:6px;background:rgba(0,229,255,.04);overflow-x:auto;white-space:pre;line-height:1.7}
+.formula .d{color:var(--dim)}
+.formula .k{color:#e6faff}
+.hero{display:flex;flex-wrap:wrap;gap:12px 40px;margin-top:30px}
+.hero div{font-family:var(--mono)}
+.hero .n{font-size:30px;color:#e8f6ff;font-weight:700;letter-spacing:.01em}
+.hero .l{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
+
+nav{position:sticky;top:0;z-index:20;background:rgba(5,5,8,.9);
+    backdrop-filter:blur(14px);border-bottom:1px solid var(--rule)}
+nav ol{display:flex;gap:2px;list-style:none;overflow-x:auto;max-width:1180px;
+       margin:0 auto;padding:0 22px;scrollbar-width:none}
+nav ol::-webkit-scrollbar{display:none}
+nav a{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.13em;
+      text-transform:uppercase;color:var(--dim);text-decoration:none;
+      padding:13px 10px;white-space:nowrap;border-bottom:2px solid transparent}
+nav a:hover{color:var(--mid)}
+nav a.on{color:var(--live);border-bottom-color:var(--live)}
+nav a:focus-visible{outline:2px solid var(--live);outline-offset:-4px}
+
+section{padding:76px 0;border-bottom:1px solid var(--rule)}
+.shead{display:flex;align-items:baseline;gap:16px;margin-bottom:26px}
+.snum{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.1em;
+      border:1px solid var(--rule);border-radius:3px;padding:3px 8px;flex:none}
+
+.stage{background:var(--panel);border:1px solid var(--rule);border-radius:10px;
+       padding:20px;margin:26px 0}
+.ctrls{display:flex;flex-wrap:wrap;gap:18px 22px;align-items:flex-end;margin-bottom:16px}
+.cgroup{display:flex;flex-direction:column;gap:7px}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+button{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
+       background:rgba(0,229,255,.05);border:1px solid var(--rule);color:var(--mid);
+       padding:6px 11px;border-radius:4px;cursor:pointer;transition:.14s}
+button:hover{border-color:var(--rule-hi);color:#cfefff}
+button:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+button.on{background:rgba(0,229,255,.14);border-color:var(--live);color:#e6faff}
+button:disabled{opacity:.4;cursor:default}
+input[type=range]{-webkit-appearance:none;appearance:none;width:140px;height:3px;
+       background:#1a2030;border-radius:2px;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;
+       border-radius:50%;background:var(--live);cursor:pointer}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:var(--live)}
+input[type=range]:focus-visible{outline:2px solid var(--live);outline-offset:4px}
+input[type=color]{width:44px;height:26px;padding:0;border:1px solid var(--rule);border-radius:4px;background:none;cursor:pointer}
+label.lbl{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;
+       text-transform:uppercase;color:var(--dim)}
+.val{color:var(--live)}
+
+canvas{display:block;width:100%;background:var(--ink-2);
+       border:1px solid var(--rule);border-radius:6px}
+canvas.paint{cursor:crosshair;touch-action:none}
+
+.read{display:flex;flex-wrap:wrap;gap:2px 24px;margin-top:14px;
+      font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+.read span b{color:var(--live);font-weight:600}
+.verdict{font-family:var(--mono);font-size:12px;margin-top:14px;padding:11px 14px;
+      border-radius:5px;border:1px solid rgba(0,229,255,.3);
+      background:rgba(0,229,255,.06);color:#a8ecff;line-height:1.6}
+.verdict:empty{display:none}
+.verdict b{color:#e6faff}
+.verdict .bad{color:#ffb0b6}
+
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.twoL{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:18px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--mono);
+        font-size:10px;letter-spacing:.1em;color:var(--dim);margin:4px 0 10px}
+.swatch{display:inline-block;width:14px;height:8px;border-radius:2px;vertical-align:middle;margin-right:6px}
+
+table.dt{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px;margin-top:8px}
+table.dt th{text-align:left;font-weight:600;font-size:9.5px;letter-spacing:.14em;
+      text-transform:uppercase;color:var(--dim);padding:0 10px 9px 0;border-bottom:1px solid var(--rule)}
+table.dt td{padding:7px 10px 7px 0;border-bottom:1px solid rgba(120,150,190,.07);color:var(--mid);vertical-align:top}
+table.dt td.k{color:#9fe8ff;white-space:nowrap}
+table.dt td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+table.dt th.n{text-align:right}
+table.dt tr.hi td{color:#e6faff;background:rgba(0,229,255,.05)}
+table.dt td.good{color:#7fe0a8}
+table.dt td.bad{color:#ff9ca5}
+table.dt td code{font-size:.95em}
+.scroll{max-height:330px;overflow:auto}
+
+.path{font-family:var(--mono);font-size:11.5px;color:var(--mid);line-height:1.55}
+.path .step{padding:7px 0 7px 12px;border-left:2px solid var(--rule);margin-left:4px}
+.path .step b{color:#cfefff}
+.path .step .t{color:var(--warm)}
+.path .step.part{border-left-color:var(--live)}
+.path .hint{color:var(--dim)}
+
+.mono{font-family:var(--mono);font-size:11.5px;color:var(--mid);line-height:1.65}
+.mono b{color:#cfefff}
+.mono .t{color:var(--warm)}
+.mono .ok{color:#7fe0a8}
+.mono .no{color:#ff9ca5}
+.ref{font-family:var(--mono);font-size:.82em;color:#8fb7cc;border-bottom:1px dotted rgba(143,183,204,.45);cursor:copy;white-space:nowrap}
+.ref:hover{color:#e6faff}
+.chipnote{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:6px;max-width:none}
+select{font-family:var(--mono);font-size:11px;background:#0d1019;color:#cfefff;border:1px solid var(--rule);border-radius:4px;padding:5px 6px}
+
+/* A colour chip beside a number: the colour is always written out next to it. */
+.sw{display:inline-block;width:22px;height:13px;border-radius:2px;border:1px solid rgba(255,255,255,.14);vertical-align:-2px;margin:0 5px 0 2px}
+.sw.big{width:46px;height:26px;vertical-align:-8px}
+
+/* §1's road: three lanes, the thread a step runs on. */
+.road{display:grid;grid-template-columns:92px 1fr;gap:10px 14px;margin:26px 0;align-items:stretch}
+.road .lane{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);
+            display:flex;align-items:center;border-right:1px solid var(--rule);padding-right:10px}
+.road .cards{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch}
+.card{flex:1 1 170px;min-width:150px;background:var(--panel);border:1px solid var(--rule);border-radius:7px;padding:10px 12px;
+      font-family:var(--mono);font-size:11px;color:var(--mid);line-height:1.5;position:relative}
+.card b{display:block;color:#e6faff;font-size:11.5px;margin-bottom:2px}
+.card i{display:block;font-style:normal;color:var(--dim);font-size:10px;margin-top:4px}
+.card .to{position:absolute;right:-9px;top:50%;transform:translateY(-50%);color:var(--live);font-size:12px;z-index:1}
+.card.gpu{border-color:rgba(255,196,79,.3)}
+.card.wk{border-color:rgba(0,229,255,.3)}
+
+/* §3's bits: 32 boxes, most significant on the left, grouped by byte. */
+.bits{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0 6px}
+.byte{display:flex;flex-direction:column;gap:4px}
+.byte .cap{font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.byte .row{display:flex;gap:2px}
+.bit{width:22px;height:30px;border-radius:3px;border:1px solid var(--rule);font-family:var(--mono);font-size:12px;
+     display:flex;flex-direction:column;align-items:center;justify-content:center;color:#e6faff;line-height:1}
+.bit small{font-size:7.5px;color:var(--dim);margin-top:3px}
+.bit.rs{color:#4a5166;background:rgba(255,255,255,.02)}
+.bit.cr{background:rgba(232,80,92,.2);border-color:rgba(232,80,92,.45)}
+.bit.cg{background:rgba(92,200,120,.18);border-color:rgba(92,200,120,.45)}
+.bit.cb{background:rgba(79,156,255,.2);border-color:rgba(79,156,255,.5)}
+
+#tip{position:fixed;z-index:50;pointer-events:none;font-family:var(--mono);font-size:11px;
+     color:#e6faff;background:rgba(12,14,22,.96);border:1px solid var(--rule-hi);border-radius:5px;
+     padding:7px 9px;max-width:320px;line-height:1.5;display:none}
+
+footer{padding:60px 0 0;font-family:var(--mono);font-size:11px;color:var(--dim);line-height:1.9}
+footer a{color:var(--mid)}
+
+@media(max-width:860px){
+  .two,.twoL{grid-template-columns:1fr}
+  .wrap{padding:0 18px 100px}
+  body{font-size:16px}
+  .road{grid-template-columns:1fr}
+  .road .lane{border-right:0;border-bottom:1px solid var(--rule);padding:0 0 4px}
+  .bit{width:17px}
+}
+</style>
+</head>
+<body>
+
+<nav aria-label="Sections">
+  <ol>
+    <li><a href="#s1" data-nav="s1">1 Road</a></li>
+    <li><a href="#s2" data-nav="s2">2 Field</a></li>
+    <li><a href="#s3" data-nav="s3">3 Word</a></li>
+    <li><a href="#s4" data-nav="s4">4 Named</a></li>
+    <li><a href="#s5" data-nav="s5">5 Mean</a></li>
+    <li><a href="#s6" data-nav="s6">6 Baked</a></li>
+    <li><a href="#s7" data-nav="s7">7 Edits</a></li>
+    <li><a href="#s8" data-nav="s8">8 Scenes</a></li>
+    <li><a href="#s9" data-nav="s9">9 Threads</a></li>
+    <li><a href="#s10" data-nav="s10">10 GPU</a></li>
+    <li><a href="#s11" data-nav="s11">11 Files</a></li>
+    <li><a href="#s12" data-nav="s12">12 Cost</a></li>
+    <li><a href="#s13" data-nav="s13">13 Read</a></li>
+  </ol>
+</nav>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">colours.js &nbsp;·&nbsp; chunk-core.js &nbsp;·&nbsp; baked-core.js &nbsp;·&nbsp; attr-core.js &nbsp;·&nbsp; interactive companion</div>
+  <h1>Colour Fields</h1>
+  <p class="lede" style="margin-top:22px">The DAG holds shape and nothing else. A node's id says which voxels are there, and two places with the same voxels are
+  the same node, whatever colour they are. So colour lives <b>beside</b> the DAG, as a <b>field</b>: a function from a point to a colour, asked by the chunk job
+  once for every cube it's about to draw. This page follows a colour from the world's name for it to the pixel, one step a section, with the real code running.</p>
+
+  <div class="hero" aria-label="Headline numbers">
+    <div><div class="n">32</div><div class="l">bits a word, 18 of them colour</div></div>
+    <div><div class="n">1</div><div class="l">word per shown cube</div></div>
+    <div><div class="n">7 + 1</div><div class="l">named kinds, and baked</div></div>
+    <div><div class="n">≤ 8</div><div class="l">samples a coarse word</div></div>
+    <div><div class="n">≤ 126</div><div class="l">words read, a baked mean</div></div>
+    <div><div class="n">7 + 1</div><div class="l">ids and a revision: a stamp</div></div>
+  </div>
+
+  <div class="formula"><span class="d">name    </span><span class="k">descriptor    </span>{ kind, … } in the snapshot: data, never a function          <span class="d">§4, §9</span>
+<span class="d">field   </span><span class="k">colourOf      </span>(x, y, z, level) → r | g &lt;&lt; 8 | b &lt;&lt; 16                      <span class="d">§2</span>
+<span class="d">wrap    </span><span class="k">editedField   </span>the latest block over the point, else the field              <span class="d">§7</span>
+<span class="d">        </span><span class="k">sceneField    </span>the latest dropped world solid in the cell, else the field   <span class="d">§8</span>
+<span class="d">reduce  </span><span class="k">cellAttr      </span>lod 0: one sample · coarse: the count-weighted mean          <span class="d">§5</span>
+<span class="d">        </span><span class="k">field.mean    </span>baked: the exact mean of a rank range                        <span class="d">§6</span>
+<span class="d">pack    </span><span class="k">attrOf8       </span>8-bit floats → 6 bits a channel, rounded once                <span class="d">§3</span>
+<span class="d">carry   </span><span class="k">attrs         </span>a word per record · a run per brick on the ray path          <span class="d">§10</span>
+<span class="d">decode  </span><span class="k">GLSL_ATTR     </span>attrRGB(w) / 63, then light and fog                          <span class="d">§10</span></div>
+</header>
+
+<!-- ============================ 1 ============================ -->
+<section id="s1">
+  <div class="shead"><span class="snum">01</span><h2>The whole road</h2></div>
+
+  <p>Three things are easy to mix up, so here they are once, apart:</p>
+  <ul class="plain">
+    <li>A <b>descriptor</b> is a small object that <em>names</em> a colour: <code>{ kind: 'shape', name: 'terrain', D: 8 }</code>. It's what a world carries,
+      what crosses to a worker and what goes in a file. It's data, because a function can't be posted to a worker.</li>
+    <li>A <b>field</b> is the function a descriptor turns into: <code>colour(x, y, z, level)</code>, returning 8-bit RGB packed in one integer. Each side
+      (a worker, the main-thread fallback, Node) makes its own from the descriptor with <code>colourOf</code>.</li>
+    <li>A <b>word</b> is what the job writes for one drawn cube: 32 bits, 6 of them per channel. It's the only form of colour the GPU ever sees.</li>
+  </ul>
+  <p>The job is where a field becomes words. For each cube a chunk will draw, <code>cellAttr</code> asks the field and packs the answer. Everything before
+  that is about getting the right field to the job. Everything after is about carrying words to a pixel.</p>
+
+  <div class="road" aria-label="The road a colour takes, by thread">
+    <div class="lane">main thread</div>
+    <div class="cards">
+      <div class="card"><b>the world</b>store, root, D, and <code>W.colour</code>: a descriptor<i>stream-viewer.html, buildWorld</i><span class="to">▸</span></div>
+      <div class="card"><b>worldSnapshot</b>keys, counts, poses, <code>colour</code>: the descriptor rides along<i>stream-core.js §4</i><span class="to">▸</span></div>
+      <div class="card"><b>the pool posts it</b>structured clone, once a world, to every worker<i>stream-pool.js</i><span class="to">▾</span></div>
+    </div>
+    <div class="lane">worker</div>
+    <div class="cards">
+      <div class="card wk"><b>createJobRunner</b><code>colourOf(desc, { store, counts, D })</code> → the field<i>stream-core.js, chunk-worker.js</i><span class="to">▸</span></div>
+      <div class="card wk"><b>a tail arrives</b>an edit's ops or a scene's drops wrap the field<i>run.tail, editedField, sceneField</i><span class="to">▸</span></div>
+      <div class="card wk"><b>the job</b>for every shown cell: <code>cellAttr</code> → a word<i>fastChunk (job-core.js), held to expandChunk</i><span class="to">▸</span></div>
+      <div class="card wk"><b>the result</b><code>records</code> and <code>attrs</code>, same order, transferred back<i>4 + 4 bytes a cube</i><span class="to">▾</span></div>
+    </div>
+    <div class="lane">main, then GPU</div>
+    <div class="cards">
+      <div class="card gpu"><b>install</b>one buffer: records, then words. Or a ray page's runs, into the heap<i>stream-viewer.html, install</i><span class="to">▸</span></div>
+      <div class="card gpu"><b>vertex shader</b><code>aAttr</code>, one per instance, passed on <code>flat</code><i>rasterVS</i><span class="to">▸</span></div>
+      <div class="card gpu"><b>fragment shader</b><code>attrColour(w)</code> = 6-bit channels / 63, then <code>shadeOut</code><i>GLSL_ATTR, GLSL_SHADE</i></div>
+    </div>
+  </div>
+
+  <p>Pick a voxel below and the right-hand column walks it down that road with real values. Every number comes from the functions the viewer runs.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">World</label><div class="chips" id="jrWorld"></div></div>
+      <div class="cgroup">
+        <label class="lbl" for="jrZ">slice z = <span class="val" id="jrZV"></span></label>
+        <input type="range" id="jrZ" min="0" max="255" step="1" value="128">
+      </div>
+    </div>
+    <div class="twoL">
+      <div>
+        <canvas id="cvJr" class="paint" data-h="430" tabindex="0" aria-label="A slice of the chosen world, each voxel in the colour its word shows. Click a voxel."></canvas>
+        <div class="read" id="rdJr"></div>
+      </div>
+      <div>
+        <h3>One voxel's journey</h3>
+        <div class="path" id="jrSteps"><span class="hint">Click a voxel in the slice.</span></div>
+      </div>
+    </div>
+  </div>
+
+  <p class="aside"><b>Only shown voxels get a word</b> (Q13). A voxel with all six neighbours filled has no face to draw, so it has no record, and
+  the job never asks the field about it. Click deep inside a solid to see that: the field <em>has</em> a value there, but nothing carries it.
+  That's why a word's place is its record's place: <code>attrs[i]</code> belongs to <code>records[i]</code>, and there is no other index.</p>
+</section>
+
+<!-- ============================ 2 ============================ -->
+<section id="s2">
+  <div class="shead"><span class="snum">02</span><h2>What a field is</h2></div>
+
+  <p>The whole contract is one line, <span class="ref" data-f="colours.js" data-q="A field takes a point in voxel units"></span>:</p>
+  <pre class="code"><span class="k">colour</span>(x, y, z, level)  →  r | g &lt;&lt; 8 | b &lt;&lt; 16      <span class="c">// 8-bit channels, one integer, no allocation</span>
+<span class="k">colour.mean</span>(level, x, y, z, out)  →  out[0..2]        <span class="c">// optional: only a baked field has it (§6)</span></pre>
+
+  <ul class="plain">
+    <li><b>The point is in voxel units, and a voxel's centre is at <i>i</i> + 0.5.</b> Voxel 12 spans [12, 13), so its colour is asked at 12.5. A coarse
+      sample is asked at the centre of its sub-cell: corner + side / 2, which for any side above 1 is a whole number, the corner where eight voxels meet.</li>
+    <li><b>It's defined everywhere, not only inside the shape.</b> The job only asks at occupied cells, but a coarse sample's centre can sit in air even when
+      its cell holds voxels (§5). So every named field answers for every point of the cube, and the kit's and the lattice's return grey between their pieces.</li>
+    <li><b>It's a pure function of the point.</b> No state, no order, no neighbours. That's what lets every worker rebuild it alone and get the same bytes,
+      and what lets a chunk's words depend on that chunk only.</li>
+    <li><b>It returns 8 bits a channel, though a word keeps 6.</b> A coarse mean is summed from these in floats, and the 6-bit rounding happens once at the end (§3).</li>
+    <li><b>The fourth argument is the sample's level.</b> The point is the centre of a level-<code>level</code> cell: 0 at lod 0, the walk's floor level
+      below it. Every named field ignores it. The scene field needs it (§8).</li>
+  </ul>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">World</label><div class="chips" id="fdWorld"></div></div>
+      <div class="cgroup"><label class="lbl">Draw the field</label><div class="chips" id="fdMode"></div></div>
+      <div class="cgroup">
+        <label class="lbl" for="fdZ">slice z = <span class="val" id="fdZV"></span></label>
+        <input type="range" id="fdZ" min="0" max="255" step="1" value="128">
+      </div>
+    </div>
+    <canvas id="cvFd" class="paint" data-h="460" tabindex="0" aria-label="A slice of the chosen world's colour field, asked at every point of the slice."></canvas>
+    <div class="read" id="rdFd"></div>
+    <div class="verdict" id="vdFd"></div>
+  </div>
+  <p class="chipnote">"Everywhere" asks the field at every voxel centre of the slice and dims the answers where there's no voxel. Nothing in the engine draws those:
+  they're what a coarse sample can land on.</p>
+
+  <p>Look at the kit and the lattice in "everywhere": between the pieces the field is flat grey. Look at terrain: its bands carry on up into the sky. Both are
+  the same promise kept two ways. A coarse sample that lands in air gets <em>something sensible</em>, and its weight decides how much that matters.</p>
+</section>
+
+<!-- ============================ 3 ============================ -->
+<section id="s3">
+  <div class="shead"><span class="snum">03</span><h2>The word</h2></div>
+
+  <p>There are <b>two packings</b>, and they're easy to confuse because both put red in the low byte:</p>
+  <table class="dt" style="max-width:900px">
+    <thead><tr><th>what</th><th>layout</th><th>made by</th><th>read by</th></tr></thead>
+    <tbody>
+      <tr><td class="k">a field's answer</td><td>8 bits a channel: <code>r | g &lt;&lt; 8 | b &lt;&lt; 16</code></td><td><code>rgb8</code></td><td>the job (<code>cellAttr</code>), files' baked words</td></tr>
+      <tr><td class="k">an attribute word</td><td>6 bits a channel, in the <em>high</em> 6 bits of each colour byte: shifts 2, 10, 18</td><td><code>packAttr</code>, <code>attrOf8</code></td><td><code>attrRGB</code> (JS) and <code>GLSL_ATTR</code> (shader), only</td></tr>
+    </tbody>
+  </table>
+  <p style="margin-top:14px">A word read as four RGBA8 bytes is a colour you can look at: each colour byte is the 6-bit value times 4. That's on purpose (Q14): an
+  image codec that predicts per channel sees one channel per byte. The 14 bits left over (the low 2 of each colour byte, and all of the fourth byte) are
+  <b>reserved</b>: written 0, ignored on read, so every word made today stays valid when something is put there.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl" for="wdPick">colour</label><input type="color" id="wdPick" value="#c8783c"></div>
+      <div class="cgroup"><label class="lbl" for="wdR">red <span class="val" id="wdRV"></span></label><input type="range" id="wdR" min="0" max="255" step="1" value="200"></div>
+      <div class="cgroup"><label class="lbl" for="wdG">green <span class="val" id="wdGV"></span></label><input type="range" id="wdG" min="0" max="255" step="1" value="120"></div>
+      <div class="cgroup"><label class="lbl" for="wdB">blue <span class="val" id="wdBV"></span></label><input type="range" id="wdB" min="0" max="255" step="1" value="60"></div>
+    </div>
+    <div class="bits" id="wdBits" aria-label="The word's 32 bits, most significant first"></div>
+    <div class="legend"><span><i class="swatch" style="background:rgba(232,80,92,.6)"></i>red, bits 2–7</span><span><i class="swatch" style="background:rgba(92,200,120,.6)"></i>green, bits 10–15</span>
+      <span><i class="swatch" style="background:rgba(79,156,255,.7)"></i>blue, bits 18–23</span><span><i class="swatch" style="background:#22262f"></i>reserved, written 0</span></div>
+    <div class="mono" id="wdOut"></div>
+    <h3 style="margin-top:20px">All 256 values of a channel, and the 64 they land on</h3>
+    <canvas id="cvStair" data-h="64" aria-label="Top: the 256 8-bit greys. Bottom: the 6-bit value each rounds to, shown as the grey the screen gets."></canvas>
+  </div>
+
+  <ul class="plain">
+    <li><b><code>to6</code> is round-to-nearest of <i>v</i> · 63 / 255.</b> 0 goes to 0 and 255 to 63, so black and white survive. It takes a float, because a coarse
+      mean is one. <span class="ref" data-f="attr-core.js" data-q="export const to6"></span></li>
+    <li><b>The rounding is the only loss, and it happens once per word.</b> A step is 255 / 63 ≈ 4.05 in 8-bit units, so the worst error is half that, about 2.02.
+      Averaging words that were already rounded would round again at every lod. So means are taken in 8-bit floats and rounded at the end (decision 6).</li>
+    <li><b>The shader divides by 63, not 64.</b> <code>attrColour(w) = vec3(attrRGB(w)) / 63.0</code>, so 63 is exactly 1.0. The transform-feedback probe in
+      <code>chunk-viewer.html</code> reads every one of the 2<sup>18</sup> colours back through <code>GLSL_ATTR</code> and compares with <code>attrRGB</code>, exactly.</li>
+    <li><b>A new field in the reserved bits must bring its own coarse reduction.</b> Colour's is the count-weighted mean. A material id couldn't use a mean: 3 and 5
+      don't average to 4. That's the rule that keeps the 14 bits from being spent carelessly (<code>attributes-q13.md</code> §3).</li>
+  </ul>
+</section>
+
+<!-- ============================ 4 ============================ -->
+<section id="s4">
+  <div class="shead"><span class="snum">04</span><h2>Named fields: a name, not a function</h2></div>
+
+  <p>A world doesn't ship its colours. It ships a <b>name</b> for them, and <span class="ref" data-f="colours.js" data-q="export function colourOf"></span>
+  turns the name back into a function wherever one is needed. That works because every one of these worlds is <em>generated</em>: the same descriptor that
+  built the shape can rebuild the colour.</p>
+
+  <table class="dt">
+    <thead><tr><th>kind</th><th>what the descriptor holds</th><th>what the field does with a point</th><th>built on each side from</th></tr></thead>
+    <tbody>
+      <tr><td class="k">shape</td><td><code>name</code>, <code>D</code></td><td>maps it to (−1, 1)³ and calls the shape's own <code>colour</code>: bands, strata, biomes <span class="ref" data-f="experiments/shapes.mjs" data-q="export function colourFieldOf"></span></td><td>nothing: the shapes are code</td></tr>
+      <tr><td class="k">row</td><td><code>D</code></td><td>a cosine palette along a diagonal, times a ±12% jitter per 4³ block <span class="ref" data-f="colours.js" data-q="export function rowColour"></span></td><td>a 1,024-entry palette table</td></tr>
+      <tr><td class="k">scatter</td><td>the layout, and a <code>table</code>: 6 int32 a specimen</td><td>inside a specimen's box and off the ground: its position in the specimen's own unturned frame, as RGB. Else the ground's colour <span class="ref" data-f="scatter-core.js" data-q="export function scatterColour"></span></td><td>the table (it travels in the descriptor)</td></tr>
+      <tr><td class="k">lattice</td><td>the grid, and the same <code>table</code></td><td>the same gamut colour per specimen, grey between boxes <span class="ref" data-f="lattice-core.js" data-q="export function latticeColour"></span></td><td>the table</td></tr>
+      <tr><td class="k">kit</td><td>the kit's own descriptor, with <code>colourLevel</code></td><td>walks the plan down to the level-<i>c</i> entry holding the point, un-turning as it goes, and returns the position in that entry's frame <span class="ref" data-f="kit-core.js" data-q="export function kitColour"></span></td><td>the plan, rebuilt from the descriptor (a few ms)</td></tr>
+      <tr><td class="k">caves</td><td><code>D</code>, <code>seed</code>, <code>G</code></td><td>sea, pool water or lava if the voxel is one; the surface ramp on a column's top three voxels; rock strata elsewhere <span class="ref" data-f="cave-core.js" data-q="export function caveColour"></span></td><td>the plan, rebuilt (~0.6 s at D = 12)</td></tr>
+      <tr><td class="k">clay</td><td><code>D</code>, <code>lump</code>, <code>shape</code>, <code>ground</code></td><td>ground below the centre plane (with a 16-voxel checker), clay above, a small jitter per voxel <span class="ref" data-f="clay-core.js" data-q="export function clayColour"></span></td><td>nothing</td></tr>
+      <tr><td class="k">baked</td><td><code>skin</code>, <code>words</code>, <code>bits</code></td><td>looks the voxel's word up by its rank in the skin (§6)</td><td>the words themselves: this one is data, not a name</td></tr>
+      <tr><td class="k">null</td><td>—</td><td>no field: jobs emit no words, and the viewer draws in gamut mode</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">World</label><div class="chips" id="nmWorld"></div></div>
+      <div class="cgroup" id="nmLevelG"><label class="lbl">kit colourLevel</label><div class="chips" id="nmLevel"></div></div>
+      <div class="cgroup">
+        <label class="lbl" for="nmZ">slice z = <span class="val" id="nmZV"></span></label>
+        <input type="range" id="nmZ" min="0" max="255" step="1" value="40">
+      </div>
+    </div>
+    <div class="twoL">
+      <div><canvas id="cvNm" class="paint" data-h="430" aria-label="A slice of the chosen world in its named colours."></canvas></div>
+      <div>
+        <h3>Its descriptor: all that crosses to a worker</h3>
+        <pre class="code" id="nmDesc" style="margin-top:0;white-space:pre-wrap"></pre>
+        <div class="read" id="rdNm" style="margin-top:0"></div>
+      </div>
+    </div>
+    <div class="verdict" id="vdNm"></div>
+  </div>
+
+  <ul class="plain">
+    <li><b>The gamut fields colour by frame, not by place.</b> Scatter, lattice and kit all return "where am I inside my own piece", un-turned. So a turned copy
+      shows the same colours turned with it, and a repeated piece shows as a repeated colour. On the kit, switch <code>colourLevel</code>: at 0 every 16³ part is
+      its own rainbow, at 1 every 64³ assembly is, at 2 the whole 256³ world is one. <b>The shape doesn't change</b>, only the name.</li>
+    <li><b>The kit's field caches frames.</b> Walking the plan for every point made colour most of a kit job (30 ms a chunk against 6.4 without). Entries sit
+      on a world-aligned grid, so each grid cell is one affine map: a miss walks 4 points, a hit is 9 multiply-adds, in a 4,096-line direct-mapped cache. Every
+      value is an integer or a half, so the cached map gives exactly the walk's answer.</li>
+    <li><b>A table in a descriptor is still a name.</b> The scatter's and lattice's tables say where each specimen landed. They're cloned to each worker with the
+      snapshot, but they describe the <em>world</em>, not colours.</li>
+    <li><b><code>stream-core.js</code> never imports any of this.</b> <code>createJobRunner(snap, colourOf)</code> is handed the resolver, so the streamer stays
+      pure and a test can hand in any field it likes.</li>
+  </ul>
+</section>
+
+<!-- ============================ 5 ============================ -->
+<section id="s5">
+  <div class="shead"><span class="snum">05</span><h2>From field to word: <code style="font-size:.9em;letter-spacing:0;text-transform:none">cellAttr</code></h2></div>
+
+  <p>One function turns a field into a word, and it has three branches
+  (<span class="ref" data-f="chunk-core.js" data-q="export function cellAttr"></span>):</p>
+  <pre class="code"><span class="k">if</span> (colour.mean)   <span class="c">// a baked field: ask it for the cell's mean, at every lod, lod 0 included (§6)</span>
+<span class="k">if</span> (lod === 0)     <span class="c">// a voxel: one sample at its centre, colour(x + 0.5, y + 0.5, z + 0.5, 0)</span>
+<span class="k">else</span>               <span class="c">// a coarse cell: the walk below, then ÷ the cell's voxel count, then to6 once</span></pre>
+
+  <p>A coarse cell's colour should be <b>the mean colour of every voxel under it</b>. Taken exactly that's 8<sup>lod</sup> samples a cell: 512 at lod 3, which a
+  job can't pay. So the walk goes down <code>meanDepth</code> levels (1 in the engine) and stops. Each sub-cell at that floor counts as
+  <b>its voxel count × the field at its centre</b>. Click a cell to see its sub-cells laid out.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">World</label><div class="chips" id="mnWorld"></div></div>
+      <div class="cgroup"><label class="lbl" for="mnLod">lod <span class="val" id="mnLodV">3</span></label><input type="range" id="mnLod" min="1" max="4" step="1" value="3"></div>
+      <div class="cgroup"><label class="lbl" for="mnDepth">meanDepth <span class="val" id="mnDepthV">1</span></label><input type="range" id="mnDepth" min="0" max="3" step="1" value="1"></div>
+      <div class="cgroup"><label class="lbl" for="mnZ">layer z = <span class="val" id="mnZV"></span></label><input type="range" id="mnZ" min="0" max="31" step="1" value="16"></div>
+    </div>
+    <div class="twoL">
+      <div>
+        <canvas id="cvMn" class="paint" data-h="430" tabindex="0" aria-label="One layer of cells at the chosen lod, each in the colour cellAttr gives it. Click a cell."></canvas>
+        <div class="read" id="rdMn"></div>
+      </div>
+      <div>
+        <h3>The cell you clicked, sub-cell by sub-cell</h3>
+        <div class="mono" id="mnSum"><span style="color:var(--dim)">Click a cell.</span></div>
+        <div class="scroll" style="margin-top:10px"><table class="dt" id="tbMn"><thead><tr>
+          <th>sub-cell corner</th><th class="n">side</th><th class="n">count</th><th class="n">weight</th><th>sample at</th><th>there is</th><th>field says</th>
+        </tr></thead><tbody></tbody></table></div>
+      </div>
+    </div>
+  </div>
+  <p class="chipnote">The layer shows every occupied cell; a job asks only for the ones that show a face. The table is this page's copy of <code>meanUnder</code>
+  with each step kept, and it's checked against the real <code>cellAttr</code> on every click. The "unweighted" figure is the page's, to show what the weights do.</p>
+
+  <ul class="plain">
+    <li><b>The weights are the children's voxel counts, and the divisor is the cell's.</b> The children's counts add up to the cell's, so it's a true weighted
+      mean. A sub-cell with one voxel in it barely moves the colour; a full one counts 8<sup>level</sup> times. Empty sub-cells aren't visited at all.</li>
+    <li><b>A sample can land in air.</b> The sample point is the sub-cell's centre, whether or not the voxel there is filled. The table's "there is" column
+      says which. This is why §2's fields are defined everywhere, and why a smooth field is forgiving: the centre's colour is close to its neighbours'.</li>
+    <li><b>It's exact while lod ≤ meanDepth.</b> Then the floor is level 0 and every voxel is sampled with weight 1. Past that, the error is set by the floor
+      sub-cell's side against the field's smallest feature. The rows jitter per 4³ block, so depth 1 is exact-looking at lod 3 (4³ sub-cells) and slips at lod 4
+      (<code>attrs-findings.md</code> §1). <a href="lod-explainer.html#s10">The LOD explainer's §10</a> shows whole slices of that error.</li>
+    <li><b>The accumulator is one module-level buffer, <code>ACC</code>,</b> so <code>cellAttr</code> isn't re-entrant: a field that called
+      <code>cellAttr</code> itself in the middle of a walk would clobber the sum in progress. Nothing does. The scene field is asked mid-walk and sometimes
+      needs a baked child's mean; it calls the child's <code>mean</code> directly, with a buffer of its own.</li>
+    <li><b>Counts are float64.</b> Exact to level 17, rounded above. That's fine for a weight, and it's why "is this node full?" is asked with
+      <code>isFull</code>, never by comparing a count.</li>
+  </ul>
+</section>
+
+<!-- ============================ 6 ============================ -->
+<section id="s6">
+  <div class="shead"><span class="snum">06</span><h2>Baked fields: words by rank</h2></div>
+
+  <p>An imported asset has no formula for its colour. Its colours come from a texture, sampled once when the mesh is voxelized. So a baked field is
+  <b>data</b>: an array of words, and a way to find a voxel's word in it (<span class="ref" data-f="baked-core.js" data-q="export function createBaked"></span>).</p>
+  <ul class="plain">
+    <li><b>The skin</b> is a second bit DAG beside the shape: the voxels that get a word. In the asset pipeline that's every voxel a triangle touches, which
+      includes every voxel that can show. Insides have no word: the pack at D = 10 has 2.23M skin voxels of 5.6M occupied.</li>
+    <li><b>A voxel's rank</b> is its place among the skin's voxels in Morton order, which is the order a depth-first walk of the DAG meets them. Walk down to the
+      voxel, add the counts of the octants you pass on the left, and the total is the rank. <code>words[rank]</code> is its colour. No index is stored: the
+      skin's own counts <em>are</em> the index.</li>
+    <li><b>A coarse cell is one subtree, so its skin is one run of ranks</b> [<i>r</i>, <i>r</i> + <i>n</i>). Its mean is that run's sum over <i>n</i>: exact, at
+      any lod, with no sampling. This is the mean of <em>what can show</em>, which is the right colour for a coarse cell of an asset.</li>
+  </ul>
+
+  <p>Below is a 64³ ball whose skin is baked from the sphere's named colours, so you can compare the two. The strip on the right is the whole
+  <code>words</code> array, <b>64 words a row, so each row is one block</b>.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl" for="bkLevel">cell level <span class="val" id="bkLevelV">4</span></label><input type="range" id="bkLevel" min="0" max="5" step="1" value="4"></div>
+      <div class="cgroup"><label class="lbl" for="bkZ">slice z = <span class="val" id="bkZV">32</span></label><input type="range" id="bkZ" min="0" max="63" step="1" value="32"></div>
+      <div class="cgroup"><label class="lbl" for="bkClimb">climb <span class="val" id="bkClimbV">6</span></label><input type="range" id="bkClimb" min="0" max="6" step="1" value="6"></div>
+      <div class="cgroup"><label class="lbl">Measure</label><div class="chips"><button id="bkMemo">the path memo</button><button id="bkSix">six bits a channel</button></div></div>
+    </div>
+    <div class="twoL">
+      <div>
+        <canvas id="cvBk" class="paint" data-h="430" tabindex="0" aria-label="A slice of the ball: skin voxels in their words' colours, inside voxels dark. Hover a cell."></canvas>
+        <div class="legend" style="margin-top:8px"><span><i class="swatch" style="background:#c8783c"></i>skin: has a word</span><span><i class="swatch" style="background:#262a36"></i>inside: no word</span>
+          <span><i class="swatch" style="background:none;border:1px solid #fff"></i>the cell asked</span><span><i class="swatch" style="background:none;border:1px dashed #ffc44f"></i>the ancestor it climbed to</span></div>
+        <div class="mono" id="bkRead" style="margin-top:8px"><span style="color:var(--dim)">Hover a cell of the slice.</span></div>
+      </div>
+      <div>
+        <h3>The words, in rank order (one block a row)</h3>
+        <canvas id="cvStrip" class="paint" data-h="520" aria-label="Every word of the skin in rank order, 64 a row. The hovered cell's rank range is lit."></canvas>
+        <div class="legend" style="margin-top:8px"><span><i class="swatch" style="background:rgba(0,229,255,.7)"></i>whole blocks: two reads of the block sums</span><span><i class="swatch" style="background:#ffc44f"></i>scanned, a word at a time</span></div>
+      </div>
+    </div>
+    <div class="verdict" id="vdBk"></div>
+  </div>
+
+  <ul class="plain">
+    <li><b>Block sums, not prefix sums.</b> A running sum at every word would be 24 bytes a word (53 MB for the pack at D = 10). Instead there's one every
+      <code>BLOCK</code> = 64 words: three float64 a block, 0.4 bytes a word. A range reads two block sums for its whole blocks and scans the ragged ends, at most
+      63 words each: <b>126 words a mean, whatever the lod</b>. Every sum is of integers below 2<sup>53</sup>, so it's exact, and the test compares with <code>===</code>.</li>
+    <li><b>Some cells are asked and have no skin.</b> Two kinds. The <em>seam tail</em>: cells only the apron buried, drawn when a neighbouring chunk is at another
+      lod; at lod 0 those are inside voxels. And cells a lod rule exposes: a dropped neighbour counts as empty, so a cell of solid inside can show a face. Hover the
+      dark middle of the ball to see what they get.</li>
+    <li><b>The fallback climbs, but never out of its chunk.</b> A cell with no skin takes the mean of its smallest ancestor that has some, at most
+      <code>climb</code> = 6 levels up. A level-<i>l</i> cell's level-(<i>l</i> + 6) ancestor is exactly its chunk at lod <i>l</i>. So the word still reads only
+      inside its own chunk's box, which is the stamp rule (§7). Past that it takes the <b>whole skin's mean</b>, a constant. Drag <code>climb</code> down to 2 to see that case here; at 6 this small world never reaches it.</li>
+    <li><b>The path memo.</b> A lod-0 word was a walk of all D levels, and that walk was most of a baked job. But a job asks its cells in nearly Morton order, so
+      each walk starts at the deepest level it shares with the last one: the highest bit where the two points differ, by <code>clz32</code> of their xor. In Morton
+      order a skin voxel then reads one or two children instead of D. It's correct in any order, only slower when the asks jump about. Press the button.</li>
+    <li><b>Six bits in the file.</b> A file can store <code>to6</code> of each channel and widen it back on read. A lod-0 word can't move: widening lands within
+      0.12 of a step of where it started, so <code>to6</code> gives the same value. A coarse word can move by one step at most. Press the button to count both here.</li>
+    <li><b>A baked field's lod-0 answer goes through <code>mean</code> too.</b> At level 0 the "mean" of a skin voxel is its own word, and the mean of a
+      no-skin voxel is the fallback, unrounded. So one branch serves every lod, and each word is still quantized exactly once.</li>
+  </ul>
+</section>
+
+<!-- ============================ 7 ============================ -->
+<section id="s7">
+  <div class="shead"><span class="snum">07</span><h2>Edits: ids can't see colour</h2></div>
+
+  <p>Edit mode places coloured blocks. The shape change goes into the DAG. The colour can't, so it goes into a <b>table beside the field</b>, and the field the
+  job uses becomes a wrapper (<span class="ref" data-f="edit-core.js" data-q="export const editedField"></span>):</p>
+  <pre class="code"><span class="k">editedField</span> = (base, table) =&gt; (x, y, z, level) =&gt; {
+  <span class="k">const</span> c = table.lookup(x, y, z);          <span class="c">// the latest block over this point, or −1</span>
+  <span class="k">return</span> c &gt;= 0 ? c : base(x, y, z, level);   <span class="c">// else the world's own field</span>
+};</pre>
+
+  <p>The world below is real clay on flat ground, in a real store, with the real edit log. Click the slice to place or break. Then press
+  <b>the trap</b>, which is the reason this whole section exists.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Tool</label><div class="chips" id="edTool"></div></div>
+      <div class="cgroup"><label class="lbl">Colour</label><div class="chips" id="edPal"></div></div>
+      <div class="cgroup"><label class="lbl">Block side</label><div class="chips" id="edLevel"></div></div>
+      <div class="cgroup"><label class="lbl" for="edZ">slice z = <span class="val" id="edZV">128</span></label><input type="range" id="edZ" min="0" max="255" step="1" value="128"></div>
+      <div class="cgroup"><label class="lbl">Log</label><div class="chips"><button id="edUndo">undo</button><button id="edRedo">redo</button><button id="edTrap">the trap: red, break, blue</button><button id="edReset">reset</button></div></div>
+    </div>
+    <div class="twoL">
+      <div>
+        <canvas id="cvEd" class="paint" data-h="430" tabindex="0" aria-label="A slice of clay on ground, coloured by the edited field. Click to place or break a block."></canvas>
+        <div class="read" id="rdEd"></div>
+      </div>
+      <div>
+        <h3>The log: every op, in order</h3>
+        <div class="scroll" style="max-height:230px"><table class="dt" id="tbOps"><thead><tr>
+          <th class="n">#</th><th>op</th><th>block</th><th>colour</th><th class="n">root after</th><th>note</th>
+        </tr></thead><tbody></tbody></table></div>
+        <div class="mono" id="edState" style="margin-top:12px"></div>
+      </div>
+    </div>
+    <div class="verdict" id="vdEd"></div>
+  </div>
+
+  <ul class="plain">
+    <li><b>The trap.</b> Place a red block: the root changes to some id A. Break it: the root is the id you started with, because hash-consing gives equal
+      voxels equal ids. Place a blue block in the same spot: the root is <b>A again</b>. Same voxels, same id, different colour. Anything that decides "is this
+      cached chunk still right?" from ids alone would keep the red one.</li>
+    <li><b>So a stamp is seven ids and a colour revision.</b> A chunk's job reads seven nodes (its own and its six face neighbours'), and
+      <span class="ref" data-f="stream-core.js" data-q="export function stampOf"></span> records them. Beside them goes the revision of the last op whose block
+      overlaps the chunk. An entry is right if its ids match <em>and</em> its revision is at least the chunk's. <span class="ref" data-f="stream-core.js" data-q="export function createPaint"></span>
+      answers "which revision touches this chunk" without scanning the log: blocks are snapped, so a block and a chunk overlap only if one holds the other.</li>
+    <li><b>Colour needs only the chunk's own revision, where ids need the neighbours'.</b> A word reads the field only inside its own chunk's box: cell centres,
+      or a coarse mean's sub-cells, or a baked climb of at most 6 levels. That's the second half of the stamp rule, and every field on this page keeps it.</li>
+    <li><b>A break isn't in the table.</b> It removes voxels, and a voxel that's gone has no colour to look up. What it uncovers is the base field's colour,
+      which never moved. So a break paints nothing, and the table holds places only.</li>
+    <li><b>A click that changes no voxel isn't an op.</b> Try placing over solid ground: nothing is logged. So a block placed over solid can't recolour it. That
+      was decided (2026-11-05): recolouring is a brush's job, when there is one.</li>
+    <li><b>The latest block wins, by sequence number.</b> The table is keyed by (level, X, Y, Z) and keeps each block's place in the log. A lookup tries each
+      block size in use and takes the hit with the highest sequence. An undo can uncover an older block's colour, which can't be done in place, so <b>an undo
+      starts a new epoch</b> and a table seeing a new epoch rebuilds from op 0.</li>
+    <li><b>Epoch and count, never count alone.</b> Undo then place something else leaves the same count with a different op on the end. A worker comparing
+      counts would keep the old colour for that one block.</li>
+    <li><b>The wrapper has no <code>mean</code>.</b> So an edited baked world would lose its exact means and walk a field that has no words off the skin. No
+      baked world can be edited today (files open as views); the edited field has to keep <code>mean</code> before one can.</li>
+  </ul>
+</section>
+
+<!-- ============================ 8 ============================ -->
+<section id="s8">
+  <div class="shead"><span class="snum">08</span><h2>Scenes: a field over placements</h2></div>
+
+  <p>Dropping a world into a world is the same problem at a larger scale. <code>bakeScene</code> unions the child's voxels into the parent's DAG, and after
+  that the DAG can't say whose voxel is whose. A knight dropped where the kit was already solid leaves the kit's node exactly as it was, yet that voxel is
+  the knight's now. So <b>a scene's colour is a field over its placements</b> (<span class="ref" data-f="scene-core.js" data-q="export function sceneField"></span>).
+  Asked for the centre of a level-<i>l</i> cell, it does three things:</p>
+  <ul class="plain">
+    <li><b>Find the owner</b>: the latest placement whose placed shape has a solid voxel in the cell. Bounds first, then a real test of the child's DAG at its
+      offset (<code>boxHits</code>). Bounds alone would be wrong: a parent voxel inside the child's box but outside the child would take the child's colour.</li>
+    <li><b>Find the child's cell</b>: a level-<i>l</i> parent cell is a level-(<i>l</i> − scale) child cell. Take the one holding the centre, on the child's
+      own grid, then go back through the turn. Turns are the 48 cube symmetries and offsets are whole voxels, so cells map to cells exactly.</li>
+    <li><b>Ask the child</b>: a baked child for that cell's exact skin mean, a named child at that cell's centre. No owner: the parent's field.</li>
+  </ul>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Child to drop</label><div class="chips" id="scChild"></div></div>
+      <div class="cgroup"><label class="lbl">Turn about z</label><div class="chips" id="scTurn"></div></div>
+      <div class="cgroup"><label class="lbl">Scale</label><div class="chips" id="scScale"></div></div>
+      <div class="cgroup"><label class="lbl" for="scLevel">sample level <span class="val" id="scLevelV">0</span></label><input type="range" id="scLevel" min="0" max="4" step="1" value="0"></div>
+      <div class="cgroup"><label class="lbl">Pass the level</label><div class="chips"><button id="scPass">on</button></div></div>
+      <div class="cgroup"><label class="lbl" for="scZ">slice z = <span class="val" id="scZV">64</span></label><input type="range" id="scZ" min="0" max="127" step="1" value="64"></div>
+      <div class="cgroup"><label class="lbl">Log</label><div class="chips"><button id="scUndo">undo</button><button id="scRedo">redo</button><button id="scClear">start over</button></div></div>
+    </div>
+    <div class="twoL">
+      <div>
+        <canvas id="cvSc" class="paint" data-h="430" tabindex="0" aria-label="A slice of terrain with dropped worlds, coloured by the scene field. Click to drop the chosen child."></canvas>
+        <div class="read" id="rdSc"></div>
+      </div>
+      <div>
+        <h3>The drops: seven int32 each</h3>
+        <div class="scroll" style="max-height:230px"><table class="dt" id="tbDrops"><thead><tr>
+          <th class="n">#</th><th>child</th><th>at</th><th class="n">turn</th><th class="n">scale</th><th class="n">T</th><th class="n">paint</th><th class="n">root after</th>
+        </tr></thead><tbody></tbody></table></div>
+        <div class="mono" id="scState" style="margin-top:12px"></div>
+      </div>
+    </div>
+    <div class="verdict" id="vdSc"></div>
+  </div>
+  <p class="chipnote">Click to drop: the page centres the child's cube on the click, in the slice's plane. (The viewer's <code>dropAt</code> puts it against the face you hit,
+  <code>scene-log.md</code> §4.) The picture is the field's answer for each occupied level-<i>l</i> cell of the layer, which is what the coarse walk's floor asks it.
+  The slice cuts through the middle of what you drop, so it shows <b>insides the viewer never draws</b>. A baked ball's inside voxels have no word: the blocky colours in its
+  middle are §6's fallback, each the mean of the nearest ancestor cell with skin. Its rim is its own words.</p>
+
+  <ul class="plain">
+    <li><b>Why the level is passed.</b> Raise the sample level to 2, then switch "pass the level" off. Without it the field takes the point as one voxel, and
+      two things go wrong, both on a dropped child's rim. A cell the child only partly fills fails the owner test whenever the voxel at its centre isn't the
+      child's, and takes the parent's colour for a point in air: the pale cells. And where the test does pass, a baked child answers for that one voxel, often
+      an inside one with no word, where with the level it gives the exact mean of the whole child cell. This is the one field that reads the fourth argument,
+      and anything that wraps it has to pass it on (<code>editedField</code> does).</li>
+    <li><b>A drop into solid is still an op.</b> Drop a small child deep underground: the root doesn't change at all, and the drop is logged anyway, because the
+      colours there are the child's now. A drop with no voxel inside the world isn't.</li>
+    <li><b>A drop carries T, the child already turned and scaled, as an id in the parent's store.</b> A worker can't intern, so it can't prepare the child
+      itself. The new nodes go in the same tail, ahead of the drop that names them. A baked child's words cross once per world, in the first tail after its first drop.</li>
+    <li><b>Paint is bounds, never shape.</b> A drop repaints every 64-voxel block its content box touches. Over-painting only costs a redone chunk; missing a
+      block would leave a wrong colour on screen.</li>
+    <li><b>The scene field has no <code>mean</code>, and refuses a parent that has one.</b> A field with <code>mean</code> is asked it at every lod, and a named
+      parent has none to give. So nothing can be dropped into a baked world yet. With no drops, it hands the parent's field back untouched: undo everything and the bytes are the parent's own.</li>
+    <li><b>It keeps a short list.</b> The first version tested every placement for every sample: 16 placements cost 1.5–2× a job's colour, nearly all in chunks
+      no placement touches. Now it keeps the placements meeting the sample's 64-voxel block and rebuilds the list only when a sample lands in another block:
+      1.15–1.5× (<code>scene-log.md</code> §2.2).</li>
+    <li><b>Blocks and drops in one world are refused.</b> "The latest op wins" would need one log ordering both. Two tables wrapped either way round would each
+      be wrong somewhere, so the runner throws instead (<code>scene-plan.md</code> §4 Q3).</li>
+  </ul>
+</section>
+
+<!-- ============================ 9 ============================ -->
+<section id="s9">
+  <div class="shead"><span class="snum">09</span><h2>Across threads</h2></div>
+
+  <p>Chunk jobs run in workers, and a worker shares nothing with the page. So everything a field needs has to be <b>posted</b>, and it has to arrive
+  <b>before the job that uses it</b>.</p>
+
+  <table class="dt">
+    <thead><tr><th>what crosses</th><th>when</th><th>what's in it for colour</th><th>the other side does</th></tr></thead>
+    <tbody>
+      <tr><td class="k">the snapshot</td><td>once a world, to every worker</td><td><code>snap.colour</code>: the descriptor. A baked one carries its <code>words</code>, cloned like the keys</td><td><code>colourOf(snap.colour, { store, counts, D })</code>, over its own view of the keys <span class="ref" data-f="stream-core.js" data-q="export function createJobRunner"></span></td></tr>
+      <tr><td class="k">a tail</td><td>once an edit, before any job names its root</td><td><code>edits</code>: the ops the table hasn't seen, 5 int32 each. <code>scene</code>: the drops, 7 int32 each, plus new worlds' descriptors</td><td><code>table.sync</code>, then the field is wrapped <span class="ref" data-f="stream-core.js" data-q="run.tail ="></span></td></tr>
+      <tr><td class="k">a job</td><td>per chunk</td><td>nothing: it names a chunk, a rule and a root</td><td><code>fastChunk</code> with the field it holds right now</td></tr>
+      <tr><td class="k">a result</td><td>per chunk, back</td><td><code>attrs</code>, a Uint32Array beside <code>records</code>, transferred (moved, not copied)</td><td>the page uploads it (§10)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">World</label><div class="chips" id="thWorld"></div></div>
+      <div class="cgroup"><label class="lbl">Run</label><div class="chips"><button id="thRun">one job, in a real worker</button></div></div>
+    </div>
+    <div class="mono" id="thOut"><span style="color:var(--dim)">Starts when this section is first on screen.</span></div>
+    <div class="verdict" id="vdTh"></div>
+  </div>
+  <p class="chipnote">This starts the viewer's own <code>chunk-worker.js</code>, posts it a snapshot and one job the way <code>stream-pool.js</code> does, and compares what comes back
+  with the same chunk expanded here by <code>expandChunk</code> with this page's own copy of the field.</p>
+
+  <ul class="plain">
+    <li><b>Ordering is what makes it right.</b> A tail is posted on the same port a worker's jobs use. A port keeps its messages in order and a worker runs one
+      at a time, so a job always runs with exactly the nodes and the colour table it was dispatched with. Post a tail anywhere else and a job can read a table
+      from its own future.</li>
+    <li><b>The pool keeps the snapshot and every tail.</b> A worker that dies and restarts gets the snapshot and all the tails again, in order. So does the
+      main-thread runner if the workers never start. A baked world's words reach a restarted worker the same way: they're in the snapshot.</li>
+    <li><b>A follower that's missing something throws.</b> A table quietly short one op would draw the wrong colour until something else happened to repaint that
+      chunk. So a tail that doesn't start where the table stopped is an error, the worker dies, and the pool restarts it with everything.</li>
+    <li><b>Baked words are copied per worker.</b> 14 MB for the knight at D = 10, so 56 MB across four workers. A SharedArrayBuffer would make it one copy, but
+      needs the page served cross-origin isolated, so it was left (<code>glb-colour-log.md</code> §7).</li>
+    <li><b>Why a baked field is built from <code>{ store, counts, D }</code>.</b> Its rank walk needs the skin's nodes and their counts. Those are in the
+      snapshot's keys already, so each side builds the field over its own view. A named field ignores the second argument.</li>
+  </ul>
+</section>
+
+<!-- ============================ 10 ============================ -->
+<section id="s10">
+  <div class="shead"><span class="snum">10</span><h2>To the GPU, twice</h2></div>
+
+  <p>The viewer has two ways to draw a chunk, and each carries words its own way.</p>
+
+  <div class="two">
+    <div>
+      <h3>Raster: a word per instance</h3>
+      <p>A records chunk is one buffer: all the records, then all the words. Two integer attributes read it, one from byte 0 and one from byte 4<i>n</i>, each with
+      divisor 1, so every instanced cube gets its record and its word. The vertex shader passes the word on <code>flat</code>, since a cube is one colour.
+      <span class="ref" data-f="stream-viewer.html" data-q="function install(entry)"></span></p>
+    </div>
+    <div>
+      <h3>Ray: a run per brick, in a heap</h3>
+      <p>A traced chunk has no instances. A ray hits a cell and needs that cell's word. Each 8³ brick with shown cells gets a <b>run</b>: 16 words of
+      shown-mask (512 bits, Morton order), then one word per shown cell. A hit's word is at the cell's <b>rank</b> among the set bits, a popcount.
+      <span class="ref" data-f="ray-core.js" data-q="export function pageAttrBlock"></span></p>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Chunk of terrain at lod</label><div class="chips" id="gpLod"></div></div>
+      <div class="cgroup"><label class="lbl">Brick with shown cells</label><div class="chips"><button id="gpPrev">◂ prev</button><button id="gpNext">next ▸</button></div></div>
+    </div>
+    <div class="mono" id="gpBuf"></div>
+    <div class="twoL" style="margin-top:14px">
+      <div>
+        <h3 id="gpBrickH">One brick's shown mask: 16 words × 32 bits</h3>
+        <canvas id="cvRun" class="paint" data-h="250" tabindex="0" aria-label="A brick's 512-bit shown mask as 16 rows of 32 bits. Set bits are in their word's colour. Click one."></canvas>
+      </div>
+      <div>
+        <h3>The cell you clicked</h3>
+        <div class="mono" id="gpRead"><span style="color:var(--dim)">Click a lit bit.</span></div>
+      </div>
+    </div>
+  </div>
+
+  <ul class="plain">
+    <li><b>The words belong to the page, not the shared brick.</b> A brick's occupancy bits are shared by every page holding the same DAG node at that lod.
+      But whether a cell is <em>shown</em> depends on its neighbours, and its colour depends on where it is. So each page brings its own attribute block.</li>
+    <li><b>"Shown" means the records plus the seam tail.</b> A ray from outside can only enter an occupied cell through a face whose neighbour is empty, so those
+      are the only cells that need a word. A ray that starts inside a solid hits a cell with none, and the shader draws it mid grey (<code>ATTR_NONE</code>).</li>
+    <li><b>GLSL ES 3.00 has no <code>bitCount</code>,</b> so the rank is a SWAR popcount over at most 16 mask words. <code>GLSL_RAY_ATTR</code> and
+      <code>attrAtCPU</code> are line-for-line twins, and a probe holds them equal on every hit.</li>
+    <li><b>Both paths show the same word for the same cell.</b> <code>ray.test.js</code> draws a view both ways in colour mode 9 (the raw 6-bit channels, unshaded)
+      and compares exactly.</li>
+    <li><b>Words now outweigh occupancy on the ray path.</b> A traced view's attributes are 2–100× its occupancy pages (<code>attrs-findings.md</code> §3).
+      Storing only shown cells was still right: the same view as full 8³ tiles would be 628 MB, not 119.</li>
+  </ul>
+
+  <h3 style="margin-top:30px">Then the word is lit</h3>
+  <p>Both passes share <span class="ref" data-f="stream-viewer.html" data-q="const GLSL_SHADE"></span>, so a voxel looks the same drawn either way. The word's
+  colour is multiplied by a fixed two-light shade that depends only on which face it is, then mixed toward the background by distance. There's no gamma step:
+  the 6-bit channel over 63 goes to the canvas as it is.</p>
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Face</label><div class="chips" id="shFace"></div></div>
+      <div class="cgroup"><label class="lbl" for="shDist">distance, world sides <span class="val" id="shDistV">0.3</span></label><input type="range" id="shDist" min="0" max="3" step="0.05" value="0.3"></div>
+    </div>
+    <div class="mono" id="shOut"></div>
+  </div>
+  <p class="chipnote">The arithmetic here is this page's copy of <code>shadeOut</code>, on the cell clicked above (or a default clay colour).</p>
+
+  <h3 style="margin-top:30px">The viewer's colour modes</h3>
+  <table class="dt" style="max-width:900px">
+    <thead><tr><th class="n">mode</th><th>menu name</th><th>what colours the cube</th><th>needs words?</th></tr></thead>
+    <tbody>
+      <tr class="hi"><td class="n">8</td><td class="k">attribute</td><td>the word: everything on this page</td><td>yes</td></tr>
+      <tr><td class="n">3</td><td class="k">gamut</td><td>the fragment's position over the world's side, as RGB, computed in the shader</td><td>no</td></tr>
+      <tr><td class="n">0</td><td class="k">lod</td><td>one colour per lod</td><td>no</td></tr>
+      <tr><td class="n">1</td><td class="k">pose</td><td>the 8³ brick's Oh pose, from the record</td><td>no</td></tr>
+      <tr><td class="n">2</td><td class="k">chunk</td><td>one colour per chunk</td><td>no</td></tr>
+      <tr><td class="n">4</td><td class="k">plain</td><td>flat grey, shaded</td><td>no</td></tr>
+      <tr><td class="n">6</td><td class="k">path</td><td>raster warm, ray cool</td><td>no</td></tr>
+      <tr><td class="n">5, 7, 9, 10</td><td>(tests)</td><td>depth, draw index, the raw word, the stencil mask</td><td>9 does</td></tr>
+    </tbody>
+  </table>
+  <p style="margin-top:14px"><b>A world with no colour opens in gamut</b>, one with colour in attribute, until you pick a mode
+  (<span class="ref" data-f="stream-viewer.html" data-q="function colourForWorld"></span>). Attribute mode with no field drew a shape-only file almost
+  black, and that read as broken. Gamut here is a different thing from §4's gamut <em>fields</em>: the mode colours by where a fragment is in the world,
+  per pixel; the fields colour by where a voxel is in its own piece, per word.</p>
+</section>
+
+<!-- ============================ 11 ============================ -->
+<section id="s11">
+  <div class="shead"><span class="snum">11</span><h2>In a file</h2></div>
+
+  <p>A <code>.vdag</code> file outlives the code that wrote it, and that's a problem for a <em>name</em>: the file says "the terrain's colours", and the
+  code that reads it might define those differently by then. So a file stores the descriptor and a <b>print</b> of what it meant when written.</p>
+  <ul class="plain">
+    <li><b>The print</b> is a hash of the field at 256 voxels. Each is found by a walk from the root that turns at every level into a present octant the hash
+      picks, so every sample lands on a solid voxel, and the walk reads only the graph's shape, never an id. The same world gives the same samples in any store.
+      <span class="ref" data-f="vdag-core.js" data-q="export function colourPrint"></span></li>
+    <li><b>On read, the reader makes the field from the name and prints it again.</b> Equal: <code>same</code>. Different: <code>changed</code>, and the
+      viewer warns that the shape is right and the colours may not be. Can't make the field at all: <code>unknown</code>, drawn without.</li>
+    <li><b>It catches a plan or a palette that moved, not one altered voxel.</b> 256 samples can miss a change confined to a few places. That's the trade.</li>
+    <li><b>A baked world's colours are in the file</b>, in an <code>ATTR</code> section: the skin as a graph that carries on from the shape's level tables, and
+      the words gzipped. Its print is of its own words, and a mismatch there isn't "changed", it's <b>damage</b>: the file is refused.</li>
+    <li><b>An older reader skips <code>ATTR</code></b> (readers skip tags they don't know) and opens the world as its shape. A file is outside input: the reader
+      checks that the skin is inside the shape, that there's a word per skin voxel, and that nothing is left over.</li>
+  </ul>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">Write and read §6's ball</label><div class="chips"><button id="flRun">run again</button></div></div>
+    </div>
+    <table class="dt" id="tbFile"><thead><tr><th>file</th><th class="n">bytes</th><th>read back with</th><th>status</th><th>what the viewer says</th></tr></thead><tbody>
+      <tr><td colspan="5" style="color:var(--dim)">Runs when this section is first on screen.</td></tr></tbody></table>
+    <div class="verdict" id="vdFl"></div>
+  </div>
+  <p class="chipnote">Real <code>writeVdag</code> and <code>readVdag</code>, in memory. "A field that changed" hands the reader a <code>colourOf</code> whose field returns one constant, as
+  <code>file.test.js</code> does.</p>
+</section>
+
+<!-- ============================ 12 ============================ -->
+<section id="s12">
+  <div class="shead"><span class="snum">12</span><h2>What colour costs</h2></div>
+
+  <p>Since the job got faster, <b>colour is most of a coloured job</b>. The walk of the DAG is cheap now; what's left is calling the field once per lod-0
+  record and up to 8 times per coarse one. The numbers below are measured, each with where it came from. Then measure this machine.</p>
+
+  <table class="dt">
+    <thead><tr><th>what</th><th>measured</th><th>where</th></tr></thead>
+    <tbody>
+      <tr><td class="k">a job, with colour against without (meanDepth 1)</td><td>+6% to +200%. Cheap jobs double; jobs dominated by the walk barely notice</td><td><code>attrs-findings.md</code> §2</td></tr>
+      <tr><td class="k">meanDepth 2</td><td>2–10× a plain job. It buys accuracy only at lod 4, so the default stays 1</td><td><code>attrs-findings.md</code> §2</td></tr>
+      <tr><td class="k">the kit's job, warm</td><td>about 1.5 ms of walk and 12–13 ms of words: 0.6 µs a word even with the frame cache</td><td><code>job-speed-log.md</code></td></tr>
+      <tr><td class="k">a baked word at lod 0</td><td>0.13–0.29 µs with the path memo (0.35–0.47 before); a named one, 0.08–0.10</td><td><code>glb-colour-log.md</code> §6</td></tr>
+      <tr><td class="k">a baked job against a named one, lods 1–4</td><td>0.59–0.93×: cheaper, and exact where the walk isn't</td><td><code>glb-colour-log.md</code> §6</td></tr>
+      <tr><td class="k">a baked field's block sums</td><td>0.375 bytes a word; built in 11–30 ms at D = 10, in each worker</td><td><code>glb-colour-log.md</code> §2, §7</td></tr>
+      <tr><td class="k">six bits against eight, in the file</td><td>files 1.4–1.8× smaller; a quarter of coarse words move one step; no lod-0 word moves</td><td><code>glb-colour-log.md</code> §5</td></tr>
+      <tr><td class="k">the scene field over the kit's</td><td>×1.0–1.3 with one placement, ×1.15–1.5 with sixteen</td><td><code>scene-log.md</code> §2.2</td></tr>
+      <tr><td class="k">an edit's tail</td><td>under 1 KB a click, against 79 MB for a whole D = 12 caves snapshot</td><td><code>stream-core.js</code> §4b</td></tr>
+    </tbody>
+  </table>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup"><label class="lbl">World (every chunk, each lod)</label><div class="chips" id="ctWorld"></div></div>
+      <div class="cgroup"><label class="lbl">Run</label><div class="chips"><button id="ctRun">measure on this machine</button></div></div>
+    </div>
+    <table class="dt" id="tbCost"><thead><tr>
+      <th class="n">lod</th><th class="n">chunks</th><th class="n">records</th><th class="n">no colour</th><th class="n">meanDepth 0</th><th class="n">meanDepth 1</th><th class="n">meanDepth 2</th><th class="n">µs a word, depth 1</th>
+    </tr></thead><tbody><tr><td colspan="8" style="color:var(--dim)">Press the button. It takes a second or two, on the main thread.</td></tr></tbody></table>
+    <div class="verdict" id="vdCt"></div>
+  </div>
+  <p class="chipnote">Real <code>fastChunk</code> (the job), one cache a column, rule <i>any</i> at lod 0 and <i>shadow</i> above, one run on the main thread of whatever machine this is.
+  Read the ratios, not the milliseconds. At lod 0 every depth is one sample, so those columns differ only by noise. At lod 1, depths 1 and 2 are the same walk:
+  the floor is level 0 either way.</p>
+
+  <p class="aside"><b>Two things would cut colour's cost without changing a word, and one that looks like it would doesn't.</b> Field-specific work helps, like the
+  kit's frame cache. So does asking fewer points: meanDepth 0 asks 1 instead of up to 8, and <code>attrs-findings.md</code> measured what that loses (at lod 3 only
+  31–34% of the rows' words come within a step). Caching a word per DAG node doesn't work at all: a word is a function of <em>position</em>, and the same node
+  sits at many positions. That's this page's first sentence again.</p>
+</section>
+
+<!-- ============================ 13 ============================ -->
+<section id="s13">
+  <div class="shead"><span class="snum">13</span><h2>The rules, and where to read</h2></div>
+
+  <p>Each of these is a sentence in <code>CLAUDE.md</code> with a test behind it. They're the finer points in the form you'd trip over them.</p>
+  <table class="dt">
+    <thead><tr><th>rule</th><th>why</th><th>held by</th></tr></thead>
+    <tbody>
+      <tr><td class="k">a word's layout is decided in one place</td><td><code>attr-core.js</code> packs, <code>GLSL_ATTR</code> decodes; change both together</td><td><code>chunk.test.js</code>: every word through the shader, exactly</td></tr>
+      <tr><td class="k">colour fields are named, or baked and shipped</td><td>a worker can't receive a function; a baked field is data in the snapshot</td><td><code>baked-core.test.js</code>: a snapshot cloned through the runner</td></tr>
+      <tr><td class="k">a word reads only inside its own chunk's box</td><td>or "same stamp, same bytes" is false and the cache is silently wrong</td><td><code>stream-core.test.js</code>, on every chunk</td></tr>
+      <tr><td class="k">a stamp has a colour revision</td><td>ids can't see colour: red, break, blue</td><td><code>stream-core.test.js</code>: break-and-recolour</td></tr>
+      <tr><td class="k">a table follows the log by epoch and count</td><td>undo then a different op leaves the same count</td><td><code>edit-core.test.js</code>, <code>scene-log.test.js</code></td></tr>
+      <tr><td class="k">fields get the sample's level</td><td>or a coarse cell of a placed child reads one voxel</td><td><code>scene-field.test.js</code>, both sides</td></tr>
+      <tr><td class="k">what <code>expandChunk</code> emits, <code>fastChunk</code> emits</td><td>the fast job is the real one; the slow one is the oracle</td><td><code>job-core.test.js</code>, byte for byte, with colour</td></tr>
+      <tr><td class="k">a reserved bit's field brings its own reduction</td><td>a mean is right for colour and wrong for a label</td><td><code>attrs.test.js</code> needs an oracle for it</td></tr>
+      <tr><td class="k">a tail goes on the port its jobs use</td><td>or a job reads a table from its future</td><td><code>stream-core.test.js</code>: tails against a fresh snapshot; <code>edit.test.js</code>, a worker killed part way</td></tr>
+      <tr><td class="k">a file's baked print that doesn't match is damage</td><td>a named colour can drift; a file's own words can't</td><td><code>vdag-core.test.js</code>: every lie a file can tell</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:34px">Reading order for the code</h3>
+  <p>Line numbers are looked up as the page loads, so they're right for the files you're serving. Click one to copy <code>file:line</code>.</p>
+  <table class="dt" style="max-width:1000px">
+    <thead><tr><th>#</th><th>where</th><th>what to read for</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><span class="ref" data-f="attr-core.js" data-q="export const packAttr"></span> <span class="ref" data-f="attr-core.js" data-q="export const rgb8"></span></td><td>The whole file is 42 lines: the word, <code>to6</code>, and the field's packing beside it.</td></tr>
+      <tr><td>2</td><td><span class="ref" data-f="colours.js" data-q="export function colourOf"></span></td><td>The header lists every descriptor; <code>colourOf</code> is the switch.</td></tr>
+      <tr><td>3</td><td><span class="ref" data-f="chunk-core.js" data-q="---- attributes: a shown cell's word"></span></td><td>The comment is the design: the mean, <code>meanDepth</code>, the <code>mean</code> hook, the sample's level. Then <code>meanUnder</code> and <code>cellAttr</code>, under 30 lines.</td></tr>
+      <tr><td>4</td><td><span class="ref" data-f="chunk-core.js" data-q="const cs = 2 ** lod, attrAt"></span> <span class="ref" data-f="job-core.js" data-q="const attrAt = (i, x, y, z) => cellAttr"></span></td><td>Where the job calls it: once per record, once per tail record, in both jobs.</td></tr>
+      <tr><td>5</td><td><span class="ref" data-f="baked-core.js" data-q="function sumRange"></span> <span class="ref" data-f="baked-core.js" data-q="function descend"></span> <span class="ref" data-f="baked-core.js" data-q="function meanAt"></span></td><td>Block sums, the rank walk with its memo, and the fallback. Read the header first.</td></tr>
+      <tr><td>6</td><td><span class="ref" data-f="edit-core.js" data-q="export function createBlockTable"></span> <span class="ref" data-f="edit-core.js" data-q="export function createEditLog"></span></td><td>The table's <code>lookup</code> and <code>sync</code>; the log's comment on paint, the trap and the epoch.</td></tr>
+      <tr><td>7</td><td><span class="ref" data-f="stream-core.js" data-q="---- 2c. stamps"></span></td><td>Stamps, "ids can't see colour", and <code>createPaint</code>.</td></tr>
+      <tr><td>8</td><td><span class="ref" data-f="scene-core.js" data-q="---- colour: the scene field"></span> <span class="ref" data-f="scene-core.js" data-q="export function createSceneTable"></span></td><td>The owner, the child's cell, what's exact, the stamp rule, the cost. Then the follower.</td></tr>
+      <tr><td>9</td><td><span class="ref" data-f="stream-core.js" data-q="export function worldSnapshot"></span> <span class="ref" data-f="stream-core.js" data-q="export function createJobRunner"></span> <span class="ref" data-f="stream-core.js" data-q="---- 4b. tails"></span></td><td>How the descriptor rides the snapshot, where the field is made and wrapped, and why ordering makes tails right.</td></tr>
+      <tr><td>10</td><td><span class="ref" data-f="chunk-worker.js" data-q="runner = createJobRunner(data.snap, colourOf)"></span> <span class="ref" data-f="stream-pool.js" data-q="tail(tail){"></span></td><td>The worker, which is short, and the pool keeping every tail.</td></tr>
+      <tr><td>11</td><td><span class="ref" data-f="ray-core.js" data-q="---- a page's attribute block"></span> <span class="ref" data-f="ray-core.js" data-q="export function attrAtCPU"></span> <span class="ref" data-f="ray-glsl.js" data-q="export const GLSL_RAY_ATTR"></span></td><td>Runs, the heap, and the two twins.</td></tr>
+      <tr><td>12</td><td><span class="ref" data-f="chunk-glsl.js" data-q="export const GLSL_ATTR"></span> <span class="ref" data-f="stream-viewer.html" data-q="const GLSL_SHADE"></span></td><td>Two lines of decode, and the shade both passes share.</td></tr>
+      <tr><td>13</td><td><span class="ref" data-f="vdag-core.js" data-q="---- the colour's print"></span> <span class="ref" data-f="vdag-core.js" data-q="export function resolveColour"></span> <span class="ref" data-f="vdag-core.js" data-q="const narrow6"></span></td><td>The print, the five statuses, six bits.</td></tr>
+      <tr><td>14</td><td><span class="ref" data-f="docs/attrs-plan.md" data-q="## Decisions"></span> <span class="ref" data-f="docs/glb-colour-plan.md" data-q="## 1. The design"></span> <span class="ref" data-f="docs/scene-log.md" data-q="### 2.2 What it costs"></span></td><td>The ten decisions behind the word, the baked design, and the scene field's cost.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:30px">What this page leaves out</h3>
+  <ul class="plain">
+    <li><b>Where baked words come from.</b> The bake itself (the nearest triangle's texture under a voxel's footprint, the skin's cap term) is
+      <code>experiments/mesh-asset.mjs</code> and <code>glb-colour-log.md</code> §1. This page starts from the words.</li>
+    <li><b>Labels and materials.</b> A label per voxel as a second DAG, and what to put in the reserved bits, are measured in <code>multidag-attributes.md</code>
+      and the three labels logs. None of it is drawn yet.</li>
+    <li><b>Actors' bodies.</b> A flier's body has words too, made once by <code>expandChunk</code> on the body alone and turned in the shader (<code>body-core.js</code>).</li>
+    <li><b>Which coarse cells are drawn.</b> That's the lod rule's choice, not colour's: <a href="lod-explainer.html">the LOD explainer</a>.</li>
+  </ul>
+</section>
+
+<footer>
+  Companion pages: <a href="renderer-explainer.html">the renderer explainer</a> (the big picture), <a href="lod-explainer.html">levels of detail</a> (§10 there is the coarse mean
+  as whole slices), <a href="dagskits-explainer.html">DAGs and kits</a> (the store, and the kit's colour frames). Notes on this page: <code>docs/colorfields-explainer.md</code>.
+  Serve the folder (<code>npm run serve</code>); the page imports the cores unchanged.
+</footer>
+
+</div>
+<div id="tip" role="tooltip"></div>
+
+<script type="module">
+/* COLOUR FIELDS EXPLAINER
+   ---------------------------------------------------------------------
+   A study companion for colour, asked for on 2026-11-10: "a new explainer for
+   how the color fields currently work, top to bottom … the finer points
+   explained in great detail". A sibling of lod-explainer.html, whose §10 is the
+   coarse mean as slices; this page is everything round it.
+
+   Colour is one road with a fork in it: a world names its colour (a descriptor),
+   each side turns the name into a field, edits and drops wrap the field, the job
+   reduces it to one word per drawn cube, and two paths carry words to the GPU.
+   The page takes that road in order. The cores are imported unchanged, and every
+   number in a read-out is computed here by them. What is this page's own, and
+   says so where it's shown:
+     - §5's table is a copy of chunk-core's meanUnder that keeps each step
+       (walkTrace), checked against the real cellAttr on every click, and its
+       "unweighted" figure, which the engine doesn't compute;
+     - §6's skin is "every voxel with an empty face neighbour", on a dense grid,
+       as file.test.js's bakedStep makes one. The asset pipeline's skin (every
+       voxel a triangle touches) is a superset; the field doesn't care which;
+     - §7 keeps the colour revision the way stream-core's setRoot does (a
+       counter that moves only when an op paints), since no streamer runs here;
+     - §8 finds a cell's owner by asking the real sceneField one placement at a
+       time with constant colours, so the owner test is scene-core's;
+     - §10's shade is a JS copy of the viewer's shadeOut;
+     - no section draws in 3D. A field is easier to read in a slice.
+
+   A section initialises the first time it scrolls into view (whenSeen). */
+import { createStore, createCounts, EMPTY, applyG } from './dag-core.js';
+import { expandChunk, cellAttr, nodeAt, mortonOf, mortonXYZ, cellOf } from './chunk-core.js';
+import { fastChunk, createJobCache } from './job-core.js';
+import { attrOf8, attrRGB, to6, rgb8, R_SHIFT, G_SHIFT, B_SHIFT } from './attr-core.js';
+import { colourOf } from './colours.js';
+import { createBaked, BLOCK } from './baked-core.js';
+import { createEditLog, createBlockTable, editedField, PALETTE, OP_WORDS, BREAK } from './edit-core.js';
+import { createSceneLog, createSceneTable, sceneField, SCENE_WORDS } from './scene-core.js';
+import { worldSnapshot, createPaint, stampOf, MEAN_DEPTH } from './stream-core.js';
+import { pageAttrBlock, ATTR_NONE, RUN_HEAD } from './ray-core.js';
+import { writeVdag, readVdag, sixBitWords, colourPrint, PRINT_SAMPLES } from './vdag-core.js';
+import { kitDesc, buildKit } from './kit-core.js';
+import { clayDesc, buildClay } from './clay-core.js';
+import { latticeDesc, buildLattice } from './lattice-core.js';
+import { caveDesc, buildCaves } from './cave-core.js';
+import { PROPER } from './scatter-core.js';
+import { SHAPES, fieldOf } from './experiments/shapes.mjs';
+
+/* ---- small things ---------------------------------------------------------- */
+const $ = id => document.getElementById(id);
+const fmt = n => Math.round(n).toLocaleString('en-US');
+const kb = b => b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(2) + ' MB';
+const hex = (v, n = 6) => '0x' + (v >>> 0).toString(16).padStart(n, '0');
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+const later = () => new Promise(res => setTimeout(res, 0));
+/* Colours on the page. A field's answer is rgb8 (r | g << 8 | b << 16), which is
+   also a canvas pixel's low three bytes, so a slice writes it straight in.
+   wordRGB8 is what the screen gets from a word before light: channel × 255 / 63. */
+const ch = c => [c & 255, c >> 8 & 255, c >> 16 & 255];
+const css = c => `rgb(${c & 255},${c >> 8 & 255},${c >> 16 & 255})`;
+const wordRGB8 = w => { const [r, g, b] = attrRGB(w); return rgb8(r * 255 / 63, g * 255 / 63, b * 255 / 63); };
+const wordOf = c => attrOf8(c & 255, c >> 8 & 255, c >> 16 & 255);
+const sw = (c, big = false) => `<i class="sw${big ? ' big' : ''}" style="background:${css(c)}"></i>`;
+const rgbText = c => ch(c).join(', ');
+const BG = 0xff110a0a, DIM = rgb8(38, 42, 54);
+
+function fit(cv){
+  const dpr = Math.min(devicePixelRatio || 1, 2), h = +cv.dataset.h;
+  cv.style.height = h + 'px';
+  const w = cv.clientWidth || 600, W2 = Math.round(w * dpr), H2 = Math.round(h * dpr);
+  if (cv.width !== W2 || cv.height !== H2){ cv.width = W2; cv.height = H2; }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  return { g, w, h };
+}
+function chipRow(host, items, onPick, current){
+  host.innerHTML = '';
+  const buttons = new Map();
+  const mark = key => { for (const [k, b] of buttons){ const on = k === key; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); } };
+  for (const [key, label, style] of items){
+    const b = document.createElement('button');
+    b.innerHTML = label;
+    if (style) b.style.cssText = style;
+    b.onclick = () => { mark(key); onPick(key); };
+    host.appendChild(b); buttons.set(key, b);
+  }
+  mark(current);
+  return mark;
+}
+function toggle(btn, on, onChange){
+  const paint = () => { btn.classList.toggle('on', on); btn.textContent = on ? 'on' : 'off'; btn.setAttribute('aria-pressed', on); };
+  btn.onclick = () => { on = !on; paint(); onChange(on); };
+  paint();
+}
+function slider(id, onInput){
+  const el = $(id), out = $(id + 'V');
+  const show = () => { if (out) out.textContent = el.value; };
+  el.oninput = () => { show(); onInput(+el.value); };
+  show();
+  return { get value(){ return +el.value; }, set(v, max){ if (max !== undefined) el.max = max; el.value = v; show(); } };
+}
+
+/* A section does its work the first time it's on screen. */
+const seen = new Set(), redraws = [];
+const whenSeen = (id, f) => {
+  let done = false;
+  new IntersectionObserver(es => {
+    for (const e of es){
+      if (e.isIntersecting) seen.add(id); else seen.delete(id);
+      if (e.isIntersecting && !done){ done = true; try { f(); } catch (err){ console.error(id, err); throw err; } }
+    }
+  }, { rootMargin: '200px 0px' }).observe($(id));
+};
+{ // nav: mark the section in view
+  const links = [...document.querySelectorAll('nav a')];
+  const io = new IntersectionObserver(es => {
+    for (const e of es) if (e.isIntersecting) for (const a of links) a.classList.toggle('on', a.dataset.nav === e.target.id);
+  }, { rootMargin: '-45% 0px -50% 0px' });
+  for (const a of links) io.observe($(a.dataset.nav));
+}
+{ let t = 0; addEventListener('resize', () => { clearTimeout(t); t = setTimeout(() => { for (const f of redraws) f(); }, 120); }); }
+
+/* ---- source references (the renderer explainer's) -----------------------------
+   A .ref names a file and a string in it, and shows file:line, looked up now, so
+   line numbers can't go stale. Click to copy. */
+const sources = new Map();
+const sourceOf = f => { if (!sources.has(f)) sources.set(f, fetch('./' + f).then(r => r.ok ? r.text() : '').catch(() => '')); return sources.get(f); };
+async function fillRefs(){
+  for (const el of document.querySelectorAll('.ref[data-f]')){
+    if (el.dataset.done) continue;
+    el.dataset.done = 1;
+    const { f, q } = el.dataset, base = f.replace(/^.*\//, '');
+    el.textContent = base; el.title = 'copy ' + f;
+    el.onclick = () => { navigator.clipboard?.writeText(el.dataset.at || f); el.style.color = '#ffc44f'; setTimeout(() => { el.style.color = ''; }, 400); };
+    const text = await sourceOf(f), i = q ? text.indexOf(q) : -1;
+    if (i < 0){ el.title = `${f}: "${q}" not found`; el.dataset.missing = 1; continue; }
+    const line = text.slice(0, i).split('\n').length;
+    el.textContent = `${base}:${line}`; el.dataset.at = `${f}:${line}`; el.title = `copy ${f}:${line}`;
+  }
+}
+fillRefs();
+
+/* ---- the lab's worlds ----------------------------------------------------------
+   Small real worlds, one per kind of named field that builds in a blink: four
+   shapes, a kit, a lattice, the caves and clay on ground, all 256³ but the
+   lattice (128³). Each is { store, root, D, desc, counts, field }, where desc is
+   the colour descriptor the viewer would put in the snapshot and field is
+   colourOf(desc). The scatter world (its smallest is D = 9, a second or two) and
+   the rows (they'd need sol-v4's page sliced) are described in §4 and not built:
+   the scatter's field is the lattice's with a ground under it.
+
+   The kit is asked for colourLevel 1: at D = 8 a kit has two levels, so the
+   default (2) is the whole world's gamut and shows no repeats. */
+const LAB = new Map();
+const LAB_KEYS = [['terrain', 'terrain'], ['sphere', 'sphere'], ['blob', 'blob'], ['gyroid', 'gyroid'], ['kit', 'kit'], ['lattice', 'lattice'], ['caves', 'caves'], ['clay', 'clay']];
+function lab(key){
+  if (LAB.has(key)) return LAB.get(key);
+  let w;
+  if (key === 'kit'){ const desc = kitDesc({ D: 8, colourLevel: 1 }), k = buildKit(desc); w = { store: k.store, root: k.root, D: 8, desc }; }
+  else if (key === 'clay'){ const desc = clayDesc({ D: 8, lump: 64, ground: true }), c = buildClay(desc); w = { store: c.store, root: c.root, D: 8, desc }; }
+  else if (key === 'caves'){ const desc = caveDesc({ D: 8, G: 48 }), c = buildCaves(desc); w = { store: c.store, root: c.root, D: 8, desc }; }
+  else if (key === 'lattice'){ const d = latticeDesc({ R: 12, n: [8, 8, 8] }), l = buildLattice(d); w = { store: l.store, root: l.root, D: l.D, desc: { ...d, table: l.table } }; }
+  else { const shape = SHAPES.find(s => s.name === key), store = createStore(), D = 8; w = { store, root: store.fromField(D, fieldOf(shape, D)).root, D, desc: { kind: 'shape', name: key, D } }; }
+  w.key = key; w.R = 2 ** w.D; w.counts = createCounts(w.store); w.field = colourOf(w.desc);
+  w.solid = (x, y, z) => w.store.query(w.root, w.D, x, y, z) === 1;
+  LAB.set(key, w);
+  return w;
+}
+/* The chunk to show for a lab world: the one holding the surface over the middle
+   of the world, where the colours vary. The chunk with the most records is a
+   corner whose three world walls are flat. Falls back to that when the middle
+   column is empty. */
+function showChunk(w, lod, opts){
+  const m = w.R >> 1, sh = 6 + lod, at = (cx, cy, cz) => expandChunk(w.store, w.root, w.D, { lod, cx, cy, cz }, opts);
+  for (let y = w.R - 1; y >= 0; y--) if (w.solid(m, y, m)){ const ex = at(m >> sh, y >> sh, m >> sh); if (ex.count) return ex; break; }
+  const side = Math.max(1, 2 ** (w.D - sh));
+  let best = null;
+  for (let cz = 0; cz < side; cz++) for (let cy = 0; cy < side; cy++) for (let cx = 0; cx < side; cx++){ const ex = at(cx, cy, cz); if (!best || ex.count > best.count) best = ex; }
+  return best;
+}
+const descText = d => JSON.stringify(d, (k, v) => ArrayBuffer.isView(v) ? `${v.constructor.name}(${v.length})` : v, 1).replace(/\n\s*/g, ' ').replace(/"(\w+)":/g, '$1:');
+
+/* A slice of a cubic grid on a canvas: n × n cells, y up, each cell one
+   offscreen pixel scaled without smoothing. pixel(x, y) gives rgb8, or a
+   negative number for nothing there. `over` draws on top in canvas pixels. */
+function sliceView(cv){
+  const off = document.createElement('canvas');
+  let n = 0, box = null;
+  return {
+    paint(size, pixel, over){
+      n = size; off.width = off.height = n;
+      const g2 = off.getContext('2d'), im = g2.createImageData(n, n), px = new Uint32Array(im.data.buffer);
+      for (let y = 0; y < n; y++) for (let x = 0; x < n; x++){ const c = pixel(x, y); px[(n - 1 - y) * n + x] = c < 0 ? BG : (0xff000000 | c) >>> 0; }
+      g2.putImageData(im, 0, 0);
+      const { g, w, h } = fit(cv), s = Math.min(w, h), x0 = (w - s) / 2, y0 = (h - s) / 2;
+      g.imageSmoothingEnabled = false; g.drawImage(off, x0, y0, s, s);
+      box = { x0, y0, s };
+      // xy(x, y): the canvas position of the cell's top-left corner; k: a cell's side in px.
+      if (over) over(g, (x, y) => [x0 + x * s / n, y0 + (n - 1 - y) * s / n], s / n);
+    },
+    cell(ev){
+      if (!box) return null;
+      const r = cv.getBoundingClientRect(), x = Math.floor((ev.clientX - r.left - box.x0) / box.s * n), y = n - 1 - Math.floor((ev.clientY - r.top - box.y0) / box.s * n);
+      return x >= 0 && y >= 0 && x < n && y < n ? [x, y] : null;
+    },
+  };
+}
+const outline = (g, xy, k, x, y, side, colour, dash = null) => {
+  const [px, py] = xy(x, y + side - 1);
+  g.save(); g.strokeStyle = colour; g.lineWidth = 1.5; if (dash) g.setLineDash(dash);
+  g.strokeRect(px - 0.5, py - 0.5, side * k + 1, side * k + 1); g.restore();
+};
+
+/* ============================ §1 the road ====================================
+   One voxel, followed with the real functions: the descriptor, the field's
+   answer, attrOf8's word, then the chunk job itself (expandChunk with the
+   colour) to find the record that carries the word, and the shader's decode
+   as arithmetic. A buried voxel has no record, which is the point of Q13. */
+const JR = { key: 'terrain', z: 128, sel: null, chunks: new Map(), view: null };
+function jrChunk(w, cx, cy, cz){
+  const k = w.key + ':' + cx + ',' + cy + ',' + cz;
+  if (!JR.chunks.has(k)) JR.chunks.set(k, expandChunk(w.store, w.root, w.D, { lod: 0, cx, cy, cz }, { counts: w.counts, colour: w.field, seams: true }));
+  return JR.chunks.get(k);
+}
+function jrDraw(){
+  const w = lab(JR.key), z = Math.min(JR.z, w.R - 1);
+  JR.view.paint(w.R, (x, y) => w.solid(x, y, z) ? wordRGB8(cellAttr(w.store, w.counts, w.field, 0, 0, MEAN_DEPTH, x, y, z)) : -1,
+    (g, xy, k) => { if (JR.sel && JR.sel[2] === z) outline(g, xy, k, JR.sel[0], JR.sel[1], 1, '#fff'); });
+  $('rdJr').innerHTML = `<span>world <b>${w.R}³</b>, D = ${w.D}</span><span>slice z = <b>${z}</b></span><span>each pixel: one voxel, in the colour its word shows</span>`;
+}
+function jrSteps(){
+  const w = lab(JR.key), host = $('jrSteps');
+  if (!JR.sel){ host.innerHTML = '<span class="hint">Click a voxel in the slice.</span>'; return; }
+  const [x, y, z] = JR.sel;
+  if (!w.solid(x, y, z)){
+    const c = w.field(x + 0.5, y + 0.5, z + 0.5, 0);
+    host.innerHTML = `<div class="step"><b>(${x}, ${y}, ${z}) is air.</b> No cell, no record, no word. The field would still answer here: ${sw(c)}${hex(c)}. At lod 0 nothing asks it. A coarse sample might (§5).</div>`;
+    return;
+  }
+  const c = w.field(x + 0.5, y + 0.5, z + 0.5, 0), [r, g, b] = ch(c), word = cellAttr(w.store, w.counts, w.field, 0, 0, MEAN_DEPTH, x, y, z), [r6, g6, b6] = attrRGB(word);
+  const cx = x >> 6, cy = y >> 6, cz = z >> 6, ex = jrChunk(w, cx, cy, cz), cell = mortonOf(x & 63, y & 63, z & 63);
+  let i = -1;
+  for (let j = 0; j < ex.records.length; j++) if (cellOf(ex.records[j]) === cell){ i = j; break; }
+  const steps = [];
+  steps.push(`<div class="step"><b>1 · the world names its colour.</b><br><span class="t">${esc(descText(w.desc))}</span></div>`);
+  steps.push(`<div class="step"><b>2 · <code>colourOf(desc)</code></b> makes the field, on whichever side asks. Here: this page. In the viewer: each chunk worker.</div>`);
+  steps.push(`<div class="step"><b>3 · the field, at the voxel's centre.</b><br><code>colour(${x}.5, ${y}.5, ${z}.5, 0)</code> = <span class="t">${hex(c)}</span> ${sw(c)}<br>r, g, b = ${r}, ${g}, ${b} &nbsp;(8 bits each, red in the low byte)</div>`);
+  steps.push(`<div class="step"><b>4 · <code>attrOf8(r, g, b)</code>: each channel × 63 / 255, rounded.</b><br>${r} → ${r6}, &nbsp;${g} → ${g6}, &nbsp;${b} → ${b6}<br>word = ${r6} &lt;&lt; ${R_SHIFT} | ${g6} &lt;&lt; ${G_SHIFT} | ${b6} &lt;&lt; ${B_SHIFT} = <span class="t">${hex(word, 8)}</span></div>`);
+  if (i < 0)
+    steps.push(`<div class="step part"><b>5 · the job: no record.</b> All six neighbours are filled, so this voxel shows no face. <code>expandChunk</code> emits nothing for it, and <b>step 4's word is never made</b>: the job asks the field only for cells it emits. Chunk (${cx}, ${cy}, ${cz}) drew ${fmt(ex.count)} of its ${fmt(ex.occupied)} occupied voxels.</div>`);
+  else {
+    const tail = i >= ex.borderStart, same = ex.attrs[i] === word, mask = ex.records[i] >>> 18 & 63, faces = mask.toString(2).split('').filter(v => v === '1').length;
+    steps.push(`<div class="step part"><b>5 · the job: chunk (${cx}, ${cy}, ${cz}), lod 0.</b><br>` +
+      (tail ? `This voxel is in the <b>seam tail</b>: buried by its neighbour chunk, mask 0, drawn only while that side is open. It still gets a word.<br>`
+            : `Its record is <b>number ${fmt(i)}</b> of ${fmt(ex.count)}, showing ${faces} face${faces === 1 ? '' : 's'}.<br>`) +
+      `<code>attrs[${i}]</code> = <span class="t">${hex(ex.attrs[i], 8)}</span> <span class="${same ? 'ok' : 'no'}" style="color:${same ? '#7fe0a8' : '#ff9ca5'}">${same ? '✓ the same word' : '✗ differs'}</span><br>The record holds the cell and its faces; the word sits at the same index in a parallel array.</div>`);
+    steps.push(`<div class="step"><b>6 · the GPU.</b> <code>attrColour(w)</code> = (${r6}, ${g6}, ${b6}) / 63 = (${(r6 / 63).toFixed(3)}, ${(g6 / 63).toFixed(3)}, ${(b6 / 63).toFixed(3)}) ${sw(wordRGB8(word))}<br>then × light for the face, and fog (§10).</div>`);
+  }
+  host.innerHTML = steps.join('');
+}
+function initJourney(){
+  JR.view = sliceView($('cvJr'));
+  const z = slider('jrZ', v => { JR.z = v; jrDraw(); });
+  const pick = key => { JR.key = key; const w = lab(key); JR.z = w.R >> 1; z.set(JR.z, w.R - 1); JR.sel = null; jrDraw(); jrSteps(); };
+  chipRow($('jrWorld'), LAB_KEYS, pick, JR.key);
+  $('cvJr').addEventListener('click', ev => { const c = JR.view.cell(ev); if (!c) return; JR.sel = [c[0], c[1], Math.min(JR.z, lab(JR.key).R - 1)]; jrDraw(); jrSteps(); });
+  pick(JR.key);
+  // Start on a voxel at the surface, so the first thing shown is a whole journey.
+  { const w = lab(JR.key), x = w.R >> 1, zz = JR.z; for (let y = w.R - 1; y >= 0; y--) if (w.solid(x, y, zz)){ JR.sel = [x, y, zz]; break; } jrDraw(); jrSteps(); }
+  redraws.push(jrDraw);
+}
+whenSeen('s1', initJourney);
+
+/* ============================ §2 the field ===================================
+   The field asked at every voxel centre of a slice, not only where there are
+   voxels: what "defined everywhere" looks like. Answers in air are dimmed. */
+const FD = { key: 'kit', mode: 'everywhere', z: 128, view: null };
+const dimmed = c => rgb8((c & 255) * 0.42, (c >> 8 & 255) * 0.42, (c >> 16 & 255) * 0.42);
+function fdDraw(){
+  const w = lab(FD.key), z = Math.min(FD.z, w.R - 1), f = w.field;
+  const t0 = performance.now();
+  FD.view.paint(w.R, (x, y) => {
+    const s = w.solid(x, y, z);
+    if (FD.mode === 'shape') return s ? rgb8(150, 158, 172) : -1;
+    if (FD.mode === 'voxels') return s ? f(x + 0.5, y + 0.5, z + 0.5, 0) : -1;
+    const c = f(x + 0.5, y + 0.5, z + 0.5, 0);
+    return s ? c : dimmed(c);
+  });
+  FD.ms = performance.now() - t0;
+  $('rdFd').innerHTML = `<span>world <b>${w.key}</b>, ${w.R}³</span><span>slice z = <b>${z}</b></span><span>hover for a point's answer</span>`;
+}
+function fdTime(){
+  // The field alone, over a 64³ block of voxel centres in the middle of the world.
+  const w = lab(FD.key), f = w.field, o = (w.R >> 1) - 32;
+  let acc = 0; const t0 = performance.now();
+  for (let z = 0; z < 64; z++) for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) acc ^= f(o + x + 0.5, o + y + 0.5, o + z + 0.5, 0);
+  const ns = (performance.now() - t0) * 1e6 / 262144;
+  $('vdFd').innerHTML = `<b>${w.key}</b>'s field: 262,144 calls over a 64³ block took ${((performance.now() - t0)).toFixed(1)} ms here, about <b>${ns.toFixed(0)} ns a call</b> on this machine. ` +
+    `A lod-0 job makes one call a record; a coarse one, up to 8.`;
+  return acc;
+}
+function initField(){
+  FD.view = sliceView($('cvFd'));
+  const z = slider('fdZ', v => { FD.z = v; fdDraw(); });
+  const pick = key => { FD.key = key; const w = lab(key); FD.z = Math.min(w.R - 1, key === 'kit' ? 40 : w.R >> 1); z.set(FD.z, w.R - 1); fdDraw(); fdTime(); };
+  chipRow($('fdWorld'), LAB_KEYS, pick, FD.key);
+  chipRow($('fdMode'), [['everywhere', 'everywhere'], ['voxels', 'only on the voxels'], ['shape', 'the shape alone']], m => { FD.mode = m; fdDraw(); }, FD.mode);
+  $('cvFd').addEventListener('mousemove', ev => {
+    const c = FD.view.cell(ev); if (!c) return;
+    const w = lab(FD.key), z2 = Math.min(FD.z, w.R - 1), v = w.field(c[0] + 0.5, c[1] + 0.5, z2 + 0.5, 0), s = w.solid(c[0], c[1], z2);
+    $('rdFd').innerHTML = `<span>colour(<b>${c[0]}.5, ${c[1]}.5, ${z2}.5</b>, 0)</span><span>= <b>${hex(v)}</b> ${sw(v)} r, g, b = ${rgbText(v)}</span><span>${s ? '<b>a voxel</b>: a lod-0 job would ask this' : 'air: only a coarse sample could land here'}</span>`;
+  });
+  pick(FD.key);
+  redraws.push(fdDraw);
+}
+whenSeen('s2', initField);
+
+/* ============================ §3 the word ==================================== */
+function initWord(){
+  const R = $('wdR'), G = $('wdG'), B = $('wdB'), pick = $('wdPick');
+  const widen = q => Math.round(q * 255 / 63);
+  const show = () => {
+    const r = +R.value, g = +G.value, b = +B.value, c = rgb8(r, g, b), w = attrOf8(r, g, b), [r6, g6, b6] = attrRGB(w);
+    $('wdRV').textContent = r; $('wdGV').textContent = g; $('wdBV').textContent = b;
+    pick.value = '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+    // 32 boxes, bit 31 on the left; byte 0 (red) ends up on the right.
+    const names = ['byte 3 · reserved', 'byte 2 · blue', 'byte 1 · green', 'byte 0 · red'], cls = ['rs', 'cb', 'cg', 'cr'];
+    let html = '';
+    for (let by = 3; by >= 0; by--){
+      html += `<div class="byte"><div class="cap">${names[3 - by]}</div><div class="row">`;
+      for (let i = 7; i >= 0; i--){ const bit = by * 8 + i, on = w >>> bit & 1, colour = by < 3 && i >= 2; html += `<span class="bit ${colour ? cls[3 - by] : 'rs'}">${on}<small>${bit}</small></span>`; }
+      html += '</div></div>';
+    }
+    $('wdBits').innerHTML = html;
+    const back = [widen(r6), widen(g6), widen(b6)], shown = rgb8(...back);
+    $('wdOut').innerHTML =
+      `the field's answer &nbsp;<b>rgb8(${r}, ${g}, ${b})</b> = ${r} | ${g} &lt;&lt; 8 | ${b} &lt;&lt; 16 = <span class="t">${hex(c)}</span> ${sw(c, true)}<br>` +
+      `<b>to6</b>: ${r} · 63 / 255 = ${(r * 63 / 255).toFixed(2)} → <b>${r6}</b> &nbsp;·&nbsp; ${(g * 63 / 255).toFixed(2)} → <b>${g6}</b> &nbsp;·&nbsp; ${(b * 63 / 255).toFixed(2)} → <b>${b6}</b><br>` +
+      `the word &nbsp;<b>packAttr(${r6}, ${g6}, ${b6})</b> = ${r6} &lt;&lt; 2 | ${g6} &lt;&lt; 10 | ${b6} &lt;&lt; 18 = <span class="t">${hex(w, 8)}</span><br>` +
+      `as four bytes: [${w & 255}, ${w >> 8 & 255}, ${w >> 16 & 255}, ${w >>> 24}] &nbsp;(each colour byte is its 6-bit value × 4)<br>` +
+      `on screen: (${r6}, ${g6}, ${b6}) / 63 → 8-bit (${back.join(', ')}) ${sw(shown, true)} &nbsp;off by (${[r, g, b].map((v, i) => (back[i] - v > 0 ? '+' : '') + (back[i] - v)).join(', ')}) of 255`;
+  };
+  for (const el of [R, G, B]) el.oninput = show;
+  pick.oninput = () => { const v = parseInt(pick.value.slice(1), 16); R.value = v >> 16 & 255; G.value = v >> 8 & 255; B.value = v & 255; show(); };
+  const stair = () => {
+    const { g, w, h } = fit($('cvStair')), k = w / 256;
+    for (let v = 0; v < 256; v++){
+      g.fillStyle = `rgb(${v},${v},${v})`; g.fillRect(v * k, 0, k + 0.5, h / 2 - 1);
+      const q = widen(to6(v)); g.fillStyle = `rgb(${q},${q},${q})`; g.fillRect(v * k, h / 2 + 1, k + 0.5, h / 2 - 1);
+    }
+    g.fillStyle = 'rgba(0,229,255,.5)';
+    for (let v = 1; v < 256; v++) if (to6(v) !== to6(v - 1)) g.fillRect(v * k - 0.5, h / 2 + 1, 1, h / 2 - 1);
+  };
+  show(); stair(); redraws.push(stair);
+}
+whenSeen('s3', initWord);
+
+const tip = $('tip');
+function showTip(html, ev){
+  tip.innerHTML = html; tip.style.display = 'block';
+  const r = tip.getBoundingClientRect();
+  tip.style.left = Math.min(innerWidth - r.width - 8, ev.clientX + 14) + 'px';
+  tip.style.top = Math.min(innerHeight - r.height - 8, ev.clientY + 14) + 'px';
+}
+const hideTip = () => { tip.style.display = 'none'; };
+addEventListener('scroll', hideTip, { passive: true });
+// How far apart two words are, in 6-bit steps: the largest channel difference.
+const stepsApart = (a, b) => { const p = attrRGB(a), q = attrRGB(b); return Math.max(Math.abs(p[0] - q[0]), Math.abs(p[1] - q[1]), Math.abs(p[2] - q[2])); };
+
+/* ============================ §4 named fields ================================
+   The descriptor as text, what resolving it costs here, and the world in its
+   colours. The kit's colourLevel is the one knob that changes a field without
+   touching the shape: kitColour reads it, kitPlan and buildKit don't. */
+const NM = { key: 'kit', level: 1, z: 40, view: null };
+function nmNow(){
+  const w = lab(NM.key);
+  if (NM.key !== 'kit') return { w, desc: w.desc };
+  return { w, desc: kitDesc({ D: 8, colourLevel: NM.level }) };
+}
+function nmDraw(){
+  const { w, desc } = nmNow(), z = Math.min(NM.z, w.R - 1);
+  const t0 = performance.now(), field = colourOf(desc), ms = performance.now() - t0;
+  NM.field = field;
+  NM.view.paint(w.R, (x, y) => w.solid(x, y, z) ? wordRGB8(wordOf(field(x + 0.5, y + 0.5, z + 0.5, 0))) : -1);
+  $('nmDesc').textContent = JSON.stringify(desc, (k, v) => ArrayBuffer.isView(v) ? `${v.constructor.name}(${v.length})` : v, 2);
+  let tableBytes = 0;
+  const json = JSON.stringify(desc, (k, v) => { if (ArrayBuffer.isView(v)){ tableBytes += v.byteLength; return undefined; } return v; }).length;
+  $('rdNm').innerHTML = `<span>as data: <b>${json} B</b> of JSON${tableBytes ? ` + a table of <b>${kb(tableBytes)}</b>` : ''}</span><span><code>colourOf(desc)</code> took <b>${ms < 0.1 ? '&lt; 0.1' : ms.toFixed(1)} ms</b> here</span>`;
+  $('nmLevelG').style.display = NM.key === 'kit' ? '' : 'none';
+  const side = 16 * 4 ** NM.level;
+  $('vdNm').innerHTML = NM.key === 'kit'
+    ? `<b>colourLevel ${NM.level}</b>: the colour is a point's position inside the ${side}³ entry it lies in (${NM.level === 0 ? 'a part' : NM.level === 1 ? 'an assembly of 4³ parts' : 'the whole world, at this depth'}), un-turned, as RGB lifted off black (40 + 215 · u / ${side}). The store and the root (id ${w.root}) are the same at every level: only the name changed.`
+    : NM.key === 'lattice' ? `Each 12³ specimen is coloured by position in its own frame. The <code>table</code> holds 6 int32 a specimen (recipe, turn, corner, fingerprint): it says where the specimens are, and the field does the rest.`
+    : NM.key === 'caves' ? `The caves' field rebuilds the whole plan (heights, chambers, pools) from three numbers. The plan is cached per descriptor, so only the first <code>colourOf</code> on a side pays for it.`
+    : NM.key === 'clay' ? `Clay above the centre plane, ground below it, with a per-voxel jitter so a one-voxel edit can be found, and a 16-voxel checker so the ground gives a sense of scale.`
+    : `A shape's descriptor is two fields. The colour is code beside the shape in <code>experiments/shapes.mjs</code>, defined over (−1, 1)³ and scaled to the world's side by <code>colourFieldOf</code>.`;
+}
+function initNamed(){
+  NM.view = sliceView($('cvNm'));
+  const z = slider('nmZ', v => { NM.z = v; nmDraw(); });
+  const pick = key => { NM.key = key; const w = lab(key); NM.z = Math.min(w.R - 1, key === 'kit' ? 40 : key === 'lattice' ? 9 : w.R >> 1); z.set(NM.z, w.R - 1); nmDraw(); };
+  chipRow($('nmWorld'), LAB_KEYS, pick, NM.key);
+  chipRow($('nmLevel'), [[0, '0 · parts, 16³'], [1, '1 · assemblies, 64³'], [2, '2 · the world, 256³']], l => { NM.level = l; nmDraw(); }, NM.level);
+  $('cvNm').addEventListener('mousemove', ev => {
+    const c = NM.view.cell(ev); if (!c) return;
+    const { w } = nmNow(), z2 = Math.min(NM.z, w.R - 1), v = NM.field(c[0] + 0.5, c[1] + 0.5, z2 + 0.5, 0);
+    showTip(`(${c[0]}, ${c[1]}, ${z2}) ${w.solid(c[0], c[1], z2) ? '' : '· air '}<br>${sw(v)}${hex(v)} · ${rgbText(v)}`, ev);
+  });
+  $('cvNm').addEventListener('mouseleave', hideTip);
+  pick(NM.key);
+  redraws.push(nmDraw);
+}
+whenSeen('s4', initNamed);
+
+/* ============================ §5 the coarse mean ==============================
+   walkTrace is chunk-core's meanUnder with every floor sub-cell kept instead of
+   summed. The sums made from its rows are held to the real cellAttr below, so
+   if the two ever part the page says so rather than showing a wrong table. */
+const MN = { key: 'terrain', lod: 3, depth: 1, z: 16, sel: null, view: null };
+function walkTrace(w, id, level, floor, x, y, z, out){
+  if (id === EMPTY) return;
+  if (level === floor){
+    const h = 2 ** level / 2;
+    out.push({ x, y, z, level, w: w.counts.of(id), px: x + h, py: y + h, pz: z + h, c: w.field(x + h, y + h, z + h, level) });
+    return;
+  }
+  const h = 2 ** (level - 1);
+  for (let o = 0; o < 8; o++) walkTrace(w, w.store.child(id, o), level - 1, floor, x + (o & 1) * h, y + (o >> 1 & 1) * h, z + (o >> 2) * h, out);
+}
+function mnDraw(){
+  const w = lab(MN.key), lod = Math.min(MN.lod, w.D - 2), n = w.R >> lod, zc = Math.min(MN.z, n - 1), cs = 2 ** lod;
+  MN.view.paint(n, (X, Y) => {
+    const id = nodeAt(w.store, w.root, w.D, lod, X, Y, zc);
+    return id === EMPTY ? -1 : wordRGB8(cellAttr(w.store, w.counts, w.field, id, lod, MN.depth, X * cs, Y * cs, zc * cs));
+  }, (g, xy, k) => { if (MN.sel && MN.sel[2] === zc && MN.sel[3] === lod) outline(g, xy, k, MN.sel[0], MN.sel[1], 1, '#fff'); });
+  const floor = Math.max(0, lod - MN.depth);
+  $('rdMn').innerHTML = `<span>cells of side <b>${cs}</b> voxels</span><span>floor level <b>${floor}</b>: sub-cells of side ${2 ** floor}, up to <b>${8 ** (lod - floor)}</b> samples a cell</span>` +
+    `<span>${lod <= MN.depth ? '<b>exact</b>: lod ≤ meanDepth, every voxel is sampled' : 'sampled, not exact'}</span>`;
+}
+function mnCell(){
+  const w = lab(MN.key), sum = $('mnSum'), body = $('tbMn').tBodies[0];
+  if (!MN.sel){ sum.innerHTML = '<span style="color:var(--dim)">Click a cell.</span>'; body.innerHTML = ''; return; }
+  const [X, Y, Z, lod] = MN.sel, cs = 2 ** lod, id = nodeAt(w.store, w.root, w.D, lod, X, Y, Z);
+  if (id === EMPTY){ sum.innerHTML = `Cell (${X}, ${Y}, ${Z}) is empty: no node, so no walk and no word.`; body.innerHTML = ''; return; }
+  const floor = Math.max(0, lod - MN.depth), rows = [];
+  walkTrace(w, id, lod, floor, X * cs, Y * cs, Z * cs, rows);
+  const n = w.counts.of(id), S = [0, 0, 0], U = [0, 0, 0];
+  let wsum = 0, air = 0;
+  for (const r of rows){
+    const c = ch(r.c);
+    for (let i = 0; i < 3; i++){ S[i] += r.w * c[i]; U[i] += c[i]; }
+    wsum += r.w;
+    r.solid = w.solid(Math.floor(r.px), Math.floor(r.py), Math.floor(r.pz));
+    if (!r.solid) air++;
+  }
+  const mean = S.map(v => v / n), word = attrOf8(...mean), real = cellAttr(w.store, w.counts, w.field, id, lod, MN.depth, X * cs, Y * cs, Z * cs);
+  const exact = cellAttr(w.store, w.counts, w.field, id, lod, lod, X * cs, Y * cs, Z * cs), plain = attrOf8(...U.map(v => v / rows.length));
+  const q = attrRGB(word), ok = word === real, tick = v => `<span class="${v ? 'ok' : 'no'}">${v ? '✓' : '✗'}</span>`;
+  sum.innerHTML =
+    `cell <b>(${X}, ${Y}, ${Z})</b> at lod ${lod}: corner (${X * cs}, ${Y * cs}, ${Z * cs}), side ${cs}, holding <b>${fmt(n)}</b> of ${fmt(cs ** 3)} voxels (${(100 * n / cs ** 3).toFixed(1)}% full)<br>` +
+    `floor = max(0, ${lod} − ${MN.depth}) = <b>${floor}</b>: <b>${rows.length}</b> occupied sub-cell${rows.length === 1 ? '' : 's'} of side ${2 ** floor}` +
+    (floor > 0 ? `, <b>${air}</b> sampled at a point that's in air` : ', each a voxel, sampled at its own centre') + `<br>` +
+    `Σ weight · colour = (${S.map(v => fmt(v)).join(', ')}) &nbsp;·&nbsp; Σ weight = ${fmt(wsum)} ${tick(wsum === n)} the cell's count<br>` +
+    `÷ ${fmt(n)} = (<b>${mean.map(v => v.toFixed(2)).join(', ')}</b>) → to6 → (${q.join(', ')}) → <span class="t">${hex(word, 8)}</span> ${sw(wordRGB8(word), true)} ${tick(ok)} ${ok ? 'what <code>cellAttr</code> returns' : `<code>cellAttr</code> returns ${hex(real, 8)}`}<br>` +
+    `the exact mean (meanDepth = ${lod}: all ${fmt(n)} voxels) ${sw(wordRGB8(exact), true)} ` + (exact === word ? '<span class="ok">the same word</span>' : `<span class="t">${stepsApart(word, exact)} step${stepsApart(word, exact) === 1 ? '' : 's'} away</span>`) + `<br>` +
+    `the same samples, <i>un</i>weighted ${sw(wordRGB8(plain), true)} ` + (plain === word ? 'the same word (the sub-cells are about equally full)' : `<span class="t">${stepsApart(word, plain)} step${stepsApart(word, plain) === 1 ? '' : 's'} away</span>: what ignoring the counts would cost here`);
+  const SHOWN = 64;
+  body.innerHTML = rows.slice(0, SHOWN).map(r =>
+    `<tr><td>(${r.x}, ${r.y}, ${r.z})</td><td class="n">${2 ** r.level}</td><td class="n">${fmt(r.w)}</td><td class="n">${(100 * r.w / n).toFixed(1)}%</td>` +
+    `<td>(${r.px}, ${r.py}, ${r.pz})</td><td class="${r.solid ? '' : 'bad'}">${r.solid ? 'a voxel' : 'air'}</td><td>${sw(r.c)}${rgbText(r.c)}</td></tr>`).join('') +
+    (rows.length > SHOWN ? `<tr><td colspan="7" style="color:var(--dim)">… and ${rows.length - SHOWN} more, all in the sums above</td></tr>` : '');
+}
+function initMean(){
+  MN.view = sliceView($('cvMn'));
+  const z = slider('mnZ', v => { MN.z = v; mnDraw(); });
+  const reset = () => { const w = lab(MN.key), n = w.R >> Math.min(MN.lod, w.D - 2); MN.z = Math.min(MN.z, n - 1); z.set(Math.min(n - 1, n >> 1), n - 1); MN.z = z.value; MN.sel = null; mnDraw(); mnFirst(); };
+  // Start on the cell whose weighted and unweighted means differ most: a surface cell.
+  const mnFirst = () => {
+    const w = lab(MN.key), lod = Math.min(MN.lod, w.D - 2), n = w.R >> lod, zc = Math.min(MN.z, n - 1), cs = 2 ** lod;
+    let best = null, bestV = -1;
+    for (let Y = 0; Y < n; Y++) for (let X = 0; X < n; X++){
+      const id = nodeAt(w.store, w.root, w.D, lod, X, Y, zc); if (id === EMPTY) continue;
+      const fill = w.counts.of(id) / cs ** 3, v = fill < 1 ? 1 - Math.abs(fill - 0.4) : 0;
+      if (v > bestV){ bestV = v; best = [X, Y, zc, lod]; }
+    }
+    MN.sel = best; mnDraw(); mnCell();
+  };
+  chipRow($('mnWorld'), LAB_KEYS, key => { MN.key = key; reset(); }, MN.key);
+  slider('mnLod', v => { MN.lod = v; reset(); });
+  slider('mnDepth', v => { MN.depth = v; mnDraw(); mnCell(); });
+  $('cvMn').addEventListener('click', ev => {
+    const c = MN.view.cell(ev); if (!c) return;
+    const w = lab(MN.key), lod = Math.min(MN.lod, w.D - 2), n = w.R >> lod;
+    MN.sel = [c[0], c[1], Math.min(MN.z, n - 1), lod]; mnDraw(); mnCell();
+  });
+  reset();
+  redraws.push(mnDraw);
+}
+whenSeen('s5', initMean);
+
+/* ============================ §6 baked fields =================================
+   A 64³ ball, its skin and its words, made the way file.test.js's bakedStep
+   makes them: walk every voxel in Morton order, keep the ones with an empty
+   face neighbour, and bake each from the sphere's named field. Morton order is
+   rank order, so words.push is all the indexing there is. Then the real
+   createBaked reads them. */
+function bakeBall(D){
+  const R = 2 ** D, shape = SHAPES.find(s => s.name === 'sphere'), cell = fieldOf(shape, D), named = colourOf({ kind: 'shape', name: 'sphere', D });
+  const occ = new Uint8Array(R ** 3), skinOcc = new Uint8Array(R ** 3), rankAt = new Int32Array(R ** 3).fill(-1), words = [], pos = [];
+  for (let z = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) occ[x + R * (y + R * z)] = cell(0, x, y, z) === 1 ? 1 : 0;
+  const at = (x, y, z) => x >= 0 && y >= 0 && z >= 0 && x < R && y < R && z < R && occ[x + R * (y + R * z)];
+  for (let i = 0; i < R ** 3; i++){
+    let x = 0, y = 0, z = 0;
+    for (let l = 0; l < D; l++){ x |= (i >> 3 * l & 1) << l; y |= (i >> 3 * l + 1 & 1) << l; z |= (i >> 3 * l + 2 & 1) << l; }
+    if (!at(x, y, z) || (at(x + 1, y, z) && at(x - 1, y, z) && at(x, y + 1, z) && at(x, y - 1, z) && at(x, y, z + 1) && at(x, y, z - 1))) continue;
+    const v = x + R * (y + R * z);
+    skinOcc[v] = 1; rankAt[v] = words.length; words.push(named(x + 0.5, y + 0.5, z + 0.5)); pos.push(x, y, z);
+  }
+  const store = createStore(), root = store.fromDense(occ, R).root, skin = store.fromDense(skinOcc, R).root;
+  return { D, R, store, root, skin, occ, skinOcc, rankAt, words: Uint32Array.from(words), pos: Uint8Array.from(pos), named, counts: createCounts(store) };
+}
+let BALL = null;
+const ball = () => BALL || (BALL = bakeBall(6));
+const BK = { level: 4, climb: 6, z: 32, sel: null, field: null, view: null, strip: null, range: null, up: null };
+const bkField = (words = ball().words, climb = BK.climb) => createBaked(ball().store, ball().skin, ball().D, words, { counts: ball().counts, climb });
+function bkDraw(){
+  const b = ball(), R = b.R, z = BK.z, l = BK.level, s = 2 ** l;
+  BK.view.paint(R, (x, y) => { const v = x + R * (y + R * z); return b.skinOcc[v] ? b.words[b.rankAt[v]] & 0xffffff : b.occ[v] ? DIM : -1; },
+    (g, xy, k) => {
+      if (k * s >= 6){
+        g.strokeStyle = 'rgba(160,190,230,.16)'; g.lineWidth = 1; g.beginPath();
+        const [x0, yTop] = xy(0, R - 1), full = R * k;
+        for (let i = 0; i <= R; i += s){ g.moveTo(x0 + i * k, yTop); g.lineTo(x0 + i * k, yTop + full); g.moveTo(x0, yTop + i * k); g.lineTo(x0 + full, yTop + i * k); }
+        g.stroke();
+      }
+      if (BK.up && (BK.up.Z << BK.up.level) <= z && z < ((BK.up.Z + 1) << BK.up.level)) outline(g, xy, k, BK.up.X << BK.up.level, BK.up.Y << BK.up.level, 2 ** BK.up.level, '#ffc44f', [4, 3]);
+      if (BK.sel && BK.sel.level === l && BK.sel.Z === z >> l) outline(g, xy, k, BK.sel.X << l, BK.sel.Y << l, s, '#fff');
+    });
+}
+/* The strip: every word, 64 a row, so a row is one of createBaked's blocks.
+   A lit range is drawn at full strength over a dimmed copy; whole rows inside
+   it are the block sums' part (a bar in the gutter), the ragged ends are the
+   scan (outlined). */
+const GUT = 14;
+function bkStrip(){
+  const b = ball(), N = b.words.length, rows = Math.ceil(N / BLOCK), cv = $('cvStrip'), rh = 4;
+  if (!BK.strip){
+    const off = document.createElement('canvas'); off.width = BLOCK; off.height = rows;
+    const g2 = off.getContext('2d'), im = g2.createImageData(BLOCK, rows), px = new Uint32Array(im.data.buffer);
+    for (let i = 0; i < N; i++) px[i] = (0xff000000 | (b.words[i] & 0xffffff)) >>> 0;
+    g2.putImageData(im, 0, 0); BK.strip = off;
+  }
+  cv.dataset.h = rows * rh + 4;
+  const { g, w } = fit(cv), cw = Math.max(2, Math.floor((w - GUT - 2) / BLOCK));
+  BK.geom = { cw, rh, rows, N };
+  g.imageSmoothingEnabled = false;
+  const r = BK.range;
+  g.globalAlpha = r ? 0.22 : 1;
+  g.drawImage(BK.strip, GUT, 2, BLOCK * cw, rows * rh);
+  g.globalAlpha = 1;
+  if (!r) return;
+  const [a, e] = r, A = Math.ceil(a / BLOCK), B = Math.floor(e / BLOCK);
+  for (let row = Math.floor(a / BLOCK); row * BLOCK < e; row++){
+    const xs = Math.max(a, row * BLOCK) - row * BLOCK, xe = Math.min(e, (row + 1) * BLOCK) - row * BLOCK;
+    g.drawImage(BK.strip, xs, row, xe - xs, 1, GUT + xs * cw, 2 + row * rh, (xe - xs) * cw, rh);
+    const whole = A < B && row >= A && row < B;
+    if (whole){ g.fillStyle = 'rgba(0,229,255,.85)'; g.fillRect(3, 2 + row * rh, 7, rh - 0.5); }
+    else { g.strokeStyle = '#ffc44f'; g.lineWidth = 1; g.strokeRect(GUT + xs * cw - 0.5, 2 + row * rh - 0.5, (xe - xs) * cw + 1, rh + 1); }
+  }
+}
+function bkShow(){
+  const b = ball(), f = BK.field, out = $('bkRead'), sel = BK.sel;
+  BK.range = null; BK.up = null;
+  if (!sel){ out.innerHTML = '<span style="color:var(--dim)">Hover a cell of the slice.</span>'; bkDraw(); bkStrip(); return; }
+  const { level: l, X, Y, Z } = sel, s = 2 ** l, shapeId = nodeAt(b.store, b.root, b.D, l, X, Y, Z);
+  if (shapeId === EMPTY){ out.innerHTML = `cell (${X}, ${Y}, ${Z}) of level ${l} is empty: a job never asks about it.`; bkDraw(); bkStrip(); return; }
+  const before = { ...f.stats }, m = f.mean(l, X * s, Y * s, Z * s, new Float64Array(3)), scanned = f.stats.scanned - before.scanned;
+  const world = f.stats.world > before.world, word = attrOf8(m[0], m[1], m[2]);
+  // Which range the mean was of: the cell's own, or the nearest ancestor's within climb.
+  let own = f.range(l, X, Y, Z), up = 0, rng = own;
+  if (!own && !world) for (up = 1; up <= BK.climb && l + up <= b.D; up++){ rng = f.range(l + up, X >> up, Y >> up, Z >> up); if (rng) break; }
+  let how, check = '';
+  if (world){ how = `<span class="t">no skin within ${BK.climb} level${BK.climb === 1 ? '' : 's'}</span>: it takes <b>the whole skin's mean</b>, a constant of the world (${fmt(b.words.length)} words, summed once when the field was built)`; BK.range = [0, b.words.length]; }
+  else {
+    const [r0, n] = rng, a = r0, e = r0 + n, A = Math.ceil(a / BLOCK), B = Math.floor(e / BLOCK);
+    BK.range = [a, e];
+    if (up){ BK.up = { level: l + up, X: X >> up, Y: Y >> up, Z: Z >> up }; }
+    how = (up ? `<span class="t">no skin in this cell</span> (it's all inside): it <b>climbed ${up} level${up === 1 ? '' : 's'}</b> to the level-${l + up} cell, side ${2 ** (l + up)}, and took that one's mean<br>` : '') +
+      `rank range <b>[${fmt(a)}, ${fmt(e)})</b>: ${fmt(n)} skin voxel${n === 1 ? '' : 's'}<br>` +
+      (A < B ? `blocks ${A}…${B - 1} whole: <b>S[${B}] − S[${A}]</b>, two reads for ${fmt((B - A) * BLOCK)} words &nbsp;·&nbsp; ` : `inside one block's span: no block sum helps &nbsp;·&nbsp; `) +
+      `<b>${scanned}</b> word${scanned === 1 ? '' : 's'} scanned`;
+    // The page's own sum of the range, word by word, against the field's answer.
+    let sr = 0, sg = 0, sb = 0;
+    for (let i = a; i < e; i++){ const w = b.words[i]; sr += w & 255; sg += w >> 8 & 255; sb += w >> 16 & 255; }
+    const same = sr / n === m[0] && sg / n === m[1] && sb / n === m[2];
+    check = ` <span class="${same ? 'ok' : 'no'}">${same ? '✓ equals the range summed a word at a time' : '✗ differs from a plain sum'}</span>`;
+  }
+  const twin = cellAttr(b.store, b.counts, b.named, shapeId, l, MEAN_DEPTH, X * s, Y * s, Z * s);
+  out.innerHTML =
+    `cell <b>(${X}, ${Y}, ${Z})</b> of level ${l}: side ${s}, ${fmt(b.counts.of(shapeId))} voxels of shape, <b>${own ? fmt(own[1]) : 0}</b> of them skin<br>` + how + `<br>` +
+    `mean = (${Array.from(m, v => v.toFixed(2)).join(', ')}) → <span class="t">${hex(word, 8)}</span> ${sw(wordRGB8(word), true)}${check}<br>` +
+    `the named sphere's walk for the same cell ${sw(wordRGB8(twin), true)} ` + (twin === word ? 'gives the same word' : `is <span class="t">${stepsApart(twin, word)} step${stepsApart(twin, word) === 1 ? '' : 's'} away</span>: it weighs every voxel under the cell, inside ones too; the baked mean is of the skin alone`);
+  bkDraw(); bkStrip();
+}
+function initBaked(){
+  BK.view = sliceView($('cvBk'));
+  BK.field = bkField();
+  slider('bkLevel', v => { BK.level = v; BK.sel = null; bkShow(); });
+  slider('bkZ', v => { BK.z = v; if (BK.sel) BK.sel = { ...BK.sel, Z: v >> BK.level }; bkShow(); });
+  slider('bkClimb', v => { BK.climb = v; BK.field = bkField(); bkShow(); });
+  $('cvBk').addEventListener('mousemove', ev => {
+    const c = BK.view.cell(ev); if (!c) return;
+    const l = BK.level, X = c[0] >> l, Y = c[1] >> l, Z = BK.z >> l;
+    if (BK.sel && BK.sel.level === l && BK.sel.X === X && BK.sel.Y === Y && BK.sel.Z === Z) return;
+    BK.sel = { level: l, X, Y, Z }; bkShow();
+  });
+  $('cvStrip').addEventListener('mousemove', ev => {
+    const b = ball(), { cw, rh, N } = BK.geom, r = $('cvStrip').getBoundingClientRect();
+    const col = Math.floor((ev.clientX - r.left - GUT) / cw), row = Math.floor((ev.clientY - r.top - 2) / rh), i = row * BLOCK + col;
+    if (col < 0 || col >= BLOCK || row < 0 || i >= N){ hideTip(); return; }
+    const w = b.words[i];
+    showTip(`<b>words[${fmt(i)}]</b> = ${hex(w)} ${sw(w & 0xffffff)}<br>the skin voxel of rank ${fmt(i)}: (${b.pos[3 * i]}, ${b.pos[3 * i + 1]}, ${b.pos[3 * i + 2]})<br>block ${row}, word ${col} of it`, ev);
+  });
+  $('cvStrip').addEventListener('mouseleave', hideTip);
+  // Every skin voxel looked up once, in rank order and then shuffled: stats.steps
+  // is the children the walks read, which without a memo is D a lookup.
+  $('bkMemo').onclick = () => {
+    const b = ball(), N = b.words.length, order = Uint32Array.from({ length: N }, (_, i) => i);
+    const run = ord => { const f = bkField(b.words, 6), t0 = performance.now(); let bad = 0;
+      for (let k = 0; k < N; k++){ const i = ord[k]; if ((f(b.pos[3 * i] + 0.5, b.pos[3 * i + 1] + 0.5, b.pos[3 * i + 2] + 0.5) >>> 0) !== (b.words[i] & 0xffffff)) bad++; }
+      return { steps: f.stats.steps / N, ms: performance.now() - t0, bad }; };
+    const morton = run(order);
+    let s = 12345; for (let i = N - 1; i > 0; i--){ s = Math.imul(s, 1664525) + 1013904223 >>> 0; const j = s % (i + 1), t = order[i]; order[i] = order[j]; order[j] = t; }
+    const shuffled = run(order);
+    $('vdBk').innerHTML = `<b>The path memo</b>, on all ${fmt(N)} skin voxels of this ball (D = ${b.D}). In rank order a lookup read <b>${morton.steps.toFixed(2)} children</b> on average ` +
+      `(${morton.ms.toFixed(1)} ms in all); in shuffled order <b>${shuffled.steps.toFixed(2)}</b> (${shuffled.ms.toFixed(1)} ms). With no memo it would be ${b.D} every time. ` +
+      `Every word came back right both ways${morton.bad + shuffled.bad ? ` <span class="bad">except ${morton.bad + shuffled.bad}</span>` : ''}: the memo changes the cost, never the answer. ` +
+      `A job's records come in nearly rank order, which is why it pays.`;
+  };
+  // The words as a six-bit file would hand them back, through the same field.
+  $('bkSix').onclick = () => {
+    const b = ball(), N = b.words.length, w6 = sixBitWords(b.words), f8 = bkField(b.words, 6), f6 = bkField(w6, 6);
+    let moved0 = 0;
+    for (let i = 0; i < N; i++) if (wordOf(b.words[i]) !== wordOf(w6[i])) moved0++;
+    const rows = [], m8 = new Float64Array(3), m6 = new Float64Array(3);
+    for (let l = 1; l <= 4; l++){
+      const n = b.R >> l, s = 2 ** l; let cells = 0, moved = 0, worst = 0;
+      for (let Z = 0; Z < n; Z++) for (let Y = 0; Y < n; Y++) for (let X = 0; X < n; X++){
+        if (!f8.range(l, X, Y, Z)) continue;
+        f8.mean(l, X * s, Y * s, Z * s, m8); f6.mean(l, X * s, Y * s, Z * s, m6);
+        const a = attrOf8(m8[0], m8[1], m8[2]), c = attrOf8(m6[0], m6[1], m6[2]);
+        cells++; if (a !== c){ moved++; worst = Math.max(worst, stepsApart(a, c)); }
+      }
+      rows.push(`level ${l}: ${fmt(moved)} of ${fmt(cells)} cells' words moved (${(100 * moved / cells).toFixed(1)}%), by at most ${worst} step${worst === 1 ? '' : 's'}`);
+    }
+    $('vdBk').innerHTML = `<b>Six bits a channel</b> (<code>sixBitWords</code>: what a <code>bits: 6</code> file gives back). ` +
+      `Lod 0: <b>${moved0}</b> of ${fmt(N)} words changed what the job draws${moved0 ? '' : ', as the argument says must happen'}.<br>` + rows.join('<br>');
+  };
+  BK.sel = { level: BK.level, X: 3, Y: 2, Z: BK.z >> BK.level };
+  bkShow();
+  redraws.push(() => { bkDraw(); bkStrip(); });
+}
+whenSeen('s6', initBaked);
+
+/* ============================ §7 edits ========================================
+   Real clay on ground in a real store, the real edit log and block table, and
+   editedField over clay's own field. What the page keeps itself is the colour
+   revision: stream-core's setRoot bumps one only when an op paints, and marks
+   the painted blocks in a createPaint index. ED.rev and ED.paint do the same. */
+const ED = { z: 130, level: 3, tool: 'place', colour: PALETTE[5], view: null };
+function edNew(){
+  const desc = clayDesc({ D: 8, lump: 64, ground: true }), c = buildClay(desc), base = colourOf(desc);
+  Object.assign(ED, { store: c.store, D: 8, start: c.root, base, log: createEditLog(c.root), table: createBlockTable(), paint: createPaint(8), rev: 0 });
+  ED.field = editedField(base, ED.table);
+}
+function edAfter(r){
+  ED.table.sync(ED.log.delta(ED.table.epoch, ED.table.seen));
+  if (r && r.paint.length){ ED.rev++; for (const b of r.paint) ED.paint.touch(b, ED.rev); }
+}
+const edSolid = (x, y, z) => ED.store.query(ED.log.root, ED.D, x, y, z) === 1;
+function edDraw(){
+  const z = ED.z;
+  ED.view.paint(256, (x, y) => edSolid(x, y, z) ? wordRGB8(wordOf(ED.field(x + 0.5, y + 0.5, z + 0.5, 0))) : -1);
+  const ops = ED.log.ops(), n = ED.log.count, rows = [];
+  for (let i = 0; i < n; i++){
+    const j = i * OP_WORDS, l = ops[j], col = ops[j + 4], root = ED.log.rootAt(i + 1);
+    let note = root === ED.start ? '= the start' : '';
+    if (!note) for (let k = 0; k < i; k++) if (ED.log.rootAt(k + 1) === root){ note = `= after op ${k + 1}`; break; }
+    rows.push(`<tr${note ? ' class="hi"' : ''}><td class="n">${i + 1}</td><td>${col === BREAK ? 'break' : 'place'}</td><td>level ${l} (${ops[j + 1]}, ${ops[j + 2]}, ${ops[j + 3]})</td>` +
+      `<td>${col === BREAK ? '—' : sw(col) + hex(col)}</td><td class="n">${root}</td><td>${note}</td></tr>`);
+  }
+  $('tbOps').tBodies[0].innerHTML = rows.join('') || '<tr><td colspan="6" style="color:var(--dim)">No ops yet. Click the slice.</td></tr>';
+  $('edState').innerHTML =
+    `root now <b>${ED.log.root}</b>${ED.log.root === ED.start ? ' (the start)' : ''} &nbsp;·&nbsp; log: <b>${n}</b> op${n === 1 ? '' : 's'}, epoch <b>${ED.log.epoch}</b>${ED.log.canRedo ? ', redo waiting' : ''}<br>` +
+    `table: <b>${ED.table.used}</b> block${ED.table.used === 1 ? '' : 's'}, sizes in use [${ED.table.sizes.map(l => 2 ** l).join(', ')}], has seen ${ED.table.seen} op${ED.table.seen === 1 ? '' : 's'} at epoch ${ED.table.epoch}<br>` +
+    `colour revision <b>${ED.rev}</b> &nbsp;·&nbsp; store: ${fmt(ED.store.size)} nodes (ids only ever append)`;
+  $('edUndo').disabled = !ED.log.canUndo; $('edRedo').disabled = !ED.log.canRedo;
+}
+const edStamp = (cx, cy, cz) => Array.from(stampOf(ED.store, ED.log.root, ED.D, 0, cx, cy, cz));
+function edTrap(){
+  edNew();
+  const T = { level: 3, X: 5, Y: 17, Z: 16 }, C = [0, 2, 2], P = [44.5, 140.5, 132.5], red = PALETTE[5], blue = PALETTE[4];
+  const snap = () => ({ root: ED.log.root, stamp: edStamp(...C), rev: ED.paint.revOf(0, ...C), colour: ED.table.lookup(...P) });
+  const s0 = snap();
+  edAfter(ED.log.place(ED.store, ED.D, T, red)); const s1 = snap();
+  edAfter(ED.log.erase(ED.store, ED.D, T)); const s2 = snap();
+  edAfter(ED.log.place(ED.store, ED.D, T, blue)); const s3 = snap();
+  const same = s1.stamp.every((v, i) => v === s3.stamp[i]), tick = v => v ? '✓' : '<span class="bad">✗</span>';
+  ED.z = 130; $('edZ').value = 130; $('edZV').textContent = 130;
+  $('vdEd').innerHTML =
+    `<b>The trap</b>, on an 8³ block in the air at (40…47, 136…143, 128…135), which is in lod-0 chunk (${C.join(', ')}).<br>` +
+    `start &nbsp;: root <b>${s0.root}</b>, chunk stamp [${s0.stamp.join(', ')}], colour revision ${s0.rev}<br>` +
+    `1 place ${sw(red)}: root <b>${s1.root}</b>, stamp [${s1.stamp.join(', ')}], revision <b>${s1.rev}</b>, the table says ${sw(s1.colour)}<br>` +
+    `2 break &nbsp;&nbsp;&nbsp;&nbsp;: root <b>${s2.root}</b> ${tick(s2.root === s0.root)} the start's id again; nothing painted, revision stays ${s2.rev}<br>` +
+    `3 place ${sw(blue)}: root <b>${s3.root}</b> ${tick(s3.root === s1.root)} step 1's id again, stamp [${s3.stamp.join(', ')}] ${tick(same)} the same seven ids, revision <b>${s3.rev}</b>, the table says ${sw(s3.colour)}<br>` +
+    `A chunk cached at step 1 has step 3's exact stamp. By ids alone it would be kept, and stay red. Its colour revision is ${s1.rev}, the chunk's is now ${s3.rev}: it's remade.`;
+  edDraw();
+}
+function initEdits(){
+  ED.view = sliceView($('cvEd'));
+  edNew();
+  slider('edZ', v => { ED.z = v; edDraw(); });
+  chipRow($('edTool'), [['place', 'place'], ['break', 'break']], t => { ED.tool = t; }, ED.tool);
+  chipRow($('edPal'), PALETTE.map((c, i) => [c, '&nbsp;', `background:${css(c)};width:26px;height:22px;padding:0`]), c => { ED.colour = c; }, ED.colour);
+  chipRow($('edLevel'), [0, 1, 2, 3, 4].map(l => [l, String(2 ** l)]), l => { ED.level = l; }, ED.level);
+  $('cvEd').addEventListener('click', ev => {
+    const c = ED.view.cell(ev); if (!c) return;
+    const l = ED.level, T = { level: l, X: c[0] >> l, Y: c[1] >> l, Z: ED.z >> l };
+    const r = ED.tool === 'place' ? ED.log.place(ED.store, ED.D, T, ED.colour) : ED.log.erase(ED.store, ED.D, T);
+    edAfter(r);
+    $('vdEd').innerHTML = r === null
+      ? `<b>That click changed no voxel</b>, so it isn't an op: nothing logged, nothing to undo. ${ED.tool === 'place' ? 'The block was already solid, and a block placed over solid can\'t recolour it.' : 'There was nothing there to break.'}`
+      : ED.tool === 'place' ? `<b>Placed.</b> The log returned <code>{ paint: [the block] }</code>: one block whose colour may now read differently. The revision went to ${ED.rev}, and only chunks that block overlaps are behind.`
+      : `<b>Broken.</b> The log returned <code>{ paint: [] }</code>: a break isn't in the colour table, so no solid voxel's colour moved. The ids changed, and that alone remakes the chunks.`;
+    edDraw();
+  });
+  $('cvEd').addEventListener('mousemove', ev => {
+    const c = ED.view.cell(ev); if (!c) return;
+    const cx = c[0] >> 6, cy = c[1] >> 6, cz = ED.z >> 6, hit = ED.table.lookup(c[0] + 0.5, c[1] + 0.5, ED.z + 0.5);
+    $('rdEd').innerHTML = `<span>voxel (${c[0]}, ${c[1]}, ${ED.z}): ${edSolid(c[0], c[1], ED.z) ? (hit >= 0 ? `<b>a block's colour</b> ${sw(hit)}` : 'the base field') : 'air'}</span>` +
+      `<span>lod-0 chunk <b>(${cx}, ${cy}, ${cz})</b>: stamp [${edStamp(cx, cy, cz).join(', ')}], colour revision <b>${ED.paint.revOf(0, cx, cy, cz)}</b></span>`;
+  });
+  const step = (f, what) => () => { const r = f(); edAfter(r); $('vdEd').innerHTML = r ? what() : ''; edDraw(); };
+  $('edUndo').onclick = step(() => ED.log.undo(), () => `<b>Undone.</b> Every undo starts a new epoch (now ${ED.log.epoch}), so the table threw its entries away and rebuilt from op 0: an undo can uncover an older block's colour, and that can't be patched in place.`);
+  $('edRedo').onclick = step(() => ED.log.redo(), () => `<b>Redone.</b> Redo appends what was there, so the epoch stays ${ED.log.epoch} and the table just takes the one op.`);
+  $('edTrap').onclick = edTrap;
+  $('edReset').onclick = () => { edNew(); $('vdEd').innerHTML = ''; edDraw(); };
+  edTrap();
+  redraws.push(edDraw);
+}
+whenSeen('s7', initEdits);
+
+/* ============================ §8 scenes ========================================
+   A 128³ terrain in a real store, three small children (a named torus, a baked
+   ball, a blob with no colour), the real scene log, and a follower built from
+   its delta exactly as a worker's is. After each change the page rebuilds the
+   follower from scratch (delta(−1, 0, 0)): a real one takes only what's new.
+
+   The owner under the pointer comes from scene-core too. For each placement
+   the page makes sceneField(store, () => 0, [that placement, coloured 1]):
+   it answers 1 exactly where that placement passes the owner test. */
+const SC = { D: 7, child: 'ball', turn: 0, scale: 0, level: 0, pass: true, z: 64, view: null, kids: null };
+const Z_TURNS = PROPER.filter(e => { const v = applyG([0, 0, 1], e); return v[0] === 0 && v[1] === 0 && v[2] === 1; })
+  .map(e => { const u = applyG([1, 0, 0], e); return [e, (Math.round(Math.atan2(u[1], u[0]) * 180 / Math.PI) + 360) % 360]; }).sort((a, b) => a[1] - b[1]);
+function scKids(){
+  if (SC.kids) return SC.kids;
+  const mk = (name, D, colour) => { const store = createStore(); return { store, root: store.fromField(D, fieldOf(SHAPES.find(s => s.name === name), D)).root, D, colour }; };
+  const b = bakeBall(5);
+  return SC.kids = {
+    ball: { label: 'ball, baked', world: { store: b.store, root: b.root, D: 5, skin: b.skin, colour: { kind: 'baked', skin: b.skin, words: b.words } } },
+    torus: { label: 'torus, named', world: mk('torus', 5, { kind: 'shape', name: 'torus', D: 5 }) },
+    blob: { label: 'blob, no colour', world: mk('blob', 5, null) },
+  };
+}
+function scNew(){
+  const store = createStore(), D = SC.D, root = store.fromField(D, fieldOf(SHAPES.find(s => s.name === 'terrain'), D)).root;
+  Object.assign(SC, { store, start: root, base: colourOf({ kind: 'shape', name: 'terrain', D }), log: createSceneLog(root), counts: createCounts(store), drops: [] });
+  scSync();
+}
+function scSync(){
+  SC.counts.update();
+  const table = createSceneTable(SC.store, (desc, D) => colourOf(desc, { store: SC.store, counts: SC.counts, D }));
+  table.sync(SC.log.delta(-1, 0, 0));
+  SC.list = table.list; SC.field = table.field(SC.base);
+  SC.probes = SC.list.map(e => sceneField(SC.store, () => 0, [{ ...e, colour: () => 1 }]));
+}
+const scAsk = (X, Y, Z, l) => { const s = 2 ** l, x = (X + 0.5) * s, y = (Y + 0.5) * s, z = (Z + 0.5) * s; return SC.pass ? SC.field(x, y, z, l) : SC.field(x, y, z); };
+function scDraw(){
+  const l = SC.level, n = 2 ** (SC.D - l), zc = SC.z >> l;
+  SC.view.paint(n, (X, Y) => nodeAt(SC.store, SC.log.root, SC.D, l, X, Y, zc) === EMPTY ? -1 : wordRGB8(wordOf(scAsk(X, Y, zc, l))));
+  const ops = SC.log.ops(), cnt = SC.log.count, rows = [];
+  for (let i = 0; i < cnt; i++){
+    const j = i * SCENE_WORDS, d = SC.drops[i] || {}, root = SC.log.rootAt(i + 1), prev = SC.log.rootAt(i);
+    rows.push(`<tr${root === prev ? ' class="hi"' : ''}><td class="n">${i + 1}</td><td>${d.name || ''}</td><td>(${ops[j + 1]}, ${ops[j + 2]}, ${ops[j + 3]})</td><td class="n">${ops[j + 4]}</td><td class="n">${ops[j + 5] > 0 ? '+' : ''}${ops[j + 5]}</td>` +
+      `<td class="n">${ops[j + 6]}</td><td class="n">${d.paint ?? ''}</td><td class="n">${root}${root === prev ? ' (unchanged)' : ''}</td></tr>`);
+  }
+  $('tbDrops').tBodies[0].innerHTML = rows.join('') || '<tr><td colspan="8" style="color:var(--dim)">No drops yet. Click the slice.</td></tr>';
+  $('scState').innerHTML = `root now <b>${SC.log.root}</b>${SC.log.root === SC.start ? ' (the parent alone)' : ''} &nbsp;·&nbsp; ${cnt} drop${cnt === 1 ? '' : 's'}, epoch ${SC.log.epoch}, ${SC.log.worldCount} world${SC.log.worldCount === 1 ? '' : 's'} registered<br>` +
+    `the parent's store: ${fmt(SC.store.size)} nodes &nbsp;·&nbsp; ` + (cnt ? `the field is <code>sceneField(store, base, ${cnt} placement${cnt === 1 ? '' : 's'})</code>` : `no placements: <code>sceneField</code> hands back the parent's field itself ${SC.field === SC.base ? '<span class="ok">✓</span>' : ''}`);
+  $('scUndo').disabled = !SC.log.canUndo; $('scRedo').disabled = !SC.log.canRedo;
+}
+function scDrop(x, y, say = true){
+  const kid = scKids()[SC.child], side = 2 ** (kid.world.D + SC.scale), half = side / 2, at = [Math.round(x - half), Math.round(y - half), Math.round(SC.z - half)];
+  const before = SC.log.root, nodes = SC.store.size;
+  let r;
+  try { r = SC.log.drop(SC.store, SC.D, { world: kid.world, at, turn: SC.turn, scale: SC.scale }); }
+  catch (e){ $('vdSc').innerHTML = `<span class="bad">Refused:</span> ${esc(e.message)}`; return; }
+  if (r){ SC.drops.length = SC.log.count - 1; SC.drops.push({ name: kid.label, paint: r.paint.length }); }
+  scSync(); scDraw();
+  if (!say) return;
+  $('vdSc').innerHTML = r === null ? `<b>No voxel of it lands in the world</b>, so it isn't an op.`
+    : `<b>Dropped</b> a ${kid.label} (${side}³) at (${at.join(', ')}). ` + (SC.log.root === before
+        ? `The root is still <b>${before}</b>: every voxel of it landed in solid ground, so the DAG didn't change at all. It's an op anyway. Raise the slice or dig to it and the colours there are the child's. `
+        : `The root went ${before} → <b>${SC.log.root}</b>, with ${fmt(SC.store.size - nodes)} new nodes. `) +
+      `It repaints ${r.paint.length} block${r.paint.length === 1 ? '' : 's'} of 64³: its content box, not its shape.`;
+}
+function initScenes(){
+  SC.view = sliceView($('cvSc'));
+  scKids(); scNew();
+  chipRow($('scChild'), Object.entries(SC.kids).map(([k, v]) => [k, v.label]), k => { SC.child = k; }, SC.child);
+  chipRow($('scTurn'), Z_TURNS.map(([e, deg]) => [e, deg + '°']), e => { SC.turn = e; }, SC.turn);
+  chipRow($('scScale'), [[-1, '½ · 16³'], [0, '1 · 32³'], [1, '2 · 64³']], s => { SC.scale = s; }, SC.scale);
+  slider('scLevel', v => { SC.level = v; scDraw(); });
+  slider('scZ', v => { SC.z = v; scDraw(); });
+  toggle($('scPass'), SC.pass, on => { SC.pass = on; scDraw(); });
+  $('cvSc').addEventListener('click', ev => { const c = SC.view.cell(ev); if (!c) return; const s = 2 ** SC.level; scDrop((c[0] + 0.5) * s, (c[1] + 0.5) * s); });
+  $('cvSc').addEventListener('mousemove', ev => {
+    const c = SC.view.cell(ev); if (!c) return;
+    const l = SC.level, s = 2 ** l, zc = SC.z >> l, x = (c[0] + 0.5) * s, y = (c[1] + 0.5) * s, z = (zc + 0.5) * s;
+    if (nodeAt(SC.store, SC.log.root, SC.D, l, c[0], c[1], zc) === EMPTY){ $('rdSc').innerHTML = `<span>cell (${c[0]}, ${c[1]}, ${zc}) of level ${l}: empty</span>`; return; }
+    let owner = -1;
+    for (let k = SC.probes.length - 1; k >= 0; k--) if (SC.probes[k](x, y, z, l) === 1){ owner = k; break; }
+    const v = scAsk(c[0], c[1], zc, l), base = SC.base(x, y, z, l);
+    $('rdSc').innerHTML = `<span>cell (${c[0]}, ${c[1]}, ${zc}) of level ${l}, centre (${x}, ${y}, ${z})</span><span>owner: <b>${owner < 0 ? 'the parent' : `drop ${owner + 1}, ${SC.drops[owner]?.name || ''}`}</b></span>` +
+      `<span>the field says ${sw(v)}${hex(v)}</span><span>the parent's alone ${sw(base)}${hex(base)}</span>`;
+  });
+  const step = f => () => { f(); scSync(); scDraw(); $('vdSc').innerHTML = ''; };
+  $('scUndo').onclick = step(() => SC.log.undo());
+  $('scRedo').onclick = step(() => SC.log.redo());
+  $('scClear').onclick = () => { scNew(); $('vdSc').innerHTML = ''; scDraw(); };
+  // Three to start with: a baked ball on the surface, a turned torus beside it,
+  // and a small ball dropped wholly into rock.
+  const top = x => { for (let y = 127; y >= 0; y--) if (SC.store.query(SC.start, SC.D, x, y, SC.z) === 1) return y; return 40; };
+  SC.child = 'ball'; scDrop(40, top(40) + 6, false);
+  SC.child = 'torus'; SC.turn = Z_TURNS[1][0]; SC.scale = 1; scDrop(92, top(92) + 14, false);
+  SC.child = 'ball'; SC.turn = 0; SC.scale = -1; scDrop(64, 12, false);
+  SC.scale = 0; scDraw();
+  $('vdSc').innerHTML = `Three drops to start: a baked ball and a turned, doubled, named torus on the surface, and a small ball dropped wholly into the rock near the bottom (its row is lit: the root didn't change). Hover the slice for a cell's owner, and click to drop more.`;
+  redraws.push(scDraw);
+}
+whenSeen('s8', initScenes);
+
+/* ============================ §9 across threads ================================
+   The viewer's own chunk-worker.js, driven by hand: the snapshot, then one job,
+   in the messages stream-pool.js posts. What comes back is held to the same
+   chunk expanded here with this page's field. */
+const TH = { key: 'terrain', busy: false };
+function thWorld(){
+  if (TH.key !== 'baked') return lab(TH.key);
+  const b = ball();
+  return { key: 'baked', store: b.store, root: b.root, D: b.D, R: b.R, counts: b.counts, desc: { kind: 'baked', skin: b.skin, words: b.words }, field: bkField(b.words, 6) };
+}
+async function thRun(){
+  if (TH.busy) return; TH.busy = true;
+  const out = $('thOut'), w = thWorld(), opts = { counts: w.counts, lodRule: 'any', seams: true, colour: w.field, meanDepth: MEAN_DEPTH };
+  out.innerHTML = 'expanding here first, to pick a chunk…'; $('vdTh').innerHTML = '';
+  await later();
+  w.solid ??= (x, y, z) => w.store.query(w.root, w.D, x, y, z) === 1;
+  const best = showChunk(w, 0, opts), at = best.chunk;
+  const snap = worldSnapshot(w.store, w.root, w.D, { counts: w.counts, colour: w.desc });
+  let tables = 0;
+  const json = JSON.stringify(w.desc, (k, v) => { if (ArrayBuffer.isView(v)){ tables += v.byteLength; return undefined; } return v; }).length;
+  const lines = [`<b>the snapshot</b> (cloned to the worker): keys ${kb(snap.keys.byteLength)} (${fmt(snap.keys.length / 9)} nodes × 9 words) · counts ${kb(snap.counts.byteLength)} · ` +
+    `<b>colour: ${json} B of descriptor${tables ? ' + ' + kb(tables) + (w.key === 'baked' ? ' of words' : ' of table') : ''}</b>`,
+    `<span class="t">${esc(descText(w.desc))}</span>`];
+  out.innerHTML = lines.join('<br>') + '<br>starting chunk-worker.js…';
+  try {
+    const res = await new Promise((resolve, reject) => {
+      const worker = new Worker('./chunk-worker.js', { type: 'module' }), t = setTimeout(() => { worker.terminate(); reject(new Error('no answer in 20 s')); }, 20000);
+      let t0 = 0;
+      worker.onerror = e => { clearTimeout(t); worker.terminate(); reject(new Error(e.message || 'the worker failed to load')); };
+      worker.onmessage = ({ data }) => {
+        if (data.ready){
+          t0 = performance.now();
+          worker.postMessage({ type: 'world', snap, revision: 1 });
+          worker.postMessage({ type: 'expand', jobId: 1, world: 1, lod: 0, cx: at[0], cy: at[1], cz: at[2], lodRule: 'any', kind: 'records' });
+          return;
+        }
+        clearTimeout(t); worker.terminate();
+        if (data.error) reject(new Error(data.error)); else resolve({ result: data.result, ms: performance.now() - t0 });
+      };
+    });
+    const r = res.result, sameLen = r.records.length === best.records.length && r.attrs && r.attrs.length === best.attrs.length;
+    let badRec = 0, badWord = 0;
+    if (sameLen) for (let i = 0; i < r.records.length; i++){ if (r.records[i] !== best.records[i]) badRec++; if (r.attrs[i] !== best.attrs[i]) badWord++; }
+    const ok = sameLen && !badRec && !badWord;
+    lines.push(`<b>the job</b>: lod 0, chunk (${at.join(', ')}), rule any → the worker built its own field from the descriptor${w.key === 'baked' ? ' and the words' : ''}, then made ` +
+      `<b>${fmt(r.records.length)}</b> records and <b>${fmt(r.attrs.length)}</b> words (${fmt(r.count)} shown + ${fmt(r.records.length - r.count)} seam tail), ${kb(r.records.byteLength + r.attrs.byteLength)} transferred back`);
+    lines.push(`round trip, snapshot included: ${res.ms.toFixed(0)} ms (the worker says the job itself took ${r.ms.toFixed(1)} ms)`);
+    out.innerHTML = lines.join('<br>');
+    $('vdTh').innerHTML = ok ? `<b>✓ Every record and every word is the one this page made</b> for the same chunk, with a field of its own from the same descriptor: ${fmt(r.attrs.length)} of ${fmt(r.attrs.length)}. Nothing but data crossed, in either direction.`
+      : `<span class="bad">✗ They differ</span>: ${sameLen ? `${badRec} records, ${badWord} words` : 'the lengths'}. That shouldn't happen: tell me.`;
+  } catch (e){
+    out.innerHTML = lines.join('<br>');
+    $('vdTh').innerHTML = `<span class="bad">The worker didn't run</span> (${esc(e.message)}). Module workers need the folder served over HTTP: <code>npm run serve</code>.`;
+  }
+  TH.busy = false;
+}
+function initThreads(){
+  chipRow($('thWorld'), [...LAB_KEYS, ['baked', 'the baked ball (§6)']], key => { TH.key = key; thRun(); }, TH.key);
+  $('thRun').onclick = thRun;
+  thRun();
+}
+whenSeen('s9', initThreads);
+
+/* ============================ §10 to the GPU ===================================
+   One chunk of the terrain, expanded as the job does, then turned into a ray
+   page's attribute block by the real pageAttrBlock. A brick's 512-bit shown
+   mask is drawn as its 16 words; a click finds a cell's word by rank, the way
+   attrAtCPU and GLSL_RAY_ATTR do, and checks it against the cell's record. */
+const GP = { lod: 0, ex: null, block: null, bricks: [], bi: 0, sel: -1, base: rgb8(188, 138, 104), face: '+Y', dist: 0.3 };
+const pop32 = x => { x -= x >>> 1 & 0x55555555; x = (x & 0x33333333) + (x >>> 2 & 0x33333333); return Math.imul((x + (x >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24; };
+function gpBuild(){
+  const w = lab('terrain'), lod = GP.lod, opts = { counts: w.counts, lodRule: lod ? 'shadow' : 'any', seams: true, colour: w.field, meanDepth: MEAN_DEPTH };
+  const best = showChunk(w, lod, opts);
+  GP.ex = best; GP.block = pageAttrBlock(best.records, best.attrs);
+  const { attr, attrAt } = GP.block;
+  GP.bricks = [];
+  for (let b = 0; b < attrAt.length; b++) if (attrAt[b] !== ATTR_NONE){ let n = 0; for (let k = 0; k < RUN_HEAD; k++) n += pop32(attr[attrAt[b] + k]); GP.bricks.push({ b, run: attrAt[b], shown: n }); }
+  GP.bi = GP.bricks.reduce((m, v, i) => v.shown > GP.bricks[m].shown ? i : m, 0); GP.sel = -1;
+  const n = best.records.length, tail = n - best.count;
+  $('gpBuf').innerHTML =
+    `<b>raster</b> · chunk (${best.chunk.join(', ')}) at lod ${lod}: <b>${fmt(n)}</b> records (${fmt(best.count)} shown + ${fmt(tail)} seam tail) → one buffer of 2 × ${fmt(n)} uint32 = <b>${kb(8 * n)}</b><br>` +
+    `&nbsp;&nbsp;[ records 0…${fmt(n - 1)} | words 0…${fmt(n - 1)} ] &nbsp; attribute 0 from byte 0, attribute 1 from byte ${fmt(4 * n)}, each one per instance<br>` +
+    `<b>ray</b> · the same chunk as a page: <b>${GP.bricks.length}</b> of 512 bricks show something → ${GP.bricks.length} runs, <b>${fmt(attr.length)}</b> words = <b>${kb(4 * attr.length)}</b> ` +
+    `(${fmt(16 * GP.bricks.length)} of mask + ${fmt(n)} of colour), one stretch of the heap; <code>pageAttr</code> holds each brick's run, or ATTR_NONE`;
+}
+function gpDraw(){
+  const br = GP.bricks[GP.bi], { attr } = GP.block, { g, w, h } = fit($('cvRun')), cw = w / 32, rh = h / 16;
+  const [bx, by, bz] = mortonXYZ(br.b);
+  $('gpBrickH').textContent = `Brick ${GP.bi + 1} of ${GP.bricks.length}: brick (${bx}, ${by}, ${bz}) of the chunk, ${br.shown} of 512 cells shown`;
+  let rank = 0;
+  for (let l = 0; l < 512; l++){
+    const on = attr[br.run + (l >> 5)] >>> (l & 31) & 1, x = (l & 31) * cw, y = (l >> 5) * rh;
+    g.fillStyle = on ? css(wordRGB8(attr[br.run + RUN_HEAD + rank])) : '#141722';
+    g.fillRect(x + 0.5, y + 0.5, cw - 1, rh - 1);
+    if (on) rank++;
+    if (l === GP.sel){ g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.strokeRect(x, y, cw, rh); }
+  }
+}
+function gpPick(l){
+  const br = GP.bricks[GP.bi], { attr } = GP.block, k = l >> 5, j = l & 31, m = attr[br.run + k], out = $('gpRead');
+  const [x, y, z] = mortonXYZ(l);
+  if (!(m >>> j & 1)){ GP.sel = l; out.innerHTML = `cell ${l} = (${x}, ${y}, ${z}) in the brick: its bit is 0. Not shown (empty, or buried), so no word. A ray that hits it started inside the solid, and is drawn mid grey.`; gpDraw(); return; }
+  let rank = pop32((m & ((1 << j) - 1)) >>> 0);
+  const inWord = rank;
+  for (let q = 0; q < k; q++) rank += pop32(attr[br.run + q]);
+  const word = attr[br.run + RUN_HEAD + rank], cell = br.b << 9 | l;
+  let rec = -1;
+  for (let i = 0; i < GP.ex.records.length; i++) if (cellOf(GP.ex.records[i]) === cell){ rec = i; break; }
+  const same = rec >= 0 && GP.ex.attrs[rec] === word;
+  GP.sel = l; GP.base = wordRGB8(word);
+  out.innerHTML =
+    `cell <b>${l}</b> of the brick = Morton of (${x}, ${y}, ${z})<br>` +
+    `mask word ${l} &gt;&gt; 5 = <b>${k}</b>, bit ${l} &amp; 31 = <b>${j}</b>: set<br>` +
+    `rank = set bits below it in that word (<b>${inWord}</b>) + in words 0…${k - 1} (<b>${rank - inWord}</b>) = <b>${rank}</b><br>` +
+    `word = block[run + 16 + ${rank}] = <span class="t">${hex(word, 8)}</span> ${sw(wordRGB8(word), true)}<br>` +
+    `the raster side: record <b>${rec < 0 ? '?' : fmt(rec)}</b>${rec >= GP.ex.count ? ' (seam tail)' : ''} holds this cell, and <code>attrs[${rec}]</code> = ${rec < 0 ? '?' : hex(GP.ex.attrs[rec], 8)} ` +
+    `<span class="${same ? 'ok' : 'no'}">${same ? '✓ the same word, by a different road' : '✗ differs'}</span>`;
+  gpDraw(); shDraw();
+}
+/* shadeOut, in JS (stream-viewer.html's GLSL_SHADE): two fixed lights by face,
+   then a mix toward the background by distance. uFog is 1 / (1.5 · side). */
+const L1 = [0.5, 0.8, 0.35].map((v, _, a) => v / Math.hypot(...a)), L2 = [-0.6, -0.2, -0.7].map((v, _, a) => v / Math.hypot(...a));
+const FACES = { '+X': [1, 0, 0], '−X': [-1, 0, 0], '+Y': [0, 1, 0], '−Y': [0, -1, 0], '+Z': [0, 0, 1], '−Z': [0, 0, -1] };
+const shadeOf = n => 0.55 + 0.45 * Math.max(n[0] * L1[0] + n[1] * L1[1] + n[2] * L1[2], 0) + 0.12 * Math.max(n[0] * L2[0] + n[1] * L2[1] + n[2] * L2[2], 0);
+function shDraw(){
+  const base = ch(GP.base).map(v => v / 255), shade = shadeOf(FACES[GP.face]), fog = 1 - Math.exp(-GP.dist / 1.5), bg = [0.027, 0.027, 0.039];
+  const lit = base.map(v => Math.min(1, v * shade)), fin = lit.map((v, i) => v + (bg[i] - v) * fog * 0.85), to8 = a => rgb8(a[0] * 255, a[1] * 255, a[2] * 255);
+  $('shOut').innerHTML =
+    `the word's colour ${sw(GP.base, true)} (${base.map(v => v.toFixed(3)).join(', ')})<br>` +
+    `× shade for ${GP.face} = <b>${shade.toFixed(3)}</b> &nbsp;(0.55 + 0.45 · max(n · L₁, 0) + 0.12 · max(n · L₂, 0)) → ${sw(to8(lit), true)}<br>` +
+    `fog = 1 − e<sup>−distance / 1.5 sides</sup> = <b>${fog.toFixed(3)}</b>, mixed 85% of that toward the background → ${sw(to8(fin), true)} (${fin.map(v => v.toFixed(3)).join(', ')})<br>` +
+    `all six faces: ` + Object.entries(FACES).map(([k, n]) => `${k} ${shadeOf(n).toFixed(2)}`).join(' &nbsp;·&nbsp; ');
+}
+function initGpu(){
+  const rebuild = () => { gpBuild(); gpDraw(); $('gpRead').innerHTML = '<span style="color:var(--dim)">Click a lit bit.</span>'; };
+  chipRow($('gpLod'), [[0, '0'], [1, '1'], [2, '2']], l => { GP.lod = l; rebuild(); }, GP.lod);
+  const move = d => () => { GP.bi = (GP.bi + d + GP.bricks.length) % GP.bricks.length; GP.sel = -1; gpDraw(); };
+  $('gpPrev').onclick = move(-1); $('gpNext').onclick = move(1);
+  $('cvRun').addEventListener('click', ev => {
+    const cv = $('cvRun'), r = cv.getBoundingClientRect(), col = Math.floor((ev.clientX - r.left) / r.width * 32), row = Math.floor((ev.clientY - r.top) / r.height * 16);
+    if (col >= 0 && col < 32 && row >= 0 && row < 16) gpPick(row * 32 + col);
+  });
+  chipRow($('shFace'), Object.keys(FACES).map(k => [k, k]), f => { GP.face = f; shDraw(); }, GP.face);
+  slider('shDist', v => { GP.dist = v; shDraw(); });
+  rebuild();
+  // Start on the first shown cell of the brick, so the rank arithmetic is on screen.
+  { const br = GP.bricks[GP.bi]; for (let l = 0; l < 512; l++) if (GP.block.attr[br.run + (l >> 5)] >>> (l & 31) & 1){ if (l > 40){ gpPick(l); break; } } if (GP.sel < 0) shDraw(); }
+  redraws.push(gpDraw);
+}
+whenSeen('s10', initGpu);
+
+/* ============================ §11 files ========================================
+   §6's ball written four ways and read back, with the real writer and reader. */
+const NOTES = { same: 'colour as written', changed: 'this page\'s colour for it has changed since the file was written: the shape is right, the colours may not be',
+  unknown: 'this page can\'t make the colour the file names, so it\'s drawn without', unchecked: 'colour not checked (the file has no print to compare)',
+  none: 'no colour in the file', baked: 'baked colour from the file' };
+async function flRun(){
+  const body = $('tbFile').tBodies[0], b = ball(), keys = b.store.snapshot().keys, named = { kind: 'shape', name: 'sphere', D: b.D }, base = { keys, root: b.root, D: b.D, name: 'ball' };
+  body.innerHTML = '<tr><td colspan="5" style="color:var(--dim)">writing…</td></tr>';
+  try {
+    const rows = [], row = (file, bytes, how, status, hi, note) => rows.push(`<tr${hi ? ' class="hi"' : ''}><td class="k">${file}</td><td class="n">${bytes === null ? '' : fmt(bytes)}</td><td>${how}</td><td class="${status === 'changed' ? 'bad' : status === 'same' || status === 'baked' ? 'good' : ''}">${status}</td><td>${note || NOTES[status] || ''}</td></tr>`);
+    const fNamed = await writeVdag([{ ...base, colour: named }], { colourOf });
+    const st = async opts => (await readVdag(fNamed, opts)).worlds[0].colourStatus;
+    row('named: <code>{ kind: \'shape\', name: \'sphere\' }</code>', fNamed.length, 'this page\'s <code>colourOf</code>', await st({ colourOf }));
+    row('', null, 'a <code>colourOf</code> whose field changed', await st({ colourOf: () => () => 12345 }));
+    row('', null, 'no <code>colourOf</code> at all', await st({}), false, 'not checked: the reader was handed nothing to make a field with (the viewer always hands one in)');
+    const sizes = {};
+    for (const bits of [8, 6]){
+      const f = await writeVdag([{ ...base, colour: { kind: 'baked', skin: b.skin, words: b.words, bits } }]), w = (await readVdag(f)).worlds[0];
+      sizes[bits] = f.length;
+      row(`baked, ${bits} bits a channel`, f.length, `nothing: ${fmt(w.colour.words.length)} words came out of the file, <code>bits: ${w.colour.bits}</code>`, w.colourStatus, bits === 6);
+    }
+    const fShape = await writeVdag([{ ...base, colour: null }]);
+    row('the shape alone', fShape.length, '—', (await readVdag(fShape)).worlds[0].colourStatus);
+    body.innerHTML = rows.join('');
+    const p1 = colourPrint(b.store, b.root, b.D, b.named), p2 = colourPrint(b.store, b.root, b.D, () => 12345);
+    $('vdFl').innerHTML = `The named file is the shape's ${fmt(fShape.length)} bytes plus <b>${fNamed.length - fShape.length} bytes</b> of name and print. The print of this ball under the sphere's field is ` +
+      `<b>${hex(p1, 8)}</b> (${PRINT_SAMPLES} voxels hashed); under the constant field it's ${hex(p2, 8)}, which is how the second read knew. ` +
+      `Baked, the words are most of the file: ${fmt(b.words.length)} words cost ${fmt(sizes[8] - fShape.length)} bytes at eight bits and ${fmt(sizes[6] - fShape.length)} at six (skin included), on a ball whose colours are smooth bands and compress well.`;
+  } catch (e){
+    body.innerHTML = `<tr><td colspan="5" class="bad">Couldn't run here: ${esc(e.message)}</td></tr>`;
+  }
+}
+whenSeen('s11', () => { $('flRun').onclick = flRun; flRun(); });
+
+/* ============================ §12 cost =========================================
+   The job itself (job-core's fastChunk, what a worker runs) on every chunk of a
+   lab world, without colour and at three mean depths. One run, main thread. */
+const CT = { key: 'terrain', busy: false };
+async function ctRun(){
+  if (CT.busy) return; CT.busy = true;
+  const w = lab(CT.key), body = $('tbCost').tBodies[0], rows = [];
+  $('ctRun').disabled = true; $('vdCt').innerHTML = '';
+  const variants = [null, 0, 1, 2];
+  let worst = 0;
+  for (let lod = 0; lod <= Math.min(2, w.D - 6); lod++){
+    const side = 2 ** (w.D - lod - 6), ms = [];
+    let recs = 0;
+    for (const depth of variants){
+      body.innerHTML = rows.join('') + `<tr><td colspan="8" style="color:var(--dim)">lod ${lod}, ${depth === null ? 'no colour' : 'meanDepth ' + depth}…</td></tr>`;
+      await later();
+      const cache = createJobCache(), opts = { counts: w.counts, lodRule: lod ? 'shadow' : 'any', cache, ...(depth === null ? {} : { colour: w.field, meanDepth: depth }) };
+      const t0 = performance.now(); let n = 0;
+      for (let cz = 0; cz < side; cz++) for (let cy = 0; cy < side; cy++) for (let cx = 0; cx < side; cx++) n += fastChunk(w.store, w.root, w.D, { lod, cx, cy, cz }, opts).records.length;
+      ms.push(performance.now() - t0); recs = n;
+    }
+    const us = recs ? Math.max(0, ms[2] - ms[0]) * 1000 / recs : 0, x = v => `${v.toFixed(1)} ms <span style="color:var(--dim)">×${(v / ms[0]).toFixed(2)}</span>`;
+    worst = Math.max(worst, ms[2] / ms[0]);
+    rows.push(`<tr><td class="n">${lod}</td><td class="n">${fmt(side ** 3)}</td><td class="n">${fmt(recs)}</td><td class="n">${ms[0].toFixed(1)} ms</td><td class="n">${x(ms[1])}</td><td class="n">${x(ms[2])}</td><td class="n">${x(ms[3])}</td><td class="n">${us < 0.005 ? '≈ 0' : us.toFixed(2)}</td></tr>`);
+  }
+  body.innerHTML = rows.join('');
+  $('vdCt').innerHTML = `<b>${w.key}</b>, ${w.R}³, on this machine: with colour at the engine's meanDepth 1 the job was up to <b>×${worst.toFixed(2)}</b> the job without. ` +
+    `"µs a word" is the added time over the records made, so it folds in up to 8 field calls a coarse word. One run: the small numbers are noisy.`;
+  $('ctRun').disabled = false; CT.busy = false;
+}
+whenSeen('s12', () => { chipRow($('ctWorld'), LAB_KEYS, key => { CT.key = key; }, CT.key); $('ctRun').onclick = ctRun; });
+
+window.__colour = { lab, LAB, JR, FD, NM, MN, BK, ED, SC, TH, GP, CT, ball, seen, thRun, flRun, ctRun };
+
+</script>
+</body>
+</html>
