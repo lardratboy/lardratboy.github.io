@@ -142,8 +142,8 @@ function solidOutside(side, lo, hi){
   }
   return out;
 }
-// Set the part of [a, b) inside the grid's box [lo, hi).
-function fillBox(out, lo, hi, a, b){
+// Set the part of [a, b) inside the grid's box [lo, hi). scene-core fills children with it.
+export function fillBox(out, lo, hi, a, b){
   const n0 = hi[0] - lo[0], n1 = hi[1] - lo[1];
   const x0 = Math.max(a[0], lo[0]) - lo[0], x1 = Math.min(b[0], hi[0]) - lo[0];
   for (let z = Math.max(a[2], lo[2]); z < Math.min(b[2], hi[2]); z++)

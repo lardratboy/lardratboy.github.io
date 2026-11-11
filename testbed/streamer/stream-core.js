@@ -21,7 +21,9 @@
       as job-core's fastChunk, its byte-for-byte faster twin.
 
    Edits come in through setRoot and §3b, and a worker follows them through
-   tails (§4b). docs/edit-stream-log.md has the reasoning.
+   tails (§4b). docs/edit-stream-log.md has the reasoning. A world dropped into
+   a world (scene-core.js) is an edit too: the same setRoot, flip and tails, with
+   the drops in the tail's `scene` (docs/scene-plan.md §1.4–1.5).
 
    Addresses. A chunk at lod l is a 64³ grid of level-l cells, i.e. the
    DAG node at level l + 6, and the chunk grid at lod l has side
@@ -33,6 +35,7 @@ import { CHUNK_LEVELS, CHUNK_SIDE, chunkNode, expandChunk } from './chunk-core.j
 import { fastChunk, createJobCache } from './job-core.js';
 import { pageJob, RUN_HEAD, ATTR_NONE } from './ray-core.js';
 import { createBlockTable, editedField } from './edit-core.js';
+import { createSceneTable } from './scene-core.js';
 
 // Face order of the record's mask and of uOpenSides: +X −X +Y −Y +Z −Z.
 export const SIDES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
@@ -884,7 +887,7 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
   // among the keys, so colourOf builds it over this side's own view and counts.
   // A named field ignores them.
   const base = snap.colour && colourOf ? colourOf(snap.colour, { store, counts, D: snap.D }) : null;
-  let colour = base, table = null;
+  let colour = base, table = null, scenes = null;
   const full = (root, lod, x, y, z) => {
     const id = chunkNode(store, root, snap.D, lod, x, y, z).id;
     return id !== EMPTY && isFull(store, counts, id, lod + CHUNK_LEVELS);
@@ -914,8 +917,16 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
   /* Take an edit's tail (§4b): the new nodes, their counts and poses, and the ops
      the colour table hasn't seen. Only edits make a table, so a world never edited
      keeps its plain field and doesn't pay a lookup. A world with no colour ignores
-     the ops, as it has no words for them to change. */
-  run.tail = ({ from, keys, counts: c, poses: p, edits }) => {
+     the ops, as it has no words for them to change.
+
+     A scene's drops come the same way (`scene`, scene-core's createSceneLog delta;
+     docs/scene-plan.md §1.5): the follower builds each new world's field once, over
+     this side's view and counts, after the keys above have grown it (a baked
+     child's skin is among them), and the scene field is rebuilt over the base on
+     every delta, a few bounds a drop. **Blocks and drops in one world are refused**:
+     "the latest op wins" would need one log ordering both (scene-plan §4 Q3), and
+     two tables wrapped either way round would each be wrong somewhere. */
+  run.tail = ({ from, keys, counts: c, poses: p, edits, scene }) => {
     store.grow(from, keys);                 // throws if a tail was lost
     const top = store.maxId;
     if (top >= C.length){
@@ -925,8 +936,15 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
     C.set(c, from);
     if (P && p) P.set(p, from);
     if (edits && base){
+      if (scenes) throw new Error('tail: blocks in a world with drops in it need one log for both (scene-plan §4 Q3)');
       if (!table){ table = createBlockTable(); colour = editedField(base, table); }
       table.sync(edits);
+    }
+    if (scene && base){
+      if (table) throw new Error('tail: drops in a world with blocks in it need one log for both (scene-plan §4 Q3)');
+      scenes ??= createSceneTable(store, (desc, D) => colourOf(desc, { store, counts, D }));
+      scenes.sync(scene);
+      colour = scenes.field(base);
     }
   };
   run.cache = cache;
@@ -948,9 +966,13 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
    order.
 
    Make the tailer alongside worldSnapshot, as it starts from what the snapshot
-   holds. Each worker gets every tail. */
-export function createTailer(store, { counts, classes = null, log = null }){
-  let next = store.maxId + 1, epoch = 0, seen = 0;
+   holds. Each worker gets every tail.
+
+   `scene` is a scene log (scene-core's createSceneLog), followed the way `log` is,
+   by epoch and count, plus the worlds it has registered: a baked child's words go
+   in the first tail after its first drop, and never again (scene-plan §1.5). */
+export function createTailer(store, { counts, classes = null, log = null, scene = null }){
+  let next = store.maxId + 1, epoch = 0, seen = 0, sEpoch = 0, sSeen = 0, sWorlds = 0;
   return () => {
     counts.update(); classes?.update();
     const from = next, top = store.maxId, n = top - from + 1;
@@ -961,7 +983,12 @@ export function createTailer(store, { counts, classes = null, log = null }){
       edits = log.delta(epoch, seen);
       epoch = edits.epoch; seen = edits.count;
     }
+    let drops = null;
+    if (scene && (scene.epoch !== sEpoch || scene.count !== sSeen || scene.worldCount !== sWorlds)){
+      drops = scene.delta(sEpoch, sSeen, sWorlds);
+      sEpoch = drops.epoch; sSeen = drops.count; sWorlds += drops.worlds.length;
+    }
     next = top + 1;
-    return { from, keys: store.keysFrom(from), counts: c, poses: p, edits };
+    return { from, keys: store.keysFrom(from), counts: c, poses: p, edits, scene: drops };
   };
 }

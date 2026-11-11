@@ -128,8 +128,9 @@
     <label>shape <select id="clayShape"><option value="ball">a ball</option><option value="block">a block</option></select></label>
     <label>ground <select id="clayGround"><option value="0">none, it floats</option><option value="1">flat ground</option></select></label>
     <div id="clayInfo"></div>
-    <label>edit <button id="editToggle" title="edit mode: click to break and place blocks (B)">edit mode (B)</button></label>
   </div>
+  <label id="editL" hidden>edit <button id="editToggle" title="edit mode: on clay, break and place blocks; in the kit, drop worlds from the shelf (B)">edit mode (B)</button></label>
+  <label id="placeL" hidden title="the shelf world a left click drops into the kit (1-8 in edit mode)">place <select id="placeWorld"></select></label>
   <div id="fileCtl">
     <label>file <button id="fileOpen" title="open .vdag files (or drop them anywhere on the page)">open…</button><button id="fileExport" title="save the world on screen as one .vdag file">export this world</button></label>
     <label>shelf <button id="shelfAdd" title="keep the world on screen, and this view of it, on the shelf">add this world</button><button id="shelfRemove" title="take the world on screen off the shelf">remove</button><button id="shelfExport" title="save every world on the shelf in one .vdag file">export all</button></label>
@@ -156,10 +157,13 @@ shift: ×8   wheel: speed   F: freeze cut
 H: show or hide these panels   T: wireframe
 [ / ]: seed − / +   R: a random seed
 drop .vdag files anywhere to open them
-B: edit mode, on clay and flat ground. Esc leaves
-  left: break   right: place   middle: take a colour
-  wheel or - =: block side   1-8: colour   Z / shift-Z: undo / redo
-  alt-wheel: speed
+B: edit mode, on clay, flat ground and the kit. Esc leaves
+  clay: left break, right place, middle take a colour
+    wheel or - =: block side   1-8: colour
+  kit: left drops the shelf world, right undoes
+    wheel or - =: scale   Q / E: turn   G: snap 16 / voxel
+    1-8: which shelf world (or the place menu)
+  Z / shift-Z: undo / redo   alt-wheel: speed
 pad: L stick move, R stick look, RT/LT up/down
      A or L3 ×8, RB/LB speed ×2/÷2, Y freeze cut
 ?world=&amp;depth=&amp;detail=&amp;max=&amp;workers=&amp;eye=x,y,z
@@ -236,6 +240,7 @@ pad: L stick move, R stick look, RT/LT up/down
    transaction that shows it; the section "edit mode" below is the wiring. */
 import { createStore, createClasses, createCounts, prune, storeView, OH48, EMPTY } from './dag-core.js';
 import { mortonXYZ, shownMask, quadsShown } from './chunk-core.js';
+import { createSceneLog, childFrame, dropAt, snapRef, Y_TURNS, bakeScene, placeMemoSize } from './scene-core.js';
 import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
 import { createWorld, createStreamer, worldSnapshot, createTailer, keyOf, DEFAULTS, clearance as clearanceOf } from './stream-core.js';
 import { aimAt, aimInAir, pick, boxOf, boxEdges, reachOf, createEditLog, createBlockTable, editedField, replay, createRepeat, PALETTE, MAX_BLOCK_LEVEL, AIR_PER_SIDE } from './edit-core.js';
@@ -1221,6 +1226,7 @@ function fillWorlds(){
   }
   sel.value = state.world;
   fillShelf();
+  fillPlace();
 }
 const isRow = id => id.startsWith('row:'), isScatter = id => id.startsWith('scatter:'), isLattice = id => id.startsWith('lattice:');
 const isKit = id => id.startsWith('kit:'), isCaves = id => /^caves:\d+$/.test(id), isClay = id => id === 'clay';
@@ -1239,6 +1245,8 @@ function fillDepth(){
   $('depthL').hidden = isLattice(state.world) || isFile(state.world); $('latticeCtl').hidden = !isLattice(state.world);
   $('kitCtl').hidden = !isKit(state.world);
   $('clayCtl').hidden = !isClay(state.world);
+  $('editL').hidden = !isClay(state.world) && !isKit(state.world);
+  $('placeL').hidden = !isKit(state.world);
   // A world on the shelf is the depth it is.
   if (isFile(state.world)){ state.depth = shelfEntry(state.world)?.D ?? state.depth; return; }
   if (isLattice(state.world)){ state.depth = state.lattice.D; fillLattice(); return; }
@@ -1682,6 +1690,16 @@ async function buildWorld(signal, gen){
       onPhase: (t, f) => setBuilding(`building ${t}`, f) });
     kit.desc = desc;
     ({ store, root, D } = kit);
+    /* A real store, so worlds can be dropped in (docs/scene-plan.md §1.1, step 4).
+       The assembler hands back pruned keys as a storeView, which can't intern. The
+       keys are unique and children-first, so importing them into a fresh store
+       gives every node its old id, and the workers' snapshot is the same either
+       way; it's checked here, since a store that renumbered would make every
+       later tail name the wrong nodes. 1.4 ms for the default D = 14 kit's 6,261
+       nodes in Node; `realMs` says what it is here. */
+    { const t = performance.now(), keys = store.snapshot().keys, real = createStore(), ids = real.importKeys(keys);
+      for (let i = 0; i < ids.length; i++) if (ids[i] !== i) throw new Error(`the kit's keys didn't import as themselves (node ${i} became ${ids[i]})`);
+      kit.realMs = performance.now() - t; kit.baseKeys = keys; store = real; }
     label = `kit: ${desc.L} levels of 4³ assemblies${desc.ground ? ' on the ground' : ', floating'}`;
     colour = desc;
   } else if (isClay(state.world)){
@@ -1727,9 +1745,10 @@ async function buildWorld(signal, gen){
   W = { id: state.world, label, store, root, D, side: 2 ** D, top: Math.max(0, D - 6), nodes: store.size, voxels: counts.of(root), counts,
         buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, caves, clay, file, colour, source: sourceOf(), classes: classes ? classes.size : null,
         // Made with the snapshot, as a tailer starts from what the snapshot holds.
-        // Only clay for now: its store is real, here, with an interner (step 5
-        // brings the rest). A clay world off the shelf is a read-only view.
-        edit: clay ? newEdit(store, root, counts) : null };
+        // Clay takes blocks and the kit takes worlds (scene-plan §4 Q3: blocks in the
+        // kit wait for one log ordering both). Both have real stores, here, with an
+        // interner. A clay world or a kit off the shelf is a read-only view.
+        edit: clay ? newEdit(store, root, counts) : kit ? newSceneEdit(store, root, counts, classes, kit.baseKeys) : null };
   ray.frame = null;
   streamer.setWorld(createWorld(store, root, D));
   pool.setWorld(snap, ++worldEpoch);
@@ -1935,17 +1954,99 @@ function padInput(){
    **A press acts in its own event**, not at the next frame, so a click is in the
    log before the next frame starts. Held buttons repeat from the frame loop. */
 const edit = { on: false, locked: false, noLock: params.has('nolock'), level: 0, slot: 0, colour: PALETTE[0],
-               aim: null, far: null, repeat: createRepeat(), held: new Map(), wheel: 0, note: '', noteUntil: 0 };
+               aim: null, far: null, repeat: createRepeat(), held: new Map(), wheel: 0, note: '', noteUntil: 0,
+               // The world tool (scene-plan step 4): which shelf world, which of Y_TURNS, 2^scale, the snap.
+               entry: null, turn: 0, scale: 0, grid: 16 };
 const newEdit = (store, root, counts) => {
   const log = createEditLog(root);
-  return { log, base: root, tailer: createTailer(store, { counts, log }), table: createBlockTable(), field: null,
+  return { kind: 'blocks', log, base: root, tailer: createTailer(store, { counts, log }), table: createBlockTable(), field: null,
            serial: 0, pending: [], samples: [], gens: new Map(), shownGen: 0, flip: null, last: null };
 };
+/* The kit's: a scene log (scene-core.js), followed by the same tailer, so a drop
+   reaches the workers as a block does. The kit has poses (pose colour mode), so
+   the tailer brings the new nodes' poses too. `baseKeys` are the kit's keys as
+   built, for the selftest's twin. */
+const newSceneEdit = (store, root, counts, classes, baseKeys) => {
+  const log = createSceneLog(root);
+  return { kind: 'scene', log, base: root, baseKeys, tailer: createTailer(store, { counts, classes, scene: log }),
+           serial: 0, pending: [], samples: [], gens: new Map(), shownGen: 0, flip: null, last: null };
+};
+const isScene = () => W?.edit?.kind === 'scene';
+
+/* ---- the world tool: shelf worlds dropped into the kit ----------------------
+   docs/scene-plan.md §1.3 and step 4. A shelf entry is data (its keys), so a child
+   is a storeView over them, made once an entry: the scene log registers a world
+   by identity, and scene-core's memos (the import, the prepared child) are keyed
+   by its store, so the tenth knight imports nothing. A baked entry's skin comes
+   with it (its colour names it), and its words go to the workers once a world.
+
+   Where it lands is scene-core's dropAt (against the face, centred on the hit,
+   snapped relative to the first live copy); the box is childFrame's bounds with
+   the corner at 0, memoized per (world, turn, scale), which walks the child's
+   outer layer in its own store and interns nothing in the kit's. So aiming never
+   grows the store: only a drop does. */
+const childWorlds = new WeakMap(), childBoxes = new WeakMap();
+function childOf(e){
+  let w = childWorlds.get(e);
+  if (!w){
+    const baked = e.colour?.kind === 'baked';
+    w = { store: storeView({ keys: e.keys }), root: e.root, D: e.D, colour: e.colour ?? null, ...(baked ? { skin: e.colour.skin } : {}), name: e.name };
+    childWorlds.set(e, w);
+  }
+  return w;
+}
+function childBox(world, turn, scale){
+  let m = childBoxes.get(world);
+  if (!m) childBoxes.set(world, m = new Map());
+  const key = `${turn}|${scale}`;
+  let b = m.get(key);
+  if (!b){ const f = childFrame({ world, at: [0, 0, 0], turn, scale }); b = { lo: f.lo, hi: f.hi, empty: f.empty }; m.set(key, b); }
+  return b;
+}
+const placeEntry = () => shelfEntry(edit.entry) ?? shelf[0] ?? null;
+// Scales from ¼ to ×4, where the child still fits in the kit (D_child + scale ≤ D).
+const scaleRange = e => [Math.max(-2, -e.D), Math.min(2, W.D - e.D)];
+function fillPlace(){
+  const sel = $('placeWorld'), e = placeEntry();
+  sel.innerHTML = '';
+  if (!shelf.length){ sel.add(new Option('nothing on the shelf: open a .vdag', '')); sel.disabled = true; }
+  else { sel.disabled = false; for (const s of shelf) sel.add(new Option(s.name, s.id)); sel.value = e.id; }
+}
+function setEntry(id){
+  if (!shelfEntry(id)) return false;
+  edit.entry = id; fillPlace(); updateAim(); showEdit();
+  return true;
+}
+const setTurn = i => { edit.turn = (i % 4 + 4) % 4; updateAim(); showEdit(); };
+const setScale = v => { edit.scale = v; updateAim(); showEdit(); };
+const setGrid = g => { edit.grid = g; updateAim(); showEdit(); };
+/* The aim of the world tool: the first voxel the crosshair meets, any distance
+   away (a block's reach is about lod 0; a drop is seen from where it's made), and
+   the placement dropAt makes of it, or why not. */
+function dropAim(){
+  const E = W.edit, e = placeEntry();
+  if (!e) return { why: 'the shelf is empty: open a .vdag file, or add a world, to drop it here' };
+  const [lo, hi] = scaleRange(e);
+  if (lo > hi) return { why: `<span class="warn">${esc(e.name)} is D = ${e.D}, larger than the kit (D = ${W.D}) even at ¼</span>` };
+  edit.scale = Math.max(lo, Math.min(hi, edit.scale));
+  const hit = pick(W.store, E.log.root, W.D, cam.eye, fwd());
+  if (!hit) return { why: 'nothing to drop on that way' };
+  const world = childOf(e), turn = Y_TURNS[edit.turn], scale = edit.scale, box = childBox(world, turn, scale);
+  if (box.empty) return { hit, why: `<span class="warn">${esc(e.name)} is empty</span>` };
+  const ref = edit.grid > 1 ? snapRef(E.log.placements(), world, turn, scale) : null;
+  const at = dropAt(hit, box, { grid: edit.grid, ref });
+  if (!at) return { hit, why: 'the eye is inside what it hit' };
+  const ghost = { lo: at.map((v, i) => v + box.lo[i]), hi: at.map((v, i) => v + box.hi[i]) };
+  // As a block on the player is refused: the eye would be inside rock.
+  if (cam.eye.every((v, i) => v >= ghost.lo[i] && v <= ghost.hi[i])) return { hit, ghost, why: 'too close: it would land on the eye' };
+  return { hit, ghost, drop: { world, at, turn, scale }, snapped: !!ref };
+}
 const hasEdits = () => !!W?.edit && (W.edit.log.count > 0 || W.root !== W.edit.base);
 function updateAim(){
   const E = W?.edit;
   edit.aim = null; edit.far = null;
   if (!edit.on || !E) return null;
+  if (E.kind === 'scene') return (edit.aim = dropAim());
   const root = E.log.root, d = fwd();
   edit.aim = aimAt(W.store, root, W.D, cam.eye, d, edit.level) || aimInAir(root, W.D, cam.eye, d, edit.level);
   // Out of reach: say how far, or nothing happens and you can't tell why.
@@ -1961,7 +2062,13 @@ function editStep(kind){
   let step = null;
   if (kind === 'undo') step = E.log.undo();
   else if (kind === 'redo') step = E.log.redo();
-  else {
+  else if (E.kind === 'scene'){
+    // The first drop of a world imports it, and each new turn or scale prepares it:
+    // the bake is all of logMs, on this thread (scene-plan §1.1).
+    const a = updateAim();
+    if (kind === 'drop' && a?.drop) step = E.log.drop(W.store, W.D, a.drop);
+    if (kind === 'drop' && a?.drop && !step) say(`${esc(a.drop.world.name)} would land wholly outside the world`);
+  } else {
     const a = updateAim();
     if (kind === 'break' && a?.breakAt) step = E.log.erase(W.store, W.D, a.breakAt);
     if (kind === 'place' && a?.placeAt) step = E.log.place(W.store, W.D, a.placeAt, edit.colour);
@@ -1980,7 +2087,7 @@ function editStep(kind){
    the same field the workers do (§11.5). The table is built here only when asked. */
 function takeColour(){
   const E = W?.edit, a = updateAim();
-  if (!E || !a?.hit || !W.colour) return false;
+  if (!E || E.kind !== 'blocks' || !a?.hit || !W.colour) return false;
   E.field ||= editedField(colourOf(W.colour), E.table);
   E.table.sync(E.log.delta(E.table.epoch, E.table.seen));
   edit.colour = E.field(a.hit.x + 0.5, a.hit.y + 0.5, a.hit.z + 0.5);
@@ -1995,12 +2102,13 @@ const setLevel = l => { edit.level = Math.max(0, Math.min(MAX_BLOCK_LEVEL, l)); 
 function editWheel(dy){
   edit.wheel += dy;
   if (Math.abs(edit.wheel) < 60) return;
-  setLevel(edit.level - Math.sign(edit.wheel));
+  if (isScene()) setScale(edit.scale - Math.sign(edit.wheel));
+  else setLevel(edit.level - Math.sign(edit.wheel));
   edit.wheel = 0;
 }
 function say(html, ms = 2500){ edit.note = html; edit.noteUntil = performance.now() + ms; showEdit(); }
 function setEditMode(on, { lock = true } = {}){
-  if (on && !W?.edit){ say('<span class="warn">edit mode works on clay and flat ground so far</span>'); return false; }
+  if (on && !W?.edit){ say('<span class="warn">edit mode works on clay, flat ground and the kit so far</span>'); return false; }
   edit.on = on;
   edit.repeat.clear(); edit.held.clear(); edit.wheel = 0;
   keys.clear();
@@ -2033,6 +2141,22 @@ function editKey(e){
   // Held Z repeats at the keyboard's rate: an edit that's waiting jumps to the latest.
   if (e.code === 'KeyZ'){ e.preventDefault(); editStep(e.shiftKey ? 'redo' : 'undo'); return true; }
   if (mod) return false;
+  // One tool a world for now (scene-plan §4 Q3), so Tab says which, and why.
+  if (e.code === 'Tab'){
+    e.preventDefault();
+    say(isScene() ? 'blocks in the kit come after this goal: one log has to order blocks and drops (scene-plan §4 Q3)' : 'worlds go into the kit so far: clay takes blocks');
+    return true;
+  }
+  if (isScene()){
+    const digit = /^Digit([1-8])$/.exec(e.code);
+    if (digit){ const s = shelf[+digit[1] - 1]; if (s) setEntry(s.id); else say(`no world ${digit[1]} on the shelf`); return true; }
+    if (e.code === 'KeyQ'){ setTurn(edit.turn - 1); return true; }
+    if (e.code === 'KeyE'){ setTurn(edit.turn + 1); return true; }
+    if (e.code === 'KeyG'){ setGrid(edit.grid > 1 ? 1 : 16); return true; }
+    if (e.code === 'Minus'){ setScale(edit.scale - 1); return true; }
+    if (e.code === 'Equal'){ setScale(edit.scale + 1); return true; }
+    return false;
+  }
   const digit = /^Digit([1-8])$/.exec(e.code);
   if (digit){ setSlot(+digit[1] - 1); return true; }
   if (e.code === 'Minus'){ setLevel(edit.level - 1); return true; }
@@ -2043,6 +2167,12 @@ canvas.addEventListener('mousedown', e => {
   if (!edit.on) return;
   e.preventDefault();
   if (!edit.locked && !edit.noLock){ lockPointer(); return; }   // this click only takes the mouse back
+  // The world tool doesn't repeat: a held button would drop a world every few frames.
+  if (isScene()){
+    if (e.button === 0 && !e.ctrlKey) editStep('drop');
+    else if (e.button === 2 || e.button === 0) editStep('undo');
+    return;
+  }
   if (e.button === 1){ takeColour(); return; }
   // Ctrl-click is a Mac's right click, and arrives as button 0.
   const kind = e.button === 2 || (e.button === 0 && e.ctrlKey) ? 'place' : e.button === 0 ? 'break' : null;
@@ -2099,7 +2229,7 @@ function showEdit(){
   bar.hidden = !edit.on && !note;
   if (bar.hidden) return;
   const sw = $('editSwatches');
-  sw.hidden = !edit.on;
+  sw.hidden = !edit.on || isScene();
   if (!sw.children.length){
     const c = rgb => `rgb(${rgb & 255},${rgb >> 8 & 255},${rgb >> 16 & 255})`;
     edit.swatch = c;
@@ -2111,6 +2241,7 @@ function showEdit(){
   sw.children[0].hidden = edit.slot >= 0;
   if (edit.slot < 0) sw.children[0].style.background = edit.swatch(edit.colour);
   if (!edit.on){ $('editNote').innerHTML = note; return; }
+  if (isScene()){ showDrop(note); return; }
   const side = 2 ** edit.level, ops = E ? E.log.count : 0;
   const why = note ? note
     : edit.aim?.hit ? ''
@@ -2118,6 +2249,15 @@ function showEdit(){
     : edit.far !== null ? `<span class="warn">${Math.round(edit.far).toLocaleString()} voxels off, reach ${reachOf(edit.level).toLocaleString()}: fly closer, or a larger block</span>`
     : 'nothing to click that way';
   $('editNote').innerHTML = `block side ${side}   ${ops ? `${ops} edit${ops === 1 ? '' : 's'}, not saved: a link or a file can't hold them yet` : 'no edits'}` + (why ? `\n${why}` : '');
+}
+/* The world tool's bar: what a left click drops, how, and why it won't. */
+const TURN_NAMES = ['unturned', 'a quarter turn', 'half a turn', 'three quarters'];
+const scaleName = s => s === 0 ? '×1' : s > 0 ? `×${2 ** s}` : `${s === -1 ? '½' : '¼'}`;
+function showDrop(note){
+  const E = W.edit, e = placeEntry(), a = edit.aim, n = E.log.count;
+  const what = e ? `place <b>${esc(e.name)}</b> (D = ${e.D})   ${TURN_NAMES[edit.turn]}   scale ${scaleName(edit.scale)}   snap ${edit.grid > 1 ? `${edit.grid}${a?.drop ? a.snapped ? ', to the first copy' : ', first copy: to the voxel' : ''}` : 'to the voxel'}` : '';
+  const why = note || a?.why || '';
+  $('editNote').innerHTML = [what, `${n ? `${n} drop${n === 1 ? '' : 's'}, not saved: a link or a file can't hold them yet (SCNE)` : 'no drops'}`, why].filter(Boolean).join('\n');
 }
 /* The outline, after the frame's blit: white for the block a left click breaks,
    the colour you hold for the one a right click places. Each is drawn dark and
@@ -2214,7 +2354,7 @@ function drawOutline(w, h){
   gl.bindVertexArray(lineVAO);
   gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
   const box = (target, rgb) => {
-    const { lo, hi } = boxOf(target), edges = boxEdges(lo, hi, cam.eye, f, near * 1.01);
+    const { lo, hi } = target.lo ? target : boxOf(target), edges = boxEdges(lo, hi, cam.eye, f, near * 1.01);
     if (!edges.length) return;
     gl.bufferData(gl.ARRAY_BUFFER, edges, gl.STREAM_DRAW);
     for (const [width, colour] of [[3 * dpr, [0, 0, 0]], [1.25 * dpr, rgb]]){
@@ -2223,6 +2363,9 @@ function drawOutline(w, h){
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, edges.length / 6);
     }
   };
+  // The world tool's ghost: the dropped world's content box where it would land,
+  // pale blue, or orange when it can't (on the eye).
+  if (a.ghost) box(a.ghost, a.drop ? [0.55, 0.75, 1] : [0.85, 0.55, 0.35]);
   if (a.placeAt) box(a.placeAt, [(edit.colour & 255) / 255, (edit.colour >> 8 & 255) / 255, (edit.colour >> 16 & 255) / 255]);
   if (a.breakAt) box(a.breakAt, [1, 1, 1]);
   gl.bindVertexArray(null);
@@ -2230,9 +2373,21 @@ function drawOutline(w, h){
 // For the console and the tests.
 window.__edit = {
   mode: setEditMode, step: editStep, take: takeColour, aim: updateAim, slot: setSlot, level: setLevel,
+  entry: setEntry, turn: setTurn, scale: setScale, grid: setGrid,
+  // For scene.test.js's real input: sceneSelftest's children on the shelf, and the eye
+  // `h` voxels over the topmost surface at (x, z).
+  children: () => sceneChildren().map(e => e.id),
+  over: (x, z, h, yaw = 0, pitch = -1.05) => {
+    const top = pick(W.store, W.edit ? W.edit.log.root : W.root, W.D, [x, W.side - 0.5, z], [0, -1, 0]);
+    cam.eye = [x, (top ? top.y : 0) + h, z - 40]; cam.yaw = yaw; cam.pitch = pitch; dirty = true; updateAim();
+    return cam.eye.slice();
+  },
   look: (eye, yaw, pitch) => { cam.eye = eye.slice(); cam.yaw = yaw; cam.pitch = pitch; dirty = true; updateAim(); },
   state: () => { const E = W?.edit; return { on: edit.on, locked: edit.locked, noLock: edit.noLock, level: edit.level, slot: edit.slot, colour: edit.colour,
-    held: edit.repeat.held, aim: edit.aim ? { breakAt: edit.aim.breakAt, placeAt: edit.aim.placeAt } : null, far: edit.far, editable: !!E,
+    held: edit.repeat.held, aim: edit.aim ? { breakAt: edit.aim.breakAt, placeAt: edit.aim.placeAt, drop: edit.aim.drop ? { at: edit.aim.drop.at, turn: edit.aim.drop.turn, scale: edit.aim.drop.scale } : null,
+      ghost: edit.aim.ghost ?? null, axis: edit.aim.hit?.axis ?? null, snapped: edit.aim.snapped ?? null, why: edit.aim.why ?? null } : null, far: edit.far, editable: !!E,
+    kind: E?.kind ?? null, entry: placeEntry()?.id ?? null, turn: edit.turn, scale: edit.scale, grid: edit.grid, shelf: shelf.length,
+    storeNodes: E ? W.store.size : null, placeMemo: E?.kind === 'scene' ? placeMemoSize(W.store) : null,
     ops: E ? E.log.count : null, canUndo: E ? E.log.canUndo : null, canRedo: E ? E.log.canRedo : null, root: E ? E.log.root : null, shownRoot: streamer.S.world?.root ?? null,
     pending: E ? E.pending.length : null, last: E ? E.last : null, samples: E ? E.samples.length : null, editing: streamer.editing,
     yaw: cam.yaw, pitch: cam.pitch, voxels: W?.voxels ?? null, exportDisabled: $('fileExport').disabled, addDisabled: $('shelfAdd').disabled,
@@ -2263,6 +2418,7 @@ function bindControls(){
   $('world').addEventListener('change', () => { state.world = $('world').value; state.depth = null; fillDepth(); loadWorld(true); });
   bindLattice(); bindKit(); bindClay(); bindSeed(); bindFiles();
   $('editToggle').addEventListener('click', e => { e.currentTarget.blur(); setEditMode(!edit.on); });
+  $('placeWorld').addEventListener('change', e => { setEntry(e.currentTarget.value); e.currentTarget.blur(); });
   $('depth').addEventListener('change', () => {
     state.depth = +$('depth').value;
     if (isKit(state.world)){ const d = kitFromControls(state.depth); if (!d) return; state.kit = d; fillKit(); }
@@ -2904,7 +3060,7 @@ function hud(){
       `${k(W.voxels)} voxels, ${W.caves.threads ? `${W.caves.threads} threads, slowest part ${(W.caves.ms.slowestPart / 1000).toFixed(1)} s` : '<span class="warn">main thread</span>'}\n` : '') +
     (W.file ? `<span class="sec">file</span> ${W.file.fileName ? esc(W.file.fileName) : 'added here'}, ${k(W.voxels)} voxels, ${colourNote(W.file.colourStatus)}\n` : '') +
     (W.kit ? `<span class="sec">kit</span> libraries ${W.kit.desc.libs.join(', ')}, ${W.kit.desc.ornaments} ornaments, ${W.kit.desc.ground ? 'ground and gravity' : 'floating'}, ` +
-      `colour in level-${W.kit.desc.colourLevel} frames: ${k(W.voxels)} voxels, ${W.classes ? `${W.classes.toLocaleString()} Oh classes, ` : ''}${k(W.kit.dropped)} nodes pruned\n` : '') +
+      `colour in level-${W.kit.desc.colourLevel} frames: ${k(W.voxels)} voxels, ${W.classes ? `${W.classes.toLocaleString()} Oh classes, ` : ''}${k(W.kit.dropped)} nodes pruned, a real store in ${W.kit.realMs.toFixed(1)} ms\n` : '') +
     `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}\n` +
     `<span class="sec">cut</span> ${sel ? sel.leaves.length : 0} leaves + ${sel ? sel.nodes.size - sel.leaves.length : 0} split  (lod ${lods})${sel && sel.capped ? `  <span class="warn">capped ${sel.capped}</span>` : ''}\n` +
     `<span class="sec">resident</span> ${S.cache.size} chunks, ${mb(S.cacheBytes)}  missing ${missing}${state.cache ? '' : '  <span class="warn">tiny cache</span>'}\n` +
@@ -2926,7 +3082,7 @@ function hud(){
       `${actors.note ? `  <span class="warn">${actors.note}</span>` : ''}\n` : '') +
     `<span class="sec">frame</span> ${frameMs.toFixed(1)} ms rAF interval  cut ${S.stats.selectMs.toFixed(2)}  cover ${S.stats.coverMs.toFixed(2)}  upload ${(S.stats.lastUpload / 1024).toFixed(0)} KB` +
     (W.edit && W.edit.last ? `\n<span class="sec">edit</span> ${W.edit.last.kind}: <b>${W.edit.last.ms.toFixed(0)} ms</b> click to frame, ${W.edit.last.frames} frames, ` +
-      `${W.edit.last.chunks} chunks, ${(W.edit.last.bytes / 1024).toFixed(0)} KB, setRoot ${W.edit.last.setRootMs.toFixed(2)} ms  ` +
+      `${W.edit.last.chunks} chunks, ${(W.edit.last.bytes / 1024).toFixed(0)} KB, ${W.edit.last.kind === 'drop' ? `bake ${W.edit.last.logMs.toFixed(1)} ms, ${W.store.size.toLocaleString()} nodes, place memo ${placeMemoSize(W.store).toLocaleString()}, ` : ''}setRoot ${W.edit.last.setRootMs.toFixed(2)} ms  ` +
       `median of ${W.edit.samples.length}: ${medianOf(W.edit.samples.map(x => x.ms)).toFixed(0)} ms` : '') +
     (benchHud.status || benchHud.text ? `\n<span class="bench">${benchHud.status || benchHud.text}</span>` : '');
   window.__stream = { state: { ...state }, world: { id: W.id, D: W.D, nodes: W.nodes, buildMs: W.buildMs,
@@ -2934,7 +3090,7 @@ function hud(){
                              threads: W.scatter.threads, fellBack: W.scatter.fellBack || null, ms: W.scatter.ms } : null,
       lattice: W.lattice ? { param: latticeParam(W.lattice.desc), specimens: W.lattice.layout.cells.length, unique: W.lattice.unique, repeats: W.lattice.repeats,
                              skipped: W.lattice.skipped, blocks: W.lattice.blocks, dropped: W.lattice.dropped, threads: W.lattice.threads, fellBack: W.lattice.fellBack || null, ms: W.lattice.ms } : null,
-      kit: W.kit ? { param: kitParam(W.kit.desc), seed: W.kit.desc.seed, nodes: W.kit.nodes, dropped: W.kit.dropped, classes: W.classes, ms: W.kit.totalMs } : null,
+      kit: W.kit ? { param: kitParam(W.kit.desc), seed: W.kit.desc.seed, nodes: W.kit.nodes, dropped: W.kit.dropped, classes: W.classes, ms: W.kit.totalMs, realMs: W.kit.realMs } : null,
       caves: W.caves ? { desc: W.caves.desc, info: W.caves.info, threads: W.caves.threads, fellBack: W.caves.fellBack || null, ms: W.caves.ms } : null,
       file: W.file ? { name: W.file.name, fileName: W.file.fileName, colourStatus: W.file.colourStatus } : null },
     edit: window.__edit.state(), eye: cam.eye.slice(), view: { ...view }, gpu: { ...gpu },
@@ -4862,6 +5018,228 @@ window.editSelftest = async function editSelftest(opts = {}){
   report.liveWorkers = pool.liveWorkers;
   report.ms = Math.round(performance.now() - t0);
   window.__editSelftest = report;
+  return report;
+};
+
+/* ---- sceneSelftest: worlds dropped into the kit (docs/scene-plan.md step 4) ---------
+   test/browser/scene.test.js. The children are made here and put on the shelf, as
+   an opened file's worlds are: a sphere with its named colour, the same sphere with
+   those colours baked into its skin (bakedStep's), a torus at D = 7, and a blob with
+   no colour. They go into a D = 10 kit through editStep('drop'), the click's own
+   path: the aim, dropAt's landing and snap, the scene log, setRoot, the tails, real
+   workers, one of them killed part way. Every frame keeps invariants() with
+   oneRoot on, and every root shown is one the log held.
+
+   Then, raster only and ray only, byte for byte:
+     - undoing every drop is the kit's own frame;
+     - redoing them all is the frame before the undo;
+     - a twin, the live drops baked from scratch in a store of its own and handed to
+       the workers in one tail over a fresh snapshot, is that frame too;
+     - the baked sphere dropped where the named one was, with every worker killed
+       and restarted as it draws, is the named sphere's frame (their colours are
+       the same words at lod 0, and the drop is seen from inside lod 0's range).
+   And: a second copy snaps to the first by 16 along the face; export is off while
+   drops exist and back after; the HUD's edit line says what the bake cost. */
+function sceneChildren(){
+  const morton = (i, D) => { const p = [0, 0, 0]; for (let l = 0; l < D; l++) for (let a = 0; a < 3; a++) p[a] |= (i >> 3 * l + a & 1) << l; return p; };
+  const named = (name, D) => {
+    const s = createStore(), root = s.fromField(D, fieldOf(SHAPES.find(x => x.name === name), D)).root;
+    return { s, root, D, colour: { kind: 'shape', name, D } };
+  };
+  const out = [];
+  const add = (name, w, colour) => out.push(shelve({ keys: w.s.snapshot().keys, root: w.root, D: w.D, name, colour, colourStatus: colour ? 'same' : 'none', view: null, source: null,
+                                                 voxels: createCounts(w.s).of(w.root), nodes: w.s.size, fileName: null, fileBytes: null }));
+  const sphere = named('sphere', 6);
+  add('test: sphere', sphere, sphere.colour);
+  // bakedStep's sphere: the named field's word at every skin voxel, in rank order.
+  { const D = 6, R = 64, f = colourOf(sphere.colour), cell = fieldOf(SHAPES.find(x => x.name === 'sphere'), D), shape = new Uint8Array(R ** 3);
+    for (let z = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) shape[x + R * (y + R * z)] = cell(0, x, y, z) === 1 ? 1 : 0;
+    const at = (x, y, z) => x >= 0 && y >= 0 && z >= 0 && x < R && y < R && z < R && shape[x + R * (y + R * z)];
+    const skinOcc = new Uint8Array(R ** 3), words = [];
+    for (let i = 0; i < R ** 3; i++){
+      const [x, y, z] = morton(i, D);
+      if (!at(x, y, z) || (at(x + 1, y, z) && at(x - 1, y, z) && at(x, y + 1, z) && at(x, y - 1, z) && at(x, y, z + 1) && at(x, y, z - 1))) continue;
+      skinOcc[x + R * (y + R * z)] = 1; words.push(f(x + 0.5, y + 0.5, z + 0.5));
+    }
+    const s = createStore(), root = s.fromDense(shape, R).root, skin = s.fromDense(skinOcc, R).root;
+    if (root !== s.fromField(D, fieldOf(SHAPES.find(x => x.name === 'sphere'), D)).root) throw new Error('sceneChildren: the dense sphere isn\'t the field\'s');
+    add('test: baked sphere', { s, root, D }, { kind: 'baked', skin, words: Uint32Array.from(words) }); }
+  const torus = named('torus', 7);
+  add('test: torus', torus, torus.colour);
+  const blob = named('blob', 6);
+  add('test: blob, no colour', blob, null);
+  fillWorlds();
+  return out;
+}
+window.sceneSelftest = async function sceneSelftest(opts = {}){
+  const t0 = performance.now(), saved = { auto, path: state.path, kit: state.kit, world: state.world, depth: state.depth, shelf: shelf.length };
+  auto = false;
+  const report = { violations: [], frames: 0, glError: 0 };
+  const W_ = 160, H_ = 120, settleMs = opts.settleMs ?? 300000, rand = mulberry(opts.seed ?? 23);
+  const pump = async (n, phase, { oneRoot = true } = {}) => {
+    for (let f = 0; f < n; f++){
+      frame({ draw: false });
+      report.frames++;
+      invariants(phase, report, { noHoles: true, oneRoot });
+      await sleep(4);
+    }
+  };
+  const settle = async (phase, { oneRoot = true } = {}) => {
+    const end = performance.now() + settleMs;
+    for (let f = 0; performance.now() < end; f++){
+      await pump(1, phase, { oneRoot });
+      if (f > 2 && isConverged()) return true;
+    }
+    return false;
+  };
+  const differ = (a, b) => { let n = 0; for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) n++; return n; };
+  const frames = async phase => {
+    const out = {};
+    for (const path of ['off', '0']){
+      setPath(path); dirty = true;
+      out['settled' + path] = await settle(phase + ' ' + path, { oneRoot: false });
+      view.clear = clearance();
+      out[path] = renderPixels(W_, H_, 8);
+    }
+    setPath('density'); dirty = true;
+    return out;
+  };
+  const compare = (a, b) => ({ raster: differ(a.off, b.off), ray: differ(a['0'], b['0']), settled: a.settledoff && a.settled0 && b.settledoff && b.settled0 });
+  /* 90 voxels over the kit's lowest ground near the middle, looking down and on: the
+     drops land about 100 voxels off, inside lod 0's range. The first try stood over
+     (300, 300), which is a tower 943 high: the eye was over the world's top, and
+     most drops landed wholly outside it. */
+  const topAt = (x, z) => pick(W.store, W.root, W.D, [x, W.side - 0.5, z], [0, -1, 0])?.y ?? 0;
+  const openKit = async () => {
+    state.world = 'kit:1'; state.kit = kitDesc({ D: 10 }); fillWorlds(); fillDepth();
+    await loadWorld(true);
+    // The D = 10 kit has no open ground (the flattest patch 256 wide still rises 240),
+    // so this stands by walls, and some drops hang off one back onto the eye: refused,
+    // rightly. The loop below aims until enough have landed.
+    let x = 0, z = 0, top = Infinity;
+    for (let a = 256; a <= W.side - 256; a += 32) for (let b = 256; b <= W.side - 256; b += 32){
+      const t = Math.max(topAt(a + 0.5, b + 0.5), topAt(a + 0.5, b + 64.5));
+      if (t < top){ top = t; x = a + 0.5; z = b + 0.5; }
+    }
+    cam.eye = [x, top + 90.5, z]; cam.yaw = 0; cam.pitch = -1.05;
+    setEditMode(true, { lock: false });
+    dirty = true;
+    return { yaw: cam.yaw, pitch: cam.pitch, eye: cam.eye.slice(), top };
+  };
+  const kids = sceneChildren(), ids = kids.map(k => k.id);
+  try {
+    const look = await openKit(), E0 = W.edit;
+    report.kit = { param: kitParam(W.kit.desc), kind: E0?.kind, realMs: W.kit.realMs, top: look.top, mode: pool.mode };
+    const root0 = W.root, voxels0 = W.voxels, base = await frames('kit');
+    await settle('kit density');
+    const rootsHeld = new Set([root0]), drops = opts.drops ?? 12, killAt = pool.liveWorkers > 1 ? drops >> 1 : -1;
+    let done = 0, misses = 0, afterUndo = 0, lastUndo = false;
+    const missWhy = [];
+    // A second copy snaps to the first: the sphere unturned at ×1, twice, 0.2 rad apart.
+    { setEntry(ids[0]); setTurn(0); setScale(0); setGrid(16);
+      const a = updateAim(), first = editStep('drop');
+      cam.yaw = look.yaw + 0.2;
+      const b = updateAim(), second = editStep('drop');
+      const off = b.drop && a.drop ? b.drop.at.map((v, i) => v - a.drop.at[i]) : null;
+      report.snap = { first, second, axes: [a.hit?.axis, b.hit?.axis], snapped: b.snapped, off,
+                      aligned: !!off && off.every((d, i) => i === b.hit.axis || d % 16 === 0), moved: !!off && off.some((d, i) => i !== b.hit.axis && d !== 0) };
+      rootsHeld.add(W.edit.log.root);
+      await pump(2, 'snap');
+      // The HUD's edit line, once the drop it describes is on screen.
+      await settle('snap rest');
+      frame({ draw: false }); hud();
+      report.hudBake = /drop: .*bake [\d.]+ ms/.test($('hud').textContent); }
+    for (let i = 0; done < drops && i < 4 * drops; i++){
+      cam.yaw = look.yaw + (rand() - 0.5) * 0.8; cam.pitch = look.pitch + (rand() - 0.5) * 0.4;
+      // ×2 only for the D = 6 children: a ×2 torus is 256 across, and from 90 voxels up
+      // most of its drops would be refused for landing on the eye (which is right,
+      // and is all a first run of this test tried).
+      // Each landed drop moves on to the next world, so all four go in; a refused one
+      // tries the same world again with a new aim.
+      const kid = ids[done % ids.length], big = shelfEntry(kid).D > 6;
+      setEntry(kid); setTurn(Math.floor(rand() * 4)); setScale([-1, 0, 0, big ? 0 : 1][Math.floor(rand() * 4)]); setGrid(rand() < 0.5 ? 16 : 1);
+      const u = rand(), E = W.edit;
+      // An undo every fifth step at least, so a drop after an undo (the epoch's trap) always runs.
+      if ((u < 0.1 || i % 5 === 2) && E.log.canUndo){ editStep('undo'); lastUndo = true; }
+      else if (u < 0.15 && E.log.canRedo){ editStep('redo'); lastUndo = false; }
+      else if (editStep('drop')){ done++; if (lastUndo) afterUndo++; lastUndo = false; }
+      else { misses++; missWhy.push(edit.aim?.why ?? 'outside the world'); }
+      for (let k = 0; k <= E.log.count; k++) rootsHeld.add(E.log.rootAt(k));
+      if (i === killAt){ const slot = pool.slots.find(sl => !sl.dead && sl.ready); slot.fail('sceneSelftest: a worker died'); report.killedAt = i; }
+      await pump(Math.floor(rand() * 4), 'drops');
+      if (!rootsHeld.has(streamer.S.world.root)) report.violations.push(`showing root ${streamer.S.world.root}, which the log never held`);
+    }
+    // The frames below are from where the kit's were.
+    cam.yaw = look.yaw; cam.pitch = look.pitch; dirty = true;
+    Object.assign(report, { done, misses, missWhy, afterUndo, drops: W.edit.log.count, worlds: W.edit.log.worldCount, exportDisabled: $('fileExport').disabled && $('shelfAdd').disabled });
+    await settle('drops rest');
+    report.voxelsEqualLog = (W.counts.update(), W.voxels === W.counts.of(W.edit.log.root));
+    const edited = await frames('edited');
+    report.changed = differ(edited.off, base.off);
+    await settle('edited density');
+    // Every drop back, some in a burst; then all of them again.
+    const steps = W.edit.log.count;
+    for (let i = 0; i < steps; i++){ editStep('undo'); await pump(Math.floor(rand() * 3), 'undo'); }
+    await settle('undone');
+    report.undone = { root: W.root === root0, voxels: W.voxels === voxels0, exportEnabled: !$('fileExport').disabled && !$('shelfAdd').disabled, canRedo: W.edit.log.canRedo };
+    report.undoneVsKit = compare(await frames('undone'), base);
+    await settle('undone density');
+    for (let i = 0; i < steps; i++){ editStep('redo'); await pump(Math.floor(rand() * 3), 'redo'); }
+    await settle('redone');
+    report.redoneVsEdited = compare(await frames('redone'), edited);
+    report.failed = streamer.S.stats.failed;
+    // The twin: the live drops in a store of their own, from the kit's keys as
+    // built, and the workers given them in one tail over a fresh snapshot.
+    { const E = W.edit, live = E.log.placements(), store = createStore();
+      store.importKeys(E.baseKeys);
+      const log = createSceneLog(E.base);
+      for (const p of live) log.drop(store, W.D, p);
+      const root = log.root, counts = createCounts(store);
+      report.twin = { drops: log.count === live.length, bake: bakeScene(store, E.base, W.D, live) === root, voxels: counts.of(root) === W.voxels };
+      const snap = worldSnapshot(store, root, W.D, { counts, colour: W.colour }), tailer = createTailer(store, { counts, scene: log });
+      setEditMode(false);
+      W = { ...W, store, root, counts, edit: null, voxels: counts.of(root) };
+      ray.frame = null;
+      streamer.setWorld(createWorld(store, root, W.D));
+      pool.setWorld(snap, ++worldEpoch);
+      pool.tail(tailer()); }
+    dirty = true;
+    report.twinVsEdited = compare(await frames('twin'), edited);
+    // The baked sphere where the named one was, a quarter turned, with every worker
+    // killed and restarted as it draws: the named sphere's frame.
+    if (opts.baked !== false){
+      await openKit();
+      await settle('kit again');
+      const plain = await frames('kit again');
+      setEntry(ids[0]); setTurn(1); setScale(0); setGrid(1);
+      const a = updateAim(), named = editStep('drop');
+      const namedFrames = await frames('named sphere');
+      const meets = d => d.lo.every((v, i) => v < a.ghost.hi[i] && v + d.size > a.ghost.lo[i]);
+      const lods = [...new Set(streamer.frame.draw.filter(meets).map(d => d.lod))].sort();
+      editStep('undo');
+      setEntry(ids[1]);
+      const b = updateAim(), baked = editStep('drop');
+      let killed = 0;
+      // Every worker that can still come back: a slot restarts once (stream-pool.js), and
+      // one already did in the drops above.
+      for (const slot of pool.slots) if (!slot.dead && slot.ready && !slot.restarts){ slot.fail('sceneSelftest: a worker died'); killed++; }
+      const bakedFrames = await frames('baked sphere');
+      report.baked = { named, baked, sameAt: a.drop.at.join() === b.drop?.at.join(), lods, killed, mode: pool.mode,
+                       restarted: pool.slots.filter(sl => sl.restarts > 0).length, live: pool.liveWorkers,
+                       shows: differ(namedFrames.off, plain.off), vsNamed: compare(bakedFrames, namedFrames) };
+    }
+  } finally {
+    setEditMode(false);
+    for (const id of ids){ const i = shelf.findIndex(e => e.id === id); if (i >= 0) shelf.splice(i, 1); }
+    fillWorlds();
+    state.kit = saved.kit; setPath(saved.path);
+    auto = saved.auto;
+  }
+  report.glError = gl.getError();
+  report.mode = pool.mode;
+  report.liveWorkers = pool.liveWorkers;
+  report.ms = Math.round(performance.now() - t0);
+  window.__sceneSelftest = report;
   return report;
 };
 

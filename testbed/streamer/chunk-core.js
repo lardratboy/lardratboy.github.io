@@ -341,12 +341,21 @@ function brick(ctx, id, k, X0, Y0, Z0, index, pose){
    unrounded, so quantized once like every mean), and the walk isn't; the
    cell's corner names the cell. A field without `mean` (every named field)
    takes the walk exactly as before, byte for byte. meanDepth is the walk's
-   knob and means nothing to `mean`. */
+   knob and means nothing to `mean`.
+
+   **The sample's level** (docs/scene-plan.md §1.6, step 2): the walk asks
+   `colour(x, y, z, level)`, the point being the centre of a level-`level`
+   cell (0 at lod 0, the floor's level below it). Every field before the
+   scene field takes three arguments and ignores the fourth, so their bytes
+   didn't move (attrs, job-core and stream-core's tests hold them). The
+   scene field needs it: a parent cell of level l is a child cell of level
+   l − scale, and a baked child can give that cell's exact skin mean, where
+   a point would read one voxel, often an inside one with no word. */
 const ACC = new Float64Array(3);
 function meanUnder(store, counts, colour, id, level, floor, x, y, z){
   if (id === EMPTY) return;
   if (level === floor){
-    const w = counts ? counts.of(id) : 1, h = 2 ** level / 2, c = colour(x + h, y + h, z + h);
+    const w = counts ? counts.of(id) : 1, h = 2 ** level / 2, c = colour(x + h, y + h, z + h, level);
     ACC[0] += w * (c & 255); ACC[1] += w * (c >> 8 & 255); ACC[2] += w * (c >> 16 & 255);
     return;
   }
@@ -361,7 +370,7 @@ export function cellAttr(store, counts, colour, id, lod, meanDepth, x, y, z){
     return attrOf8(ACC[0], ACC[1], ACC[2]);
   }
   if (lod === 0){
-    const c = colour(x + 0.5, y + 0.5, z + 0.5);
+    const c = colour(x + 0.5, y + 0.5, z + 0.5, 0);
     return attrOf8(c & 255, c >> 8 & 255, c >> 16 & 255);
   }
   ACC.fill(0);

@@ -353,9 +353,10 @@ export function createBlockTable(){
 }
 
 /* A world's colour field with the blocks over it. */
-export const editedField = (base, table) => (x, y, z) => {
+// The sample's level (chunk-core's cellAttr) goes through to the base untouched.
+export const editedField = (base, table) => (x, y, z, level) => {
   const c = table.lookup(x, y, z);
-  return c >= 0 ? c : base(x, y, z);
+  return c >= 0 ? c : base(x, y, z, level);
 };
 
 /* ---- the log --------------------------------------------------------------
