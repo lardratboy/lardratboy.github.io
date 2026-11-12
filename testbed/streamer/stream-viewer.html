@@ -129,8 +129,8 @@
     <label>ground <select id="clayGround"><option value="0">none, it floats</option><option value="1">flat ground</option></select></label>
     <div id="clayInfo"></div>
   </div>
-  <label id="editL" hidden>edit <button id="editToggle" title="edit mode: on clay, break and place blocks; in the kit, drop worlds from the shelf (B)">edit mode (B)</button></label>
-  <label id="placeL" hidden title="the shelf world a left click drops into the kit (1-8 in edit mode)">place <select id="placeWorld"></select></label>
+  <label id="editL" hidden>edit <button id="editToggle" title="edit mode: on clay, break and place blocks; in the kit, the shapes, the rows and files of them, place worlds from the shelf in a box with handles (B)">edit mode (B)</button></label>
+  <label id="placeL" hidden title="the shelf world a click opens a box for (1-8 in edit mode)">place <select id="placeWorld"></select></label>
   <div id="fileCtl">
     <label>file <button id="fileOpen" title="open .vdag files (or drop them anywhere on the page)">open…</button><button id="fileExport" title="save the world on screen as one .vdag file">export this world</button></label>
     <label>shelf <button id="shelfAdd" title="keep the world on screen, and this view of it, on the shelf">add this world</button><button id="shelfRemove" title="take the world on screen off the shelf">remove</button><button id="shelfExport" title="save every world on the shelf in one .vdag file">export all</button></label>
@@ -157,12 +157,19 @@ shift: ×8   wheel: speed   F: freeze cut
 H: show or hide these panels   T: wireframe
 [ / ]: seed − / +   R: a random seed
 drop .vdag files anywhere to open them
-B: edit mode, on clay, flat ground and the kit. Esc leaves
-  clay: left break, right place, middle take a colour
+B: edit mode. Esc leaves
+  clay, flat ground: left break, right place, middle take a colour
     wheel or - =: block side   1-8: colour
-  kit: left drops the shelf world, right undoes
-    wheel or - =: scale   Q / E: turn   G: snap 16 / voxel
+  the kit, the shapes: a click opens a box for the shelf world
+    drag an arrow: move   a ring: turn   a corner: double or halve
+    drag the box: slide it over the world   click elsewhere: put it there
+    Enter bakes the box   Esc closes it   shift-click drops at once
+    J L spin   I K tip   U O roll   M mirror   V underside to the face
+    P: the child drawn in the box, or not (?preview=0 starts with it off)
+    wheel or - =: scale   G: snap 16 / voxel
     1-8: which shelf world (or the place menu)
+    right click or Z: undo, and pick the last one up
+    drag anywhere else, or right drag: look
   Z / shift-Z: undo / redo   alt-wheel: speed
 pad: L stick move, R stick look, RT/LT up/down
      A or L3 ×8, RB/LB speed ×2/÷2, Y freeze cut
@@ -238,9 +245,10 @@ pad: L stick move, R stick look, RT/LT up/down
    Edit mode (docs/edit-mode-log.md): B on clay or flat ground. A click is
    one step of edit-core's log, and the streamer's setRoot opens the
    transaction that shows it; the section "edit mode" below is the wiring. */
-import { createStore, createClasses, createCounts, prune, storeView, OH48, EMPTY } from './dag-core.js';
-import { mortonXYZ, shownMask, quadsShown } from './chunk-core.js';
-import { createSceneLog, childFrame, dropAt, snapRef, Y_TURNS, bakeScene, placeMemoSize } from './scene-core.js';
+import { createStore, createClasses, createCounts, prune, storeView, isFull, OH48, EMPTY, FIRST_NODE, INV } from './dag-core.js';
+import { mortonXYZ, shownMask, quadsShown, expandChunk } from './chunk-core.js';
+import { createSceneLog, childFrame, dropAt, snapRef, bakeScene, placeMemoSize } from './scene-core.js';
+import * as gizmo from './gizmo-core.js';
 import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
 import { createWorld, createStreamer, worldSnapshot, createTailer, keyOf, DEFAULTS, clearance as clearanceOf } from './stream-core.js';
 import { aimAt, aimInAir, pick, boxOf, boxEdges, reachOf, createEditLog, createBlockTable, editedField, replay, createRepeat, PALETTE, MAX_BLOCK_LEVEL, AIR_PER_SIDE } from './edit-core.js';
@@ -249,14 +257,14 @@ import { StreamPool } from './stream-pool.js';
 import { GLSL_RAY, GLSL_RAY_ATTR, TREE_TEXELS, TREE_W, BRICK_ROW } from './ray-glsl.js';
 import { createBrickPool, installPage, releasePage, buildCoverTree, KIND_RAY, KIND_RASTER, PAGE_WORDS, BRICK_WORDS,
          TREE_WORDS, classifyPagesCPU, traceCPU, hitAttrCPU, createHeap, ATTR_NONE, HEAP_W } from './ray-core.js';
-import { attrRGB } from './attr-core.js';
+import { attrRGB, attrOf8 } from './attr-core.js';
 import { readPad, pickPad, PAD } from './pad-core.js';
 import { createOcclusion, nearEye, nearRadius, hiddenByTiles, OCCLUSION } from './occlusion-core.js';
 import { SHAPES, fieldOf } from './experiments/shapes.mjs';
 import { dagWorld, createActors, spawnNear, tickFliers, advanceFliers, regather, restHits, rescue, diffBox, trapped, mix as actorMix, FLIER, ONE as ACTOR_ONE, MAX_D as ACTOR_MAX_D } from './actor-core.js';
 import { actorBody, bodyRecords, makeBody, turnMap, turnedBox } from './body-core.js';
 import { sliceCore, rowsOf, automatonOf, AXIS_NAMES } from './testbed-rows.js';
-import { scatterDesc, groundOf, rotateOcc, PROPER } from './scatter-core.js';
+import { scatterDesc, groundOf, rotateOcc, unturn, PROPER } from './scatter-core.js';
 import { buildScatterInWorkers, buildKitInWorkers, ornamentsKept, isAbort } from './scatter-build.js';
 import { latticeDesc, latticeFromParam, latticeParam, budgetOf, maxCube, stackOf, gapOf } from './lattice-core.js';
 import { kitDesc, kitFromParam, kitParam, sideOf, KIT_LIMITS } from './kit-core.js';
@@ -266,7 +274,9 @@ import { clayDesc, clayFromParam, clayParam, buildClay, clayPlace, CLAY_LIMITS, 
 const $ = id => document.getElementById(id);
 const canvas = $('gl');
 // No MSAA: the frame is drawn offscreen and blitted here (rasterTarget).
-const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
+// depth: true is WebGL's default; it's asked for by name because the placement box's preview
+// sorts its own cubes in the canvas's depth buffer (drawPreview). Nothing else uses it.
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: true });
 if (!gl) throw new Error('WebGL2 is required');
 const params = new URLSearchParams(location.search);
 
@@ -1230,6 +1240,26 @@ function fillWorlds(){
 }
 const isRow = id => id.startsWith('row:'), isScatter = id => id.startsWith('scatter:'), isLattice = id => id.startsWith('lattice:');
 const isKit = id => id.startsWith('kit:'), isCaves = id => /^caves:\d+$/.test(id), isClay = id => id === 'clay';
+const isShape = id => id.startsWith('shape:');
+/* Which worlds take worlds (gizmo-plan §7 step 4, vdagplacement §1): every world with
+   a named colour whose store is real on this thread, or small enough to make real when
+   it's installed. The kit, the shapes, the testbed rows, and a file of any of those.
+   Not yet: a file with baked colour (scene-core's sceneField refuses a parent with
+   `mean`) or with none (a drop needs the parent's colour for everything it isn't), and
+   the scatter, the lattice and the caves, whose stores are views of a million nodes
+   and wait for step 5's import when B is pressed. A file past `tool.importMax` nodes waits
+   with them: importing a view is ~290 ns a node (vdagplacement §2.3), so 2^19 is
+   about 150 ms, inside a load that already stops to prepare the nodes. */
+const tool = { importMax: 2 ** 19 };
+function fileWhyNot(e){
+  if (!e) return 'not on the shelf';
+  if (!e.colour) return 'a world with no colour can\'t take worlds yet: a drop needs its parent\'s colour for everything the child isn\'t';
+  if (e.colour.kind === 'baked') return 'a world with baked colour can\'t take worlds yet: the scene\'s colour needs a parent with a named one';
+  const nodes = e.keys.length / 9;
+  if (nodes > tool.importMax) return `${nodes.toLocaleString()} nodes: a file this large takes worlds with the scatter and the caves (gizmo-plan §7 step 5)`;
+  return null;
+}
+const takesWorlds = id => isKit(id) || isShape(id) || isRow(id) || (isFile(id) && !fileWhyNot(shelfEntry(id)));
 // The kit: 12, 14 and 16 as planned (decision 7), and 10, small enough for the self-test.
 const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: `L=${L} (${(4 ** L).toLocaleString()}³)` }))
   : isKit(id) ? [10, 12, 14, 16].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³, ${(D - 4) / 2} levels)` }))
@@ -1245,8 +1275,9 @@ function fillDepth(){
   $('depthL').hidden = isLattice(state.world) || isFile(state.world); $('latticeCtl').hidden = !isLattice(state.world);
   $('kitCtl').hidden = !isKit(state.world);
   $('clayCtl').hidden = !isClay(state.world);
-  $('editL').hidden = !isClay(state.world) && !isKit(state.world);
-  $('placeL').hidden = !isKit(state.world);
+  // The world tool is every named world's with a real store (takesWorlds); blocks are clay's.
+  $('editL').hidden = !isClay(state.world) && !takesWorlds(state.world);
+  $('placeL').hidden = !takesWorlds(state.world);
   // A world on the shelf is the depth it is.
   if (isFile(state.world)){ state.depth = shelfEntry(state.world)?.D ?? state.depth; return; }
   if (isLattice(state.world)){ state.depth = state.lattice.D; fillLattice(); return; }
@@ -1604,6 +1635,7 @@ function removeFromShelf(){
   const i = shelf.findIndex(e => e.id === state.world);
   if (i < 0) return Promise.resolve(false);
   const [gone] = shelf.splice(i, 1), next = shelf[i] ?? shelf[i - 1];
+  if (childWorlds.has(gone)) previewForget(childWorlds.get(gone));
   if (next){ state.world = next.id; state.depth = next.D; } else goToSource(gone.source);
   fillWorlds(); fillDepth();
   showFile(`removed from the shelf: ${esc(gone.name)}`);
@@ -1632,9 +1664,12 @@ let W = null;                    // the current world: { id, store, root, D, sid
    the newer one installs. The worker-built worlds also take `signal`, so
    a superseded build stops at once (scatter-build.js). */
 const CLASSES_MAX = 300000;
+const LATER = 'the scatter, the lattice and the caves take worlds with gizmo-plan §7 step 5: their stores are views until B imports them';
 async function buildWorld(signal, gen){
   const t0 = performance.now();
-  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, clay = null, classes = null, file = null;
+  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, clay = null, classes = null, file = null, shaped = false;
+  // The keys a scene log starts from (a world that takes worlds), and why a world takes none.
+  let sceneKeys = null, noEdit = null;
   if (isFile(state.world)){
     // Already data: the file's worker read it, or it was added from a world
     // built here. Nothing to build but the counts and the snapshot below.
@@ -1648,6 +1683,21 @@ async function buildWorld(signal, gen){
     // restarted worker and the main-thread runner get the words too.
     ({ root, D, colour } = file);
     label = file.name;
+    /* A file with a named colour takes worlds (gizmo-plan §7 step 4), by the kit's
+       fix: its keys imported into a real store, here, and every id checked to be
+       its own. A file this page wrote is pruned keys, unique and children-first, so
+       it is; a file from elsewhere may hold a node twice, the import would merge
+       them, and every id after it would move. Then the root, a baked skin and every
+       later tail would name the wrong nodes, so that file stays a view and takes
+       nothing, and says why. */
+    noEdit = fileWhyNot(file);
+    if (!noEdit){
+      const t = performance.now(), real = createStore(), ids = real.importKeys(file.keys);
+      let same = real.size === store.size;
+      for (let i = 0; same && i < ids.length; i++) same = ids[i] === i;
+      if (same){ store = real; sceneKeys = file.keys; file.realMs = performance.now() - t; }
+      else noEdit = 'this file holds a node twice, so its nodes can\'t be imported as they are numbered: it\'s shown, and takes no worlds';
+    }
   } else if (isScatter(state.world)){
     // No poses (docs/scatter-plan.md, decision 9): classes over 1.7M nodes
     // would hold the main thread for seconds, for the pose colour mode only.
@@ -1657,6 +1707,7 @@ async function buildWorld(signal, gen){
     ({ store, root, D } = scatter);
     scatter.groundTop = groundOf(desc).top;
     label = `scatter: ${scatter.layout.cells.length.toLocaleString()} specimens on hills`;
+    noEdit = LATER;
     colour = { kind: 'scatter', ...desc, table: scatter.table };
   } else if (isLattice(state.world)){
     // No poses either, as the scatter world (the lattice reaches 2M nodes).
@@ -1667,6 +1718,7 @@ async function buildWorld(signal, gen){
     ({ store, root, D } = lattice);
     lattice.desc = desc;
     label = `lattice: ${lattice.layout.cells.length.toLocaleString()} specimens, R=${desc.R}`;
+    noEdit = LATER;
     colour = { ...desc, table: lattice.table };
   } else if (isCaves(state.world)){
     // In workers, 64 column parts (docs/caves-plan.md, decision 5). The
@@ -1678,6 +1730,7 @@ async function buildWorld(signal, gen){
     caves.desc = desc;
     const i = caves.info;
     label = `caves: ${i.chambers.toLocaleString()} chambers (${i.network.toLocaleString()} connected), ${i.pools} pools (${i.lava} lava)`;
+    noEdit = LATER;
     colour = desc;
   } else if (isKit(state.world)){
     // In workers since kit-findings §5 (it was the main thread, ~40 ms by
@@ -1714,12 +1767,15 @@ async function buildWorld(signal, gen){
     ({ root, D } = store.fromRadix4(state.depth, a.start, a.step, a.accept, a.keyOf));
     label = `${AXIS_NAMES[row.axis]}: ${row.label} ${row.depth === '-' ? '' : row.depth}`;
     colour = { kind: 'row', D };
+    // A row takes worlds as a shape does (step 4): fromRadix4 built it here, in a real store.
+    shaped = true;
   } else {
     const shape = SHAPES.find(s => 'shape:' + s.name === state.world) || SHAPES[0];
     D = state.depth;
     ({ root } = store.fromField(D, fieldOf(shape, D)));
     label = shape.name;
     colour = { kind: 'shape', name: shape.name, D };
+    shaped = true;
   }
   if (gen !== buildGen) return false;
   // The counts and the snapshot hold the main thread (the build's last
@@ -1741,14 +1797,21 @@ async function buildWorld(signal, gen){
   const poseless = scatter || lattice || caves || clay || (file && ['scatter', 'lattice', 'caves', 'clay'].includes(file.colour?.kind));
   if (!poseless && store.size <= CLASSES_MAX) classes = createClasses(store, OH48);
   const snap = worldSnapshot(store, root, D, { counts, classes, colour });
-  const t2 = performance.now();
+  const t2 = performance.now(), toolWas = W?.edit?.kind;
   W = { id: state.world, label, store, root, D, side: 2 ** D, top: Math.max(0, D - 6), nodes: store.size, voxels: counts.of(root), counts,
         buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, caves, clay, file, colour, source: sourceOf(), classes: classes ? classes.size : null,
         // Made with the snapshot, as a tailer starts from what the snapshot holds.
         // Clay takes blocks and the kit takes worlds (scene-plan §4 Q3: blocks in the
         // kit wait for one log ordering both). Both have real stores, here, with an
         // interner. A clay world or a kit off the shelf is a read-only view.
-        edit: clay ? newEdit(store, root, counts) : kit ? newSceneEdit(store, root, counts, classes, kit.baseKeys) : null };
+        // A shape takes worlds too (gizmo-plan §7 step 2; vdagplacement §2.1): fromField
+        // built it here in a real store, and its colour is named, which is all a drop
+        // needs. Its keys as built are the snapshot's own copy. A row is the same, and a
+        // file with a named colour after its import above (step 4): `noEdit` is why not.
+        edit: clay ? newEdit(store, root, counts) : kit ? newSceneEdit(store, root, counts, classes, kit.baseKeys)
+            : shaped ? newSceneEdit(store, root, counts, classes, snap.keys)
+            : sceneKeys ? newSceneEdit(store, root, counts, classes, sceneKeys) : null,
+        noEdit };
   ray.frame = null;
   streamer.setWorld(createWorld(store, root, D));
   pool.setWorld(snap, ++worldEpoch);
@@ -1757,7 +1820,12 @@ async function buildWorld(signal, gen){
   if (kit) showKit();
   if (clay) showClay();
   fillShelf();
-  if (edit.on && !W.edit) setEditMode(false);
+  // A box is of the world it was opened in. And edit mode doesn't stick to a world that
+  // can't be edited, or to one with the other tool: blocks hold the pointer's lock and
+  // the world tool has none, so going from clay to a shape with the mode on would leave
+  // a locked pointer with nothing to aim.
+  edit.box = null; edit.press = null; edit.hot = null;
+  if (edit.on && W.edit?.kind !== toolWas) setEditMode(false);
   showEdit();
   return true;
 }
@@ -1955,8 +2023,21 @@ function padInput(){
    log before the next frame starts. Held buttons repeat from the frame loop. */
 const edit = { on: false, locked: false, noLock: params.has('nolock'), level: 0, slot: 0, colour: PALETTE[0],
                aim: null, far: null, repeat: createRepeat(), held: new Map(), wheel: 0, note: '', noteUntil: 0,
-               // The world tool (scene-plan step 4): which shelf world, which of Y_TURNS, 2^scale, the snap.
-               entry: null, turn: 0, scale: 0, grid: 16 };
+               // The world tool (scene-plan step 4, gizmo-plan step 2): which shelf world, the turn
+               // you hold (one of dag-core's 48, in the floor's frame), 2^scale, the snap, and
+               // "underside to the face" (V).
+               entry: null, turn: 0, scale: 0, grid: 16, under: false,
+               // The placement box when one is open: a gizmo-core state, with its world, the face
+               // it was opened on (`rest`), the turn that face gave it (`lift`) and whether an
+               // undo picked it up. Then the pointer in CSS pixels (null: the middle of the
+               // view), the button that's down, and the handle under the pointer.
+               box: null, pointer: null, press: null, hot: null,
+               // The child drawn in the box (gizmo-plan step 3): on unless P turns it off; what the last frame drew.
+               preview: params.get('preview') !== '0', previewInfo: null,
+               // Its detail (gizmo-log §11): how many lods finer than the coarse one it rests at
+               // (Infinity: the bake's own voxels; shift - and shift = step it), and when and
+               // where the placement last changed, which is what "moving" means.
+               detail: Infinity, previewKey: '', previewOf: null, previewMoved: 0 };
 const newEdit = (store, root, counts) => {
   const log = createEditLog(root);
   return { kind: 'blocks', log, base: root, tailer: createTailer(store, { counts, log }), table: createBlockTable(), field: null,
@@ -1973,8 +2054,9 @@ const newSceneEdit = (store, root, counts, classes, baseKeys) => {
 };
 const isScene = () => W?.edit?.kind === 'scene';
 
-/* ---- the world tool: shelf worlds dropped into the kit ----------------------
-   docs/scene-plan.md §1.3 and step 4. A shelf entry is data (its keys), so a child
+/* ---- the world tool: shelf worlds placed in the kit, or in a shape ------------
+   docs/scene-plan.md §1.3 and step 4; the placement box, further down, is
+   docs/gizmo-plan.md step 2. A shelf entry is data (its keys), so a child
    is a storeView over them, made once an entry: the scene log registers a world
    by identity, and scene-core's memos (the import, the prepared child) are keyed
    by its store, so the tenth knight imports nothing. A baked entry's skin comes
@@ -2004,8 +2086,10 @@ function childBox(world, turn, scale){
   return b;
 }
 const placeEntry = () => shelfEntry(edit.entry) ?? shelf[0] ?? null;
-// Scales from ¼ to ×4, where the child still fits in the kit (D_child + scale ≤ D).
+// Scales from ¼ to ×4, where the child still fits in the world (D_child + scale ≤ D).
 const scaleRange = e => [Math.max(-2, -e.D), Math.min(2, W.D - e.D)];
+// What gizmo-core asks of a child: its box at a turn and a scale, and where it may go.
+const ctxOf = world => ({ boxOf: (turn, scale) => childBox(world, turn, scale), side: W.side, scales: scaleRange(world), grid: edit.grid });
 function fillPlace(){
   const sel = $('placeWorld'), e = placeEntry();
   sel.innerHTML = '';
@@ -2013,33 +2097,66 @@ function fillPlace(){
   else { sel.disabled = false; for (const s of shelf) sel.add(new Option(s.name, s.id)); sel.value = e.id; }
 }
 function setEntry(id){
-  if (!shelfEntry(id)) return false;
-  edit.entry = id; fillPlace(); updateAim(); showEdit();
+  const e = shelfEntry(id);
+  if (!e) return false;
+  edit.entry = id; fillPlace();
+  // An open box takes the new world where it stands: the same pivot, turn and (if it fits) scale.
+  const B = edit.box, world = B && childOf(e);
+  if (B && world !== B.world){
+    const [lo, hi] = scaleRange(world), scale = Math.max(lo, Math.min(hi, B.scale));
+    if (lo > hi || childBox(world, B.turn, scale).empty) say(`<span class="warn">${esc(e.name)} can't go in this box (${lo > hi ? 'too large for this world' : 'it\'s empty'})</span>`);
+    else edit.box = gizmo.settle(ctxOf(world), { ...B, world, scale });
+  }
+  updateAim(); showEdit();
   return true;
 }
-const setTurn = i => { edit.turn = (i % 4 + 4) % 4; updateAim(); showEdit(); };
+// One of the 48 (dag-core's Oh encoding): 0 upright and unturned, 41 a quarter about y, 1 a mirror.
+const setTurn = e => { edit.turn = ((e % 48) + 48) % 48; updateAim(); showEdit(); };
+const setUnder = on => { edit.under = !!on; updateAim(); showEdit(); };
 const setScale = v => { edit.scale = v; updateAim(); showEdit(); };
 const setGrid = g => { edit.grid = g; updateAim(); showEdit(); };
-/* The aim of the world tool: the first voxel the crosshair meets, any distance
-   away (a block's reach is about lod 0; a drop is seen from where it's made), and
-   the placement dropAt makes of it, or why not. */
+/* The pointer's ray. The world tool has a free cursor (gizmo-plan §4, answered A), so
+   it aims where the pointer is, not at the middle of the view. With no pointer yet (a
+   page that hasn't seen the mouse, a selftest) it's the middle, and the direction is
+   fwd() itself, bit for bit, which is what the crosshair aimed with. The same
+   arithmetic as viewProj: half the field of view is 0.45 rad, up and down. */
+function pointerRay(px = edit.pointer){
+  const f = fwd();
+  if (!px) return { o: cam.eye, d: f };
+  const k = Math.tan(0.45), r = norm(cross(f, [0, 1, 0])), u = cross(r, f);
+  const x = (2 * px[0] / innerWidth - 1) * k * innerWidth / innerHeight, y = (1 - 2 * px[1] / innerHeight) * k;
+  return { o: cam.eye, d: [f[0] + r[0] * x + u[0] * y, f[1] + r[1] * x + u[1] * y, f[2] + r[2] * x + u[2] * y] };
+}
+// Where a point of the world is on the page, in CSS pixels, or null behind the eye.
+function screenOf(p){
+  const f = fwd(), r = norm(cross(f, [0, 1, 0])), u = cross(r, f), v = [p[0] - cam.eye[0], p[1] - cam.eye[1], p[2] - cam.eye[2]], d = dot(v, f);
+  if (d <= 0) return null;
+  const k = Math.tan(0.45);
+  return [(dot(v, r) / d / (k * innerWidth / innerHeight) + 1) / 2 * innerWidth, (1 - dot(v, u) / d / k) / 2 * innerHeight];
+}
+/* The aim of the world tool: the first voxel under the pointer, any distance away (a
+   block's reach is about lod 0; a drop is seen from where it's made), and the placement
+   dropAt makes of it, or why not. With a box open it's where a click would move the box,
+   so it's the box's world, turn and scale. With none, the turn is the one you hold, lifted
+   onto the face if "underside to the face" is on (`lift`, gizmo-core's upTo). */
 function dropAim(){
-  const E = W.edit, e = placeEntry();
-  if (!e) return { why: 'the shelf is empty: open a .vdag file, or add a world, to drop it here' };
-  const [lo, hi] = scaleRange(e);
-  if (lo > hi) return { why: `<span class="warn">${esc(e.name)} is D = ${e.D}, larger than the kit (D = ${W.D}) even at ¼</span>` };
-  edit.scale = Math.max(lo, Math.min(hi, edit.scale));
-  const hit = pick(W.store, E.log.root, W.D, cam.eye, fwd());
+  const E = W.edit, B = edit.box, e = B ? null : placeEntry();
+  if (!B && !e) return { why: 'the shelf is empty: open a .vdag file, or add a world, to drop it here' };
+  const world = B ? B.world : childOf(e), [lo, hi] = scaleRange(world);
+  if (lo > hi) return { why: `<span class="warn">${esc(world.name)} is D = ${world.D}, larger than this world (D = ${W.D}) even at ¼</span>` };
+  if (!B) edit.scale = Math.max(lo, Math.min(hi, edit.scale));
+  const ray = pointerRay(), hit = pick(W.store, E.log.root, W.D, ray.o, ray.d);
   if (!hit) return { why: 'nothing to drop on that way' };
-  const world = childOf(e), turn = Y_TURNS[edit.turn], scale = edit.scale, box = childBox(world, turn, scale);
-  if (box.empty) return { hit, why: `<span class="warn">${esc(e.name)} is empty</span>` };
+  const lift = !B && edit.under && hit.axis >= 0 ? gizmo.upTo(hit.axis, hit.normal) : 0;
+  const turn = B ? B.turn : gizmo.openTurn(edit.turn, hit, edit.under), scale = B ? B.scale : edit.scale, box = childBox(world, turn, scale);
+  if (box.empty) return { hit, why: `<span class="warn">${esc(world.name)} is empty</span>` };
   const ref = edit.grid > 1 ? snapRef(E.log.placements(), world, turn, scale) : null;
   const at = dropAt(hit, box, { grid: edit.grid, ref });
   if (!at) return { hit, why: 'the eye is inside what it hit' };
   const ghost = { lo: at.map((v, i) => v + box.lo[i]), hi: at.map((v, i) => v + box.hi[i]) };
   // As a block on the player is refused: the eye would be inside rock.
   if (cam.eye.every((v, i) => v >= ghost.lo[i] && v <= ghost.hi[i])) return { hit, ghost, why: 'too close: it would land on the eye' };
-  return { hit, ghost, drop: { world, at, turn, scale }, snapped: !!ref };
+  return { hit, ghost, drop: { world, at, turn, scale }, snapped: !!ref, lift };
 }
 const hasEdits = () => !!W?.edit && (W.edit.log.count > 0 || W.root !== W.edit.base);
 function updateAim(){
@@ -2054,8 +2171,9 @@ function updateAim(){
   return edit.aim;
 }
 /* One step of the log, and the transaction that shows it. `kind`: break, place,
-   undo, redo. Returns true if the world changed. */
-function editStep(kind){
+   drop (at the aim), bake (the placement `p`, a box's), undo, redo. Returns true if
+   the world changed. */
+function editStep(kind, p = null){
   const E = W?.edit;
   if (!E) return false;
   const t0 = performance.now();
@@ -2065,9 +2183,11 @@ function editStep(kind){
   else if (E.kind === 'scene'){
     // The first drop of a world imports it, and each new turn or scale prepares it:
     // the bake is all of logMs, on this thread (scene-plan §1.1).
-    const a = updateAim();
-    if (kind === 'drop' && a?.drop) step = E.log.drop(W.store, W.D, a.drop);
-    if (kind === 'drop' && a?.drop && !step) say(`${esc(a.drop.world.name)} would land wholly outside the world`);
+    const drop = kind === 'bake' ? p : kind === 'drop' ? updateAim()?.drop : null;
+    if (drop) step = E.log.drop(W.store, W.D, drop);
+    if (drop && !step) say(`${esc(drop.world.name)} would land wholly outside the world`);
+    // To the log, the tail and the HUD's edit line a baked box is a drop like any other.
+    if (kind === 'bake') kind = 'drop';
   } else {
     const a = updateAim();
     if (kind === 'break' && a?.breakAt) step = E.log.erase(W.store, W.D, a.breakAt);
@@ -2102,18 +2222,21 @@ const setLevel = l => { edit.level = Math.max(0, Math.min(MAX_BLOCK_LEVEL, l)); 
 function editWheel(dy){
   edit.wheel += dy;
   if (Math.abs(edit.wheel) < 60) return;
-  if (isScene()) setScale(edit.scale - Math.sign(edit.wheel));
+  if (isScene()) scaleStep(-Math.sign(edit.wheel));
   else setLevel(edit.level - Math.sign(edit.wheel));
   edit.wheel = 0;
 }
 function say(html, ms = 2500){ edit.note = html; edit.noteUntil = performance.now() + ms; showEdit(); }
 function setEditMode(on, { lock = true } = {}){
-  if (on && !W?.edit){ say('<span class="warn">edit mode works on clay, flat ground and the kit so far</span>'); return false; }
+  if (on && !W?.edit){ say(`<span class="warn">${esc(W?.noEdit ?? 'edit mode works on clay and flat ground (blocks), and on the kit, the shapes, the rows and files of them (worlds) so far')}</span>`, 4000); return false; }
   edit.on = on;
   edit.repeat.clear(); edit.held.clear(); edit.wheel = 0;
+  edit.box = null; edit.press = null; edit.hot = null; edit.pointer = null;
+  canvas.style.cursor = '';
   keys.clear();
-  $('cross').hidden = !on;
-  if (on){ canvas.focus(); edit.noLock = params.has('nolock') || !lock; lockPointer(); updateAim(); }
+  // The world tool has a free cursor and no crosshair (gizmo-plan §4): handles need a pointer.
+  $('cross').hidden = !on || isScene();
+  if (on){ canvas.focus(); edit.noLock = params.has('nolock') || !lock; if (!isScene()) lockPointer(); updateAim(); }
   else { if (document.pointerLockElement === canvas) document.exitPointerLock(); edit.aim = null; saveView(); }
   showEdit();
   return on;
@@ -2137,24 +2260,37 @@ function editKey(e){
   const mod = e.metaKey || e.ctrlKey || e.altKey;
   if (e.code === 'KeyB' && !mod && !e.repeat){ setEditMode(!edit.on); return true; }
   if (!edit.on) return false;
-  if (e.code === 'Escape'){ setEditMode(false); return true; }
+  // Esc closes an open box first, and bakes nothing; then it leaves edit mode.
+  if (e.code === 'Escape'){ if (isScene() && edit.box) closeBox(); else setEditMode(false); return true; }
   // Held Z repeats at the keyboard's rate: an edit that's waiting jumps to the latest.
-  if (e.code === 'KeyZ'){ e.preventDefault(); editStep(e.shiftKey ? 'redo' : 'undo'); return true; }
+  if (e.code === 'KeyZ'){
+    e.preventDefault();
+    if (isScene()){ if (e.shiftKey) sceneRedo(); else sceneUndo(); }
+    else editStep(e.shiftKey ? 'redo' : 'undo');
+    return true;
+  }
   if (mod) return false;
   // One tool a world for now (scene-plan §4 Q3), so Tab says which, and why.
   if (e.code === 'Tab'){
     e.preventDefault();
-    say(isScene() ? 'blocks in the kit come after this goal: one log has to order blocks and drops (scene-plan §4 Q3)' : 'worlds go into the kit so far: clay takes blocks');
+    say(isScene() ? 'blocks here come after the box: one log has to order blocks and drops (gizmo-plan §7 step 6)' : 'worlds go into the kit, the shapes, the rows and files of them so far: clay takes blocks');
     return true;
   }
   if (isScene()){
     const digit = /^Digit([1-8])$/.exec(e.code);
     if (digit){ const s = shelf[+digit[1] - 1]; if (s) setEntry(s.id); else say(`no world ${digit[1]} on the shelf`); return true; }
-    if (e.code === 'KeyQ'){ setTurn(edit.turn - 1); return true; }
-    if (e.code === 'KeyE'){ setTurn(edit.turn + 1); return true; }
+    // Q and E fly again (they turned about y until the box came): the turns are U I O J K L, laid
+    // out as Q W E A S D, and they mean what they look like from where you stand.
+    const turn = TURN_KEYS[e.code];
+    if (turn){ turnKey(turn); return true; }
+    if (e.code === 'KeyM'){ mirrorKey(); return true; }
+    if (e.code === 'KeyV' && !e.repeat){ setUnder(!edit.under); return true; }
+    if (e.code === 'KeyP' && !e.repeat){ edit.preview = !edit.preview; say(edit.preview ? 'the preview is on' : 'the preview is off: P brings it back'); return true; }
     if (e.code === 'KeyG'){ setGrid(edit.grid > 1 ? 1 : 16); return true; }
-    if (e.code === 'Minus'){ setScale(edit.scale - 1); return true; }
-    if (e.code === 'Equal'){ setScale(edit.scale + 1); return true; }
+    // Shifted, the same two keys step the preview's detail and leave the size alone.
+    if (e.code === 'Minus'){ if (e.shiftKey) detailKey(-1); else scaleStep(-1); return true; }
+    if (e.code === 'Equal'){ if (e.shiftKey) detailKey(1); else scaleStep(1); return true; }
+    if (e.code === 'Enter' || e.code === 'NumpadEnter'){ if (!e.repeat) bakeBox(); return true; }
     return false;
   }
   const digit = /^Digit([1-8])$/.exec(e.code);
@@ -2166,13 +2302,9 @@ function editKey(e){
 canvas.addEventListener('mousedown', e => {
   if (!edit.on) return;
   e.preventDefault();
+  // The world tool has no lock, and acts on release: a press may be a drag (a handle, or a look).
+  if (isScene()){ scenePress(e); return; }
   if (!edit.locked && !edit.noLock){ lockPointer(); return; }   // this click only takes the mouse back
-  // The world tool doesn't repeat: a held button would drop a world every few frames.
-  if (isScene()){
-    if (e.button === 0 && !e.ctrlKey) editStep('drop');
-    else if (e.button === 2 || e.button === 0) editStep('undo');
-    return;
-  }
   if (e.button === 1){ takeColour(); return; }
   // Ctrl-click is a Mac's right click, and arrives as button 0.
   const kind = e.button === 2 || (e.button === 0 && e.ctrlKey) ? 'place' : e.button === 0 ? 'break' : null;
@@ -2185,12 +2317,169 @@ addEventListener('mouseup', e => {
   const kind = edit.held.get(e.button);
   if (kind){ edit.held.delete(e.button); edit.repeat.release(kind); }
 });
-addEventListener('blur', () => { edit.repeat.clear(); edit.held.clear(); });
+addEventListener('blur', () => { edit.repeat.clear(); edit.held.clear(); edit.press = null; });
 canvas.addEventListener('contextmenu', e => { if (edit.on) e.preventDefault(); });
 canvas.addEventListener('mousemove', e => {
-  if (!edit.on) return;
+  if (!edit.on || isScene()) return;
   cam.yaw -= e.movementX * 0.002;
   cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch - e.movementY * 0.002));
+});
+/* ---- the placement box (docs/gizmo-plan.md step 2, docs/gizmo-log.md) ------------
+   A click used to be a drop. Now a click opens a box where the drop would have
+   landed, handles and keys change it, and Enter bakes it: one log.drop, one flip, as
+   before. Nothing below the page changed. Every decision about the box is
+   gizmo-core.js's (what a handle is, what a drag ends in, what a key turns), held in
+   Node by test/gizmo-core.test.js; this section passes it the pointer's ray and the
+   child's boxes, and draws what comes back.
+
+   **A free cursor** (plan §4, answered A): the world tool takes no pointer lock.
+   Left on a handle drags it; left anywhere else, or right, drags the view as the
+   page does outside edit mode; a press that doesn't move four pixels is a click.
+   So the tool acts on release, not on press as blocks do.
+
+   **Nothing is baked during a drag**: a bake is 0.1 to 0.3 s for a knight's first
+   copy at a turn (vdagplacement §6). The box is lines; the DAG is touched once, at
+   Enter. Opening, turning and dragging a box interns nothing in the world's store
+   (the child's boxes are walked in its own), which sceneSelftest holds.
+
+   **Undo picks the last one up** (plan §8 Q4): Z or a right click undoes the latest
+   drop and opens its box where it stood. Enter puts it back (the same root id, if
+   it wasn't moved), Esc leaves it undone, and Z again goes on to the one before. A
+   box a click opened is only closed by Z: there's nothing of it in the log. */
+const TURN_KEYS = { KeyJ: 'spinLeft', KeyL: 'spinRight', KeyI: 'tipAway', KeyK: 'tipToward', KeyU: 'rollLeft', KeyO: 'rollRight' };
+function openBox(p, { rest = null, lift = 0, picked = false } = {}){
+  edit.box = gizmo.fromPlacement(ctxOf(p.world), p, { world: p.world, rest, lift, picked });
+  edit.hot = null;
+  showEdit();
+}
+function closeBox(){ edit.box = null; edit.press = null; edit.hot = null; updateAim(); showEdit(); }
+/* A click on the world. With no box it opens one at the aim; with one, the box
+   goes there ("no, over there" is one click). Shift drops at once, as a click
+   always did, for stamping copies. */
+function sceneClick(shift = false){
+  const a = updateAim();
+  if (shift) return editStep('drop');
+  if (!a?.drop){ if (a?.why) say(a.why); return false; }
+  const B = edit.box, rest = { axis: a.hit.axis, normal: a.hit.normal };
+  if (B) edit.box = gizmo.fromPlacement(ctxOf(B.world), a.drop, { ...B, rest });
+  else openBox(a.drop, { rest, lift: a.lift });
+  showEdit();
+  return true;
+}
+function bakeBox(){
+  const B = edit.box;
+  if (!B) return false;
+  const ctx = ctxOf(B.world), p = { world: B.world, ...gizmo.placementOf(ctx, B) }, b = gizmo.boxAt(ctx, B);
+  // As a drop on the eye is refused: the eye would be inside rock.
+  if (cam.eye.every((v, i) => v >= b.lo[i] && v <= b.hi[i])){ say('<span class="warn">the eye is inside the box: fly out of it, then Enter</span>'); return false; }
+  if (!editStep('bake', p)) return false;
+  // The next box opens turned and sized as this one was.
+  edit.turn = gizmo.closeTurn(B.turn, B.lift); edit.scale = B.scale;
+  closeBox();
+  return true;
+}
+function sceneUndo(){
+  const B = edit.box;
+  if (B){ closeBox(); if (!B.picked) return true; }
+  const live = W.edit.log.placements(), last = live[live.length - 1];
+  if (!editStep('undo')) return !!B;
+  openBox(last, { picked: true });
+  return true;
+}
+function sceneRedo(){ if (edit.box) closeBox(); return editStep('redo'); }
+/* The keys. With a box open they turn the box. With none they turn what you hold,
+   which is in the floor's frame: so with "underside to the face" on a wall, a spin
+   is about the wall's normal, and the others are still as you see them (the lift
+   on, the turn, the lift off). */
+function turnKey(name){
+  const [axis, quarters] = gizmo.viewTurn(cam.yaw, name), B = edit.box;
+  if (B){ edit.box = gizmo.turnAbout(ctxOf(B.world), B, axis, quarters); showEdit(); return; }
+  const lift = edit.aim?.lift ?? 0;
+  setTurn(name.startsWith('spin') ? gizmo.turned(edit.turn, 1, quarters) : gizmo.closeTurn(gizmo.turned(gizmo.closeTurn(edit.turn, INV[lift]), axis, quarters), lift));
+}
+// Left for right as you see it: across the horizontal axis nearest your right.
+function mirrorKey(){
+  const axis = gizmo.viewAxes(cam.yaw).right[0], B = edit.box;
+  if (B){ edit.box = gizmo.mirrorAcross(ctxOf(B.world), B, axis); showEdit(); return; }
+  const lift = edit.aim?.lift ?? 0;
+  setTurn(gizmo.closeTurn(gizmo.mirrored(gizmo.closeTurn(edit.turn, INV[lift]), axis), lift));
+}
+/* Halve or double. An open box keeps the face it rests on and its pivot across
+   that face, so a knight on a floor grows up from the floor (a box an undo picked
+   up has no face on record, and keeps its low y). */
+function scaleStep(k){
+  const B = edit.box;
+  if (!B){ setScale(edit.scale + k); return; }
+  const anchor = [0, 0, 0];
+  if (B.rest && B.rest.axis >= 0) anchor[B.rest.axis] = B.rest.normal > 0 ? -1 : 1; else anchor[1] = -1;
+  edit.box = gizmo.scaleBy(ctxOf(B.world), B, k, anchor);
+  showEdit();
+}
+/* The handles now, for the pointer and for the draw. `pixel` is in CSS pixels, as
+   the pointer is, so a handle is the same size on any screen density. */
+const gizmoView = () => ({ eye: cam.eye, fwd: fwd(), pixel: 2 * Math.tan(0.45) / innerHeight });
+function gizmoNow(){
+  const B = edit.box, ctx = ctxOf(B.world), held = edit.press?.grab;
+  return { ctx, box: gizmo.boxAt(ctx, B), handles: gizmo.handlesOf(ctx, B, gizmoView(), held && held.kind !== 'body' ? held.id : null) };
+}
+const CLICK_PX = 4;      // a press that moves less is a click
+function scenePress(e){
+  canvas.focus();
+  edit.pointer = [e.clientX, e.clientY];
+  // Ctrl-click is a Mac's right click, and arrives as button 0.
+  const button = e.button === 2 || (e.button === 0 && e.ctrlKey) ? 'right' : e.button === 0 ? 'left' : null;
+  if (!button || edit.press) return;
+  const p = edit.press = { button, raw: e.button, x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, moved: false, shift: e.shiftKey, grab: null, drag: null, off: [0, 0] };
+  if (button !== 'left' || !edit.box) return;
+  const B = edit.box, g = gizmoNow(), ray = pointerRay(), hit = gizmo.hitHandle(g.handles, ray, g.box);
+  if (!hit) return;
+  p.grab = hit;
+  p.drag = gizmo.startDrag(g.ctx, B, hit, ray);
+  if (hit.kind === 'body'){
+    /* The body slides over the world by the click's own rule: dropAt on what's under
+       the pointer. Under the pointer less where it took hold, or the box would jump
+       to put its foot there: the pick goes through where the foot's middle would be.
+       The foot is the middle of the face the box rests on, a quarter voxel inside
+       the surface and off the voxel's edge, so a box that hasn't been moved picks
+       the voxel it stands on. */
+    const rest = B.rest && B.rest.axis >= 0 ? B.rest : { axis: 1, normal: 1 };
+    const foot = g.box.lo.map((lo, i) => i === rest.axis ? (rest.normal > 0 ? lo : g.box.hi[i]) - 0.25 * rest.normal : (lo + g.box.hi[i]) / 2 - 0.25), at = screenOf(foot);
+    if (at) p.off = [e.clientX - at[0], e.clientY - at[1]];
+  }
+}
+function sceneDrag(p){
+  const B = p.drag.from, ctx = ctxOf(B.world);
+  if (p.grab.kind !== 'body'){ edit.box = gizmo.dragTo(ctx, p.drag, pointerRay()); return; }
+  const ray = pointerRay([edit.pointer[0] - p.off[0], edit.pointer[1] - p.off[1]]), hit = pick(W.store, W.edit.log.root, W.D, ray.o, ray.d);
+  const ref = edit.grid > 1 ? snapRef(W.edit.log.placements(), B.world, B.turn, B.scale) : null;
+  const at = hit ? dropAt(hit, childBox(B.world, B.turn, B.scale), { grid: edit.grid, ref }) : null;
+  edit.box = gizmo.dragTo(ctx, p.drag, ray, at);
+  if (at) edit.box = { ...edit.box, rest: { axis: hit.axis, normal: hit.normal } };
+}
+// On the window, so a drag goes on when the pointer leaves the canvas.
+addEventListener('mousemove', e => {
+  if (!edit.on || !isScene()) return;
+  const p = edit.press;
+  if (p || e.target === canvas) edit.pointer = [e.clientX, e.clientY];
+  if (!p) return;
+  if (!p.moved && Math.hypot(e.clientX - p.x, e.clientY - p.y) < CLICK_PX) return;
+  p.moved = true;
+  if (p.grab && edit.box) sceneDrag(p);
+  else {
+    cam.yaw -= (e.clientX - p.lx) * 0.004;
+    cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch - (e.clientY - p.ly) * 0.004));
+  }
+  p.lx = e.clientX; p.ly = e.clientY;
+  showEdit();
+});
+addEventListener('mouseup', e => {
+  const p = edit.press;
+  if (!p || e.button !== p.raw) return;
+  edit.press = null;
+  if (!edit.on || !isScene()) return;
+  if (p.moved){ if (!p.grab) saveView(); return; }       // a drag: it was done as it went
+  if (p.button === 'right') sceneUndo();
+  else if (!p.grab) sceneClick(p.shift);                  // a click on a handle or the box does nothing
 });
 /* After service: did the frame just move to a new root? This frame's draw shows
    it. The near plane follows the distance to the nearest voxel, and a block placed
@@ -2226,6 +2515,7 @@ const medianOf = a => { const s = [...a].sort((x, y) => x - y); return s.length 
 function showEdit(){
   const bar = $('editBar'), E = W?.edit, now = performance.now(), note = now < edit.noteUntil ? edit.note : '';
   $('editToggle').textContent = edit.on ? 'leave edit mode (B)' : 'edit mode (B)';
+  $('cross').hidden = !edit.on || isScene();
   bar.hidden = !edit.on && !note;
   if (bar.hidden) return;
   const sw = $('editSwatches');
@@ -2250,14 +2540,32 @@ function showEdit(){
     : 'nothing to click that way';
   $('editNote').innerHTML = `block side ${side}   ${ops ? `${ops} edit${ops === 1 ? '' : 's'}, not saved: a link or a file can't hold them yet` : 'no edits'}` + (why ? `\n${why}` : '');
 }
-/* The world tool's bar: what a left click drops, how, and why it won't. */
-const TURN_NAMES = ['unturned', 'a quarter turn', 'half a turn', 'three quarters'];
+/* The world tool's bar: what a click opens or what the box holds, how it's turned,
+   and why a click won't. A turn is named by where it sends the child's underside
+   and its front (+z), which is what the box's two marks show. */
+function turnName(e){
+  const f = gizmo.frameOf(e), dir = ([a, sign]) => (sign > 0 ? '+' : '−') + 'xyz'[a];
+  return `${f.down[0] === 1 ? (f.down[1] < 0 ? 'upright' : 'upside down') : `underside to ${dir(f.down)}`}, front to ${dir(f.front)}${f.mirrored ? ', mirrored' : ''}`;
+}
 const scaleName = s => s === 0 ? '×1' : s > 0 ? `×${2 ** s}` : `${s === -1 ? '½' : '¼'}`;
 function showDrop(note){
-  const E = W.edit, e = placeEntry(), a = edit.aim, n = E.log.count;
-  const what = e ? `place <b>${esc(e.name)}</b> (D = ${e.D})   ${TURN_NAMES[edit.turn]}   scale ${scaleName(edit.scale)}   snap ${edit.grid > 1 ? `${edit.grid}${a?.drop ? a.snapped ? ', to the first copy' : ', first copy: to the voxel' : ''}` : 'to the voxel'}` : '';
-  const why = note || a?.why || '';
-  $('editNote').innerHTML = [what, `${n ? `${n} drop${n === 1 ? '' : 's'}, not saved: a link or a file can't hold them yet (SCNE)` : 'no drops'}`, why].filter(Boolean).join('\n');
+  const E = W.edit, B = edit.box, e = placeEntry(), a = edit.aim, n = E.log.count;
+  const snap = `snap ${edit.grid > 1 ? `${edit.grid}${!B && a?.drop ? a.snapped ? ', to the first copy' : ', first copy: to the voxel' : ''}` : 'to the voxel'}`;
+  let what = '', how = '';
+  if (B){
+    const b = gizmo.boxAt(ctxOf(B.world), B);
+    what = `<b>${esc(B.world.name)}</b> in the box   ${turnName(B.turn)}   scale ${scaleName(B.scale)}   ${b.hi.map((v, i) => v - b.lo[i]).join(' × ')} at ${b.lo.join(', ')}   ${snap}`;
+    how = 'drag a handle or the box   J L I K U O turn   M mirror   - = size   shift - = detail   P preview   Enter bakes   Esc closes';
+  } else if (e){
+    what = `place <b>${esc(e.name)}</b> (D = ${e.D})   ${turnName(edit.turn)}${edit.under ? ', underside to the face' : ''}   scale ${scaleName(edit.scale)}   ${snap}`;
+    how = 'click opens a box   shift-click drops at once';
+  }
+  const why = note || (!B && a?.why) || '';
+  // What the preview shows of what a bake will make (gizmo-log §11): cells across the child's cube.
+  const pv = edit.preview ? edit.previewInfo : null, D = B ? B.world.D : e?.D, across = l => (2 ** (D - l)).toLocaleString();
+  const seen = !pv || pv.fine === null ? '' : `   preview ${across(pv.lod)} across` + (pv.lod === pv.fine ? ', as baked'
+    : ` of ${across(pv.fine)}` + (pv.making ? `, sharpening ${Math.round(100 * pv.making.chunks / pv.making.of)}%` : pv.held ? ', as fine as its budget goes' : pv.lod === pv.rest ? ' (shift = for more)' : ''));
+  $('editNote').innerHTML = [what, `${n ? `${n} drop${n === 1 ? '' : 's'}, not saved: a link or a file can't hold them yet (SCNE)` : 'no drops'}${seen}`, why || how].filter(Boolean).join('\n');
 }
 /* The outline, after the frame's blit: white for the block a left click breaks,
    the colour you hold for the one a right click places. Each is drawn dark and
@@ -2341,9 +2649,294 @@ function showTriangles(){
     `raster ${k(view.triangles)} exposed of ${k(12 * view.instances)} sent` +
     (view.rayChunks ? `\ntraced ${view.rayChunks} chunks: ${k(boxes)} in boxes, ${screen} full-screen` : '');
 }
+/* ---- the preview: the child drawn in the box (docs/gizmo-plan.md step 3) --------
+   A wire box can't say which way a knight faces. So the child itself is drawn in
+   the box (and in the ghost before a click): its records at a lod, made once a
+   world and lod by expandChunk with the *any* rule and the child's own colour, and
+   turned, scaled and moved by the vertex shader through gizmo-core's previewMap,
+   as an actor's body is turned by BODY_VS. Turns, mirrors, scales and moves are
+   uniforms: dragging the box costs nothing.
+
+   **Which lod** is gizmo-core's previewPlan (gizmo-log §11). The coarse one first
+   (previewLod: 64 cells across at most, never a cell smaller than a parent voxel,
+   one chunk); then, while the box is still, finer ones a few ms a frame down to
+   the voxels a bake makes, each drawn when it's whole. While it moves, a lod of at
+   most 2^18 cubes. shift - and shift = step where it rests.
+
+   **Drawn after the frame, never in it** (CLAUDE.md: nothing edit mode draws goes
+   in renderView), on the canvas before the box's lines. The canvas's own depth
+   buffer, unused by everything else, sorts the preview's cubes against each other,
+   with a near and far of its own about the child's cube (so a knight 300 voxels
+   off isn't sorted in a depth range set for the whole world). Against the world
+   it's tested by hand, as markTraced's boxes are: each fragment turns the raster's
+   depth texture back into a distance along its pixel's ray (rasterTMax) and is
+   solid in front of it and faint behind it, so you see how much of a knight is
+   buried. Two draws: the cubes' depth first, then their colour where they're the
+   nearest, blended, so a pixel shows one surface of the child and never two
+   faint ones stacked.
+
+   **Ray content doesn't hide it.** The ray pass writes no depth, so with a path
+   that traces chunks the preview shows through what they draw. The viewer is
+   raster only by default since 2026-11-09, and there it's exact.
+
+   **A mirror turns every triangle inside out**: the cube's winding is the
+   unmirrored one, so for the other 24 turns the front face is the clockwise one
+   (previewMap's `mirrored`). Bodies are never mirrored, so BODY_VS never met it.
+
+   previewSelftest holds the pixels to a CPU ray cast of the child turned by
+   scatter-core's rotateOcc, in all 48 turns, with the words at lod 0. */
+const PREVIEW_VS = `#version 300 es
+precision highp float;
+precision highp int;
+${GLSL_DECODE}
+layout(location = 0) in uint aRec;
+layout(location = 1) in uint aAttr;
+layout(location = 2) in uint aChunk;   // the record's chunk in the lod's grid, 10 bits an axis
+uniform mat4 uViewProj;
+uniform mat3 uTurn;        // previewMap's M, column-major
+uniform float uCellS;      // a cell's side, parent voxels
+uniform float uHalfS;      // half the child's cube, parent voxels
+uniform vec3 uShift;       // the cube's centre, eye-relative
+const vec3 CORNER[24] = vec3[24](
+  ${glslVec3s(FACE_OFF)});
+const vec3 NORMAL[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
+out vec3 vRel;
+out vec3 vNormal;
+flat out uint vAttr;
+// The depth pass and the colour pass must agree to the bit, for LEQUAL to keep the nearest.
+invariant gl_Position;
+void main(){
+  uint corner = uint(gl_VertexID), face = corner / 4u;
+  vec3 cell = vec3(recCell(aRec)) + 64.0 * vec3(float(aChunk & 1023u), float(aChunk >> 10u & 1023u), float(aChunk >> 20u));
+  vec3 p = uTurn * ((cell + 0.5 + CORNER[corner]) * uCellS - uHalfS) + uShift;
+  vRel = p;
+  vNormal = uTurn * NORMAL[face];
+  vAttr = aAttr;
+  gl_Position = uViewProj * vec4(p, 1.0);
+  if (!faceShown(aRec, face)) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}`;
+const PREVIEW_FS = `#version 300 es
+precision highp float;
+precision highp int;
+in vec3 vRel;
+in vec3 vNormal;
+flat in uint vAttr;
+uniform int uHasAttr;      // the child has colour; without, a pale blue-grey
+uniform float uBehind;     // the alpha of a surface behind the world
+${GLSL_RAY_CAMERA}
+${GLSL_RASTER_TMAX}
+${GLSL_SHADE}
+${GLSL_ATTR}
+void main(){
+  // In front of the world, or level with it: a copy picked up by Z sits exactly on
+  // the one still in the frame until the flip, and should look solid there.
+  float t = length(vRel);
+  bool front = t <= rasterTMax(gl_FragCoord.xy, rayDirAt(gl_FragCoord.xy)) + 0.01 + 1e-4 * t;
+  vec3 base = uHasAttr == 1 ? attrColour(vAttr) : vec3(0.72, 0.78, 0.86);
+  outColor = shadeOut(base, vNormal, vRel);
+  if (uColorMode == 9) outColor = vec4(vec3(attrRGB(vAttr) << 2u) / 255.0, 1.0);
+  if (!front && uColorMode == 0) outColor.rgb = mix(outColor.rgb, vec3(0.55, 0.7, 1.0), 0.35);
+  outColor.a = front ? 1.0 : uBehind;
+}`;
+const previewProg = link(PREVIEW_VS, PREVIEW_FS);
+const PREVIEW_U = uniformsOf(previewProg, ['uViewProj', 'uTurn', 'uCellS', 'uHalfS', 'uShift', 'uOpenSides', 'uColorMode', 'uFog', 'uDepthScale',
+                                           'uHasAttr', 'uBehind', 'uEye', 'uFwd', 'uRightT', 'uUpT', 'uViewport', 'uRasterDepth', 'uNearFar']);
+const PREVIEW_BEHIND = 0.3;
+/* A child's records at a lod, on the GPU: records, then words, then each record's
+   chunk, in one buffer. Kept while the shelf entry lives (the D = 8 knight's lod 2
+   is 7,800 cubes, 94 KB; its lod 0 is 134,000 and 1.6 MB).
+
+   **Finer than one chunk** (gizmo-log §11, asked for after the first try: low while
+   it moves, the size that will be placed when it stops). The coarse lod is one chunk
+   and is made at once. A finer lod is a grid of chunks, made a few ms a frame while
+   the box is still (previewMake), and drawn when all of it is there: half a lod over
+   the coarse one would be two surfaces. Which lod is drawn and which is made next is
+   gizmo-core's previewPlan; this only makes what it's asked for.
+
+   The chunks made are those that can show something (previewChunks): a walk down
+   the child's DAG that skips what's empty, and what's full with six full
+   neighbours, at every level, so a solid child's inside costs nothing. A chunk's
+   records are expandChunk's with its default border, the apron, so a face against
+   the next chunk's cell is hidden exactly as in the whole child, and the chunks
+   need no seams: they're all one lod. */
+const previewCtx = new WeakMap();
+const PREVIEW_SLICE_MS = 6, PREVIEW_REST_MS = 200;
+function previewWorld(world){
+  let c = previewCtx.get(world);
+  if (!c){
+    const counts = createCounts(world.store);
+    let colour = null;
+    if (world.colour) try { colour = colourOf(world.colour, { store: world.store, counts, D: world.D }); } catch (err){ console.warn('the preview has no colour:', err.message); }
+    previewCtx.set(world, c = { counts, colour, lods: new Map() });
+  }
+  return c;
+}
+function previewChunks(world, lod, counts){
+  const { store, root, D } = world, top = lod + 6;
+  if (D <= top) return [[0, 0, 0]];
+  // The node of side 2^level at (x, y, z), in its own units. Outside the child is empty.
+  const nodeAt = (level, x, y, z) => {
+    const n = 2 ** (D - level);
+    if (x < 0 || y < 0 || z < 0 || x >= n || y >= n || z >= n) return EMPTY;
+    let id = root;
+    for (let k = D - level - 1; k >= 0 && id >= FIRST_NODE; k--) id = store.child(id, (x >> k & 1) | (y >> k & 1) << 1 | (z >> k & 1) << 2);
+    return id;
+  };
+  const full = (level, x, y, z) => { const id = nodeAt(level, x, y, z); return id !== EMPTY && (id < FIRST_NODE || isFull(store, counts, id, level)); };
+  const buried = (level, x, y, z) => full(level, x, y, z) && full(level, x - 1, y, z) && full(level, x + 1, y, z) && full(level, x, y - 1, z) && full(level, x, y + 1, z) && full(level, x, y, z - 1) && full(level, x, y, z + 1);
+  const out = [];
+  (function walk(id, level, x, y, z){
+    if (id === EMPTY || buried(level, x, y, z)) return;
+    if (level === top){ out.push([x, y, z]); return; }
+    for (let o = 0; o < 8; o++) walk(id < FIRST_NODE ? id : store.child(id, o), level - 1, 2 * x + (o & 1), 2 * y + (o >> 1 & 1), 2 * z + (o >> 2));
+  })(root, D, 0, 0, 0);
+  return out;
+}
+function previewLodOf(world, lod){
+  const ctx = previewWorld(world);
+  let g = ctx.lods.get(lod);
+  if (!g) ctx.lods.set(lod, g = { lod, chunks: previewChunks(world, lod, ctx.counts), next: 0, parts: [], n: 0, attr: false, done: false, vao: null, buf: null, ms: 0 });
+  return g;
+}
+/* More of a lod: chunks until `ms` have gone (Infinity: the rest of it), then the
+   upload when the last one is in. True when it's whole. */
+function previewMake(world, g, ms = Infinity){
+  if (g.done) return true;
+  const ctx = previewWorld(world), t0 = performance.now();
+  while (g.next < g.chunks.length){
+    const [cx, cy, cz] = g.chunks[g.next++];
+    const e = expandChunk(world.store, world.root, world.D, { lod: g.lod, cx, cy, cz }, { lodRule: 'any', counts: ctx.counts, colour: ctx.colour });
+    if (e.count) g.parts.push({ n: e.count, records: e.records.slice(0, e.count), attrs: e.attrs ? e.attrs.slice(0, e.count) : null, where: (cx | cy << 10 | cz << 20) >>> 0 });
+    g.n += e.count;
+    if (performance.now() - t0 >= ms) break;
+  }
+  g.ms += performance.now() - t0;
+  if (g.next < g.chunks.length) return false;
+  const n = g.n, all = new Uint32Array(3 * n), vao = gl.createVertexArray(), buf = gl.createBuffer();
+  let at = 0;
+  for (const part of g.parts){
+    all.set(part.records, at);
+    if (part.attrs){ all.set(part.attrs, n + at); g.attr = true; }
+    all.fill(part.where, 2 * n + at, 2 * n + at + part.n);
+    at += part.n;
+  }
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeIndex);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, all, gl.STATIC_DRAW);
+  for (let a = 0; a < 3; a++){
+    gl.enableVertexAttribArray(a);
+    gl.vertexAttribIPointer(a, 1, gl.UNSIGNED_INT, 4, 4 * n * a);
+    gl.vertexAttribDivisor(a, 1);
+  }
+  gl.bindVertexArray(null);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  g.vao = vao; g.buf = buf; g.parts = null; g.done = true;
+  return true;
+}
+// A child off the shelf takes its buffers with it (the map is weak; GL's objects aren't).
+function previewForget(world){
+  const c = previewCtx.get(world);
+  if (!c) return;
+  for (const g of c.lods.values()) if (g.done){ gl.deleteVertexArray(g.vao); gl.deleteBuffer(g.buf); }
+  previewCtx.delete(world);
+}
+/* The plan for this frame: gizmo-core's, with the page's part of it, whether the box
+   is moving. It is while a handle is held, and for PREVIEW_REST_MS after the
+   placement or the camera last changed (the ghost follows the pointer, so it rests
+   when the pointer does). The camera counts because the cost is the draw: the
+   D = 10 knight's lod 0 is 2.2 million cubes and 11.4 ms a frame on the Apple GPU
+   in Chrome, which took a frame at rest from 60 fps to 33. Still, that's the
+   picture asked for; flying round it at 33 isn't. */
+function previewNow(p){
+  const now = performance.now(), key = `${p.at}|${p.turn}|${p.scale}|${cam.eye}|${cam.yaw}|${cam.pitch}`, lods = previewWorld(p.world).lods;
+  if (key !== edit.previewKey || p.world !== edit.previewOf || edit.press?.grab){ edit.previewKey = key; edit.previewOf = p.world; edit.previewMoved = now; }
+  const have = l => { const g = lods.get(l); return g?.done ? g.n : undefined; };
+  return gizmo.previewPlan(p.world.D, p.scale, { detail: edit.detail, moving: now - edit.previewMoved < PREVIEW_REST_MS, have });
+}
+// shift - and shift =: the lod the preview rests at, one coarser or finer (gizmo-core's detailStep).
+function detailKey(k){
+  const p = previewPlacement();
+  if (!p){ say('the preview\'s detail is set with a box or a ghost to look at'); return; }
+  edit.detail = gizmo.detailStep(p.world.D, p.scale, edit.detail, k);
+  const plan = gizmo.previewPlan(p.world.D, p.scale, { detail: edit.detail });
+  say(`the preview rests at ${(2 ** (p.world.D - plan.rest)).toLocaleString()} cells across${plan.rest === plan.fine ? ': the voxels a bake makes' : ` (a bake makes ${(2 ** (p.world.D - plan.fine)).toLocaleString()})`}`);
+}
+// What the preview shows: the open box, or the ghost a click would open.
+function previewPlacement(){
+  if (!isScene() || !edit.preview || !W) return null;
+  const B = edit.box;
+  if (B) return { world: B.world, ...gizmo.placementOf(ctxOf(B.world), B) };
+  return edit.aim?.drop ?? null;
+}
+/* Into framebuffer `out` (null: the canvas), which must have a depth buffer, w × h,
+   after renderView drew that size (its raster depth is what the hand test reads).
+   `mode` 0 draws it shaded and blended; 5 writes each pixel's distance and 9 its
+   word, unblended, with the alpha saying in front (1) or behind (0.5), for
+   previewSelftest. `force` is a lod to make whole and draw, whatever the plan says
+   (the selftest's); without it the plan picks the lod, and a slice of the next one
+   is made. Returns what it drew, or null. */
+const PREVIEW_TURN = new Float32Array(9);
+function drawPreview(w, h, out = null, mode = 0, force = null){
+  edit.previewInfo = null;
+  const p = previewPlacement();
+  if (!p) return null;
+  const D = p.world.D, plan = force === null ? previewNow(p) : null;
+  // The coarse lod is one chunk, a few ms: made here, so there's always something to draw.
+  if (plan && plan.draw === null) previewMake(p.world, previewLodOf(p.world, plan.coarse));
+  else if (plan && plan.make !== null) previewMake(p.world, previewLodOf(p.world, plan.make), PREVIEW_SLICE_MS);
+  const lod = plan ? plan.draw ?? plan.coarse : force, g = previewLodOf(p.world, lod);
+  if (!plan) previewMake(p.world, g);
+  const making = plan && plan.make !== null ? previewLodOf(p.world, plan.make) : null;
+  const info = { lod, cubes: g.n, ms: g.ms, mirrored: false, colour: g.attr, coarse: plan?.coarse ?? null, fine: plan?.fine ?? null, rest: plan?.rest ?? null, held: plan?.held ?? false,
+                 making: making && !making.done ? { lod: making.lod, chunks: making.next, of: making.chunks.length } : null };
+  if (!g.n) return null;
+  const map = gizmo.previewMap(p, D, lod), e = cam.eye, side = 2 ** (D + p.scale);
+  // A near and far of its own, about the child's cube: half the way to it, and just past its far corner.
+  let dn = 0, df = 0;
+  for (let a = 0; a < 3; a++){
+    const lo = p.at[a], hi = lo + side, gap = e[a] < lo ? lo - e[a] : e[a] > hi ? e[a] - hi : 0, far = Math.max(Math.abs(e[a] - lo), Math.abs(e[a] - hi));
+    dn += gap * gap; df += far * far;
+  }
+  const M = viewProj(w / h, Math.max(0.05, 0.5 * Math.sqrt(dn)), 1.01 * Math.sqrt(df) + 1), T = rasterTarget(w, h), u = PREVIEW_U;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, out);
+  gl.viewport(0, 0, w, h);
+  gl.disable(gl.STENCIL_TEST); gl.disable(gl.BLEND);
+  gl.depthMask(true); gl.clearDepth(1); gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE);
+  gl.frontFace(map.mirrored ? gl.CW : gl.CCW);
+  gl.useProgram(previewProg);
+  gl.uniformMatrix4fv(u.uViewProj, false, M);
+  for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) PREVIEW_TURN[3 * c + r] = map.M[3 * r + c];     // GL is column major
+  gl.uniformMatrix3fv(u.uTurn, false, PREVIEW_TURN);
+  gl.uniform1f(u.uCellS, map.cell); gl.uniform1f(u.uHalfS, map.half);
+  gl.uniform3f(u.uShift, map.shift[0] - e[0], map.shift[1] - e[1], map.shift[2] - e[2]);
+  gl.uniform1ui(u.uOpenSides, 0);
+  gl.uniform1i(u.uColorMode, mode);
+  gl.uniform1f(u.uFog, 1 / (1.5 * W.side));
+  gl.uniform1f(u.uDepthScale, 1 / (8 * W.side));
+  gl.uniform1i(u.uHasAttr, g.attr ? 1 : 0);
+  gl.uniform1f(u.uBehind, mode ? 0.5 : PREVIEW_BEHIND);
+  setRayCamera(u, w, h);
+  gl.uniform2f(u.uNearFar, view.near, view.far);
+  gl.activeTexture(gl.TEXTURE0 + RASTER_DEPTH_UNIT); gl.bindTexture(gl.TEXTURE_2D, T.depth); gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1i(u.uRasterDepth, RASTER_DEPTH_UNIT);
+  gl.bindVertexArray(g.vao);
+  gl.colorMask(false, false, false, false); gl.depthFunc(gl.LESS);
+  gl.drawElementsInstanced(gl.TRIANGLES, CUBE_TRIS, gl.UNSIGNED_BYTE, 0, g.n);
+  gl.colorMask(true, true, true, true); gl.depthFunc(gl.LEQUAL); gl.depthMask(false);
+  if (!mode){ gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); }
+  gl.drawElementsInstanced(gl.TRIANGLES, CUBE_TRIS, gl.UNSIGNED_BYTE, 0, g.n);
+  gl.disable(gl.BLEND); gl.depthMask(true); gl.depthFunc(gl.LESS); gl.frontFace(gl.CCW);
+  gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
+  gl.bindVertexArray(null);
+  info.mirrored = map.mirrored;
+  return (edit.previewInfo = info);
+}
+const AXIS_COLOURS = [[0.95, 0.38, 0.38], [0.5, 0.86, 0.42], [0.42, 0.62, 1]], CORNER_COLOUR = [1, 0.84, 0.35];
 function drawOutline(w, h){
-  const a = edit.aim;
-  if (!a) return;
+  const a = edit.aim, B = isScene() ? edit.box : null;
+  if (!a && !B) return;
   const near = 0.05, M = viewProj(w / h, near, view.far), f = fwd(), dpr = Math.min(devicePixelRatio || 1, 2);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, w, h);
@@ -2363,9 +2956,42 @@ function drawOutline(w, h){
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, edges.length / 6);
     }
   };
-  // The world tool's ghost: the dropped world's content box where it would land,
-  // pale blue, or orange when it can't (on the eye).
+  // Any lines (gizmo-core's segments, in voxels), dark and wide first like the boxes.
+  const lines = (segs, width, rgb) => {
+    const edges = gizmo.clipSegments(segs, cam.eye, f, near * 1.01);
+    if (!edges.length) return;
+    gl.bufferData(gl.ARRAY_BUFFER, edges, gl.STREAM_DRAW);
+    for (const [wd, colour] of [[(width + 1.75) * dpr, [0, 0, 0]], [width * dpr, rgb]]){
+      gl.uniform1f(LU.uWidth, wd);
+      gl.uniform3fv(LU.uColour, colour);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, edges.length / 6);
+    }
+  };
+  // Where the child's underside (orange diagonals) and front (a white arrow up its
+  // middle, a flag toward its +x) are: all a wire box can say of a turn.
+  const marks = (ctx, state) => { const m = gizmo.marksOf(ctx, state); lines(m.under, 1.25, [0.95, 0.6, 0.3]); lines(m.front, 1.5, [1, 1, 1]); };
+  if (B){
+    /* The open box: its edges, its marks, then every handle far to near (there's no
+       depth test, so the near ones go on top, which is also the order a ray takes
+       them in). The handle under the pointer, or the one held, is white. */
+    const g = gizmoNow(), p = edit.press, inside = cam.eye.every((v, i) => v >= g.box.lo[i] && v <= g.box.hi[i]);
+    const over = p ? p.grab : edit.pointer ? gizmo.hitHandle(g.handles, pointerRay(), g.box) : null;
+    edit.hot = over ? over.id : null;
+    canvas.style.cursor = !over ? '' : over.kind === 'body' ? 'move' : p ? 'grabbing' : 'grab';
+    box(g.box, inside ? [0.85, 0.55, 0.35] : over?.kind === 'body' ? [0.8, 0.9, 1] : [0.55, 0.75, 1]);
+    marks(g.ctx, B);
+    for (const hd of g.handles){
+      const hot = hd.id === edit.hot;
+      lines(hd.segs, hd.width ?? (hot ? 3 : 2), hot ? [1, 1, 1] : hd.kind === 'corner' ? CORNER_COLOUR : AXIS_COLOURS[hd.axis]);
+    }
+    gl.bindVertexArray(null);
+    return;
+  }
+  if (isScene()) canvas.style.cursor = '';
+  // The world tool's ghost: the dropped world's content box where a click would open
+  // it, pale blue with its marks, or orange when it can't (on the eye).
   if (a.ghost) box(a.ghost, a.drop ? [0.55, 0.75, 1] : [0.85, 0.55, 0.35]);
+  if (a.drop) marks(ctxOf(a.drop.world), gizmo.fromPlacement(ctxOf(a.drop.world), a.drop));
   if (a.placeAt) box(a.placeAt, [(edit.colour & 255) / 255, (edit.colour >> 8 & 255) / 255, (edit.colour >> 16 & 255) / 255]);
   if (a.breakAt) box(a.breakAt, [1, 1, 1]);
   gl.bindVertexArray(null);
@@ -2373,7 +2999,40 @@ function drawOutline(w, h){
 // For the console and the tests.
 window.__edit = {
   mode: setEditMode, step: editStep, take: takeColour, aim: updateAim, slot: setSlot, level: setLevel,
-  entry: setEntry, turn: setTurn, scale: setScale, grid: setGrid,
+  entry: setEntry, turn: setTurn, scale: setScale, grid: setGrid, under: setUnder,
+  // The box, for the console and scene.test.js: click, bake, close, the keys' functions,
+  // the pointer, and what the page would hand gizmo-core (the view, the handles with
+  // where each is on the page, the child's box at every turn and scale).
+  click: sceneClick, bake: bakeBox, close: closeBox, undo: sceneUndo, redo: sceneRedo, turnKey, mirrorKey, scaleStep, detailKey,
+  pointer: px => { edit.pointer = px ? px.slice() : null; updateAim(); }, project: screenOf,
+  // What a draw of the preview costs on this GPU (test/browser/preview-detail.mjs, gizmo-log §11):
+  // n draws on the canvas, then one pixel read back, which waits for all of them.
+  previewCost: (n = 20) => {
+    const px = new Uint8Array(4), t = performance.now();
+    let info = null;
+    for (let i = 0; i < n; i++) info = drawPreview(canvas.width, canvas.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return { ms: (performance.now() - t) / n, lod: info?.lod ?? null, cubes: info?.cubes ?? 0 };
+  },
+  view: () => ({ eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch, width: innerWidth, height: innerHeight, half: 0.45 }),
+  handles: () => edit.box ? gizmoNow().handles.map(h => {
+    // A point to take each by: an arrow's middle, a corner, and of a ring the point on its
+    // near side whose tangent lies most across the view (where a pull says most).
+    let at = h.kind === 'arrow' ? h.shape[0][0].map((v, i) => (v + h.shape[0][1][i]) / 2) : h.shape[0][0];
+    if (h.kind === 'ring'){
+      const toEye = norm(cam.eye.map((v, i) => v - h.centre[i])), axis = [0, 1, 2].map(i => i === h.axis ? 1 : 0);
+      let best = -Infinity;
+      for (const [p] of h.shape){
+        const r = p.map((v, i) => (v - h.centre[i]) / h.R), score = Math.hypot(...cross(norm(cross(axis, r)), norm(p.map((v, i) => v - cam.eye[i])))) + 0.25 * dot(r, toEye);
+        if (score > best){ best = score; at = p; }
+      }
+    }
+    return { id: h.id, kind: h.kind, axis: h.axis ?? null, sign: h.sign ?? null, bits: h.bits ?? null, centre: h.centre ?? null, at, px: screenOf(at), r: h.r }; }) : [],
+  boxes: () => {
+    const B = edit.box, out = {};
+    if (B) for (let s = scaleRange(B.world)[0]; s <= scaleRange(B.world)[1]; s++) for (let e = 0; e < 48; e++){ const b = childBox(B.world, e, s); out[`${e}|${s}`] = { lo: b.lo, hi: b.hi }; }
+    return out;
+  },
   // For scene.test.js's real input: sceneSelftest's children on the shelf, and the eye
   // `h` voxels over the topmost surface at (x, z).
   children: () => sceneChildren().map(e => e.id),
@@ -2383,10 +3042,25 @@ window.__edit = {
     return cam.eye.slice();
   },
   look: (eye, yaw, pitch) => { cam.eye = eye.slice(); cam.yaw = yaw; cam.pitch = pitch; dirty = true; updateAim(); },
+  // The lowest ground on a 32 grid, with the ground 64 on (+z) no higher: sceneSelftest's spot.
+  // The kit at D = 10 is mostly towers, and a drop on one near the world's top lands outside it.
+  low: () => {
+    const topAt = (x, z) => pick(W.store, W.edit ? W.edit.log.root : W.root, W.D, [x, W.side - 0.5, z], [0, -1, 0])?.y ?? 0;
+    let best = [0, 0, Infinity];
+    for (let a = 256; a <= W.side - 256; a += 32) for (let b = 256; b <= W.side - 256; b += 32){
+      const t = Math.max(topAt(a + 0.5, b + 0.5), topAt(a + 0.5, b + 64.5));
+      if (t < best[2]) best = [a + 0.5, b + 0.5, t];
+    }
+    return best;
+  },
   state: () => { const E = W?.edit; return { on: edit.on, locked: edit.locked, noLock: edit.noLock, level: edit.level, slot: edit.slot, colour: edit.colour,
     held: edit.repeat.held, aim: edit.aim ? { breakAt: edit.aim.breakAt, placeAt: edit.aim.placeAt, drop: edit.aim.drop ? { at: edit.aim.drop.at, turn: edit.aim.drop.turn, scale: edit.aim.drop.scale } : null,
       ghost: edit.aim.ghost ?? null, axis: edit.aim.hit?.axis ?? null, snapped: edit.aim.snapped ?? null, why: edit.aim.why ?? null } : null, far: edit.far, editable: !!E,
-    kind: E?.kind ?? null, entry: placeEntry()?.id ?? null, turn: edit.turn, scale: edit.scale, grid: edit.grid, shelf: shelf.length,
+    kind: E?.kind ?? null, entry: placeEntry()?.id ?? null, turn: edit.turn, scale: edit.scale, grid: edit.grid, under: edit.under, shelf: shelf.length,
+    box: edit.box ? { c2: edit.box.c2.slice(), turn: edit.box.turn, scale: edit.box.scale, picked: edit.box.picked, lift: edit.box.lift, rest: edit.box.rest,
+                      ...(b => ({ at: gizmo.placementOf(ctxOf(edit.box.world), edit.box).at, lo: b.lo, hi: b.hi }))(gizmo.boxAt(ctxOf(edit.box.world), edit.box)) } : null,
+    hot: edit.hot, pressed: !!edit.press, side: W?.side ?? null, scales: edit.box ? scaleRange(edit.box.world) : null, preview: edit.preview, previewInfo: edit.previewInfo, detail: Number.isFinite(edit.detail) ? edit.detail : 'all',
+    noEdit: W?.noEdit ?? null,
     storeNodes: E ? W.store.size : null, placeMemo: E?.kind === 'scene' ? placeMemoSize(W.store) : null,
     ops: E ? E.log.count : null, canUndo: E ? E.log.canUndo : null, canRedo: E ? E.log.canRedo : null, root: E ? E.log.root : null, shownRoot: streamer.S.world?.root ?? null,
     pending: E ? E.pending.length : null, last: E ? E.last : null, samples: E ? E.samples.length : null, editing: streamer.editing,
@@ -2825,7 +3499,7 @@ function draw(){
   canvas.style.width = innerWidth + 'px'; canvas.style.height = innerHeight + 'px';
   renderView(w, h, state.color, true, undefined, 'both', null, occlusionOf());
   if (state.wire) drawWire(w, h);
-  if (edit.on){ updateAim(); drawOutline(w, h); }
+  if (edit.on){ updateAim(); if (isScene()) drawPreview(w, h); drawOutline(w, h); }
 }
 
 /* GPU time per pass (EXT_disjoint_timer_query_webgl2, where the browser
@@ -5004,10 +5678,23 @@ window.editSelftest = async function editSelftest(opts = {}){
       r.farPlace = editStep('place');
       r.ops = W.edit.log.count - ops0;
       report.worlds.push(r); }
-    // Off clay: refused, and the mode doesn't stick to a world that can't.
+    // Off clay, to a shape: it has the other tool (worlds, since the placement box), so the
+    // mode doesn't stick, but it can be entered there.
     { state.world = 'shape:sphere'; state.depth = 8; fillWorlds(); fillDepth();
       await loadWorld(true);
-      report.offClay = { leftMode: !edit.on, refused: setEditMode(true) === false, still: !edit.on, step: editStep('break') }; }
+      report.toShape = { leftMode: !edit.on, kind: W.edit?.kind ?? null, entered: setEditMode(true, { lock: false }) === true && isScene(), cross: !$('cross').hidden }; }
+    // To a world that can't be edited: refused, and the mode doesn't stick. It was a testbed
+    // row until rows took worlds (gizmo-plan §7 step 4); a file with no colour still can't.
+    { const st = createStore(), root = st.fromField(6, fieldOf(SHAPES[0], 6)).root;
+      const e = shelve({ keys: st.snapshot().keys, root, D: 6, name: 'test: no colour', colour: null, colourStatus: 'none', view: null, source: null,
+                         voxels: createCounts(st).of(root), nodes: st.size, fileName: null, fileBytes: null });
+      setEditMode(true, { lock: false });      // on, in the shape before it, so there's a mode to drop
+      state.world = e.id; fillWorlds(); fillDepth();
+      await loadWorld(true);
+      report.offClay = { leftMode: !edit.on, refused: setEditMode(true) === false, still: !edit.on, step: editStep('break') };
+      shelf.splice(shelf.indexOf(e), 1);
+      state.world = 'shape:sphere'; state.depth = 8; fillWorlds(); fillDepth();
+      await loadWorld(true); }
   } finally {
     setEditMode(false);
     state.clay = saved.clay; setPath(saved.path);
@@ -5039,7 +5726,15 @@ window.editSelftest = async function editSelftest(opts = {}){
        and restarted as it draws, is the named sphere's frame (their colours are
        the same words at lod 0, and the drop is seen from inside lod 0's range).
    And: a second copy snaps to the first by 16 along the face; export is off while
-   drops exist and back after; the HUD's edit line says what the bake cost. */
+   drops exist and back after; the HUD's edit line says what the bake cost.
+
+   **The box** (docs/gizmo-plan.md step 2, docs/gizmo-log.md): every other drop goes
+   in through a box: a click opens it, the keys' own functions turn it (any of the
+   48 now, mirrors among them), size it and move it, and Enter's function bakes it.
+   So the twin, the undos and the redos above hold boxes too. Before any drop, a box
+   is opened, turned, sized and closed with Esc's function: the root and the store's
+   size are what they were, and the frame is the kit's, byte for byte. And an undo
+   picks the last drop up into a box, which baked again unmoved is the same root id. */
 function sceneChildren(){
   const morton = (i, D) => { const p = [0, 0, 0]; for (let l = 0; l < D; l++) for (let a = 0; a < 3; a++) p[a] |= (i >> 3 * l + a & 1) << l; return p; };
   const named = (name, D) => {
@@ -5110,9 +5805,21 @@ window.sceneSelftest = async function sceneSelftest(opts = {}){
      (300, 300), which is a tower 943 high: the eye was over the world's top, and
      most drops landed wholly outside it. */
   const topAt = (x, z) => pick(W.store, W.root, W.D, [x, W.side - 0.5, z], [0, -1, 0])?.y ?? 0;
+  /* The parent (gizmo-plan §7 step 4). The kit; or a testbed row (row 20 at L = 5, `O·EV
+     uniform`, a tenth full, D = 10: its lowest top is the floor of a shaft 687 up, so the
+     eye stands in the shaft); or the kit as a file, added to the shelf and opened from
+     there, where its store is a view the page imports at install. Everything below is the
+     same for all three. Row 4, half full, passes too and takes 4.5 minutes for its
+     surface; row 28, 3% full, has too little under the second copy's aim (`opts.row`). */
+  const parent = opts.parent ?? 'kit';
+  let fileId = null;
   const openKit = async () => {
-    state.world = 'kit:1'; state.kit = kitDesc({ D: 10 }); fillWorlds(); fillDepth();
+    if (parent === 'row'){ state.world = `row:${opts.row ?? 20}`; state.depth = 5; }
+    else if (fileId) state.world = fileId;
+    else { state.world = 'kit:1'; state.kit = kitDesc({ D: 10 }); }
+    fillWorlds(); fillDepth();
     await loadWorld(true);
+    if (parent === 'file' && !fileId){ fileId = addToShelf().id; state.world = fileId; fillWorlds(); fillDepth(); await loadWorld(true); }
     // The D = 10 kit has no open ground (the flattest patch 256 wide still rises 240),
     // so this stands by walls, and some drops hang off one back onto the eye: refused,
     // rightly. The loop below aims until enough have landed.
@@ -5129,14 +5836,25 @@ window.sceneSelftest = async function sceneSelftest(opts = {}){
   const kids = sceneChildren(), ids = kids.map(k => k.id);
   try {
     const look = await openKit(), E0 = W.edit;
-    report.kit = { param: kitParam(W.kit.desc), kind: E0?.kind, realMs: W.kit.realMs, top: look.top, mode: pool.mode };
+    report.kit = { id: W.id, file: !!W.file, param: W.kit ? kitParam(W.kit.desc) : null, kind: E0?.kind, realMs: W.kit?.realMs ?? W.file?.realMs ?? null, nodes: W.nodes, top: look.top, mode: pool.mode };
     const root0 = W.root, voxels0 = W.voxels, base = await frames('kit');
     await settle('kit density');
     const rootsHeld = new Set([root0]), drops = opts.drops ?? 12, killAt = pool.liveWorkers > 1 ? drops >> 1 : -1;
-    let done = 0, misses = 0, afterUndo = 0, lastUndo = false;
-    const missWhy = [];
+    let done = 0, misses = 0, afterUndo = 0, lastUndo = false, boxed = 0, mirrors = 0;
+    const missWhy = [], turnsUsed = new Set();
+    edit.pointer = null;       // the aim is the middle of the view, as the crosshair's was
+    // A box opened, changed and closed: nothing of it in the world.
+    { setEntry(ids[0]); setTurn(0); setScale(0); setGrid(16); setUnder(false);
+      const nodes0 = W.store.size, opened = sceneClick(), at0 = edit.box && gizmo.placementOf(ctxOf(edit.box.world), edit.box).at;
+      turnKey('spinRight'); turnKey('tipAway'); mirrorKey(); scaleStep(-1);
+      if (edit.box) edit.box = gizmo.moveBy(ctxOf(edit.box.world), edit.box, 1, 40);
+      const changed = !!edit.box && (edit.box.turn !== 0 || edit.box.scale !== 0), drawn = (drawOutline(canvas.width, canvas.height), gl.getError());
+      closeBox();
+      report.esc = { opened, changed, at0, closed: !edit.box, root: W.edit.log.root === root0 && W.root === root0, ops: W.edit.log.count, nodes: W.store.size - nodes0, drawn,
+                     held: edit.turn === 0 && edit.scale === 0, vsKit: compare(await frames('a box closed'), base) };
+      await settle('a box closed, density'); }
     // A second copy snaps to the first: the sphere unturned at ×1, twice, 0.2 rad apart.
-    { setEntry(ids[0]); setTurn(0); setScale(0); setGrid(16);
+    { setEntry(ids[0]); setTurn(0); setScale(0); setGrid(16); setUnder(false);
       const a = updateAim(), first = editStep('drop');
       cam.yaw = look.yaw + 0.2;
       const b = updateAim(), second = editStep('drop');
@@ -5157,13 +5875,34 @@ window.sceneSelftest = async function sceneSelftest(opts = {}){
       // Each landed drop moves on to the next world, so all four go in; a refused one
       // tries the same world again with a new aim.
       const kid = ids[done % ids.length], big = shelfEntry(kid).D > 6;
-      setEntry(kid); setTurn(Math.floor(rand() * 4)); setScale([-1, 0, 0, big ? 0 : 1][Math.floor(rand() * 4)]); setGrid(rand() < 0.5 ? 16 : 1);
-      const u = rand(), E = W.edit;
+      // Any of the 48 turns: the mirrors and the lying-down ones were the core's alone until the box.
+      setEntry(kid); setTurn(Math.floor(rand() * 48)); setScale([-1, 0, 0, big ? 0 : 1][Math.floor(rand() * 4)]); setGrid(rand() < 0.5 ? 16 : 1);
+      setUnder(rand() < 0.3);
+      const u = rand(), E = W.edit, viaBox = i % 2 === 1;
       // An undo every fifth step at least, so a drop after an undo (the epoch's trap) always runs.
       if ((u < 0.1 || i % 5 === 2) && E.log.canUndo){ editStep('undo'); lastUndo = true; }
       else if (u < 0.15 && E.log.canRedo){ editStep('redo'); lastUndo = false; }
-      else if (editStep('drop')){ done++; if (lastUndo) afterUndo++; lastUndo = false; }
-      else { misses++; missWhy.push(edit.aim?.why ?? 'outside the world'); }
+      else {
+        /* Through the box, every other time: opened by the click's function, then two or
+           three of what the keys and handles do (the keys' own functions; an arrow's
+           move by the core, as a drag ends in), then Enter's. The eye must be out of it. */
+        let landed = false;
+        if (viaBox && sceneClick()){
+          for (let k = 2 + Math.floor(rand() * 2); k > 0; k--){
+            const op = Math.floor(rand() * 4);
+            if (op === 0) turnKey(Object.values(TURN_KEYS)[Math.floor(rand() * 6)]);
+            else if (op === 1) mirrorKey();
+            else if (op === 2 && !big) scaleStep(rand() < 0.5 ? -1 : 1);
+            else edit.box = gizmo.moveBy(ctxOf(edit.box.world), edit.box, Math.floor(rand() * 3), (Math.floor(rand() * 5) - 2) * (edit.grid > 1 ? 16 : 3));
+          }
+          const turn = edit.box.turn;
+          landed = bakeBox();
+          if (landed){ boxed++; turnsUsed.add(turn); if (gizmo.frameOf(turn).mirrored) mirrors++; if (edit.box || (!edit.under && edit.turn !== turn)) report.violations.push('a baked box stayed open, or the next box wouldn\'t open turned as it was'); }
+          else closeBox();
+        } else if (!viaBox){ const turn = edit.aim?.drop?.turn; landed = editStep('drop'); if (landed){ turnsUsed.add(turn); if (gizmo.frameOf(turn).mirrored) mirrors++; } }
+        if (landed){ done++; if (lastUndo) afterUndo++; lastUndo = false; }
+        else { misses++; missWhy.push(edit.aim?.why ?? 'outside the world, or the eye in the box'); }
+      }
       for (let k = 0; k <= E.log.count; k++) rootsHeld.add(E.log.rootAt(k));
       if (i === killAt){ const slot = pool.slots.find(sl => !sl.dead && sl.ready); slot.fail('sceneSelftest: a worker died'); report.killedAt = i; }
       await pump(Math.floor(rand() * 4), 'drops');
@@ -5171,7 +5910,19 @@ window.sceneSelftest = async function sceneSelftest(opts = {}){
     }
     // The frames below are from where the kit's were.
     cam.yaw = look.yaw; cam.pitch = look.pitch; dirty = true;
-    Object.assign(report, { done, misses, missWhy, afterUndo, drops: W.edit.log.count, worlds: W.edit.log.worldCount, exportDisabled: $('fileExport').disabled && $('shelfAdd').disabled });
+    Object.assign(report, { done, misses, missWhy, afterUndo, boxed, mirrors, turns: turnsUsed.size, drops: W.edit.log.count, worlds: W.edit.log.worldCount, exportDisabled: $('fileExport').disabled && $('shelfAdd').disabled });
+    // An undo picks the last drop up into a box where it stood; baked again unmoved, it's the root it was.
+    if (W.edit.log.count){
+      const E = W.edit, before = E.log.root, n = E.log.count, last = E.log.placements()[n - 1], picked = sceneUndo(), B = edit.box;
+      const same = !!B && B.picked && B.world === last.world && gizmo.placementOf(ctxOf(B.world), B).at.join() === last.at.join() && B.turn === last.turn && B.scale === last.scale;
+      // The eye may be in that box (it wasn't refused when it was dropped from elsewhere): step out for the bake.
+      const eye = cam.eye.slice();
+      if (B){ const b = gizmo.boxAt(ctxOf(B.world), B); if (cam.eye.every((v, i) => v >= b.lo[i] && v <= b.hi[i])) cam.eye = [cam.eye[0], b.hi[1] + 8, cam.eye[2]]; }
+      const undone = E.log.count === n - 1, baked = bakeBox();
+      cam.eye = eye; dirty = true;
+      report.pickup = { picked, same, undone, baked, root: E.log.root === before, ops: E.log.count === n, open: !!edit.box };
+      for (let k = 0; k <= E.log.count; k++) rootsHeld.add(E.log.rootAt(k));
+    }
     await settle('drops rest');
     report.voxelsEqualLog = (W.counts.update(), W.voxels === W.counts.of(W.edit.log.root));
     const edited = await frames('edited');
@@ -5181,7 +5932,8 @@ window.sceneSelftest = async function sceneSelftest(opts = {}){
     const steps = W.edit.log.count;
     for (let i = 0; i < steps; i++){ editStep('undo'); await pump(Math.floor(rand() * 3), 'undo'); }
     await settle('undone');
-    report.undone = { root: W.root === root0, voxels: W.voxels === voxels0, exportEnabled: !$('fileExport').disabled && !$('shelfAdd').disabled, canRedo: W.edit.log.canRedo };
+    // (A world that is a file is on the shelf already: "add" stays off for it.)
+    report.undone = { root: W.root === root0, voxels: W.voxels === voxels0, exportEnabled: !$('fileExport').disabled && (!!W.file || !$('shelfAdd').disabled), canRedo: W.edit.log.canRedo };
     report.undoneVsKit = compare(await frames('undone'), base);
     await settle('undone density');
     for (let i = 0; i < steps; i++){ editStep('redo'); await pump(Math.floor(rand() * 3), 'redo'); }
@@ -5211,7 +5963,7 @@ window.sceneSelftest = async function sceneSelftest(opts = {}){
       await openKit();
       await settle('kit again');
       const plain = await frames('kit again');
-      setEntry(ids[0]); setTurn(1); setScale(0); setGrid(1);
+      setEntry(ids[0]); setTurn(41); setScale(0); setGrid(1); setUnder(false);
       const a = updateAim(), named = editStep('drop');
       const namedFrames = await frames('named sphere');
       const meets = d => d.lo.every((v, i) => v < a.ghost.hi[i] && v + d.size > a.ghost.lo[i]);
@@ -5230,8 +5982,11 @@ window.sceneSelftest = async function sceneSelftest(opts = {}){
     }
   } finally {
     setEditMode(false);
-    for (const id of ids){ const i = shelf.findIndex(e => e.id === id); if (i >= 0) shelf.splice(i, 1); }
-    fillWorlds();
+    for (const id of [...ids, fileId]){ const i = shelf.findIndex(e => e.id === id); if (i >= 0) shelf.splice(i, 1); }
+    // The file it stood in is off the shelf: somewhere that still exists.
+    if (fileId){ state.world = 'kit:1'; state.kit = kitDesc({ D: 10 }); }
+    fillWorlds(); fillDepth();
+    if (fileId) await loadWorld(true);
     state.kit = saved.kit; setPath(saved.path);
     auto = saved.auto;
   }
@@ -5240,6 +5995,392 @@ window.sceneSelftest = async function sceneSelftest(opts = {}){
   report.liveWorkers = pool.liveWorkers;
   report.ms = Math.round(performance.now() - t0);
   window.__sceneSelftest = report;
+  return report;
+};
+
+/* ---- toolSelftest: which worlds take worlds (docs/gizmo-plan.md §7 step 4) ---------
+   test/browser/scene.test.js. Quick, and what sceneSelftest's row and file runs
+   don't say: who is refused, and why.
+     - a testbed row and a file with a named colour (a D = 6 sphere) have the scene
+       tool, the button and the picker; the file's store is real, with the file's
+       root and exactly its nodes; a blob dropped into it at ½ reaches the frame's
+       root with no job failed, and undone it's the file's root again;
+     - a file with baked colour, one with none, one over the size limit (lowered
+       to 100 nodes for the one load) and one that holds a node twice (the
+       sphere's keys with its root written again, and the copy named as the root:
+       a fine view, which an import would renumber) have no tool; B is refused
+       and the bar says which of the four it is; and each still draws its voxels;
+     - flat ground at D = 20, added to the shelf and opened from there, takes a
+       sphere: the general rule's odd case (the clay world itself takes blocks;
+       its file is a named world like any other), and the deepest parent there is;
+     - the scatter (D = 9) takes none and says it waits for step 5, and the same
+       world added to the shelf and opened from there takes worlds: a file of
+       29,773 nodes, under the limit. */
+window.toolSelftest = async function toolSelftest(){
+  const t0 = performance.now(), saved = { auto, importMax: tool.importMax };
+  auto = false;
+  const report = { glError: 0 }, kids = sceneChildren(), ids = kids.map(k => k.id), savedClay = state.clay;
+  const flip = async ms => { const end = performance.now() + ms; while (performance.now() < end){ frame({ draw: false }); if (W.edit && streamer.S.world.root === W.edit.log.root && !streamer.editing) return true; await sleep(4); } return false; };
+  const open = async (id, depth) => {
+    state.world = id; if (depth) state.depth = depth;
+    fillWorlds(); fillDepth();
+    await loadWorld(true);
+    const r = { kind: W.edit?.kind ?? null, why: W.noEdit ?? null, button: !$('editL').hidden, picker: !$('placeL').hidden, voxels: W.voxels, root: W.root, nodes: W.store.size,
+                entered: setEditMode(true, { lock: false }) === true, bar: $('editBar').hidden ? null : $('editBar').textContent };
+    return r;
+  };
+  try {
+    report.row = await open('row:20', 4);
+    setEditMode(false);
+    // The named sphere, as a file: a drop, its flip, and back.
+    { const e = kids[0], r = report.file = await open(e.id);
+      r.sameRoot = W.root === e.root; r.sameNodes = W.store.size === e.keys.length / 9; r.real = typeof W.store.intern === 'function'; r.realMs = W.file?.realMs ?? null;
+      cam.eye = [32.5, 90.5, 32.5]; cam.yaw = 0; cam.pitch = -1.5; dirty = true; edit.pointer = null;
+      setEntry(ids[3]); setTurn(0); setScale(-1); setGrid(1); setUnder(false);
+      const a = updateAim();
+      r.aim = a?.drop ? a.drop.at : a?.why ?? null;
+      r.dropped = editStep('drop'); r.flipped = r.dropped && await flip(60000);
+      r.grew = W.voxels > e.voxels; r.failed = streamer.S.stats.failed;
+      r.undone = editStep('undo') && await flip(60000) && W.root === e.root && W.voxels === e.voxels;
+      setEditMode(false); }
+    report.baked = await open(ids[1]);
+    report.bare = await open(ids[3]);
+    tool.importMax = 100;
+    report.big = await open(ids[2]);
+    tool.importMax = saved.importMax;
+    // The sphere's keys with its root written twice, the copy named as the root.
+    { const e = kids[0], n = e.keys.length, keys = new Uint32Array(n + 9);
+      keys.set(e.keys); keys.set(e.keys.subarray((e.root - FIRST_NODE) * 9, (e.root - FIRST_NODE) * 9 + 9), n);
+      const twice = shelve({ ...e, keys, root: n / 9 + FIRST_NODE, name: 'test: a node twice', nodes: n / 9 + 1 });
+      ids.push(twice.id); fillWorlds();
+      report.twice = await open(twice.id);
+      report.twice.sameVoxels = W.voxels === e.voxels; }
+    // Flat ground at D = 20, off the shelf.
+    { state.world = 'clay'; state.clay = clayDesc({ lump: 0, ground: true }); fillWorlds(); fillDepth();
+      await loadWorld(true);
+      const blocks = W.edit?.kind ?? null, e = addToShelf();
+      ids.push(e.id);
+      const r = report.ground = await open(e.id), c = W.side / 2;
+      r.blocks = blocks; r.D = W.D; r.sameRoot = W.root === e.root;
+      cam.eye = [c + 3.5, c + 70.5, c + 5.5]; cam.yaw = 0; cam.pitch = -1.5; dirty = true; edit.pointer = null;
+      setEntry(ids[0]); setTurn(0); setScale(0); setGrid(16); setUnder(false);
+      const a = updateAim();
+      r.aim = a?.drop ? a.drop.at : a?.why ?? null;
+      // It stands on the ground: the sphere's content box has its foot on y = side / 2.
+      r.stands = !!a?.ghost && a.ghost.lo[1] === c;
+      r.dropped = editStep('drop'); r.flipped = r.dropped && await flip(120000);
+      r.changed = W.root !== e.root; r.failed = streamer.S.stats.failed;
+      r.undone = editStep('undo') && await flip(120000) && W.root === e.root;
+      setEditMode(false); }
+    // The scatter waits for step 5; its file doesn't.
+    { report.scatter = await open('scatter:1', 9);
+      const e = addToShelf();
+      ids.push(e.id);
+      const r = report.scatterFile = await open(e.id);
+      r.sameRoot = W.root === e.root; r.sameNodes = W.store.size === e.keys.length / 9; r.realMs = W.file?.realMs ?? null;
+      setEditMode(false); }
+  } finally {
+    setEditMode(false);
+    tool.importMax = saved.importMax; state.clay = savedClay;
+    for (const id of ids){ const i = shelf.findIndex(e => e.id === id); if (i >= 0) shelf.splice(i, 1); }
+    state.world = 'shape:sphere'; state.depth = 8; fillWorlds(); fillDepth();
+    await loadWorld(true);
+    auto = saved.auto;
+  }
+  report.glError = gl.getError();
+  report.ms = Math.round(performance.now() - t0);
+  window.__toolSelftest = report;
+  return report;
+};
+
+/* ---- previewSelftest: the child drawn in the box (docs/gizmo-plan.md step 3) ------
+   test/browser/scene.test.js. On hills at D = 9, raster only, the eye 90 voxels over
+   the ground looking down, a box is opened with its content's centre on the ground
+   where the middle pixel looks, so about half of it is buried. Then for each case
+   the frame is drawn into a probe target with a depth buffer, and the preview over
+   a cleared colour, twice: distances (mode 5) and words (mode 9).
+
+   The oracle shares nothing with the shader or gizmo-core's map: the child's own
+   occupancy, coarsened to the preview's lod by the *any* rule here, turned by
+   scatter-core's rotateOcc, set at the box's corner with cells of 2^(lod + scale)
+   parent voxels, and cast by a DDA through that grid for every pixel, in float64.
+   A pixel the cast hits must show the cast's distance, solid (alpha 255) if it's in
+   front of the frame's own surface there (renderDistances) and faint (128) if it's
+   behind; a pixel it misses must show nothing. At lod 0 the pixel's word must be
+   the hit voxel's (attrOf8 of its hashed colour), found by scatter-core's unturn.
+   Pixels on the cast's own silhouette, or where the cast and the world are level,
+   are counted, not failed.
+
+   The children are tripods, arms of three lengths from one corner, so no turn
+   looks like another and a mirror isn't a turn: D = 5 (lod 0, all 48 turns at ×2)
+   and the same four times over at D = 7, with a fin one voxel thick (lod 1 at ½,
+   where the cells are exactly what the bake makes, and at ×1, coarser).
+
+   **The detail** (gizmo-log §11). Every case names its lod (`force`), so the plan's
+   clock isn't in the pixels. The D = 7 tripod is cast again at ×1 at lod 0: eight
+   chunks, the bake's own voxels, words and all. Then a solid block (D = 8, 224
+   across, one chunk of its 64 buried, 301,000 cubes at lod 0) is opened in a box
+   and the page's own frames are counted: just opened it draws the coarse lod and
+   starts nothing; still, it sharpens a lod at a time to lod 0 and stops; every
+   lod's cubes are those of every chunk of its grid made here one by one, with
+   fewer chunks made than hold anything; moved again, with a handle held, or with
+   the camera turned, it draws lod 1, the finest under the moving budget; and the
+   keys' function steps where it rests and comes back. */
+function previewChildren(){
+  const out = [], hash = (x, y, z) => { let v = Math.imul(x + 1, 0x27d4eb2d) ^ Math.imul(y + 3, 0x165667b1) ^ Math.imul(z + 7, 0x9e3779b1); v = Math.imul(v ^ (v >>> 15), 0x85ebca6b); return (v ^ (v >>> 13)) & 0xffffff; };
+  const make = (name, D, k) => {
+    const R = 2 ** D, at = (x, y, z) => x >= 0 && y >= 0 && z >= 0 && x < R && y < R && z < R && solid(x, y, z);
+    const solid = (x, y, z) => {
+      // The ×4 one has a fin one voxel thick past its y arm: content the *any* rule keeps at
+      // lod 1 and the per-brick rules may not (the preview's rule is the bake's).
+      if (k > 1 && y === 70 && x >= 16 && x < 64 && z >= 16 && z < 28) return true;
+      const a = Math.floor(x / k), b = Math.floor(y / k), c = Math.floor(z / k);
+      if (a < 4 || b < 4 || c < 4) return false;
+      return (a < 24 && b < 7 && c < 7) || (a < 7 && b < 17 && c < 7) || (a < 7 && b < 7 && c < 11);
+    };
+    const occ = new Uint8Array(R ** 3), skinOcc = new Uint8Array(R ** 3), words = [];
+    for (let z = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) if (solid(x, y, z)) occ[x + R * (y + R * z)] = 1;
+    // The skin in rank order: Morton order, octant-major (dag-core's digit).
+    for (let i = 0; i < R ** 3; i++){
+      let x = 0, y = 0, z = 0;
+      for (let l = 0; l < D; l++){ x |= (i >> 3 * l & 1) << l; y |= (i >> 3 * l + 1 & 1) << l; z |= (i >> 3 * l + 2 & 1) << l; }
+      if (!occ[x + R * (y + R * z)]) continue;
+      if (at(x + 1, y, z) && at(x - 1, y, z) && at(x, y + 1, z) && at(x, y - 1, z) && at(x, y, z + 1) && at(x, y, z - 1)) continue;
+      skinOcc[x + R * (y + R * z)] = 1; words.push(hash(x, y, z));
+    }
+    const st = createStore(), root = st.fromDense(occ, R).root, skin = st.fromDense(skinOcc, R).root;
+    const e = shelve({ keys: st.snapshot().keys, root, D, name, colour: { kind: 'baked', skin, words: Uint32Array.from(words) }, colourStatus: 'same', view: null, source: null,
+                       voxels: createCounts(st).of(root), nodes: st.size, fileName: null, fileBytes: null });
+    out.push({ e, D, R, occ, hash });
+  };
+  make('test: tripod', 5, 1);
+  make('test: tripod ×4', 7, 4);
+  // The detail's block: [0, 224)³ of a D = 8 cube, no colour. Chunk (1, 1, 1) at lod 0 is full
+  // with six full neighbours; (0, 1, 1) is full too, but its low x face is the world's edge.
+  { const D = 8, st = createStore(), root = st.fromField(D, (k, x, y, z) => { const n = 2 ** k, lo = Math.max(x, y, z) * n; return lo >= 224 ? 0 : lo + n <= 224 ? 1 : -1; }).root;
+    const e = shelve({ keys: st.snapshot().keys, root, D, name: 'test: block', colour: null, colourStatus: 'none', view: null, source: null,
+                       voxels: createCounts(st).of(root), nodes: st.size, fileName: null, fileBytes: null });
+    out.push({ e, D, R: 256 }); }
+  fillWorlds();
+  return out;
+}
+// The first cell a ray o + t·d meets in an R³ grid (x fastest) of cells of side c at
+// `origin`, or null: a DDA, in float64.
+function castGrid(o, d, origin, c, R, occ){
+  const p = [0, 1, 2].map(a => (o[a] - origin[a]) / c);
+  let s0 = 0, s1 = Infinity;
+  for (let a = 0; a < 3; a++){
+    if (d[a] === 0){ if (p[a] < 0 || p[a] > R) return null; continue; }
+    const ta = -p[a] * c / d[a], tb = (R - p[a]) * c / d[a];
+    s0 = Math.max(s0, Math.min(ta, tb)); s1 = Math.min(s1, Math.max(ta, tb));
+  }
+  if (s0 > s1) return null;
+  const cell = p.map((v, a) => Math.min(R - 1, Math.max(0, Math.floor(v + s0 * d[a] / c))));
+  const step = d.map(v => v > 0 ? 1 : v < 0 ? -1 : 0);
+  const next = [0, 1, 2].map(a => step[a] ? (cell[a] + (step[a] > 0 ? 1 : 0) - p[a]) * c / d[a] : Infinity);
+  const delta = [0, 1, 2].map(a => step[a] ? c / Math.abs(d[a]) : Infinity);
+  let s = s0;
+  for (;;){
+    const idx = cell[0] + R * (cell[1] + R * cell[2]);
+    if (occ[idx]) return { t: s, cell: cell.slice() };
+    const a = next[0] < next[1] ? (next[0] < next[2] ? 0 : 2) : (next[1] < next[2] ? 1 : 2);
+    s = next[a];
+    if (s > s1) return null;
+    cell[a] += step[a];
+    if (cell[a] < 0 || cell[a] >= R) return null;
+    next[a] += delta[a];
+  }
+}
+window.previewSelftest = async function previewSelftest(opts = {}){
+  const t0 = performance.now(), saved = { auto, path: state.path, world: state.world, depth: state.depth };
+  auto = false;
+  const report = { cases: [], glError: 0 }, w = 161, h = 121;
+  const kids = previewChildren(), ids = kids.map(k => k.e.id);
+  const fb = gl.createFramebuffer(), col = gl.createRenderbuffer(), dep = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, col); gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
+  gl.bindRenderbuffer(gl.RENDERBUFFER, dep); gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, col);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, dep);
+  const read = () => { const px = new Uint8Array(4 * w * h); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px); return px; };
+  const probe = (mode, lod = null) => {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    const info = drawPreview(w, h, fb, mode, lod);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    return { info, px: read() };
+  };
+  try {
+    state.world = 'shape:hills'; state.depth = 9; fillWorlds(); fillDepth();
+    await loadWorld(true);
+    setPath('off');
+    const top = pick(W.store, W.root, W.D, [256.5, W.side - 0.5, 256.5], [0, -1, 0]);
+    cam.eye = [256.5, top.y + 90.5, 200.5]; cam.yaw = 0; cam.pitch = -1.05; dirty = true;
+    const end = performance.now() + 120000;
+    for (let f = 0; performance.now() < end; f++){ frame({ draw: false }); if (f > 2 && isConverged()) break; await sleep(16); }
+    report.converged = isConverged();
+    setEditMode(true, { lock: false });
+    edit.pointer = null; edit.preview = true;
+    view.clear = clearance();
+    const bare = renderDistances(w, h, 'raster'), basis = rayBasis(w / h), scale8 = 8 * W.side;
+    const ground = pick(W.store, W.edit.log.root, W.D, cam.eye, fwd());
+    report.ground = [ground.x, ground.y, ground.z];
+    const quick = !!opts.quick, some = [0, 1, 5, 10, 17, 41, 44, 3, 23, 30];
+    const cases = [
+      ...(quick ? some : Array.from({ length: 48 }, (_, e) => e)).map(e => ({ kid: 0, turn: e, scale: 1 })),
+      ...(quick ? some.slice(0, 4) : some).map(e => ({ kid: 1, turn: e, scale: -1 })),
+      ...[0, 41].map(e => ({ kid: 1, turn: e, scale: 0 })),
+      // The bake's own voxels of a child wider than a chunk: eight chunks at lod 0.
+      ...(quick ? [1, 30] : [0, 1, 5, 17, 30, 41, 44, 46]).map(e => ({ kid: 1, turn: e, scale: 0, lod: 0 })),
+    ];
+    for (const cs of cases){
+      const K = kids[cs.kid], world = childOf(K.e), { turn, scale } = cs, box = childBox(world, turn, scale);
+      // The content's centre on the ground under the middle pixel.
+      const at = [ground.x, ground.y, ground.z].map((v, a) => Math.round(v + 0.5 - (box.lo[a] + box.hi[a]) / 2));
+      edit.box = gizmo.fromPlacement(ctxOf(world), { world, at, turn, scale }, { world, rest: null, lift: 0, picked: false });
+      const pAt = gizmo.placementOf(ctxOf(world), edit.box).at;
+      renderView(w, h, 5, false, [0, 0, 0, 0], 'raster', fb);
+      const lod = cs.lod ?? gizmo.previewLod(K.D, scale), dist = probe(5, lod), words = lod === 0 ? probe(9, lod) : null;
+      // The oracle's grid: the child coarsened by the any rule, turned, cells of 2^(lod + scale).
+      const Rc = K.R >> lod, k = 1 << lod, coarse = new Uint8Array(Rc ** 3);
+      for (let z = 0; z < K.R; z++) for (let y = 0; y < K.R; y++) for (let x = 0; x < K.R; x++)
+        if (K.occ[x + K.R * (y + K.R * z)]) coarse[(x >> lod) + Rc * ((y >> lod) + Rc * (z >> lod))] = 1;
+      const turned = rotateOcc(coarse, Rc, turn), c = 2 ** (lod + scale);
+      const r = { kid: cs.kid, turn, scale, lod, chunks: previewLodOf(world, lod).chunks.length, mirrored: dist.info?.mirrored ?? null, cubes: dist.info?.cubes ?? 0, covered: 0, front: 0, behind: 0, level: 0, edge: 0, bad: 0, words: 0, wordsBad: 0, first: [] };
+      const cast = new Array(w * h).fill(null);
+      for (let i = 0; i < w * h; i++){
+        const px = i % w, py = (i / w) | 0, nx = (px + 0.5) / w * 2 - 1, ny = (py + 0.5) / h * 2 - 1;
+        let d = basis.fwd.map((v, a) => v + nx * basis.rightT[a] + ny * basis.upT[a]);
+        const len = Math.hypot(...d); d = d.map(v => v / len);
+        cast[i] = castGrid(cam.eye, d, pAt, c, Rc, turned);
+      }
+      const silhouette = i => {
+        const px = i % w, py = (i / w) | 0, a = cast[i];
+        return [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => {
+          const x = px + dx, y = py + dy;
+          if (x < 0 || y < 0 || x >= w || y >= h) return false;
+          const b = cast[x + w * y];
+          return !b !== !a || (a && b && (Math.abs(a.t - b.t) > 0.5 || a.cell.join() !== b.cell.join()));
+        });
+      };
+      for (let i = 0; i < w * h; i++){
+        const a = cast[i], P = dist.px, alpha = P[4 * i + 3], got = (P[4 * i] * 65536 + P[4 * i + 1] * 256 + P[4 * i + 2]) / 16777215 * scale8;
+        let why = null;
+        if (!a){ if (alpha !== 0) why = 'drawn where the cast misses'; }
+        else {
+          r.covered++;
+          const level = bare[i] >= 0 && Math.abs(a.t - bare[i]) < 0.05 + 2e-4 * a.t, front = bare[i] < 0 || a.t < bare[i];
+          if (level) r.level++; else if (front) r.front++; else r.behind++;
+          if (alpha === 0) why = 'missing where the cast hits';
+          else if (Math.abs(got - a.t) > 0.02 + 1e-4 * a.t) why = `at ${got.toFixed(3)}, the cast at ${a.t.toFixed(3)}`;
+          else if (!level && front !== (alpha === 255)) why = `alpha ${alpha}, but ${front ? 'in front of' : 'behind'} the world (${bare[i].toFixed(2)})`;
+          else if (!level && !front && (alpha < 100 || alpha > 160)) why = `alpha ${alpha} behind the world`;
+        }
+        if (why && silhouette(i)){ r.edge++; why = null; }
+        if (why){ r.bad++; if (r.first.length < 3) r.first.push({ px: [i % w, (i / w) | 0], why }); }
+        /* The word: the hit voxel's, back through the turn. Only where rays a 32nd of a
+           pixel either way hit that same cell: nearer a cell's edge than that, the pixel can
+           be either cell's (the rasterizer places a vertex to a 256th of a pixel). It was
+           "not within 2% of the cell's edge" until the eight-chunk cases, whose cells are
+           one voxel and a pixel wide: on a face seen at a low angle a 256th of a pixel is
+           more than 2% of a voxel along the face, and 2 words of 2,498 at turn 46 were the
+           next voxel's. */
+        const inside = a && [[-1, -1], [1, -1], [-1, 1], [1, 1]].every(([sx, sy]) => {
+          const px = i % w, py = (i / w) | 0, nx = (px + 0.5 + sx / 32) / w * 2 - 1, ny = (py + 0.5 + sy / 32) / h * 2 - 1;
+          let d = basis.fwd.map((v, k) => v + nx * basis.rightT[k] + ny * basis.upT[k]);
+          const len = Math.hypot(...d); d = d.map(v => v / len);
+          const b = castGrid(cam.eye, d, pAt, c, Rc, turned);
+          return !!b && b.cell[0] === a.cell[0] && b.cell[1] === a.cell[1] && b.cell[2] === a.cell[2];
+        });
+        if (words && a && inside && !(!cast[i] || alpha === 0)){
+          const u = unturn(a.cell.map(v => v + 0.5), Rc, turn).map(v => Math.floor(v)), rgb = K.hash(u[0], u[1], u[2]);
+          const want = attrRGB(attrOf8(rgb & 255, rgb >> 8 & 255, rgb >> 16 & 255)).map(v => v << 2), Q = words.px;
+          r.words++;
+          if (Q[4 * i] !== want[0] || Q[4 * i + 1] !== want[1] || Q[4 * i + 2] !== want[2]){
+            r.wordsBad++;
+            if (r.first.length < 3) r.first.push({ px: [i % w, (i / w) | 0], why: `word ${[Q[4 * i], Q[4 * i + 1], Q[4 * i + 2]]}, voxel ${u}'s is ${want}` });
+          }
+        }
+      }
+      report.cases.push(r);
+    }
+    // A real frame on the canvas with the box open: drawn, and no GL error.
+    draw();
+    report.drawn = edit.previewInfo ? { ...edit.previewInfo } : null;
+    // The detail: the block in a box, by the page's own plan and clock.
+    { const K = kids[2], world = childOf(K.e), box = childBox(world, 0, 0);
+      const at = [ground.x, ground.y, ground.z].map((v, a) => Math.round(v + 0.5 - (box.lo[a] + box.hi[a]) / 2));
+      previewForget(world);
+      edit.detail = Infinity; edit.press = null;
+      edit.box = gizmo.fromPlacement(ctxOf(world), { world, at, turn: 0, scale: 0 }, { world, rest: null, lift: 0, picked: false });
+      renderView(w, h, 5, false, [0, 0, 0, 0], 'raster', fb);
+      const shot = () => {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+        const i = drawPreview(w, h, fb, 0);
+        return i && { lod: i.lod, cubes: i.cubes, making: i.making ? i.making.lod : null, coarse: i.coarse, fine: i.fine, rest: i.rest, held: i.held };
+      };
+      const still = () => { shot(); edit.previewMoved = -1e9; return shot(); };
+      // Just opened: the coarse lod, twice, and no finer lod so much as listed.
+      const first = shot(), second = shot(), started = [...previewWorld(world).lods.keys()].sort();
+      edit.previewMoved = -1e9;
+      const seen = [];
+      let frames = 0, last = null;
+      for (; frames < 5000; frames++){
+        last = shot();
+        if (seen[seen.length - 1] !== last.lod) seen.push(last.lod);
+        if (last.lod === last.rest && last.making === null) break;
+      }
+      const after = shot();
+      // Every lod's cubes against every chunk of its grid, made one by one here.
+      const ctx = previewWorld(world), lods = [2, 1, 0].map(lod => {
+        const g = ctx.lods.get(lod), n = 2 ** Math.max(0, K.D - lod - 6);
+        let want = 0, showing = 0;
+        for (let cz = 0; cz < n; cz++) for (let cy = 0; cy < n; cy++) for (let cx = 0; cx < n; cx++){
+          const c = expandChunk(world.store, world.root, K.D, { lod, cx, cy, cz }, { lodRule: 'any', counts: ctx.counts }).count;
+          want += c; if (c) showing++;
+        }
+        return { lod, done: !!g?.done, cubes: g?.n ?? null, want, made: g?.chunks.length ?? null, showing, grid: n ** 3 };
+      });
+      // Moved: the finest lod under the moving budget. A held handle is moving too.
+      edit.previewMoved = performance.now();
+      const moved = shot();
+      edit.previewMoved = -1e9; edit.press = { grab: { kind: 'arrow', id: 'arrow:0:1' } };
+      const held = shot();
+      edit.press = null;
+      // So is a camera that turned (the box is where it was), and it rests again after.
+      shot(); edit.previewMoved = -1e9;
+      const rested = shot();
+      cam.yaw += 0.001;
+      const flown = shot();
+      cam.yaw -= 0.001;
+      shot(); edit.previewMoved = -1e9;
+      // The keys' function: a lod coarser twice, a third time nothing, then back to the bake's.
+      const keys = [];
+      for (const k of [-1, -1, -1, 1, 1]){ detailKey(k); keys.push({ k, detail: Number.isFinite(edit.detail) ? edit.detail : 'all', lod: still().lod }); }
+      report.detail = { first, second, started, seen, frames, last, after, lods, moved, held, rested, flown, keys, budget: gizmo.PREVIEW_MOVE_CUBES, glError: gl.getError() };
+      edit.note = ''; edit.noteUntil = 0; }
+    // P turns it off: nothing drawn.
+    edit.preview = false;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    report.off = { info: drawPreview(w, h, fb, 5), lit: (() => { gl.bindFramebuffer(gl.FRAMEBUFFER, fb); const px = read(); let n = 0; for (let i = 3; i < px.length; i += 4) if (px[i]) n++; return n; })() };
+    edit.preview = true;
+    // The ghost before a click is drawn too: the box closed, the aim's drop previewed.
+    closeBox();
+    renderView(w, h, 5, false, [0, 0, 0, 0], 'raster', fb);
+    report.ghost = { aim: !!edit.aim?.drop, info: probe(5).info };
+  } finally {
+    setEditMode(false);
+    for (const id of ids){ const i = shelf.findIndex(e => e.id === id); if (i >= 0){ const [gone] = shelf.splice(i, 1); if (childWorlds.has(gone)) previewForget(childWorlds.get(gone)); } }
+    fillWorlds();
+    edit.detail = Infinity;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fb); gl.deleteRenderbuffer(col); gl.deleteRenderbuffer(dep);
+    setPath(saved.path);
+    auto = saved.auto;
+  }
+  report.glError = gl.getError();
+  report.ms = Math.round(performance.now() - t0);
+  window.__previewSelftest = report;
   return report;
 };
 
