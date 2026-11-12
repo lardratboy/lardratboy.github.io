@@ -152,8 +152,10 @@
   <label>cut <select id="freeze"><option value="0">follows the eye</option><option value="1">frozen</option></select></label>
   <label>actors <select id="actors"><option value="0">none</option><option>10</option><option>100</option><option>300</option><option>1000</option></select>
     <button id="actorsForward" title="advance the actors 10 seconds at once">fast forward 10 s</button></label>
-  <div class="keys">drag: look   WASD: move   E/Q: up/down
-shift: ×8   wheel: speed   F: freeze cut
+  <div class="keys">left drag: orbit   right or shift-left drag: pan
+middle drag or wheel: dolly (through walls)   two fingers: pinch, pan
+WASD: move   E/Q: up/down   arrows: look   shift: ×8
+alt-wheel: speed   F: freeze cut
 H: show or hide these panels   T: wireframe
 [ / ]: seed − / +   R: a random seed
 drop .vdag files anywhere to open them
@@ -169,7 +171,7 @@ B: edit mode. Esc leaves
     wheel or - =: scale   G: snap 16 / voxel
     1-8: which shelf world (or the place menu)
     right click or Z: undo, and pick the last one up
-    drag anywhere else, or right drag: look
+    a drag anywhere else: the camera, as above
   Z / shift-Z: undo / redo   alt-wheel: speed
 pad: L stick move, R stick look, RT/LT up/down
      A or L3 ×8, RB/LB speed ×2/÷2, Y freeze cut
@@ -249,6 +251,7 @@ import { createStore, createClasses, createCounts, prune, storeView, isFull, OH4
 import { mortonXYZ, shownMask, quadsShown, expandChunk } from './chunk-core.js';
 import { createSceneLog, childFrame, dropAt, snapRef, bakeScene, placeMemoSize } from './scene-core.js';
 import * as gizmo from './gizmo-core.js';
+import * as camera from './camera-core.js';
 import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
 import { createWorld, createStreamer, worldSnapshot, createTailer, keyOf, DEFAULTS, clearance as clearanceOf } from './stream-core.js';
 import { aimAt, aimInAir, pick, boxOf, boxEdges, reachOf, createEditLog, createBlockTable, editedField, replay, createRepeat, PALETTE, MAX_BLOCK_LEVEL, AIR_PER_SIDE } from './edit-core.js';
@@ -1974,21 +1977,98 @@ addEventListener('keydown', e => {
 });
 addEventListener('keyup', e => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
-let drag = null;
-canvas.addEventListener('pointerdown', e => { if (edit.on) return; drag = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); canvas.focus(); });
-canvas.addEventListener('pointermove', e => {
-  if (!drag) return;
-  cam.yaw -= (e.clientX - drag[0]) * 0.004;
-  cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch - (e.clientY - drag[1]) * 0.004));
-  drag = [e.clientX, e.clientY];
+/* ---- the mouse camera (docs/camera.md) -----------------------------------------
+   As sol-v4-tower-contact-sheet.html's: left drag orbits, right drag (or shift and
+   left) pans, middle drag and the wheel dolly, eased, and two fingers pinch and pan.
+   Every decision is camera-core.js's, held in Node; this hands it pointer deltas.
+   It was a first-person look until 2026-11-12: a drag turned the eye where it stood.
+
+   **The target is what the middle of the view is on.** Sol-v4's is the tower at the
+   origin, and a world here has no such middle. So the first gesture after anything
+   else moved the camera (WASD, the pad, the arrows, a new world, a link) picks along
+   the view (edit-core's pick, on the DAG, so it's exact at any lod), and the camera
+   orbits, pans and dollies about that point until something else moves it again.
+   Looking at nothing, it keeps the last radius, or the distance to the nearest voxel.
+
+   **Push-through** (sol-v4's): a dolly in that would come nearer than a threshold
+   pushes the target on, so the wheel takes you through a wall rather than stopping
+   at it. The threshold is half a second of the fly keys (flySpeed) where the target
+   was picked, so it follows the world's local scale and alt-wheel's speed, as WASD
+   does. Picked then and kept, as sol-v4's is constant: measured as the eye goes, it
+   shrank to a voxel at the wall (the clearance does), and the wheel stopped there.
+
+   The wheel was the fly speed. That's alt-wheel now, as it was in edit mode. */
+const orbitCam = { radius: null, scale: 2, seen: '', pending: 0, pointers: new Map() };
+const camKey = () => `${cam.eye[0]},${cam.eye[1]},${cam.eye[2]},${cam.yaw},${cam.pitch}`;
+function orbitRadius(){
+  if (orbitCam.radius !== null && orbitCam.seen === camKey()) return orbitCam.radius;
+  const hit = W ? pick(W.store, W.edit ? W.edit.log.root : W.root, W.D, cam.eye, fwd()) : null;
+  orbitCam.radius = hit ? Math.max(hit.t, 0.5) : orbitCam.radius ?? Math.max(16, Math.min(4 * (W?.side ?? 1024), view.clear || 0));
+  orbitCam.scale = W ? flySpeed() / cam.speedMul : 2;
+  orbitCam.seen = camKey();
+  return orbitCam.radius;
+}
+function camTo(c){
+  cam.eye = c.eye; cam.yaw = c.yaw; cam.pitch = c.pitch;
+  if (c.radius !== undefined) orbitCam.radius = c.radius;
+  orbitCam.seen = camKey();
+}
+// One gesture's move: orbit and pan at once, a dolly into what's waiting for move() to ease.
+function cameraBy(mode, dx, dy){
+  const R = orbitRadius();
+  if (mode === 'orbit') camTo(camera.orbit(cam, R, dx, dy, innerHeight));
+  else if (mode === 'pan') camTo(camera.pan(cam, R, dx, dy, innerHeight));
+  else if (mode === 'dolly') orbitCam.pending = camera.addPending(orbitCam.pending, -dy * camera.CAMERA.drag);
+}
+const dollyBy = s => { orbitRadius(); orbitCam.pending = camera.addPending(orbitCam.pending, s); };
+// The fly keys' speed, voxels a second: the world's local scale (§9.3) at alt-wheel's multiple.
+const flySpeed = () => Math.min(W.side / 3, Math.max(2, view.clear)) * cam.speedMul;
+const pushThreshold = () => 0.5 * orbitCam.scale * cam.speedMul;
+// A frame of what the wheel asked for. Anything else moving the camera drops the rest.
+function cameraEase(dt){
+  if (!orbitCam.pending) return;
+  if (orbitCam.seen !== camKey()){ orbitCam.pending = 0; return; }
+  const step = camera.easeStep(orbitCam.pending, dt);
+  orbitCam.pending -= step;
+  camTo(camera.dolly(cam, orbitCam.radius, step, { threshold: pushThreshold(), maxRadius: 8 * W.side }));
+  if (!orbitCam.pending) saveView();
+}
+const touchPair = () => {
+  const t = [...orbitCam.pointers.values()].filter(p => p.touch);
+  return t.length === 2 ? { x: (t[0].x + t[1].x) / 2, y: (t[0].y + t[1].y) / 2, distance: Math.hypot(t[0].x - t[1].x, t[0].y - t[1].y) } : null;
+};
+canvas.addEventListener('pointerdown', e => {
+  if (edit.on) return;
+  const mode = e.pointerType === 'touch' ? 'orbit' : camera.modeOf(e.button, e.shiftKey);
+  if (!mode) return;
+  if (e.button === 1) e.preventDefault();     // no autoscroll
+  orbitCam.pending = 0;                        // a press stops the wheel's glide, as in sol-v4
+  orbitCam.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, mode, touch: e.pointerType === 'touch' });
+  canvas.setPointerCapture(e.pointerId); canvas.focus();
 });
-canvas.addEventListener('pointerup', () => { drag = null; saveView(); });
+canvas.addEventListener('pointermove', e => {
+  const p = orbitCam.pointers.get(e.pointerId);
+  if (!p) return;
+  const before = touchPair(), dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  const after = touchPair();
+  if (before && after){ const g = camera.pinchOf(before, after); dollyBy(g.log); cameraBy('pan', g.dx, g.dy); }
+  else if (orbitCam.pointers.size === 1) cameraBy(p.mode, dx, dy);
+});
+const pointerEnd = e => {
+  if (!orbitCam.pointers.delete(e.pointerId)) return;
+  if (canvas.hasPointerCapture?.(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+  if (!orbitCam.pointers.size) saveView();
+};
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) canvas.addEventListener(type, pointerEnd);
+canvas.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
 const setSpeed = m => { cam.speedMul = Math.max(1 / 64, Math.min(64, m)); };
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
-  if (edit.on && !e.altKey) editWheel(e.deltaY);
   // Alt-wheel on a Mac can arrive as deltaX.
-  else setSpeed(cam.speedMul * Math.exp(-(e.deltaY || e.deltaX) * 0.002));
+  if (e.altKey) setSpeed(cam.speedMul * Math.exp(-(e.deltaY || e.deltaX) * 0.002));
+  else if (edit.on) editWheel(e.deltaY);
+  else dollyBy(camera.wheelLog(e.deltaY, e.deltaMode, innerHeight));
 }, { passive: false });
 const toggleFreeze = () => { state.freeze = !state.freeze; $('freeze').value = state.freeze ? '1' : '0'; dirty = true; };
 /* A gamepad (pad-core.js decides what each stick and button does). The
@@ -2318,7 +2398,8 @@ addEventListener('mouseup', e => {
   if (kind){ edit.held.delete(e.button); edit.repeat.release(kind); }
 });
 addEventListener('blur', () => { edit.repeat.clear(); edit.held.clear(); edit.press = null; });
-canvas.addEventListener('contextmenu', e => { if (edit.on) e.preventDefault(); });
+// Right drag pans, in and out of edit mode: the browser's menu would end it.
+canvas.addEventListener('contextmenu', e => e.preventDefault());
 canvas.addEventListener('mousemove', e => {
   if (!edit.on || isScene()) return;
   cam.yaw -= e.movementX * 0.002;
@@ -2427,9 +2508,12 @@ function scenePress(e){
   canvas.focus();
   edit.pointer = [e.clientX, e.clientY];
   // Ctrl-click is a Mac's right click, and arrives as button 0.
-  const button = e.button === 2 || (e.button === 0 && e.ctrlKey) ? 'right' : e.button === 0 ? 'left' : null;
+  const button = e.button === 2 || (e.button === 0 && e.ctrlKey) ? 'right' : e.button === 0 ? 'left' : e.button === 1 ? 'middle' : null;
   if (!button || edit.press) return;
-  const p = edit.press = { button, raw: e.button, x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, moved: false, shift: e.shiftKey, grab: null, drag: null, off: [0, 0] };
+  // Off the handles, a drag is the camera's (docs/camera.md): left orbits, right or shift and left pans, middle dollies.
+  const look = camera.modeOf(button === 'right' ? 2 : button === 'middle' ? 1 : 0, e.shiftKey);
+  if (button === 'middle') orbitCam.pending = 0;
+  const p = edit.press = { button, raw: e.button, x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, moved: false, shift: e.shiftKey, grab: null, drag: null, off: [0, 0], look };
   if (button !== 'left' || !edit.box) return;
   const B = edit.box, g = gizmoNow(), ray = pointerRay(), hit = gizmo.hitHandle(g.handles, ray, g.box);
   if (!hit) return;
@@ -2465,10 +2549,7 @@ addEventListener('mousemove', e => {
   if (!p.moved && Math.hypot(e.clientX - p.x, e.clientY - p.y) < CLICK_PX) return;
   p.moved = true;
   if (p.grab && edit.box) sceneDrag(p);
-  else {
-    cam.yaw -= (e.clientX - p.lx) * 0.004;
-    cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch - (e.clientY - p.ly) * 0.004));
-  }
+  else cameraBy(p.look, e.clientX - p.lx, e.clientY - p.ly);
   p.lx = e.clientX; p.ly = e.clientY;
   showEdit();
 });
@@ -2479,7 +2560,7 @@ addEventListener('mouseup', e => {
   if (!edit.on || !isScene()) return;
   if (p.moved){ if (!p.grab) saveView(); return; }       // a drag: it was done as it went
   if (p.button === 'right') sceneUndo();
-  else if (!p.grab) sceneClick(p.shift);                  // a click on a handle or the box does nothing
+  else if (p.button === 'left' && !p.grab) sceneClick(p.shift);   // a click on a handle or the box does nothing, and so does the middle
 });
 /* After service: did the frame just move to a new root? This frame's draw shows
    it. The near plane follows the distance to the nearest voxel, and a block placed
@@ -2997,6 +3078,13 @@ function drawOutline(w, h){
   gl.bindVertexArray(null);
 }
 // For the console and the tests.
+// For the console and test/browser/camera.test.js: the camera's state, and the raster's
+// distance at the middle of the view (an odd-sized frame, so its middle pixel's ray is fwd()).
+window.__camera = {
+  state: () => ({ eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch, radius: orbitCam.radius, held: orbitCam.seen === camKey(), pending: orbitCam.pending,
+                  threshold: pushThreshold(), speed: cam.speedMul, height: innerHeight, width: innerWidth, pointers: orbitCam.pointers.size }),
+  centre: (n = 65) => { const d = renderDistances(n, n, 'raster'); return d[(n * n - 1) / 2]; },
+};
 window.__edit = {
   mode: setEditMode, step: editStep, take: takeColour, aim: updateAim, slot: setSlot, level: setLevel,
   entry: setEntry, turn: setTurn, scale: setScale, grid: setGrid, under: setUnder,
@@ -3462,7 +3550,8 @@ function move(dt){
     cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch + p.look[1] * dt * PAD.PITCH));
   }
   const boost = keys.has('ShiftLeft') || keys.has('ShiftRight') || (p && p.boost);
-  const base = Math.min(W.side / 3, Math.max(2, view.clear)) * cam.speedMul * (boost ? 8 : 1);
+  cameraEase(dt);
+  const base = flySpeed() * (boost ? 8 : 1);
   const f = fwd(), r = norm(cross(f, [0, 1, 0])), step = base * dt / 1000;
   const m = [0, 0, 0], add = (v, s) => { for (let a = 0; a < 3; a++) m[a] += v[a] * s; };
   // The sticks are analog: a half push is a quarter of the keys' speed (pad-core's square response).
