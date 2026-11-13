@@ -294,7 +294,7 @@ export function createRepeat(interval = REPEAT_MS){
    milliseconds, in a worker, and undo is rare (docs/edit-log.md). */
 export function createBlockTable(){
   let cap = 1 << 12, keys = new Int32Array(cap * 4).fill(-1), vals = new Int32Array(cap * 2);
-  let used = 0, seen = 0, epoch = 0;
+  let used = 0, seen = 0, epoch = 0, hit = -1;
   const sizes = [];
   const slot = (l, X, Y, Z) => {
     let h = Math.imul(X, 73856093) ^ Math.imul(Y, 19349663) ^ Math.imul(Z, 83492791) ^ Math.imul(l, 2654435761);
@@ -321,8 +321,11 @@ export function createBlockTable(){
   return {
     add,
     /* The colour at a point, or −1 if no block covers it. Points are floats
-       because that's what a field gets: a voxel's centre, or a coarse cell's. */
+       because that's what a field gets: a voxel's centre, or a coarse cell's.
+       `seq` is then the answer's op number (−1 with none), which the one log's
+       field (log-core.js) weighs against the drops' (docs/onelog-plan.md §3). */
     lookup(x, y, z){
+      hit = -1;
       if (!sizes.length) return -1;
       const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
       let best = -1, colour = -1;
@@ -330,8 +333,10 @@ export function createBlockTable(){
         const l = sizes[n], h = slot(l, xi >> l, yi >> l, zi >> l);
         if (keys[h * 4] !== -1 && vals[h * 2] > best){ best = vals[h * 2]; colour = vals[h * 2 + 1]; }
       }
+      hit = best;
       return colour;
     },
+    get seq(){ return hit; },
     /* Take a log's delta (createEditLog's `delta`). A new epoch means ops were
        undone: start over. The delta has to start where this table stopped, or
        ops have been lost, and a table quietly missing an op draws the wrong

@@ -110,7 +110,8 @@ export function contentBox(store, root, D){
 }
 
 /* ---- checks ---------------------------------------------------------------- */
-function checkPlacement(p, D, needAt = true){
+// Exported for log-core's one log, which checks a drop before anything else.
+export function checkPlacement(p, D, needAt = true){
   const w = p.world;
   if (!w || !Number.isInteger(w.D) || w.D < 0) throw new Error('scene: a placement needs a world { store, root, D }');
   const s = p.scale ?? 0, e = p.turn ?? 0;
@@ -540,6 +541,16 @@ export function compositeWorld(parent, placements, { stats = null } = {}){
    parent's chunk box in the child's frame, but only into the same immutable
    child. Step 3's "same stamp, same bytes" is what settles it.
 
+   **Blocks in the same world** (docs/onelog-plan.md §3, log-core.js's one
+   log): `blocks` is edit-core's createBlockTable, filled with the log's
+   places, and every entry of `list` then carries `seq`, its op's place in
+   the same log. A cell takes the later of the latest block over its centre
+   (the table's rule) and the latest placement solid in it (the rule above).
+   The list is latest first, so the walk stops at the first placement older
+   than the block. A break colours nothing (a voxel solid after a break was
+   filled by a later op), which is why neither side needs breaks. Without
+   `blocks` nothing changes.
+
    **Cost.** The first version tested every placement's bounds for every
    sample, and on the whole D = 10 kit that made 16 placements cost 1.5–2×
    a job's colour, nearly all of it in chunks no placement touches. Now the
@@ -556,16 +567,17 @@ function placedBounds(store, T, Dt){
   if (!m.has(key)) m.set(key, contentBox(store, T, Dt));
   return m.get(key);
 }
-export function sceneField(store, base, list){
+export function sceneField(store, base, list, blocks = null){
   if (typeof base !== 'function') throw new Error('sceneField: needs the parent\'s field (a colourless parent has nothing to fall back on)');
   if (base.mean) throw new Error('sceneField: a parent with `mean` (a baked parent) can\'t be placed into yet; see the note above sceneField');
-  if (!list.length) return base;
+  if (!list.length && !blocks) return base;
   const kids = list.map(e => {
     checkPlacement({ world: { D: e.D }, at: e.at, turn: e.turn, scale: e.scale });
+    if (blocks && !Number.isInteger(e.seq)) throw new Error('sceneField: with blocks, every placement needs its `seq` in the one log');
     const s = e.scale ?? 0, t = e.turn ?? 0, Dt = e.D + s;
     if (e.T >= FIRST_NODE && store.levelOf(e.T) !== Dt) throw new Error(`sceneField: T is level ${store.levelOf(e.T)}, not D + scale = ${Dt}`);
     const box = placedBounds(store, e.T, Dt);
-    return { T: e.T, Dt, D: e.D, s, at: e.at, P: PERM[t >> 3], fl: [t & 1, t >> 1 & 1, t >> 2 & 1], colour: e.colour ?? null,
+    return { T: e.T, Dt, D: e.D, s, at: e.at, P: PERM[t >> 3], fl: [t & 1, t >> 1 & 1, t >> 2 & 1], colour: e.colour ?? null, seq: e.seq ?? -1,
              empty: !box, lo: box ? box.lo.map((v, i) => v + e.at[i]) : null, hi: box ? box.hi.map((v, i) => v + e.at[i]) : null };
   });
   const lo = [0, 0, 0], hi = [0, 0, 0], pt = [0, 0, 0], src = [0, 0, 0], mean = new Float64Array(3);
@@ -601,13 +613,15 @@ export function sceneField(store, base, list){
     const side = 2 ** l, h = side / 2;
     pt[0] = x; pt[1] = y; pt[2] = z;
     for (let i = 0; i < 3; i++){ lo[i] = pt[i] - h; hi[i] = lo[i] + side; }
-    const list = nearOf(l);
+    const list = nearOf(l), block = blocks ? blocks.lookup(x, y, z) : -1, after = block >= 0 ? blocks.seq : -1;
     for (let k = 0; k < list.length; k++){
       const c = list[k];
+      if (c.seq < after) break;
       if (c.empty || lo[0] >= c.hi[0] || lo[1] >= c.hi[1] || lo[2] >= c.hi[2] || hi[0] <= c.lo[0] || hi[1] <= c.lo[1] || hi[2] <= c.lo[2]) continue;
       if (!boxHits(store, c.T, c.Dt, c.at[0], c.at[1], c.at[2], lo, hi)) continue;
       return c.colour ? childColour(c, l) : base(x, y, z, l);
     }
+    if (block >= 0) return block;
     return base(x, y, z, l);
   };
 }
@@ -666,7 +680,8 @@ export function sceneField(store, base, list){
    was there and needs none. */
 export const SCENE_WORDS = 7;
 const PAINT_LEVEL = 6;                     // chunk-core's CHUNK_LEVELS; not imported, this file has no chunk-core
-function paintOf(store, T, Dt, at, D){
+// Exported for log-core's one log, whose drops paint as these do.
+export function paintOf(store, T, Dt, at, D){
   const box = placedBounds(store, T, Dt);
   if (!box) return [];
   const side = 2 ** PAINT_LEVEL, n = Math.ceil(2 ** D / side), lo = [0, 0, 0], hi = [0, 0, 0];

@@ -23,7 +23,9 @@
    Edits come in through setRoot and §3b, and a worker follows them through
    tails (§4b). docs/edit-stream-log.md has the reasoning. A world dropped into
    a world (scene-core.js) is an edit too: the same setRoot, flip and tails, with
-   the drops in the tail's `scene` (docs/scene-plan.md §1.4–1.5).
+   the drops in the tail's `scene` (docs/scene-plan.md §1.4–1.5). Blocks and drops
+   in one world come as one log (log-core.js), its delta in the tail's `ops`
+   (docs/onelog-plan.md step 2).
 
    Addresses. A chunk at lod l is a 64³ grid of level-l cells, i.e. the
    DAG node at level l + 6, and the chunk grid at lod l has side
@@ -36,6 +38,7 @@ import { fastChunk, createJobCache } from './job-core.js';
 import { pageJob, RUN_HEAD, ATTR_NONE } from './ray-core.js';
 import { createBlockTable, editedField } from './edit-core.js';
 import { createSceneTable } from './scene-core.js';
+import { createOneTable } from './log-core.js';
 
 // Face order of the record's mask and of uOpenSides: +X −X +Y −Y +Z −Z.
 export const SIDES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
@@ -497,6 +500,20 @@ export function createStreamer(options = {}){
      now it only changes which kind each chunk wants, and a chunk of the
      old kind is drawn until its replacement is admitted (§2b). */
   function setOptions(o){ Object.assign(cfg, o); }
+  /* The same world in another store that holds the same nodes under the same ids
+     (gizmo-plan §7 step 5): the scatter, the lattice and the caves are built as
+     read-only views, and the world tool makes them real when B is pressed, so an
+     edit can intern. Every id means what it meant, so nothing drawn, held or
+     stamped changes: no reset and no new revision. Not while an edit is open or
+     waiting, whose world is the old store's; the caller checks the ids (dag-core's
+     importSame), since this can only check the count. */
+  function setStore(store){
+    if (!S.world) throw new Error('setStore: no world');
+    if (S.edit || S.next) throw new Error('setStore: an edit is open');
+    if (store.maxId !== S.world.store.maxId) throw new Error(`setStore: the store ends at id ${store.maxId}, the world's at ${S.world.store.maxId}`);
+    S.world = { ...S.world, store };
+    if (S.sel){ S.sel = selectChunks(S.world, S.sel.eye, cfg); recover(); }
+  }
   // The kind chunk `key` wants: decided in recover(), for the cut's chunks.
   const kindOf = key => S.kinds.get(key) || 'records';
   /* What a chunk's entry should have been built from, at the shown root or the
@@ -557,8 +574,18 @@ export function createStreamer(options = {}){
       if ((S.failures.get(c.key) || 0) < 2) need.add(c);
     }
     E.need = [...need].sort((a, b) => a.dist - b.dist);
+    E.drawn = plan.drawKeys;
     S.queue = E.need;
   }
+  /* The flip installs every held result the cut wants, and every one the plan
+     draws. Those can differ when the eye moved during the edit: a chunk asked for
+     as a leaf, held, then merged under its parent by a jump, is drawn as the
+     parent's fallback child and wanted by nobody. The plan counted it, so it asked
+     for nothing more, and a flip that dropped it drew the entry from before the
+     edit (in the browser once, 600 voxels; in Node 6 flights of 10 jumping at
+     D = 14; docs/onelog-log.md §5). With every chunk the plan draws resident, the
+     cover after the flip is the plan's: completeness only grows with residency,
+     and the plan counted nothing else. */
   function flip(){
     const E = S.edit;
     for (const b of E.blocks) S.paint.touch(b, E.rev);
@@ -566,7 +593,7 @@ export function createStreamer(options = {}){
     S.pinned = pinOf(S.world); S.edit = null;
     let accepted = 0, bytes = 0;
     for (const item of E.held.values()){
-      if (!demanded(item.job.key)){ S.pending.delete(item.job.key); S.stats.discarded++; continue; }
+      if (!demanded(item.job.key) && !E.drawn.has(item.job.key)){ S.pending.delete(item.job.key); S.stats.discarded++; continue; }
       installItem(item); accepted++; bytes += item.bytes;
     }
     S.stats.flips++; S.stats.installs += accepted; S.stats.uploaded += bytes;
@@ -775,7 +802,7 @@ export function createStreamer(options = {}){
   }
 
   return {
-    S, setWorld, setRoot, setOptions, update, nextJob, complete, fail, service, evict,
+    S, setWorld, setStore, setRoot, setOptions, update, nextJob, complete, fail, service, evict,
     get frame(){ return S.frame; }, get sel(){ return S.sel; }, get revision(){ return S.revision; },
     entry: key => S.cache.get(key), kindOf, stale,
     // Is this resident entry built from what the shown root holds?
@@ -887,7 +914,10 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
   // among the keys, so colourOf builds it over this side's own view and counts.
   // A named field ignores them.
   const base = snap.colour && colourOf ? colourOf(snap.colour, { store, counts, D: snap.D }) : null;
-  let colour = base, table = null, scenes = null;
+  let colour = base, table = null, scenes = null, one = null;
+  // A dropped world's field, built once over this side's view and counts, at
+  // the child's own depth (its words and skin are about the child's grid).
+  const fieldOf = (desc, D) => colourOf(desc, { store, counts, D });
   const full = (root, lod, x, y, z) => {
     const id = chunkNode(store, root, snap.D, lod, x, y, z).id;
     return id !== EMPTY && isFull(store, counts, id, lod + CHUNK_LEVELS);
@@ -923,10 +953,17 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
      docs/scene-plan.md §1.5): the follower builds each new world's field once, over
      this side's view and counts, after the keys above have grown it (a baked
      child's skin is among them), and the scene field is rebuilt over the base on
-     every delta, a few bounds a drop. **Blocks and drops in one world are refused**:
-     "the latest op wins" would need one log ordering both (scene-plan §4 Q3), and
-     two tables wrapped either way round would each be wrong somewhere. */
-  run.tail = ({ from, keys, counts: c, poses: p, edits, scene }) => {
+     every delta, a few bounds a drop.
+
+     **Blocks and drops in one world come as one log** (`ops`, log-core's
+     createOneLog delta; docs/onelog-plan.md step 2). Its follower, createOneTable,
+     keeps a block table and a drop list numbered in one sequence, so a voxel takes
+     the latest op that made it solid, whichever kind. The two old roads (`edits`,
+     `scene`) stay until the page moves to the one log (step 3), and they still
+     refuse each other: two tables wrapped either way round would each be wrong
+     somewhere. A world follows one road, so mixing the one log with either old
+     one is refused too. */
+  run.tail = ({ from, keys, counts: c, poses: p, edits, scene, ops }) => {
     store.grow(from, keys);                 // throws if a tail was lost
     const top = store.maxId;
     if (top >= C.length){
@@ -935,6 +972,7 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
     }
     C.set(c, from);
     if (P && p) P.set(p, from);
+    if ((edits || scene) && one) throw new Error('tail: this world follows one log; a block or scene log can\'t join it');
     if (edits && base){
       if (scenes) throw new Error('tail: blocks in a world with drops in it need one log for both (scene-plan §4 Q3)');
       if (!table){ table = createBlockTable(); colour = editedField(base, table); }
@@ -942,9 +980,15 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
     }
     if (scene && base){
       if (table) throw new Error('tail: drops in a world with blocks in it need one log for both (scene-plan §4 Q3)');
-      scenes ??= createSceneTable(store, (desc, D) => colourOf(desc, { store, counts, D }));
+      scenes ??= createSceneTable(store, fieldOf);
       scenes.sync(scene);
       colour = scenes.field(base);
+    }
+    if (ops && base){
+      if (table || scenes) throw new Error('tail: this world follows a block or scene log; the one log can\'t join it');
+      one ??= createOneTable(store, fieldOf);
+      one.sync(ops);
+      colour = one.field(base);
     }
   };
   run.cache = cache;
@@ -970,9 +1014,14 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
 
    `scene` is a scene log (scene-core's createSceneLog), followed the way `log` is,
    by epoch and count, plus the worlds it has registered: a baked child's words go
-   in the first tail after its first drop, and never again (scene-plan §1.5). */
-export function createTailer(store, { counts, classes = null, log = null, scene = null }){
-  let next = store.maxId + 1, epoch = 0, seen = 0, sEpoch = 0, sSeen = 0, sWorlds = 0;
+   in the first tail after its first drop, and never again (scene-plan §1.5).
+
+   `oneLog` is log-core's createOneLog, blocks and drops in one list, followed the
+   same way into the tail's `ops`. The epoch is what tells "undo a drop, then place
+   a block" (the same count, a different op on the end) from nothing new. Give a
+   tailer one of `log`, `scene` or `oneLog`: the runner follows one road a world. */
+export function createTailer(store, { counts, classes = null, log = null, scene = null, oneLog = null }){
+  let next = store.maxId + 1, epoch = 0, seen = 0, sEpoch = 0, sSeen = 0, sWorlds = 0, oEpoch = 0, oSeen = 0, oWorlds = 0;
   return () => {
     counts.update(); classes?.update();
     const from = next, top = store.maxId, n = top - from + 1;
@@ -988,7 +1037,12 @@ export function createTailer(store, { counts, classes = null, log = null, scene 
       drops = scene.delta(sEpoch, sSeen, sWorlds);
       sEpoch = drops.epoch; sSeen = drops.count; sWorlds += drops.worlds.length;
     }
+    let ops = null;
+    if (oneLog && (oneLog.epoch !== oEpoch || oneLog.count !== oSeen || oneLog.worldCount !== oWorlds)){
+      ops = oneLog.delta(oEpoch, oSeen, oWorlds);
+      oEpoch = ops.epoch; oSeen = ops.count; oWorlds += ops.worlds.length;
+    }
     next = top + 1;
-    return { from, keys: store.keysFrom(from), counts: c, poses: p, edits, scene: drops };
+    return { from, keys: store.keysFrom(from), counts: c, poses: p, edits, scene: drops, ops };
   };
 }

@@ -337,6 +337,25 @@ export function createStore(){
            get size(){ return nodes.size; }, get maxId(){ return nodes.size + FIRST_NODE - 1; } };
 }
 
+/* importSame(store, keys, from, to): nodes from..to − 1 of a snapshot's keys
+   interned into `store`, which holds exactly the first `from` of them under their
+   own ids, and each must land on its own id again (gizmo-plan §7 step 5). Returns
+   −1 when they all did, or the first that didn't: a node already there, so the
+   keys hold it twice and every id after it would move. That's the identity
+   import the kit and the files make at install, in slices, so the scatter, the
+   lattice and the caves (up to two million nodes, ~290 ns each) can be made real
+   when B is pressed with frames drawn between. No map: while every id is its own,
+   a key's children are already this store's ids. */
+export function importSame(store, keys, from, to){
+  if (store.size !== from) throw new Error(`importSame: the store holds ${store.size} nodes, the slice starts at ${from}`);
+  if (to * 9 > keys.length || to < from) throw new Error(`importSame: nodes ${from} to ${to} aren't in ${keys.length / 9}`);
+  for (let i = from; i < to; i++){
+    const at = 9 * i;
+    if (store.intern(keys[at], keys.subarray(at + 1, at + 9)) !== i + FIRST_NODE) return i;
+  }
+  return -1;
+}
+
 /* ---- pruning ----------------------------------------------------------------
    A store keeps every node ever interned, and some builds intern a lot no
    root reaches: graft() unions the blocks that share a position, and the
