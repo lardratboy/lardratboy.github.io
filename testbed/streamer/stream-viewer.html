@@ -220,7 +220,7 @@ pad: L stick move, R stick look, RT/LT up/down
 <div id="hud" hidden></div>
 <div id="fps" hidden>– fps</div>
 <div id="tris" hidden title="triangles are counted before the GPU culls the back-facing ones"></div>
-<div id="corner"><button id="wireToggle" title="draw the triangles as lines (T)">wireframe (T)</button><button id="hudToggle" title="show or hide the panels (H)">show HUD (H)</button></div>
+<div id="corner"><button id="aoToggle" title="ambient occlusion in screen space, a prototype (Y)">AO (Y)</button><button id="wireToggle" title="draw the triangles as lines (T)">wireframe (T)</button><button id="hudToggle" title="show or hide the panels (H)">show HUD (H)</button></div>
 <div id="editBar" hidden><div id="editSwatches"></div><div id="editNote"></div></div>
 <div id="dropHint" hidden>drop world files to open them</div>
 <div id="rowPicker" hidden><div id="rowPanel" role="dialog" aria-modal="true" aria-labelledby="rowTitle">
@@ -300,7 +300,7 @@ import { createBrickPool, installPage, releasePage, buildCoverTree, KIND_RAY, KI
 import { attrRGB, attrOf8 } from './attr-core.js';
 import { readPad, pickPad, PAD } from './pad-core.js';
 import { createOcclusion, nearEye, nearRadius, hiddenByTiles, OCCLUSION } from './occlusion-core.js';
-import { SHAPES, fieldOf } from './experiments/shapes.mjs';
+import { SHAPES, fieldOf, crustOf } from './experiments/shapes.mjs';
 import { dagWorld, createActors, spawnNear, tickFliers, advanceFliers, regather, restHits, rescue, diffBox, trapped, mix as actorMix, FLIER, ONE as ACTOR_ONE, MAX_D as ACTOR_MAX_D } from './actor-core.js';
 import { actorBody, bodyRecords, makeBody, turnMap, turnedBox } from './body-core.js';
 import { sliceCore, rowsOf, automatonOf, AXIS_NAMES } from './testbed-rows.js';
@@ -309,7 +309,7 @@ import { buildScatterInWorkers, buildKitInWorkers, ornamentsKept, isAbort } from
 import { latticeDesc, latticeFromParam, latticeParam, budgetOf, maxCube, stackOf, gapOf } from './lattice-core.js';
 import { kitDesc, kitFromParam, kitParam, sideOf, KIT_LIMITS } from './kit-core.js';
 import { caveDesc } from './cave-core.js';
-import { clayDesc, clayFromParam, clayParam, buildClay, clayPlace, CLAY_LIMITS, CLAY_DEFAULTS } from './clay-core.js';
+import { clayDesc, clayFromParam, clayParam, buildClay, clayPlace, CLAY_LIMITS, CLAY_DEFAULTS, GROUND_DEPTH } from './clay-core.js';
 
 const $ = id => document.getElementById(id);
 const canvas = $('gl');
@@ -545,6 +545,200 @@ const RAY_UNIFORMS = ['uTree', 'uPages', 'uBricks', 'uPageAttr', 'uAttrHeap', 'u
 const RAY_PASS_UNIFORMS = [...RAY_UNIFORMS, 'uEyeN', 'uInvSide', 'uLodColors', 'uColorMode', 'uFog', 'uDepthScale'];
 const RU = uniformsOf(rayProg, RAY_PASS_UNIFORMS), RUD = uniformsOf(rayProgDiscard, RAY_PASS_UNIFORMS);
 const emptyVAO = gl.createVertexArray();
+
+/* ---- screen-space ambient occlusion, a prototype (docs/vdagssao.md) --------
+   Two full-screen passes after the frame, reading the raster's depth texture
+   and nothing else, so renderView's frames are untouched and SSAO off is the
+   page as it was.
+
+   1. AO (SSAO_FS), at full or half resolution into an RG8 target: GTAO
+      (Jimenez et al. 2016, as Intel's XeGTAO writes it), `slices` screen
+      directions a pixel and `steps` depth reads each way along each, every
+      horizon integrated against the cosine. The normal is rebuilt from depth
+      (of each pair of neighbours, the one on the same plane) and snapped to
+      the nearest axis, since every face here is one of six; its code goes in
+      G for the blur. experiments/ssao-sketch.mjs chose GTAO over the
+      hemisphere kernel: closer to the AO the DAG really has on every view,
+      for the same 16 reads (vdagssao.md §4).
+   2. Blur and multiply (SSAO_BLUR_FS), full resolution: the 4×4 AO texels
+      the noise tiles over, kept only where the normal code matches and the
+      texel lies on this pixel's plane (a face's own pixels, exactly, at any
+      angle), faded by the frame's fog, and multiplied onto the canvas (blend
+      ZERO, SRC_COLOR). Carrying each texel's depth in the AO target, so the
+      blur needn't read the depth texture, saved 0.05 ms of 1 (§5).
+
+   What it can't see: the ray pass writes no depth, so traced chunks are
+   sky to it (raster only is the default since 2026-11-09); and the whole
+   colour is darkened, not just the ambient term, since the frame is shaded
+   before AO exists (vdagssao.md §6 has both). */
+const SSAO_COMMON = `#version 300 es
+precision highp float;
+precision highp int;
+uniform highp sampler2D uRasterDepth;
+uniform vec2 uNearFar;           // the raster's planes, voxels
+uniform vec3 uFwd, uRightT, uUpT;// rayBasis: a pixel's ray is fwd + ndc.x·rightT + ndc.y·upT
+uniform vec2 uSize;              // the frame, px
+// Forward distance at full-resolution pixel p, or −1 for nothing drawn: the
+// window depth back through viewProj (GLSL_RASTER_TMAX's formula, without
+// the division by d·fwd, which is 1 for these rays).
+float linearAt(ivec2 p){
+  p = clamp(p, ivec2(0), ivec2(uSize) - 1);
+  float z = texelFetch(uRasterDepth, p, 0).r;
+  if (z >= 1.0) return -1.0;
+  float n = uNearFar.x, f = uNearFar.y;
+  return n * f / (f * (1.0 - z) + z * n);
+}
+vec3 relAt(ivec2 p, float zf){
+  vec2 ndc = (vec2(p) + 0.5) / uSize * 2.0 - 1.0;
+  return zf * (uFwd + ndc.x * uRightT + ndc.y * uUpT);
+}
+`;
+const SSAO_FS = SSAO_COMMON + `
+uniform float uScale;            // frame pixels per AO pixel: 1 or 2
+uniform float uRadius;           // voxels
+uniform float uPxPerUnit;        // (height / 2) / tan(0.45): a voxel at forward distance z is this / z px
+uniform int uSlices, uSteps;
+out vec4 outAO;
+const float PI = 3.14159265;
+void main(){
+  ivec2 q = ivec2(gl_FragCoord.xy), p = ivec2(vec2(q) * uScale);
+  float z0 = linearAt(p);
+  if (z0 < 0.0){ outAO = vec4(0.5, 0.0, 0.0, 1.0); return; }
+  vec3 P = relAt(p, z0);
+  // The normal: of left and right the neighbour nearer in depth, the same for
+  // down and up, crossed, then snapped to an axis (code 1–6 in G; 0 is none).
+  float zl = linearAt(p - ivec2(1, 0)), zr = linearAt(p + ivec2(1, 0)), zd = linearAt(p - ivec2(0, 1)), zu = linearAt(p + ivec2(0, 1));
+  bool useR = zr > 0.0 && (zl < 0.0 || abs(zr - z0) < abs(zl - z0)), useU = zu > 0.0 && (zd < 0.0 || abs(zu - z0) < abs(zd - z0));
+  if ((!useR && zl < 0.0) || (!useU && zd < 0.0)){ outAO = vec4(0.5, 0.0, 0.0, 1.0); return; }
+  vec3 dx = useR ? relAt(p + ivec2(1, 0), zr) - P : P - relAt(p - ivec2(1, 0), zl);
+  vec3 dy = useU ? relAt(p + ivec2(0, 1), zu) - P : P - relAt(p - ivec2(0, 1), zd);
+  vec3 n = normalize(cross(dx, dy));
+  if (dot(n, P) > 0.0) n = -n;
+  vec3 a = abs(n);
+  int code;
+  if (a.x >= a.y && a.x >= a.z){ code = n.x > 0.0 ? 1 : 2; n = vec3(sign(n.x), 0.0, 0.0); }
+  else if (a.y >= a.z){ code = n.y > 0.0 ? 3 : 4; n = vec3(0.0, sign(n.y), 0.0); }
+  else { code = n.z > 0.0 ? 5 : 6; n = vec3(0.0, 0.0, sign(n.z)); }
+  float g = float(code) / 8.0;
+  // A radius under a pixel can't be seen: no AO, as far away as that is.
+  float rPix = uRadius * uPxPerUnit / z0;
+  if (rPix < 1.0 || uSlices == 0){ outAO = vec4(0.5, g, 0.0, 1.0); return; }
+  vec3 V = normalize(-P), right = normalize(uRightT), up = normalize(uUpT);
+  // The noise by AO pixel, so the blur's 4×4 AO texels hold all 16 rotations.
+  // By frame pixel (p = 2q at half resolution) they held 4, bunched (0, 0.18,
+  // 0.24 and 0.94 of π), and flat ground came out 0.91 (vdagssao.md §5).
+  int idx = (q.x & 3) + 4 * (q.y & 3);
+  float n0 = fract(float(idx) * 0.618034), n1 = fract(float(idx) * 0.754878 + 0.5);
+  float fRange = 0.25 * uRadius, vis = 0.0;
+  for (int s = 0; s < uSlices; s++){
+    float phi = PI * (float(s) + n0) / float(uSlices);
+    vec2 sc = vec2(cos(phi), sin(phi));
+    vec3 dir = sc.x * right + sc.y * up;
+    vec3 ortho = normalize(dir - dot(dir, V) * V), axis = normalize(cross(ortho, V));
+    vec3 pn = n - axis * dot(n, axis);
+    float pl = length(pn);
+    if (pl < 1e-6){ vis += 1.0; continue; }
+    float cosN = clamp(dot(pn, V) / pl, -1.0, 1.0), nA = sign(dot(ortho, pn)) * acos(cosN);
+    float low0 = cos(nA + 0.5 * PI), low1 = cos(nA - 0.5 * PI), h0c = low0, h1c = low1;
+    for (int k = 0; k < uSteps; k++){
+      float u = (float(k) + n1) / float(uSteps), dist = max(1.0, u * u * rPix);
+      ivec2 o = ivec2(round(sc * dist));
+      float za = linearAt(p + o), zb = linearAt(p - o);
+      if (za > 0.0){
+        vec3 d = relAt(p + o, za) - P; float len = length(d);
+        if (len > 1e-6) h0c = max(h0c, mix(low0, dot(d, V) / len, clamp((uRadius - len) / fRange, 0.0, 1.0)));
+      }
+      if (zb > 0.0){
+        vec3 d = relAt(p - o, zb) - P; float len = length(d);
+        if (len > 1e-6) h1c = max(h1c, mix(low1, dot(d, V) / len, clamp((uRadius - len) / fRange, 0.0, 1.0)));
+      }
+    }
+    float h0 = acos(clamp(h0c, -1.0, 1.0)), h1 = -acos(clamp(h1c, -1.0, 1.0));
+    h0 = nA + clamp(h0 - nA, -0.5 * PI, 0.5 * PI);
+    h1 = nA + clamp(h1 - nA, -0.5 * PI, 0.5 * PI);
+    float sN = sin(nA);
+    vis += pl * ((cosN + 2.0 * h0 * sN - cos(2.0 * h0 - nA)) + (cosN + 2.0 * h1 * sN - cos(2.0 * h1 - nA))) / 4.0;
+  }
+  // Unclamped, halved: unoccluded GTAO is 1 only on average over slice
+  // directions (a slice alone spreads ±0.5 at grazing angles), so clamping a
+  // pixel to 1 before the blur darkened flat ground to 0.91 (vdagssao.md §5).
+  // The blur averages and then clamps; halving keeps RG8 able to hold it.
+  outAO = vec4(0.5 * max(vis / float(uSlices), 0.0), g, 0.0, 1.0);
+}`;
+const SSAO_BLUR_FS = SSAO_COMMON + `
+uniform highp sampler2D uAO;
+uniform float uScale;
+uniform float uFog;
+uniform int uShow;               // 1: the AO alone, unblended
+uniform int uDepthBlur;          // 1: the first blur's test, depth within 2% (for ssaoBench's comparison)
+out vec4 outColor;
+void main(){
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  float z0 = linearAt(p);
+  if (z0 < 0.0){ outColor = uShow == 1 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(1.0); return; }
+  ivec2 q = ivec2(vec2(p) / uScale), top = textureSize(uAO, 0) - 1;
+  float g0 = texelFetch(uAO, clamp(q, ivec2(0), top), 0).g, sum = 0.0, w = 0.0;
+  // A face's own texels: the same normal, and on the same plane. The first
+  // blur asked for a depth within 2%, and at a grazing angle that's one row
+  // of the tile, 4 of its 16 slice directions: flat ground came out 0.91,
+  // darkest where it was seen most obliquely (vdagssao.md §5).
+  int code = int(g0 * 8.0 + 0.5) - 1;
+  vec3 n0 = vec3(0.0);
+  if (code >= 0) n0[code >> 1] = (code & 1) == 0 ? 1.0 : -1.0;
+  vec3 P0 = relAt(p, z0);
+  float tol = 0.05 + 0.002 * z0;
+  for (int y = -2; y < 2; y++) for (int x = -2; x < 2; x++){
+    ivec2 t = clamp(q + ivec2(x, y), ivec2(0), top), pt = ivec2(vec2(t) * uScale);
+    vec2 v = texelFetch(uAO, t, 0).rg;
+    float z = linearAt(pt);
+    if (abs(v.g - g0) > 0.01 || z < 0.0) continue;
+    if (uDepthBlur == 1 ? abs(z - z0) > 0.02 * z0 + 0.1 : abs(dot(relAt(pt, z) - P0, n0)) > tol) continue;
+    sum += v.r; w += 1.0;
+  }
+  float ao = w > 0.0 ? clamp(2.0 * sum / w, 0.0, 1.0) : 1.0;
+  float fog = 1.0 - exp(-length(relAt(p, z0)) * uFog);
+  ao = mix(ao, 1.0, fog * 0.85);
+  outColor = vec4(vec3(ao), 1.0);
+}`;
+const ssaoProg = link(RAY_VS, SSAO_FS), ssaoBlurProg = link(RAY_VS, SSAO_BLUR_FS);
+const SSAO_U = uniformsOf(ssaoProg, ['uRasterDepth', 'uNearFar', 'uFwd', 'uRightT', 'uUpT', 'uSize', 'uScale', 'uRadius', 'uPxPerUnit', 'uSlices', 'uSteps']);
+const SSAO_BU = uniformsOf(ssaoBlurProg, ['uRasterDepth', 'uNearFar', 'uFwd', 'uRightT', 'uUpT', 'uSize', 'uAO', 'uScale', 'uFog', 'uShow', 'uDepthBlur']);
+const SSAO_AO_UNIT = 6;                    // RASTER_DEPTH_UNIT is 5
+/* The settings: '1' (or 'on') is the defaults, else slices,steps,scale,radius.
+   The defaults are the sketch's GTAO 16 (2 slices × 4 steps) at R = 8, at half
+   resolution, ssaoBench's cheapest row that still looked the same
+   (vdagssao.md §5). Anything that doesn't parse is off. */
+const SSAO_DEFAULTS = { slices: 2, steps: 4, scale: 2, radius: 8 };
+function ssaoFromParam(s){
+  if (s === '1' || s === 'on') return { ...SSAO_DEFAULTS };
+  if (!s) return null;
+  const v = s.split(',').map(Number);
+  if (v.length !== 4 || v.some(x => !Number.isFinite(x))) return null;
+  const [slices, steps, scale, radius] = v;
+  return { slices: Math.max(0, Math.min(8, slices | 0)), steps: Math.max(1, Math.min(16, steps | 0)), scale: scale === 2 ? 2 : 1, radius: Math.max(0.5, Math.min(256, radius)) };
+}
+const ssaoParam = o => [o.slices, o.steps, o.scale, o.radius].join(',');
+const SSAO_TARGETS = new Map();
+function ssaoTarget(w, h){
+  const key = w + 'x' + h;
+  let A = SSAO_TARGETS.get(key);
+  if (A) return A;
+  if (SSAO_TARGETS.size >= 3){
+    const [k0, A0] = SSAO_TARGETS.entries().next().value;
+    gl.deleteFramebuffer(A0.fb); gl.deleteTexture(A0.tex); SSAO_TARGETS.delete(k0);
+  }
+  A = { fb: gl.createFramebuffer(), tex: gl.createTexture(), w, h };
+  gl.bindTexture(gl.TEXTURE_2D, A.tex);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG8, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, A.fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, A.tex, 0);
+  const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  if (status !== gl.FRAMEBUFFER_COMPLETE) throw new Error(`ssao target ${key} incomplete (0x${status.toString(16)})`);
+  SSAO_TARGETS.set(key, A);
+  return A;
+}
 
 /* The block outline (edit-core's boxEdges): each edge an instance, a quad of six
    vertices widened in pixels, because WebGL's own lines are one device pixel, a
@@ -1186,6 +1380,13 @@ const state = {
   occlusion: OCCLUSION_MODES.includes(params.get('occlusion')) ? params.get('occlusion') : null,
   occlusionChosen: OCCLUSION_MODES.includes(params.get('occlusion')),
   freeze: false,
+  // Screen-space ambient occlusion (docs/vdagssao.md), a prototype, off by
+  // default: GTAO on the raster's depth, after the frame (drawSSAO). ?ssao=1
+  // turns it on with the defaults; ?ssao=slices,steps,scale,radius picks
+  // (scale 2 is half resolution, radius in voxels); ?ssaoshow=1 draws the AO
+  // alone. Y toggles it.
+  ssao: ssaoFromParam(params.get('ssao')),
+  ssaoShow: params.get('ssaoshow') === '1',
   // The lattice world's descriptor (docs/lattice3d-plan.md): ?lattice=
   // R,nx,ny,nz,gap,turns,axes,align, the seed from the world id (lattice:<seed>).
   lattice: null,
@@ -1405,6 +1606,8 @@ function bindRowPicker(){
 const isRow = id => id.startsWith('row:'), isScatter = id => id.startsWith('scatter:'), isLattice = id => id.startsWith('lattice:');
 const isKit = id => id.startsWith('kit:'), isCaves = id => /^caves:\d+$/.test(id), isClay = id => id === 'clay';
 const isShape = id => id.startsWith('shape:');
+// How deep a heightfield shape's crust is, in voxels (the terrain, the hills).
+const CRUST = 64;
 /* Which worlds take worlds (gizmo-plan §7 steps 4 and 5, vdagplacement §1): every
    world with a named colour. The kit, the shapes and the testbed rows are real stores
    on this thread, and a file of any of them up to `tool.importMax` nodes is made real
@@ -1559,7 +1762,7 @@ function bindKit(){
 function showClay(){
   const d = state.clay;
   $('clayInfo').textContent = d.lump ? (W && W.clay && clayParam(W.clay) === clayParam(d) ? `${W.nodes.toLocaleString()} nodes, ${Math.round(W.buildMs)} ms` : '')
-    : d.ground ? 'half the world is solid, so there\'s no floor to reach' : 'empty: nothing to draw';
+    : d.ground ? `a slab ${GROUND_DEPTH} voxels deep, with air under it` : 'empty: nothing to draw';
 }
 function fillClay(){
   const d = state.clay, sel = $('clayLump');
@@ -1937,7 +2140,10 @@ async function buildWorld(signal, gen){
   } else {
     const shape = SHAPES.find(s => 'shape:' + s.name === state.world) || SHAPES[0];
     D = state.depth;
-    ({ root } = store.fromField(D, fieldOf(shape, D)));
+    // The terrain and the hills are a crust CRUST voxels deep, not solid to
+    // the floor (asked 2026-11-13; shapes.mjs's crustOf). The surface and its
+    // colour are the shape's own.
+    ({ root } = store.fromField(D, fieldOf(shape.height ? crustOf(shape, D, CRUST) : shape, D)));
     label = shape.name;
     colour = { kind: 'shape', name: shape.name, D };
     shaped = true;
@@ -2098,7 +2304,7 @@ function showPanels(){
   // (The block tool held the pointer's lock until onelog-plan step 3, and the controls
   // and buttons hid under it. Both tools have a free cursor now.)
   $('ctl').hidden = !hudOn;
-  $('hudToggle').hidden = $('wireToggle').hidden = false;
+  $('hudToggle').hidden = $('wireToggle').hidden = $('aoToggle').hidden = false;
   $('hudToggle').textContent = hudOn ? 'hide HUD (H)' : 'show HUD (H)';
 }
 function setHud(on){
@@ -2121,6 +2327,15 @@ function showWire(){
   $('tris').hidden = !state.wire;
   showTriangles();
 }
+// SSAO on with the settings it had (the defaults if none), or off; the link keeps them.
+function setSSAO(on){
+  state.ssao = on ? state.ssaoLast || ssaoFromParam('1') : null;
+  if (state.ssao) state.ssaoLast = state.ssao;
+  const q = new URLSearchParams(location.search);
+  if (state.ssao) q.set('ssao', ssaoParam(state.ssao)); else q.delete('ssao');
+  history.replaceState(null, '', '?' + q);
+  $('aoToggle').classList.toggle('on', !!state.ssao);
+}
 
 /* ---- input --------------------------------------------------------------- */
 const keys = new Set();
@@ -2133,6 +2348,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyF') toggleFreeze();
   if (e.code === 'KeyH' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setHud(!hudOn);
   if (e.code === 'KeyT' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setWire(!state.wire);
+  if (e.code === 'KeyY' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setSSAO(!state.ssao);
   // The seed keys leave modified presses alone (cmd-R reloads, and shouldn't roll a seed first).
   // In edit mode they do nothing: a new seed is a new world, and it would take your
   // edits with it (realtimecsg.md §11.6).
@@ -2960,6 +3176,47 @@ function drawWire(w, h){
   }
   gl.bindVertexArray(null);
 }
+/* SSAO's two passes (SSAO_FS, above) onto framebuffer `out`, after renderView
+   drew the frame w × h: its raster target still holds the depth, and
+   view.near and view.far are the planes it was drawn with. `o` is the
+   settings (state.ssao). */
+function drawSSAO(w, h, o = state.ssao, out = null, show = state.ssaoShow){
+  if (!W || !o) return;
+  const T = rasterTarget(w, h), aw = Math.ceil(w / o.scale), ah = Math.ceil(h / o.scale), A = ssaoTarget(aw, ah), B = rayBasis(w / h);
+  gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.STENCIL_TEST); gl.disable(gl.BLEND);
+  gl.activeTexture(gl.TEXTURE0 + RASTER_DEPTH_UNIT); gl.bindTexture(gl.TEXTURE_2D, T.depth);
+  const common = U => {
+    gl.uniform1i(U.uRasterDepth, RASTER_DEPTH_UNIT);
+    gl.uniform2f(U.uNearFar, view.near, view.far);
+    gl.uniform3fv(U.uFwd, B.fwd); gl.uniform3fv(U.uRightT, B.rightT); gl.uniform3fv(U.uUpT, B.upT);
+    gl.uniform2f(U.uSize, w, h);
+    gl.uniform1f(U.uScale, o.scale);
+  };
+  gl.bindFramebuffer(gl.FRAMEBUFFER, A.fb);
+  gl.viewport(0, 0, aw, ah);
+  gl.useProgram(ssaoProg);
+  common(SSAO_U);
+  gl.uniform1f(SSAO_U.uRadius, o.radius);
+  gl.uniform1f(SSAO_U.uPxPerUnit, h / 2 / Math.tan(0.45));
+  gl.uniform1i(SSAO_U.uSlices, o.slices); gl.uniform1i(SSAO_U.uSteps, o.steps);
+  gl.bindVertexArray(emptyVAO);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, out);
+  gl.viewport(0, 0, w, h);
+  gl.useProgram(ssaoBlurProg);
+  common(SSAO_BU);
+  gl.activeTexture(gl.TEXTURE0 + SSAO_AO_UNIT); gl.bindTexture(gl.TEXTURE_2D, A.tex);
+  gl.uniform1i(SSAO_BU.uAO, SSAO_AO_UNIT);
+  gl.uniform1f(SSAO_BU.uFog, 1 / (1.5 * W.side));
+  gl.uniform1i(SSAO_BU.uShow, show ? 1 : 0);
+  gl.uniform1i(SSAO_BU.uDepthBlur, o.depthBlur ? 1 : 0);
+  if (!show){ gl.enable(gl.BLEND); gl.blendFunc(gl.ZERO, gl.SRC_COLOR); }
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(null);
+  gl.activeTexture(gl.TEXTURE0 + SSAO_AO_UNIT); gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.activeTexture(gl.TEXTURE0);
+}
 /* The count beside it. A cube is 12 triangles to the GPU whatever it shows: the vertex
    shader collapses a hidden face to a point after it's been sent. So the headline is what
    can reach the screen, the exposed faces plus the traced chunks' stencil boxes and the
@@ -3414,6 +3671,8 @@ function bindControls(){
   showWire();
   $('hudToggle').addEventListener('click', e => { e.currentTarget.blur(); setHud(!hudOn); });
   $('wireToggle').addEventListener('click', e => { e.currentTarget.blur(); setWire(!state.wire); });
+  $('aoToggle').addEventListener('click', e => { e.currentTarget.blur(); setSSAO(!state.ssao); });
+  $('aoToggle').classList.toggle('on', !!state.ssao);
   $('detail').value = state.detail; $('detailV').textContent = state.detail;
   $('max').value = String(state.max); $('rule').value = state.rule; $('color').value = String(state.color);
   $('cache').value = String(state.cache); $('seams').value = state.seams ? '1' : '0';
@@ -3835,6 +4094,9 @@ function draw(){
   if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; streamer.setOptions(viewportOptions(w, h)); dirty = true; }
   canvas.style.width = innerWidth + 'px'; canvas.style.height = innerHeight + 'px';
   renderView(w, h, state.color, true, undefined, 'both', null, occlusionOf());
+  // After the frame, like everything else that isn't part of it (docs/vdagssao.md).
+  if (state.ssao) timed('ssao', () => drawSSAO(w, h));
+  else timers.ssao = NaN;
   if (state.wire) drawWire(w, h);
   if (edit.on){ updateAim(); if (isScene()) drawPreview(w, h); drawOutline(w, h); }
 }
@@ -3844,7 +4106,7 @@ function draw(){
    interval can't give, since the display's refresh holds it at 13–17 ms.
    Results arrive a few frames late and are smoothed. */
 const timerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2');
-const timers = { pending: [], raster: NaN, ray: NaN, samples: { raster: [], ray: [] } };
+const timers = { pending: [], raster: NaN, ray: NaN, ssao: NaN, samples: { raster: [], ray: [], ssao: [] } };
 function timed(name, fn){
   if (!timerExt){ fn(); return; }
   const q = gl.createQuery();
@@ -4087,7 +4349,9 @@ function hud(){
       (view.rayChunks ? state.stencil ? `  stencil ${view.marked} boxes` : '  <span class="warn">full-screen ray pass</span>' : '') + '\n' +
     (ray.pageCount ? `<span class="sec">ray</span> ${ray.pageCount} pages, ${ray.brickPool.size.toLocaleString()} bricks (${ray.uploads.toLocaleString()} uploaded), tree ${ray.treeNodes}\n` : '') +
     `<span class="sec">words</span> ${mb(4 * [...S.cache.values()].reduce((a, e) => a + (e.words || 0), 0))} of the cache${ray.pageCount ? `, heap ${mb(4 * ray.heapAlloc.used)} of ${mb(4 * ray.heapAlloc.capacity)}` : ''}${ray.heapFull ? `  <span class="warn">heap full: ${ray.heapFull} pages without words</span>` : ''}\n` +
-    `<span class="sec">gpu</span> ${timerExt ? `raster ${Number.isFinite(timers.raster) ? timers.raster.toFixed(2) : '–'} ms  ray ${Number.isFinite(timers.ray) ? timers.ray.toFixed(2) : '–'} ms` : 'no timer extension'}\n` +
+    `<span class="sec">gpu</span> ${timerExt ? `raster ${Number.isFinite(timers.raster) ? timers.raster.toFixed(2) : '–'} ms  ray ${Number.isFinite(timers.ray) ? timers.ray.toFixed(2) : '–'} ms` +
+      (state.ssao ? `  ssao ${Number.isFinite(timers.ssao) ? timers.ssao.toFixed(2) : '–'} ms` : '') : 'no timer extension'}` +
+      (state.ssao ? `  <span class="sec">ssao</span> ${state.ssao.slices} slices × ${state.ssao.steps} steps, R = ${state.ssao.radius}, ${state.ssao.scale === 2 ? 'half' : 'full'} resolution` : '') + '\n' +
     (actors.n ? `<span class="sec">actors</span> ${actors.alive} of ${actors.n} alive, ${view.actors} drawn  tick ${actors.tickMs.toFixed(2)} ms, ${actors.probes.toFixed(2)} probes an actor, ` +
       `t = ${actors.A ? actors.A.t : 0}${actors.regathered ? `, ${actors.regathered} regathered` : ''}${actors.rescued ? `, ${actors.rescued} rescued (last ${actors.rescueMs.toFixed(1)} ms)` : ''}${actors.forwardMs ? `  fast forward 10 s: ${actors.forwardMs.toFixed(0)} ms` : ''}` +
       `${actors.note ? `  <span class="warn">${actors.note}</span>` : ''}\n` : '') +
@@ -5196,6 +5460,106 @@ window.__ray = {
   R: () => rayState(),
   classifyPagesCPU, traceCPU, classifyProbe, traceProbe, attrProbe, boundProbe, maskProbe, hitAttrCPU,
 };
+
+/* ---- what SSAO costs (docs/vdagssao.md §5) ------------------------------------
+   The view on screen, converged, then each setting timed against none: by GPU
+   timer queries where the browser has them (the passes' own time, median of
+   `frames`), else by the wall clock (wallTime's way: frames drawn in fours and
+   finished, the frame with SSAO less the frame without). Then the default
+   setting's AO alone, read back: how much of the frame it darkens, which is
+   what the frame shows of it, coarse lods and all. ?ssaobench runs it here. */
+// A row's settings may add depthBlur: true, the first blur's depth test, for
+// the A/B in vdagssao.md §5 (0 to 0.5 ms cheaper; flat ground 0.91).
+const SSAO_BENCH = [
+  ['off', null],
+  ['passes, no slices, half', { slices: 0, steps: 1, scale: 2, radius: 8 }],
+  ['passes, no slices, full', { slices: 0, steps: 1, scale: 1, radius: 8 }],
+  ['GTAO 1×4, half', { slices: 1, steps: 4, scale: 2, radius: 8 }],
+  ['GTAO 2×4, half', { slices: 2, steps: 4, scale: 2, radius: 8 }],
+  ['GTAO 2×4, full', { slices: 2, steps: 4, scale: 1, radius: 8 }],
+  ['GTAO 4×4, full', { slices: 4, steps: 4, scale: 1, radius: 8 }],
+  ['GTAO 2×8, full', { slices: 2, steps: 8, scale: 1, radius: 8 }],
+  ['GTAO 2×4, R = 32, full', { slices: 2, steps: 4, scale: 1, radius: 32 }],
+];
+window.ssaoBench = async function ssaoBench({ minMs = 400, frames = 120, settleMs = 120000, clock, rows = SSAO_BENCH } = {}){
+  if (clock === 'timer' && !timerExt) return { error: 'EXT_disjoint_timer_query_webgl2 is not available in this browser' };
+  const useTimer = clock ? clock === 'timer' : !!timerExt, saved = { auto, ssao: state.ssao, show: state.ssaoShow };
+  const median = a => { const s2 = [...a].sort((x, y) => x - y); return s2.length ? s2[s2.length >> 1] : NaN; };
+  auto = false;
+  try {
+    const end = performance.now() + settleMs;
+    for (let f = 0; performance.now() < end; f++){ frame({ draw: false }); if (f > 2 && isConverged()) break; await sleep(8); }
+    state.ssao = null; draw();
+    const w = canvas.width, h = canvas.height, occ = occlusionOf(), out = [];
+    /* Off and on in alternate batches of four, after a batch of each to warm
+       up: the first wall-clock bench timed "off" once, first, and it came out
+       10 ms slower than every row after it in the kit, while the occlusion
+       queries were still learning what's hidden. Paired, drift cancels. */
+    const batch = async o => {
+      const t0 = performance.now();
+      for (let i = 0; i < 4; i++){ renderView(w, h, state.color, false, undefined, 'both', null, occ); if (o) drawSSAO(w, h, o, null, false); }
+      finishGPU();
+      const ms = performance.now() - t0;
+      await nextTask();
+      return ms;
+    };
+    // Medians, of the off batches and of each pair's difference: on a machine
+    // that was drawing other pages too, means swung by ±2 ms on a 1 ms effect.
+    const wall = async o => {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      finishGPU();
+      await batch(null); await batch(o);
+      const offs = [], diffs = [];
+      let spent = 0;
+      while (offs.length < 8 || spent < 2 * minMs){
+        const a = await batch(null), b = await batch(o);
+        offs.push(a); diffs.push(b - a); spent += a + b;
+      }
+      const off = median(offs) / 4;
+      return { off, on: off + median(diffs) / 4 };
+    };
+    let offMs = NaN;
+    for (const [name, o] of rows){
+      benchHud.status = `<b>ssao bench</b> ${name}`; hud();
+      if (useTimer){
+        state.ssao = o; state.ssaoShow = false;
+        timers.samples.raster.length = 0; timers.samples.ssao.length = 0;
+        for (let f = 0; f < frames + 10; f++){ draw(); pollTimers(); await new Promise(r => requestAnimationFrame(r)); }
+        for (let k = 0; k < 20 && timers.pending.length; k++){ pollTimers(); await sleep(16); }
+        const raster = median(timers.samples.raster), ssao = o ? median(timers.samples.ssao) : 0;
+        out.push({ name, settings: o, frameMs: raster + ssao, ssaoMs: ssao, rasterMs: raster });
+      } else if (!o){
+        offMs = (await wall(null)).off;
+        out.push({ name, settings: o, frameMs: offMs, ssaoMs: 0, rasterMs: offMs });
+      } else {
+        const t = await wall(o);
+        out.push({ name, settings: o, frameMs: t.on, ssaoMs: t.on - t.off, rasterMs: t.off });
+      }
+    }
+    // The default setting's AO alone, read back over the whole canvas.
+    state.ssao = null;
+    renderView(w, h, state.color, false, undefined, 'both', null, occ);
+    drawSSAO(w, h, SSAO_DEFAULTS, null, true);
+    const px = new Uint8Array(4 * w * h);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let covered = 0, sum = 0, dark = 0;
+    for (let i = 0; i < px.length; i += 4){ if (!px[i]) continue; covered++; sum += px[i] / 255; if (px[i] < 204) dark++; }
+    const report = { world: W.label, D: W.D, eye: cam.eye.map(Math.round), yaw: +cam.yaw.toFixed(3), pitch: +cam.pitch.toFixed(3), size: [w, h],
+                     clock: useTimer ? 'timer' : 'wall', renderer: rendererName(), converged: isConverged(), cubes: view.instances, draws: view.drawn,
+                     covered: covered / (w * h), aoMean: covered ? sum / covered : 1, aoDark: covered ? dark / covered : 0, rows: out };
+    window.__ssaoBench = report;
+    return report;
+  } finally {
+    benchHud.status = '';
+    state.ssao = saved.ssao; state.ssaoShow = saved.show; auto = saved.auto;
+  }
+};
+function ssaoBenchText(r){
+  return `<b>ssao bench</b> ${esc(r.world)} ${r.size.join('×')}, ${r.clock} clock, ${k(r.cubes)} cubes; AO on ${(100 * r.covered).toFixed(0)}% of pixels, mean ${r.aoMean.toFixed(3)}, ${(100 * r.aoDark).toFixed(0)}% below 0.8\n` +
+    r.rows.map(x => `  ${x.name}: <b>${x.frameMs.toFixed(2)} ms</b>${x.settings ? ` (ssao ${x.ssaoMs.toFixed(2)})` : ''}`).join('\n');
+}
+// For the console and experiments/ssao-bench.mjs: set what's drawn.
+window.__ssao = { set: (o, show = false) => { state.ssao = o; state.ssaoShow = show; }, defaults: SSAO_DEFAULTS, bench: () => window.__ssaoBench };
 
 /* ---- raster against ray, on the world on screen ------------------------------
    The same view through each path alone, with no flight history to pick kinds.
@@ -7040,6 +7404,18 @@ async function boot(){
     } catch (e){
       console.error('editBench failed', e);
       benchHud.text = `<b>edit bench</b> <span class="warn">failed: ${e && e.message || e}</span> (the console has the stack)`;
+    }
+    hud();
+  }
+  if (params.has('ssaobench')){
+    setHud(true);   // its report is read from the HUD
+    try {
+      const r = await ssaoBench(params.get('ssaobench') === 'wall' ? { clock: 'wall' } : {});
+      console.log('ssaoBench', JSON.stringify(r, null, 1));
+      benchHud.text = r.error ? `<b>ssao bench</b> <span class="warn">${r.error}</span>` : ssaoBenchText(r);
+    } catch (e){
+      console.error('ssaoBench failed', e);
+      benchHud.text = `<b>ssao bench</b> <span class="warn">failed: ${e && e.message || e}</span> (the console has the stack)`;
     }
     hud();
   }

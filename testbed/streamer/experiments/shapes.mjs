@@ -111,6 +111,7 @@ export const SHAPES = [
     // rock strata parallel to the cut, gently warped
     colour: (x, y, z) => ramp(((((x + 2*y + 3*z) / Math.sqrt(14)) * 3 + 0.15 * Math.sin(4 * x + 3 * z)) % 1 + 1) % 1, STRATA) },
   { name: 'terrain',   note: 'y ≤ heightfield, 5-octave value noise',
+    height: (x, z) => 0.6 * fbm(1.5 * x + 4, 1.5 * z + 4) - 0.3,
     inside: (x, y, z) => y <= 0.6 * fbm(1.5 * x + 4, 1.5 * z + 4) - 0.3,
     f: (x, y, z) => y - (0.6 * fbm(1.5 * x + 4, 1.5 * z + 4) - 0.3), lip: 4.9,
     // sand, grass, forest, rock, snow by height, the boundaries broken by noise
@@ -148,11 +149,41 @@ export const SHAPES = [
      voxels, not ~30. Last in the list, so the experiments' tables keep
      their order. */
   { name: 'hills',     note: 'y ≤ heightfield, the terrain\'s noise at 0.4 of its height',
+    height: (x, z) => 0.24 * fbm(1.5 * x + 4, 1.5 * z + 4) - 0.3,
     inside: (x, y, z) => y <= 0.24 * fbm(1.5 * x + 4, 1.5 * z + 4) - 0.3,
     f: (x, y, z) => y - (0.24 * fbm(1.5 * x + 4, 1.5 * z + 4) - 0.3), lip: 2.2,
     // meadow greens over sand, rock on the highest ground
     colour: (x, y, z) => ramp(y + 0.02 * (noise2(9 * x + 1, 9 * z + 2) - 0.5), HILLS) },
 ];
+
+/* A heightfield as a crust (asked for 2026-11-13: the terrain and the hills
+   were solid all the way down: 35–65% of the world's height for the terrain,
+   whose surface is y = h ∈ [−0.3, 0.3], and 35–47% for the hills).
+   The surface is the shape's own; below it, only `depth` voxels of each column
+   are solid, so the crust follows the ground and the world under it is air.
+   A shape with a `height` (terrain, hills) can be one.
+
+   In voxel units a column is solid for H − depth < j + ½ ≤ H, a half-open
+   interval of length `depth`, so it holds exactly `depth` voxel centres (up to
+   the rounding of H). The bound is max(f, (h − T) − y): the second term's
+   gradient is the first's with y's sign flipped, so it has the same size, and
+   the max of two functions with one Lipschitz constant keeps it. `lip` stands.
+   The colour is the shape's: it's a function of position, and the surface
+   hasn't moved.
+
+   The experiments' corpus (SHAPES) stays solid to the floor, as do the
+   scatter's hills (stream.test.js pins its voxels): only the stream viewer's
+   terrain and hills worlds are crusts. */
+export function crustOf(shape, D, depth){
+  if (!shape.height) throw new Error(`crustOf: ${shape.name} isn't a heightfield`);
+  // A shape with a `height` is y ≤ height(x, z), the same expression as its
+  // `inside` (so the same floats), and f = y − h. Reading h once, not through
+  // inside and f, halves the noise: the D = 11 terrain built in 22 s that way.
+  const T = 2 * depth / 2 ** D, { height } = shape;
+  return { ...shape, note: `${shape.note}, ${depth} voxels deep`,
+    inside: (x, y, z) => { const h = height(x, z); return y <= h && y > h - T; },
+    f: (x, y, z) => { const h = height(x, z); return Math.max(y - h, h - T - y); } };
+}
 
 export function denseShape(shape, R){
   const occ = new Uint8Array(R ** 3);

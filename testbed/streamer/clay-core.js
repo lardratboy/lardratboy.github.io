@@ -4,7 +4,7 @@
 
      lump > 0, no ground     clay: a lump floating at the world's centre
      lump > 0, ground        the lump pressed onto flat ground
-     lump = 0, ground        flat ground: the lower half of the world is solid
+     lump = 0, ground        flat ground: a slab GROUND_DEPTH voxels deep under the centre plane
      lump = 0, no ground     empty: root EMPTY, nothing to draw
 
    You asked for "some volume to play with and sculpt down from, think clay".
@@ -26,10 +26,17 @@
 
    Pure: imports only dag-core.js. The colour's rgb8 is handed in, as the kit's
    and the caves' are. */
-import { createStore } from './dag-core.js';
+import { createStore, EMPTY } from './dag-core.js';
 
 export const CLAY_LIMITS = { D: [8, 28], lumps: [0, 64, 128, 256, 512, 1024], shapes: ['ball', 'block'] };
 export const CLAY_DEFAULTS = { D: 20, lump: 256, shape: 'ball', ground: false };
+
+/* The ground is a slab this deep under the centre plane, with air below it
+   (asked 2026-11-13: it was the whole lower half of the world, 2^19 voxels deep
+   at D = 20). Every lump in CLAY_LIMITS fits in it pressed: a ball sinks r/8,
+   at most 1,024/16 = 64, so its bottom cap is never below the slab. The
+   smallest world (D = 8) has 128 under the plane, so the slab always fits. */
+export const GROUND_DEPTH = 64;
 
 export function clayDesc(over = {}){
   const d = { ...CLAY_DEFAULTS, ...over, kind: 'clay' };
@@ -49,7 +56,8 @@ export function clayFromParam(s){
                     ground: ground === undefined ? CLAY_DEFAULTS.ground : ground === '1' });
 }
 
-/* Where things are. The centre plane is y = c, the top of the ground. A ball
+/* Where things are. The centre plane is y = c, the top of the ground, whose
+   bottom is c − GROUND_DEPTH. A ball
    on the ground is pressed in by an eighth of its radius, as a lump dropped on
    a table would be: resting on one point it'd stand on a single voxel. A block
    stands on the plane exactly. Off the ground, the lump straddles the centre,
@@ -63,10 +71,10 @@ export function clayPlace(desc){
 /* THE RULE: what's at voxel (x, y, z). 0 air, 1 clay, 2 ground. Every shortcut
    below is held to this (test/clay-core.test.js), and it's slow on purpose. A
    ball's voxel is inside when its centre i + ½ is within r of the ball's centre.
-   The ground wins below the plane, so a pressed ball's bottom cap is ground. */
+   The ground wins in its slab, so a pressed ball's bottom cap is ground. */
 export function clayVoxel(desc, x, y, z){
   const { c, r, centre, lo, hi } = clayPlace(desc);
-  if (desc.ground && y < c) return 2;
+  if (desc.ground && y < c && y >= c - GROUND_DEPTH) return 2;
   if (!desc.lump) return 0;
   if (desc.shape === 'block') return x >= lo[0] && y >= lo[1] && z >= lo[2] && x < hi[0] && y < hi[1] && z < hi[2] ? 1 : 0;
   const dx = x + 0.5 - centre[0], dy = y + 0.5 - centre[1], dz = z + 0.5 - centre[2];
@@ -79,8 +87,8 @@ export function clayVoxel(desc, x, y, z){
    and farthest point, and a block is a box. Together they can say −1 for a cell
    that's solid only by their union. That's harmless: the walk goes down and
    hash-consing hands back solid(k)'s own id. */
-export function clayCell(desc){
-  const { c, r, centre, lo, hi } = clayPlace(desc), r2 = r * r, ground = desc.ground, lump = desc.lump, ball = desc.shape === 'ball';
+export function clayCell(desc, ground = desc.ground){
+  const { c, r, centre, lo, hi } = clayPlace(desc), r2 = r * r, lump = desc.lump, ball = desc.shape === 'ball', g0 = c - GROUND_DEPTH;
   const lumpCell = (s, x, y, z) => {
     if (!lump) return 0;
     if (!ball){
@@ -98,9 +106,9 @@ export function clayCell(desc){
   };
   return (k, x, y, z) => {
     const s = 2 ** k;
-    if (ground && (y + 1) * s <= c) return 1;
+    if (ground && y * s >= g0 && (y + 1) * s <= c) return 1;
     const m = lumpCell(s, x, y, z);
-    if (ground && y * s < c) return m === 1 ? 1 : -1;   // it straddles the plane
+    if (ground && y * s < c && (y + 1) * s > g0) return m === 1 ? 1 : -1;   // it straddles the slab's top or bottom
     return m;
   };
 }
@@ -112,13 +120,38 @@ export function clayCell(desc){
    box of centres is a single point, so near and far agree and the test never
    says −1 there: fromField's "undecided voxel" can't fire. */
 export function buildClay(desc, store = createStore()){
-  const { root } = store.fromField(desc.D, clayCell(desc));
+  if (!desc.ground) return { store, root: store.fromField(desc.D, clayCell(desc)).root, D: desc.D };
+  // The ground isn't built by fromField, though clayCell can say it. The slab's
+  // bottom lies on the grid only up to level 6, so above that every cell along
+  // it straddles it, and fromField (no memo) walks all 4^(D−7) of them: D = 20
+  // took most of a minute, D = 24 didn't finish. The slab is the same in every
+  // column, so a cell is a function of its level and y alone: memoized on
+  // those, it's one or two nodes a level. The lump, built by fromField with the
+  // ground left out but placed as on it, joins by union; equal sets are equal
+  // ids, so the root is the one fromField would give (clay-core.test.js holds
+  // it to the dense stamp). The lump's nodes the ground covers stay in the store.
+  const c = 2 ** (desc.D - 1), g0 = c - GROUND_DEPTH, memo = new Map();
+  const slab = (k, y) => {
+    const s = 2 ** k;
+    if (y * s >= g0 && (y + 1) * s <= c) return store.solid(k);
+    if ((y + 1) * s <= g0 || y * s >= c) return EMPTY;
+    const key = k * 2 ** 30 + y, hit = memo.get(key);
+    if (hit !== undefined) return hit;
+    const lo = slab(k - 1, 2 * y), hi = slab(k - 1, 2 * y + 1);
+    // Morton, octant-major: child o has y bit (o >> 1) & 1.
+    const id = store.intern(k, Uint32Array.from({ length: 8 }, (_, o) => o >> 1 & 1 ? hi : lo));
+    memo.set(key, id);
+    return id;
+  };
+  const ground = slab(desc.D, 0);
+  const root = desc.lump ? store.union(store.fromField(desc.D, clayCell(desc, false)).root, ground) : ground;
   return { store, root, D: desc.D };
 }
 
 /* The colour field, from the descriptor alone: a world file has nothing else
    (vdag-core's colourPrint and resolveColour). Clay above the plane, ground
-   below it, so when edit mode digs, what's inside is the right material with
+   below it (nothing is solid under the slab but placed blocks, whose colour is
+   the edit table's, so the field needn't know where the slab ends), so when edit mode digs, what's inside is the right material with
    no shape test. Off the ground it's clay everywhere it's asked, and nothing
    asks about air.
 
