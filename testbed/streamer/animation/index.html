@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vdag explained</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #05070c; --ink: #e9eefb; --dim: #97a3bf; --faint: #5d6884;
+    --accent: #5ad1ff; --pink: #ff6fae; --gold: #ffd166;
+    --glass: rgba(12, 16, 26, 0.74); --line: rgba(140, 190, 255, 0.16);
+    --font: "Inter", "SF Pro Text", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  *{ box-sizing: border-box; }
+  html, body{ margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink); font-family: var(--font); }
+  canvas{ position: fixed; inset: 0; display: block; }
+  #gl{ cursor: grab; touch-action: none; }
+  #gl:active{ cursor: grabbing; }
+  #ui{ pointer-events: none; }
+
+  .brand{ position: fixed; top: 22px; left: 26px; display: flex; align-items: baseline; gap: 10px; pointer-events: none;
+          font-weight: 800; letter-spacing: -0.02em; font-size: 17px; }
+  .brand small{ font-weight: 600; font-size: 12px; color: var(--dim); letter-spacing: 0.04em; text-transform: uppercase; }
+  .now{ position: fixed; top: 24px; right: 26px; font-size: 12.5px; font-weight: 600; color: var(--dim); letter-spacing: 0.02em; pointer-events: none; }
+
+  #caption{ position: fixed; left: 26px; bottom: 84px; width: min(540px, calc(100vw - 52px)); padding: 18px 22px 20px;
+            background: var(--glass); border: 1px solid var(--line); border-radius: 16px;
+            backdrop-filter: blur(14px) saturate(1.2); -webkit-backdrop-filter: blur(14px) saturate(1.2);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.45); pointer-events: none; transition: opacity 0.2s linear; }
+  #caption.in{ animation: rise 0.6s cubic-bezier(.2,.8,.2,1); }
+  #kicker{ font: 700 11px var(--mono); color: var(--accent); letter-spacing: 0.14em; }
+  #ctitle{ font-size: 22px; font-weight: 750; letter-spacing: -0.015em; margin: 6px 0 8px; }
+  #cbody{ font-size: 15px; line-height: 1.55; color: #cdd5e8; }
+  #cbody.in{ animation: fadein 0.5s ease; }
+  #cbody b{ color: var(--ink); font-weight: 650; }
+  #cbody code{ font: 600 13px var(--mono); color: var(--gold); background: rgba(255, 209, 102, 0.08); padding: 1px 5px; border-radius: 5px; }
+  @keyframes rise{ from{ transform: translateY(10px); } to{ transform: none; } }
+  @keyframes fadein{ from{ opacity: 0; transform: translateY(4px); } to{ opacity: 1; transform: none; } }
+
+  #bar{ position: fixed; left: 0; right: 0; bottom: 0; height: 64px; padding: 0 18px 10px;
+        display: flex; align-items: flex-end; gap: 6px;
+        background: linear-gradient(to top, rgba(4,5,9,0.85), rgba(4,5,9,0)); transition: opacity 0.4s; }
+  body.idle #bar, body.idle .brand, body.idle .now{ opacity: 0.0; }
+  body.idle #bar:hover{ opacity: 1; }
+  body.bare #bar, body.bare .brand, body.bare .now, body.bare #caption{ display: none; }
+  #scrub{ position: absolute; left: 18px; right: 18px; top: 8px; height: 16px; cursor: pointer; touch-action: none; }
+  #scrub .seg{ position: absolute; top: 6px; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.14); box-shadow: inset -3px 0 0 #05070c; }
+  #fill{ position: absolute; left: 0; top: 6px; height: 4px; border-radius: 2px; background: linear-gradient(90deg, var(--accent), var(--pink)); pointer-events: none; }
+  #knob{ position: absolute; top: 2px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 4px rgba(90,209,255,0.25); pointer-events: none; }
+  #tip{ position: absolute; bottom: 22px; transform: translateX(-50%); white-space: nowrap; font: 600 12px var(--font); padding: 5px 10px;
+        background: rgba(12,16,26,0.92); border: 1px solid var(--line); border-radius: 8px; opacity: 0; transition: opacity 0.15s; pointer-events: none; }
+  #tip.show{ opacity: 1; }
+  button{ appearance: none; border: 0; background: transparent; color: var(--ink); font: 600 13px var(--font); height: 32px; min-width: 32px;
+          padding: 0 8px; border-radius: 8px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  button:hover{ background: rgba(255,255,255,0.08); }
+  button:focus-visible{ outline: 2px solid var(--accent); outline-offset: 1px; }
+  button svg{ width: 18px; height: 18px; fill: currentColor; }
+  #play[data-state="playing"] .i-play, #play[data-state="paused"] .i-pause{ display: none; }
+  #time{ font: 600 12.5px var(--mono); color: var(--dim); margin-left: 8px; align-self: center; margin-bottom: 0; }
+  .grow{ flex: 1; }
+  #speed{ font-family: var(--mono); color: var(--dim); }
+  #bar .row{ display: flex; align-items: center; gap: 4px; width: 100%; }
+
+  #menu{ position: fixed; right: 18px; bottom: 72px; width: 300px; padding: 8px; background: rgba(12,16,26,0.94); border: 1px solid var(--line);
+         border-radius: 14px; box-shadow: 0 16px 50px rgba(0,0,0,0.55); opacity: 0; transform: translateY(8px); pointer-events: none; transition: 0.18s; }
+  #menu.open{ opacity: 1; transform: none; pointer-events: auto; }
+  #menu ol{ list-style: none; margin: 0; padding: 0; }
+  #menu li{ display: grid; grid-template-columns: 28px 1fr auto; gap: 8px; align-items: center; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13.5px; font-weight: 550; }
+  #menu li:hover{ background: rgba(255,255,255,0.06); }
+  #menu li.on{ background: rgba(90,209,255,0.12); color: #fff; }
+  #menu li .n{ font: 700 11px var(--mono); color: var(--accent); }
+  #menu li .d{ font: 500 11.5px var(--mono); color: var(--faint); }
+  #menu .keys{ border-top: 1px solid var(--line); margin-top: 6px; padding: 10px 10px 4px; font-size: 11.5px; color: var(--dim); line-height: 1.7; }
+  #menu kbd{ font: 600 10.5px var(--mono); padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--ink); }
+
+  #loading{ position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); transition: opacity 0.6s; z-index: 5; }
+  #loading.done{ opacity: 0; pointer-events: none; }
+  #loading .msg{ font-size: 14px; color: var(--dim); }
+
+  @media (max-width: 720px){
+    .brand small, .now{ display: none; }
+    #caption{ left: 16px; right: 16px; width: auto; bottom: 76px; padding: 14px 16px; }
+    #ctitle{ font-size: 18px; } #cbody{ font-size: 13.5px; }
+    #time{ display: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="ui"></canvas>
+
+<div class="brand">vdag <small>an explainer</small></div>
+<div class="now" id="now"></div>
+
+<div id="caption"><div id="kicker"></div><div id="ctitle"></div><div id="cbody"></div></div>
+
+<div id="bar">
+  <div id="scrub"><div id="fill"></div><div id="knob"></div><div id="tip"></div></div>
+  <div class="row">
+    <button id="prev" aria-label="Previous chapter"><svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
+    <button id="play" aria-label="Pause" data-state="playing">
+      <svg class="i-play" viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg>
+      <svg class="i-pause" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+    </button>
+    <button id="next" aria-label="Next chapter"><svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
+    <span id="time">0:00 / 0:00</span>
+    <span class="grow"></span>
+    <button id="speed" aria-label="Playback speed">1×</button>
+    <button id="menuBtn" aria-label="Chapters"><svg viewBox="0 0 24 24"><path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h10v2H4z"/></svg></button>
+    <button id="full" aria-label="Full screen"><svg viewBox="0 0 24 24"><path d="M4 4h6v2H6v4H4zM14 4h6v6h-2V6h-4zM4 14h2v4h4v2H4zM18 14h2v6h-6v-2h4z"/></svg></button>
+  </div>
+</div>
+
+<div id="menu">
+  <ol id="chapters"></ol>
+  <div class="keys"><kbd>space</kbd> play / pause · <kbd>←</kbd> <kbd>→</kbd> chapters · <kbd>shift</kbd>+<kbd>←</kbd> <kbd>→</kbd> ±5 s ·
+    <kbd>1</kbd>–<kbd>9</kbd> jump · <kbd>f</kbd> full screen · <kbd>h</kbd> hide all · drag to look around, wheel to zoom</div>
+</div>
+
+<div id="loading"><div class="msg">Building the DAG with dag-core.js…</div></div>
+
+<script type="module" src="./main.js"></script>
+</body>
+</html>
