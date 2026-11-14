@@ -1019,7 +1019,9 @@ export const SCENES = [
   steps: [
     [0, 'Colour isn\'t in the DAG. It\'s a <b>field</b> the job samples, one 32-bit word a record: 6 bits a channel, the rest reserved.'],
     [3.8, 'A coarse cell\'s word is the count-weighted mean of the voxels under it, so empty space doesn\'t darken it.'],
-    [8.2, 'So two blocks can share a node and still differ: the pond and the lawn are both <b>id 102</b>. Shape is shared; colour is looked up.'],
+    [8.2, 'Two blocks: a pond and a lawn. They look nothing alike, and they\'re the same node.'],
+    [10.2, 'Take the colour away and they\'re the same slab: three full layers, nothing on top. Equal shapes intern to one id, <b>node 102</b>.'],
+    [12.8, 'The colour comes back from the field, asked at each voxel\'s position: water and sand here, grass there. <b>Shape is shared; colour is looked up.</b>'],
   ],
   cam(t, P){
     const m = P.D.merge.rec, c = [(m.x + 0.5) * 2 - 16, (m.y + 0.5) * 2, (m.z + 0.5) * 2 - 16];
@@ -1035,11 +1037,18 @@ export const SCENES = [
     const ex = sm(win(t, 2, 3.4)) * (1 - sm(win(t, 4.2, 5.6)));
     const merged = sm(win(t, 4.2, 5.6));
     const away = 1 - win(t, 7.6, 8.4);
-    // the town, with a hole where the cell is
+    // the town, with a hole where the cell is. The pond and the lawn lose
+    // their colour for a while (the shape alone, which is all node 102 holds)
+    // and take it back from the field.
+    const twins = ['pond', 'ground'].map(kind => D.blocks.find(x => x.kind === kind));
+    const grey = sm(win(t, 10.4, 11.2)) * (1 - sm(win(t, 12.8, 13.8)));
+    const SHAPE = [0.68, 0.7, 0.75];
     for (const q of P.lodCells[0]){
       const inCell = (q.q.x >> 1) === rec.x && (q.q.y >> 1) === rec.y && (q.q.z >> 1) === rec.z;
       if (inCell && t > 1.8 && away > 0) continue;
-      F.cube(q.p[0], q.p[1], q.p[2], 1, q.c[0], q.c[1], q.c[2], 1, 0);
+      const twin = grey > 0 && q.q.y < 8 && twins.some(b => (q.q.x >> 3) === b.bx && (q.q.z >> 3) === b.bz);
+      const c = twin ? lerp3(q.c, SHAPE, grey) : q.c;
+      F.cube(q.p[0], q.p[1], q.p[2], 1, c[0], c[1], c[2], 1, 0);
     }
     if (t > 1.8 && away > 0){
       const mc = attrCol(rec.attr);
@@ -1081,8 +1090,10 @@ export const SCENES = [
         const b = D.blocks.find(x => x.kind === kind);
         const lo = [b.bx * 8 - 16, 0, b.bz * 8 - 16], pulse = 0.65 + 0.35 * Math.sin(t * 5);
         F.wire(lo.map((v, i) => v - 0.1), [lo[0] + 8.1, 3.4, lo[2] + 8.1], withA(C3(GOLD), pa * pulse), 2.6, { add: true });
-        label3(F, g, [lo[0] + 4, 3.5, lo[2] + 4], `${kind === 'pond' ? 'pond' : 'lawn'} · node id ${b.id}`, { dy: -46, alpha: pa, color: GOLD, size: 12.5, mono: true });
+        label3(F, g, [lo[0] + 4, 3.5, lo[2] + 4], `${kind === 'pond' ? 'pond' : 'lawn'} · shape = node ${b.id}`, { dy: -46, alpha: pa, color: GOLD, size: 12.5, mono: true });
       }
+      pill(g, `no colour: one 8 × 8 slab, 3 voxels deep · both node ${twins[0].id}`, W / 2, 92, { alpha: grey, size: 13, color: GOLD });
+      pill(g, 'colour: the field, asked at each voxel', W / 2, 92, { alpha: win(t, 13.2, 13.8) * (1 - win(t, 14.4, 15)), size: 13, color: INK });
     }
   },
 },
