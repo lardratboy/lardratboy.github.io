@@ -1342,8 +1342,10 @@ const OCCLUSION_MODES = ['off', 'queries', 'depth'];
 const COLOUR_ATTR = 8, COLOUR_GAMUT = 3;
 let autoColour = params.has('color') ? null : COLOUR_ATTR;
 const state = {
+  // The world with no ?world=: the kit (2026-11-14; KIT_OPENING says which), the
+  // testbed's row 142 before it. Every test and script names its world.
   // (A link can't name a file: saveView writes what a shelf world was built from.)
-  world: /^file:/.test(params.get('world') || '') ? 'row:142' : params.get('world') || 'row:142',
+  world: /^file:/.test(params.get('world') || '') ? 'kit:1' : params.get('world') || 'kit:1',
   depth: params.has('depth') ? +params.get('depth') : null,
   // Split a chunk while the eye is closer than `detail` chunk sides. 4 on
   // this page since 2026-11-09 (the streamer's own default is 2): a coarse
@@ -1422,10 +1424,15 @@ state.lattice = (() => {
   try { return params.has('lattice') ? latticeFromParam(params.get('lattice'), seed) : latticeDesc({ seed }); }
   catch (e){ console.warn('?lattice refused:', e.message); return latticeDesc({ seed }); }
 })();
+/* The kit the page opens with, when no ?kit= says otherwise: D = 8 in level-1
+   colour frames (asked for 2026-11-14). It was kitDesc's own default, D = 14 in
+   level-2 frames, which the experiments still build: only the page's opening
+   kit moved. Every link the page writes carries ?kit=, so saved views are kept. */
+const KIT_OPENING = { D: 8, colourLevel: 1 };
 state.kit = (() => {
   const seed = /^kit:\d+$/.test(state.world) ? +state.world.slice(4) || 1 : 1;
-  try { return params.has('kit') ? kitFromParam(params.get('kit'), seed) : kitDesc({ seed }); }
-  catch (e){ console.warn('?kit refused:', e.message); return kitDesc({ seed }); }
+  try { return params.has('kit') ? kitFromParam(params.get('kit'), seed) : kitDesc({ seed, ...KIT_OPENING }); }
+  catch (e){ console.warn('?kit refused:', e.message); return kitDesc({ seed, ...KIT_OPENING }); }
 })();
 state.clay = (() => {
   try { return params.has('clay') ? clayFromParam(params.get('clay')) : clayDesc(); }
@@ -1651,9 +1658,10 @@ function fileWhyNot(e){
   return null;
 }
 const takesWorlds = id => isKit(id) || isShape(id) || isRow(id) || isScatter(id) || isLattice(id) || isCaves(id) || (isFile(id) && !fileWhyNot(shelfEntry(id)));
-// The kit: 12, 14 and 16 as planned (decision 7), and 10, small enough for the self-test.
+// The kit: 12, 14 and 16 as planned (decision 7), 10, small enough for the self-test,
+// and 8 and 6 (asked for 2026-11-14): at 6 the world is one 64³ assembly of parts, one chunk.
 const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: `L=${L} (${(4 ** L).toLocaleString()}³)` }))
-  : isKit(id) ? [10, 12, 14, 16].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³, ${(D - 4) / 2} levels)` }))
+  : isKit(id) ? [6, 8, 10, 12, 14, 16].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³, ${(D - 4) / 2} level${D === 6 ? '' : 's'})` }))
   : isCaves(id) ? [10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }))
   // Clay stops at 20 here, though its descriptor goes on: the ray pass holds
   // the eye as float32 voxels (docs/clay-log.md §3). ?clay= asks for more.
@@ -2147,7 +2155,7 @@ async function buildWorld(signal, gen){
     { const t = performance.now(), keys = store.snapshot().keys, real = createStore(), ids = real.importKeys(keys);
       for (let i = 0; i < ids.length; i++) if (ids[i] !== i) throw new Error(`the kit's keys didn't import as themselves (node ${i} became ${ids[i]})`);
       kit.realMs = performance.now() - t; kit.baseKeys = keys; store = real; }
-    label = `kit: ${desc.L} levels of 4³ assemblies${desc.ground ? ' on the ground' : ', floating'}`;
+    label = `kit: ${desc.L} level${desc.L === 1 ? '' : 's'} of 4³ assemblies${desc.ground ? ' on the ground' : ', floating'}`;
     colour = desc;
   } else if (isClay(state.world)){
     // Here, not in workers: it keeps the real store edit mode will add to.
@@ -4364,7 +4372,7 @@ function hud(){
     (W.caves ? `<span class="sec">caves</span> ${W.caves.info.tunnels.toLocaleString()} tunnels (${W.caves.info.mouths} mouths), ${W.caves.info.worms.toLocaleString()} worms, ` +
       `${k(W.voxels)} voxels, ${W.caves.threads ? `${W.caves.threads} threads, slowest part ${(W.caves.ms.slowestPart / 1000).toFixed(1)} s` : '<span class="warn">main thread</span>'}\n` : '') +
     (W.file ? `<span class="sec">file</span> ${W.file.fileName ? esc(W.file.fileName) : 'added here'}, ${k(W.voxels)} voxels, ${colourNote(W.file.colourStatus)}\n` : '') +
-    (W.kit ? `<span class="sec">kit</span> libraries ${W.kit.desc.libs.join(', ')}, ${W.kit.desc.ornaments} ornaments, ${W.kit.desc.ground ? 'ground and gravity' : 'floating'}, ` +
+    (W.kit ? `<span class="sec">kit</span> ${W.kit.desc.libs.length ? `libraries ${W.kit.desc.libs.join(', ')}` : 'no libraries'}, ${W.kit.desc.ornaments} ornaments, ${W.kit.desc.ground ? 'ground and gravity' : 'floating'}, ` +
       `colour in level-${W.kit.desc.colourLevel} frames: ${k(W.voxels)} voxels, ${W.classes ? `${W.classes.toLocaleString()} Oh classes, ` : ''}${k(W.kit.dropped)} nodes pruned, a real store in ${W.kit.realMs.toFixed(1)} ms\n` : '') +
     `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}\n` +
     `<span class="sec">cut</span> ${sel ? sel.leaves.length : 0} leaves + ${sel ? sel.nodes.size - sel.leaves.length : 0} split  (lod ${lods})${sel && sel.capped ? `  <span class="warn">capped ${sel.capped}</span>` : ''}\n` +
@@ -5771,7 +5779,7 @@ window.fileSelftest = async function fileSelftest(opts = {}){
     if (opts.only === 'baked'){ await bakedStep(); report.mode = pool.mode; report.glError = gl.getError(); return report; }
     const CASES = opts.cases || [
       { world: 'kit:1', kit: kitDesc({ D: 10 }), pin: [76250785, 3092] },
-      { world: 'scatter:1', depth: 9, pin: [17596293, 36368] },
+      { world: 'scatter:1', depth: 9, pin: [2916229, 35295] },
       { world: 'lattice:1', lattice: latticeDesc({ R: 11, n: [6, 5, 4], rotate: true }), pin: [24412, 3184] },
       { world: 'caves:1', depth: 10, pin: [386153834, 83692] },
       { world: 'clay', clay: clayDesc({ D: 20, lump: 64, ground: true }) },
@@ -5786,7 +5794,10 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       if (c.clay) state.clay = c.clay;
       fillWorlds(); fillDepth();
       await loadWorld(true);
-      c.voxels = W.voxels; c.nodes = W.nodes; c.source = W.source; c.eye = cam.eye.slice(); c.yaw = cam.yaw; c.pitch = cam.pitch;
+      // The nodes the root reaches, which is what a file holds: clay's store keeps
+      // the lump's nodes the ground covers as garbage (clay-log §7), so W.nodes
+      // (the store's size) was 1,270 for a file's 1,126.
+      c.voxels = W.voxels; c.nodes = prune(W.store.snapshot().keys, [W.root]).keys.length / 9; c.source = W.source; c.eye = cam.eye.slice(); c.yaw = cam.yaw; c.pitch = cam.pitch;
       c.frames = await frames();
       click('shelfAdd');
       c.entry = shelf[shelf.length - 1].id;
@@ -6933,7 +6944,7 @@ window.mixedSelftest = async function mixedSelftest(opts = {}){
        views until B (step 5): then they're made real, id for id, with no chunk
        flushed, and the scatter and the caves take a drop that reaches the frame and
        undo back to their roots; the scatter added to the shelf and opened from there
-       is a file of 36,368 nodes, made real at install;
+       is a file of 35,295 nodes, made real at install;
      - a file over the limit (lowered to 100 nodes) is made real at B the same way,
        and one that holds a node twice is found there, and says so. */
 window.toolSelftest = async function toolSelftest(){

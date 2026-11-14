@@ -16,8 +16,8 @@ import { findChrome, serveStatic, launchChrome } from '../test/browser/harness.j
 const arg = (name, d) => { const a = process.argv.find(x => x.startsWith(`--${name}=`)); return a ? a.slice(name.length + 3) : d; };
 const clock = arg('clock', 'wall'), [w, h] = arg('size', '1280x800').split('x').map(Number), dpr = +arg('dpr', 2), only = arg('only', null)?.split(','), shots = arg('shots', '1') !== '0';
 const VIEWS = {
-  kit: 'world=kit:1',                                                         // the D = 14 kit, the opening view
-  street: 'world=kit:1&eye=328,1966,328&yaw=0.78&pitch=-0.05',              // kit.mjs's street at D = 14
+  kit: 'world=kit:1&kit=14,8.6.4.3,4,1,2',                                                         // the D = 14 kit, the opening view
+  street: 'world=kit:1&kit=14,8.6.4.3,4,1,2&eye=328,1966,328&yaw=0.78&pitch=-0.05',              // kit.mjs's street at D = 14
   caves: 'world=caves:1',                                                     // the start chamber
   hills: 'world=shape:hills',
   // Flat ground at D = 20 has nothing to occlude anything: AO below 1 there is

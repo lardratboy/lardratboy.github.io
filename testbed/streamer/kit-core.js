@@ -77,7 +77,10 @@ export const PART = 16, PART_LEVELS = 4;
 /* ornaments to 256 (asked for 2026-11-04; kit-findings §5 measured 2,048).
    At the default libraries level 1 places at most ~166 of them, so past
    256 a larger set buys nothing unless the libraries grow with it. */
-export const KIT_LIMITS = { D: [8, 16], lib: [1, 1024], ornaments: [0, 256], share: [0, 100], seed: [1, 0xffff], nodes: 4e6 };
+/* D from 6 (asked for 2026-11-14): one level, the world a single 64³
+   assembly of parts, so its top is the grounded top's (pillars, a court,
+   a skyline) with parts in its slots. D = 8 was the floor before. */
+export const KIT_LIMITS = { D: [6, 16], lib: [1, 1024], ornaments: [0, 256], share: [0, 100], seed: [1, 0xffff], nodes: 4e6 };
 export const KIT_DEFAULTS = { seed: 1, D: 14, libs: null, ornaments: 4, ground: true, colourLevel: 2, share: null };
 export const levelsOf = D => (D - PART_LEVELS) / 2;
 export const sideOf = l => PART * 4 ** l;
@@ -92,7 +95,9 @@ const int = (v, [lo, hi], what) => {
 /* The descriptor, filled and checked: the given fields, plus `kind` and
    L. libs has one size per level below the top; a list too short for D
    is padded with the defaults and one too long is cut, so changing D
-   keeps the sizes that still apply. */
+   keeps the sizes that still apply. A colour level not given is the
+   default's (2) or the world's, whichever is lower, since a D = 6 kit
+   has no level 2; one given past the world's is still refused. */
 export function kitDesc(over = {}){
   const d = { ...KIT_DEFAULTS, ...over, kind: 'kit' };
   int(d.D, KIT_LIMITS.D, 'D');
@@ -106,6 +111,7 @@ export function kitDesc(over = {}){
   d.share = d.share ?? null;
   if (d.share !== null) int(d.share, KIT_LIMITS.share, 'ornament share');
   d.ground = !!d.ground;
+  if (over.colourLevel === undefined) d.colourLevel = Math.min(KIT_DEFAULTS.colourLevel, L);
   int(d.colourLevel, [0, L], 'colour level');
   return d;
 }
@@ -414,6 +420,6 @@ export const kitParam = d => [d.D, d.libs.join('.'), d.ornaments, d.ground ? 1 :
 export function kitFromParam(s, seed = 1){
   const [D, libs, orn, ground, cl, share] = String(s).split(',');
   return kitDesc({ seed, D: +D, libs: libs ? libs.split('.').map(Number) : null, ornaments: orn === undefined || orn === '' ? KIT_DEFAULTS.ornaments : +orn,
-                   ground: ground === undefined ? KIT_DEFAULTS.ground : ground === '1', colourLevel: cl === undefined || cl === '' ? KIT_DEFAULTS.colourLevel : +cl,
+                   ground: ground === undefined ? KIT_DEFAULTS.ground : ground === '1', colourLevel: cl === undefined || cl === '' ? undefined : +cl,
                    share: share === undefined || share === '' ? null : +share });
 }
