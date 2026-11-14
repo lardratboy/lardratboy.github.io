@@ -42,7 +42,7 @@
    ===================================================================== */
 import { createStore, pruneWorld } from './dag-core.js';
 import { createSpecimenCore, sampleRecipe, binaryLevels, hash32 } from './specimen-core.js';
-import { SHAPES, fieldOf, colourFieldOf } from './experiments/shapes.mjs';
+import { SHAPES, fieldOf, colourFieldOf, crustOf, CRUST } from './experiments/shapes.mjs';
 
 export const SCATTER_DEFAULTS = { seed: 1, D: 12, pitch: 128, R: 64, margin: 4, ground: 'hills' };
 export const scatterDesc = (over = {}) => ({ ...SCATTER_DEFAULTS, ...over });
@@ -140,7 +140,14 @@ export function scatterLayout(desc){
    expression fromField decides voxels with, so "resting on the ground"
    means on the voxels the DAG really holds. The ground is a heightfield
    (inside is monotone in y), so a guess from the height and a step or two
-   either way finds it. -1: no ground in this column. */
+   either way finds it. -1: no ground in this column.
+
+   The voxels (`field`) are a crust CRUST = 64 deep under that surface, as
+   the stream viewer's hills and terrain are (shapes.mjs's crustOf), not solid
+   to the floor (asked 2026-11-13: the hills under the specimens were 35–47% of
+   the world's height). The surface is the same, so `top`, the resting heights
+   and every placement are too; `top` reads the solid shape, whose `f` the
+   guess needs (the crust's f is a max of two terms). */
 export function groundOf(desc){
   const shape = SHAPES.find(s => s.name === desc.ground);
   if (!shape) throw new Error(`scatter: no shape '${desc.ground}'`);
@@ -152,7 +159,8 @@ export function groundOf(desc){
     while (Y >= 0 && !inside(Y)) Y--;
     return Y;
   };
-  return { shape, top, field: fieldOf(shape, desc.D) };
+  const crust = shape.height ? crustOf(shape, desc.D, CRUST) : shape;
+  return { shape, crust, top, field: fieldOf(crust, desc.D) };
 }
 
 /* The resting height: the lowest y0 at which every occupied column of the

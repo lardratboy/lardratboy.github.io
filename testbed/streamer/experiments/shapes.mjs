@@ -171,9 +171,11 @@ export const SHAPES = [
    The colour is the shape's: it's a function of position, and the surface
    hasn't moved.
 
-   The experiments' corpus (SHAPES) stays solid to the floor, as do the
-   scatter's hills (stream.test.js pins its voxels): only the stream viewer's
-   terrain and hills worlds are crusts. */
+   The experiments' corpus (SHAPES) stays solid to the floor: only the stream
+   viewer's terrain and hills worlds and the scatter's ground (scatter-core's
+   groundOf, since 2026-11-13) are crusts, CRUST deep. */
+// How deep a heightfield world's crust is, in voxels: the terrain, the hills, the scatter's ground.
+export const CRUST = 64;
 export function crustOf(shape, D, depth){
   if (!shape.height) throw new Error(`crustOf: ${shape.name} isn't a heightfield`);
   // A shape with a `height` is y ≤ height(x, z), the same expression as its
