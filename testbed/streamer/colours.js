@@ -23,6 +23,12 @@
      { kind: 'clay', D, lump, … } the clay and flat worlds' (clay-core.js,
                                   clayColour): clay above the centre plane,
                                   ground below it. Nothing to rebuild
+     { kind: 'dungeon', D, seed, floors, table }
+                                  the dungeon's (dungeon-core.js,
+                                  dungeonColour): stone by material and
+                                  floor, from the table of tile codes the
+                                  plan made (one int32 a cell), so a worker
+                                  needn't run the collapse again
      { kind: 'baked', skin, words, bits }
                                   an imported asset's own colours
                                   (baked-core.js, createBaked): data, not a
@@ -54,6 +60,7 @@ import { latticeColour } from './lattice-core.js';
 import { kitColour } from './kit-core.js';
 import { caveColour } from './cave-core.js';
 import { clayColour } from './clay-core.js';
+import { dungeonColour } from './dungeon-core.js';
 import { createBaked } from './baked-core.js';
 
 const TAU = 2 * Math.PI;
@@ -97,5 +104,6 @@ export function colourOf(desc, world = null){
   if (desc.kind === 'kit') return kitColour(desc, rgb8);
   if (desc.kind === 'caves') return caveColour(desc, rgb8);
   if (desc.kind === 'clay') return clayColour(desc, rgb8);
+  if (desc.kind === 'dungeon') return dungeonColour(desc, rgb8);
   throw new Error(`colourOf: unknown kind '${desc.kind}'`);
 }

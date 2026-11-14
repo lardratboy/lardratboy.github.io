@@ -29,12 +29,13 @@
 
    The bench numbers are wall clock (Safari 27, Apple GPU, 2026-11-01,
    ray-depth-findings.md; the terrain and scatter views rebenched
-   2026-11-02, stencil-pass.md §7–8), clear and blit included. Nothing here touches
+   2026-11-02, stencil-pass.md §7–8; the scatter again 2026-11-14 on its
+   8-voxel crust, path-occupancy.md §9), clear and blit included. Nothing here touches
    a GPU.
 
    A view marked `check` (the lattice, benched in Chrome 2026-11-03; the
-   kit and the caves, 2026-11-04, whose rays the occupancy line doesn't
-   predict) is
+   kit and the caves, 2026-11-04, and the dungeon, 2026-11-14, whose rays
+   the occupancy line doesn't predict) is
    rebuilt and reported but kept out of the fit: another browser on the
    same GPU costs twice as much a cube, and one view would pull the
    Safari fit toward it. §4 holds it to the rule instead: the rule's
@@ -49,6 +50,7 @@ import { buildScatter, scatterDesc } from '../scatter-core.js';
 import { buildLattice, latticeDesc } from '../lattice-core.js';
 import { buildKit, kitDesc } from '../kit-core.js';
 import { buildCaves, caveDesc } from '../cave-core.js';
+import { buildDungeon, dungeonDesc } from '../dungeon-core.js';
 
 const PRINT = process.argv.includes('--print');
 const started = performance.now();
@@ -66,7 +68,10 @@ function shapeWorld(name, D){
   const s = createStore(), { root } = s.fromField(D, fieldOf(SHAPES.find(x => x.name === name), D));
   return { store: s, root, D };
 }
-// Your bench links, and their rows (ms): raster only, and ray only.
+// Your bench links, and their rows (ms): raster only, and ray only. A view
+// benched since 2026-11-10 says its `detail` and `rule`: the viewer draws at
+// detail 4 with the shadow rule now, and the cut and the cubes must be the
+// ones the bench drew (the earlier views were detail 2 and adaptive).
 const VIEWS = [
   { name: 'seed row #42.0, inside', make: () => rowWorld(146, 8), eye: [32768, 40632, 32768], yaw: 2.4, pitch: -0.3, raster: 1.35, cubes: 364e3, ray: 10.2 },
   { name: 'graph row ·FEV/OFEV, inside', make: () => rowWorld(100, 8), eye: [32768, 40632, 32768], yaw: 2.4, pitch: -0.3, raster: 3.55, cubes: 1.17e6, ray: 0.86 },
@@ -74,12 +79,14 @@ const VIEWS = [
   // (docs/stencil-pass.md §8); 2026-11-01's was 1.83 raster, 511K cubes,
   // 11.2 ray only at 2560 × 1107.
   { name: 'terrain D = 11, low', make: () => shapeWorld('terrain', 11), eye: [1024, 1090, 300], yaw: 0, pitch: -0.25, canvas: [2560, 1357], raster: 1.74, cubes: 473.6e3, ray: 16.75 },
-  // 2026-11-02, the scatter world's default view (docs/stencil-pass.md §6),
-  // on a taller canvas: the rebench, with the pass that no longer discards.
-  // Its ray-only row marks 86% of the canvas; the first bench (2.95 raster,
-  // 14.49 ray, the discarding pass) was within 1% of it on both.
+  // The scatter world's default view, rebenched 2026-11-14 (path-occupancy.md
+  // §9) on the world the viewer builds now: hills a crust 8 deep (CRUST,
+  // commit 5730d19), at detail 4 with the shadow rule, on 2560 × 1319. The
+  // first bench (2026-11-02, docs/stencil-pass.md §6) was of solid hills at
+  // detail 2: 2.98 raster over 895K cubes, 14.37 ray only, on 2560 × 1357.
   { name: 'scatter D = 12, default view', make: () => { const b = buildScatter(scatterDesc({ D: 12 })); return { store: b.store, root: b.root, D: 12 }; },
-    eye: [2048, 1863, 122.88], yaw: 0, pitch: -0.16, canvas: [2560, 1357], raster: 2.98, cubes: 895e3, ray: 14.37 },
+    eye: [2048, 1863, 122.88], yaw: 0, pitch: -0.16, canvas: [2560, 1319], detail: 4, rule: 'shadow', raster: 9.20, cubes: 2.77e6, ray: 17.73,
+    rows: { density: 9.56, 'ray ≥ lod 3': 10.51, 'ray ≥ lod 1': 11.76 } },
   // 2026-11-03, Chrome on the same Apple GPU (docs/path-occupancy.md §6):
   // the lattice at R = 64, 10³ (lattice:1, upright, random, gap 16), the
   // first world with no ground. A check, not fitted (see the top).
@@ -113,6 +120,16 @@ const VIEWS = [
     make: () => { const b = buildCaves(caveDesc({ D: 12 }), { fast: true }); return { store: b.store, root: b.root, D: 12 }; },
     eye: [2361.67, 817.02, 1524.79], yaw: -2.9016, pitch: -0.0349, canvas: [2560, 1357], raster: 2.00, cubes: 553.7e3, ray: 7.50,
     rows: { density: 1.76, 'ray ≥ lod 3': 1.31, 'ray ≥ lod 1': 1.66 } },
+  // 2026-11-14, the dungeon at D = 10 with 4 floors (dungeon-log.md §9:
+  // ?world=dungeon:1&dungeon=10,4&bench), wall clock, no timer extension,
+  // from standing height on the ground floor looking up a little. Inside
+  // walls again, like the caves: density traces 208 chunks and the stencil
+  // marks none of their pixels, and a ray from in here meets a wall at once
+  // (ray only, the whole canvas, is 1.46 ms). A check, not fitted.
+  { name: 'dungeon D = 10, 4 floors, ground floor', check: true,
+    make: () => { const b = buildDungeon(dungeonDesc({ D: 10, floors: 4, seed: 1 })); return { store: b.store, root: b.root, D: 10 }; },
+    eye: [428, 5, 482], yaw: -3.04, pitch: 0.431, canvas: [2560, 1319], detail: 4, rule: 'shadow', raster: 6.50, cubes: 2.13e6, ray: 1.46,
+    rows: { density: 1.45, 'ray ≥ lod 3': 6.44, 'ray ≥ lod 1': 6.47 } },
 ];
 
 // The viewer's frustum (viewProj's 0.9 rad vertical field of view at the
@@ -135,11 +152,11 @@ const views = [];
 for (const v of VIEWS){
   const w = v.make(), counts = createCounts(w.store), classes = createClasses(w.store, OH48);
   const world = createWorld(w.store, w.root, w.D), run = createJobRunner(worldSnapshot(w.store, w.root, w.D, { counts, classes }));
-  const sel = selectChunks(world, v.eye, { detail: 2 }), drawn = new Set(coverOf(sel, () => true).draw.map(d => d.key)), canvas = v.canvas || CANVAS, planes = planesOf(v.yaw, v.pitch, canvas);
+  const sel = selectChunks(world, v.eye, { detail: v.detail ?? 2 }), drawn = new Set(coverOf(sel, () => true).draw.map(d => d.key)), canvas = v.canvas || CANVAS, planes = planesOf(v.yaw, v.pitch, canvas);
   const leaves = [];
   for (const c of sel.nodes.values()){
     if (!drawn.has(c.key)) continue;
-    const r = run({ lod: c.lod, cx: c.x, cy: c.y, cz: c.z, lodRule: c.lod ? 'adaptive' : 'any', kind: 'records' });
+    const r = run({ lod: c.lod, cx: c.x, cy: c.y, cz: c.z, lodRule: c.lod ? (v.rule ?? 'adaptive') : 'any', kind: 'records' });
     const rel = [0, 1, 2].map(a => [c.x, c.y, c.z][a] * c.size - v.eye[a]);
     leaves.push({ key: c.key, cubes: r.recordCount, withTail: r.records.length, occupancy: r.occupied / CELLS,
                   footprint: chunkFootprint(c, viewportOf(canvas)), visible: visible(planes, rel, c.size) });
@@ -191,7 +208,7 @@ const text = [
   '',
   `Generated by \`node experiments/path-cost.mjs\` on ${new Date().toISOString().slice(0, 10)} in ${seconds.toFixed(0)} s. ` +
   'The reading is in [path-occupancy.md](path-occupancy.md). Your four bench views, rebuilt on their canvases; the bench times are yours ' +
-  '(Safari 27, Apple GPU, wall clock: the seed and graph rows 2026-11-01 at 2560 × 1107, the terrain and scatter views rebenched 2026-11-02 at 2560 × 1357). Nothing here touches a GPU.',
+  '(Safari 27, Apple GPU, wall clock: the seed and graph rows 2026-11-01 at 2560 × 1107, the terrain view rebenched 2026-11-02 at 2560 × 1357, the scatter view rebenched 2026-11-14 on its 8-voxel crust at 2560 × 1319, detail 4 and the shadow rule). Nothing here touches a GPU.',
   '',
   '## 1. The views',
   '',

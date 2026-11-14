@@ -18,6 +18,9 @@
               padding:2px 8px; border-radius:4px; border:1px solid rgba(255,255,255,.1); cursor:pointer; }
   #corner button:hover{ color:#b8b8cc; border-color:rgba(255,255,255,.3); }
   #corner button.on{ color:#c8c8d8; border-color:rgba(122,138,208,.8); }
+  /* Walking with the pointer locked (docs/dungeon-log.md §11): where the middle of the view is. */
+  #crosshair{ position:fixed; left:50%; top:50%; width:14px; height:14px; margin:-7px 0 0 -7px; pointer-events:none;
+              background:linear-gradient(#ddd,#ddd) center/2px 100% no-repeat, linear-gradient(#ddd,#ddd) center/100% 2px no-repeat; opacity:.7; mix-blend-mode:difference; }
   /* The triangle count, while the wireframe is on (docs/wireframe.md). */
   #tris{ position:fixed; left:10px; bottom:8px; background:rgba(0,0,0,.55); padding:2px 8px; border-radius:4px; color:#8a8a9e;
          border:1px solid rgba(255,255,255,.07); pointer-events:none; white-space:pre; font-variant-numeric:tabular-nums; }
@@ -171,6 +174,10 @@
     <label>colour frame <select id="kitColourLevel"></select></label>
     <div id="kitInfo"></div>
   </div>
+  <div id="dungeonCtl" hidden>
+    <label>floors <select id="dungeonFloors"></select></label>
+    <div id="dungeonInfo"></div>
+  </div>
   <div id="clayCtl" hidden>
     <label>lump <select id="clayLump"></select></label>
     <label>shape <select id="clayShape"><option value="ball">a ball</option><option value="block">a block</option></select></label>
@@ -204,7 +211,8 @@
 <div id="hud" hidden></div>
 <div id="fps" hidden>– fps</div>
 <div id="tris" hidden title="triangles are counted before the GPU culls the back-facing ones"></div>
-<div id="corner"><button id="aoToggle" title="ambient occlusion in screen space, a prototype (Y)">AO (Y)</button><button id="wireToggle" title="draw the triangles as lines (T)">wireframe (T)</button><button id="helpToggle" title="the keys and the link's options (?)">keys (?)</button><button id="hudToggle" title="show or hide the panels (H)">show HUD (H)</button></div>
+<div id="crosshair" hidden></div>
+<div id="corner"><button id="walkToggle" title="walk on the ground, or fly (C)">walk (C)</button><button id="aoToggle" title="ambient occlusion in screen space, a prototype (Y)">AO (Y)</button><button id="wireToggle" title="draw the triangles as lines (T)">wireframe (T)</button><button id="helpToggle" title="the keys and the link's options (?)">keys (?)</button><button id="hudToggle" title="show or hide the panels (H)">show HUD (H)</button></div>
 <div id="editBar" hidden><div id="editSwatches"></div><div id="editNote"></div></div>
 <div id="dropHint" hidden>drop world files to open them</div>
 <div id="helpModal" hidden><div id="helpPanel" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
@@ -214,6 +222,8 @@
 middle drag or wheel: dolly (through walls)   two fingers: pinch, pan
 WASD: move   E/Q: up/down   arrows: look   shift: ×8
 alt-wheel: speed   F: freeze cut
+C: walk (or fly again)   walking: WASD, space jumps, shift runs
+  a drag looks; a click locks the pointer to look (Esc frees it)
 H: show or hide the panels   T: wireframe   Y: SSAO   ?: this list
 [ / ]: seed − / +   R: a random seed
 drop .vdag files anywhere to open them</pre></section>
@@ -232,13 +242,15 @@ drop .vdag files anywhere to open them</pre></section>
     a drag anywhere else: the camera, as above
   Z / shift-Z: undo / redo   alt-wheel: speed</pre></section>
     <section><h3>a gamepad</h3><pre>pad: L stick move, R stick look, RT/LT up/down
-     A or L3 ×8, RB/LB speed ×2/÷2, Y freeze cut</pre></section>
+     A or L3 ×8, RB/LB speed ×2/÷2, Y freeze cut
+     walking: A jumps, L3 runs</pre></section>
     <section><h3>the link</h3><pre>?world=&amp;depth=&amp;detail=&amp;max=&amp;workers=&amp;eye=x,y,z
 ?world=lattice:1&amp;lattice=R,nx,ny,nz,gap,turns,axes,align
 ?world=kit:1&amp;kit=D,libs,ornaments,ground,colour
 ?world=caves:&lt;seed&gt;&amp;depth=10..12   (scatter:, lattice:, kit: the same)
 ?world=clay&amp;clay=D,lump,shape,ground   (lump 0: flat ground, or empty without ground)
-?hud=1 opens with the panels   ?wire=1 with the wireframe
+?world=dungeon:&lt;seed&gt;&amp;dungeon=D,floors
+?hud=1 opens with the panels   ?wire=1 with the wireframe   ?walk=1 walking
 ?quiet draws once converged   ?selftest runs streamSelftest()
 ?ray=off|density|0..6 (raster only by default)   ?rule=shadow|any|adaptive (shadow by default)
 ?density=0.27,0.025   ?stencil=0   ?raymiss=discard   ?bench   raySelftest()
@@ -321,7 +333,7 @@ import { GLSL_RAY, GLSL_RAY_ATTR, TREE_TEXELS, TREE_W, BRICK_ROW } from './ray-g
 import { createBrickPool, installPage, releasePage, buildCoverTree, KIND_RAY, KIND_RASTER, PAGE_WORDS, BRICK_WORDS,
          TREE_WORDS, classifyPagesCPU, traceCPU, hitAttrCPU, createHeap, ATTR_NONE, HEAP_W } from './ray-core.js';
 import { attrRGB, attrOf8 } from './attr-core.js';
-import { readPad, pickPad, PAD } from './pad-core.js';
+import { readPad, pickPad, PAD, BUTTON } from './pad-core.js';
 import { createOcclusion, nearEye, nearRadius, hiddenByTiles, OCCLUSION } from './occlusion-core.js';
 import { SHAPES, fieldOf, crustOf, CRUST } from './experiments/shapes.mjs';
 import { dagWorld, createActors, spawnNear, tickFliers, advanceFliers, regather, restHits, rescue, diffBox, trapped, mix as actorMix, FLIER, ONE as ACTOR_ONE, MAX_D as ACTOR_MAX_D } from './actor-core.js';
@@ -333,6 +345,8 @@ import { latticeDesc, latticeFromParam, latticeParam, budgetOf, maxCube, stackOf
 import { kitDesc, kitFromParam, kitParam, sideOf, KIT_LIMITS } from './kit-core.js';
 import { caveDesc } from './cave-core.js';
 import { clayDesc, clayFromParam, clayParam, buildClay, clayPlace, CLAY_LIMITS, CLAY_DEFAULTS, GROUND_DEPTH } from './clay-core.js';
+import { dungeonDesc, dungeonFromParam, dungeonParam, dungeonPlan, buildDungeon, planFromTable, secretDoors, DUNGEON_LIMITS, CELL as DUNGEON_CELL } from './dungeon-core.js';
+import { createWalker, stepWalk, walkerEye, wishOf, lookBy, openWorld, withHoles, inside as walkerInside, settle as settleWalker, WALK } from './walk-core.js';
 
 const $ = id => document.getElementById(id);
 const canvas = $('gl');
@@ -1170,8 +1184,9 @@ function setOcclusion(mode, { chosen = false } = {}){
    other worlds, and on an open view every query is pure cost, so they
    stay off. */
 const occlusionDefault = world => {
-  if (isFile(world)){ const kind = shelfEntry(world)?.colour?.kind; return kind === 'caves' || kind === 'kit' ? 'queries' : 'off'; }
-  return isCaves(world) || isKit(world) ? 'queries' : 'off';
+  if (isFile(world)){ const kind = shelfEntry(world)?.colour?.kind; return kind === 'caves' || kind === 'kit' || kind === 'dungeon' ? 'queries' : 'off'; }
+  // The dungeon too (unmeasured: docs/dungeon-log.md): inside it, floors and walls hide most of it.
+  return isCaves(world) || isKit(world) || isDungeon(world) ? 'queries' : 'off';
 };
 
 /* The ray path's three textures, with CPU mirrors laid out word for word
@@ -1438,6 +1453,11 @@ state.clay = (() => {
   try { return params.has('clay') ? clayFromParam(params.get('clay')) : clayDesc(); }
   catch (e){ console.warn('?clay refused:', e.message); return clayDesc(); }
 })();
+state.dungeon = (() => {
+  const seed = /^dungeon:\d+$/.test(state.world) ? +state.world.slice(8) || 1 : 1;
+  try { return params.has('dungeon') ? dungeonFromParam(params.get('dungeon'), seed) : dungeonDesc({ seed }); }
+  catch (e){ console.warn('?dungeon refused:', e.message); return dungeonDesc({ seed }); }
+})();
 const workerCount = params.has('workers') ? +params.get('workers') : Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
 // The lattice's build threads: short-lived, so up to 8 (a 128³ lattice is
 // ~3 min of work on one thread; docs/lattice3d-log.md §5). ?workers sets both.
@@ -1503,6 +1523,7 @@ const catalogue = () => {
   out.push({ id: 'lattice:' + state.lattice.seed, label: 'specimen lattice (any R, nx × ny × nz)', group: 'block-showroom specimens' });
   out.push({ id: 'kit:' + state.kit.seed, label: 'kit: nested 4³ assemblies of parts', group: 'kit world' });
   out.push({ id: isCaves(state.world) ? state.world : 'caves:1', label: 'caves under mountains (water, lava)', group: 'natural' });
+  out.push({ id: 'dungeon:' + state.dungeon.seed, label: 'dungeon: floors of rooms, halls and stairs', group: 'built (wave function collapse)' });
   out.push({ id: 'clay', label: 'clay, flat ground or empty', group: 'to sculpt' });
   for (const e of shelf) out.push({ id: e.id, label: e.name, group: 'shelf' });
   return out;
@@ -1640,6 +1661,7 @@ function bindRowPicker(){
 }
 const isRow = id => id.startsWith('row:'), isScatter = id => id.startsWith('scatter:'), isLattice = id => id.startsWith('lattice:');
 const isKit = id => id.startsWith('kit:'), isCaves = id => /^caves:\d+$/.test(id), isClay = id => id === 'clay';
+const isDungeon = id => /^dungeon:\d+$/.test(id);
 const isShape = id => id.startsWith('shape:');
 /* Which worlds take worlds (gizmo-plan §7 steps 4 and 5, vdagplacement §1): every
    world with a named colour. The kit, the shapes and the testbed rows are real stores
@@ -1657,12 +1679,14 @@ function fileWhyNot(e){
   if (e.colour.kind === 'baked') return 'a world with baked colour can\'t take worlds yet: the scene\'s colour needs a parent with a named one';
   return null;
 }
-const takesWorlds = id => isKit(id) || isShape(id) || isRow(id) || isScatter(id) || isLattice(id) || isCaves(id) || (isFile(id) && !fileWhyNot(shelfEntry(id)));
+const takesWorlds = id => isKit(id) || isShape(id) || isRow(id) || isScatter(id) || isLattice(id) || isCaves(id) || isDungeon(id) || (isFile(id) && !fileWhyNot(shelfEntry(id)));
 // The kit: 12, 14 and 16 as planned (decision 7), 10, small enough for the self-test,
 // and 8 and 6 (asked for 2026-11-14): at 6 the world is one 64³ assembly of parts, one chunk.
 const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: `L=${L} (${(4 ** L).toLocaleString()}³)` }))
   : isKit(id) ? [6, 8, 10, 12, 14, 16].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³, ${(D - 4) / 2} level${D === 6 ? '' : 's'})` }))
   : isCaves(id) ? [10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }))
+  // The dungeon: N × N cells of 16 a floor, N = 2^(D − 4) (docs/dungeon-log.md).
+  : isDungeon(id) ? [8, 9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** (D - 4)).toLocaleString()}² rooms' cells a floor)` }))
   // Clay stops at 20 here, though its descriptor goes on: the ray pass holds
   // the eye as float32 voxels (docs/clay-log.md §3). ?clay= asks for more.
   : isClay(id) ? [12, 14, 16, 18, 20].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }))
@@ -1674,6 +1698,7 @@ function fillDepth(){
   $('depthL').hidden = isLattice(state.world) || isFile(state.world); $('latticeCtl').hidden = !isLattice(state.world);
   $('kitCtl').hidden = !isKit(state.world);
   $('clayCtl').hidden = !isClay(state.world);
+  $('dungeonCtl').hidden = !isDungeon(state.world);
   // The world tool is every named world's with a real store (takesWorlds), and clay's,
   // which has blocks too (onelog-plan Q1).
   $('editL').hidden = !isClay(state.world) && !takesWorlds(state.world);
@@ -1685,6 +1710,8 @@ function fillDepth(){
   for (const c of depthChoices(state.world)) sel.add(new Option(c.label, c.v));
   // The kit's depth is its descriptor's.
   if (isKit(state.world)){ state.depth = state.kit.D; sel.value = String(state.depth); fillKit(); return; }
+  // And the dungeon's.
+  if (isDungeon(state.world)){ state.depth = state.dungeon.D; sel.value = String(state.depth); fillDungeon(); return; }
   // So is clay's, and a depth past the menu's (?clay=) gets a line of its own.
   if (isClay(state.world)){
     state.depth = state.clay.D;
@@ -1813,6 +1840,34 @@ function bindClay(){
   });
 }
 
+/* ---- the dungeon's controls (docs/dungeon-log.md) ---------------------------
+   The depth (the depth select) and the floors. A dungeon is planned and built
+   here, in ~170 ms at the default D = 10 with 4 floors (2.6 s at D = 12 with 8),
+   so a change rebuilds at once and keeps the eye, as the kit's controls do: the
+   new floors appear around you. A new depth is a new world size, so that one
+   resets the view. */
+function showDungeon(){
+  const d = state.dungeon, b = W && W.dungeon && dungeonParam(W.dungeon.desc) === dungeonParam(d) && W.dungeon.desc.seed === d.seed ? W.dungeon : null;
+  const i = b?.info;
+  $('dungeonInfo').textContent = i ? `${i.rooms.toLocaleString()} rooms (${i.halls} halls two floors tall, ${i.tall} a floor and a half), ${i.stairs} stairs (${i.spirals} spiral), ${i.tunnels.toLocaleString()} tunnels carved to join ${i.pieces.toLocaleString()} pieces, ${i.loops} loops, ${i.pruned.toLocaleString()} dead ends pruned\n` +
+    `${i.bridges} bridges, ${i.pits} pits, ${i.secrets} secret doors, ${i.channels} corridors with water\n` +
+    `${i.cells.toLocaleString()} cells: ${i.roomCells.toLocaleString()} room, ${i.corrCells.toLocaleString()} corridor; planned in ${i.planMs} ms, ${W.nodes.toLocaleString()} nodes (${b.tiles} tiles)` : '';
+}
+function fillDungeon(){
+  const d = state.dungeon, sel = $('dungeonFloors');
+  sel.innerHTML = '';
+  for (let f = DUNGEON_LIMITS.floors[0]; f <= Math.min(DUNGEON_LIMITS.floors[1], 2 ** d.D / DUNGEON_CELL); f++) sel.add(new Option(`${f} floor${f > 1 ? 's' : ''}`, f));
+  sel.value = String(d.floors);
+  showDungeon();
+}
+function bindDungeon(){
+  $('dungeonFloors').addEventListener('change', () => {
+    state.dungeon = dungeonDesc({ ...state.dungeon, floors: +$('dungeonFloors').value });
+    fillDungeon();
+    loadWorld('keep').catch(e => console.error('dungeon build failed', e));
+  });
+}
+
 /* ---- the seed (asked for 2026-11-04) -------------------------------------
    Four worlds take a seed: the scatter, the lattice, the kit and the
    caves. It was always the number after the colon in the world id
@@ -1828,7 +1883,7 @@ function bindClay(){
    leave it in rock). Seeds wrap within 1…65,535, kitDesc's and
    latticeDesc's range. */
 const SEED_MAX = 0xffff, SEED_DEBOUNCE = 250;
-const isSeeded = id => isScatter(id) || isLattice(id) || isKit(id) || isCaves(id);
+const isSeeded = id => isScatter(id) || isLattice(id) || isKit(id) || isCaves(id) || isDungeon(id);
 const seedOf = id => +id.slice(id.indexOf(':') + 1) || 1;
 const wrapSeed = s => ((Math.round(s) - 1) % SEED_MAX + SEED_MAX) % SEED_MAX + 1;
 const randomSeed = () => 1 + Math.floor(Math.random() * SEED_MAX);
@@ -1845,6 +1900,7 @@ function setSeed(seed, { now = false } = {}){
   state.world = state.world.slice(0, state.world.indexOf(':') + 1) + seed;
   if (isLattice(state.world)) state.lattice = latticeDesc({ ...state.lattice, seed });
   if (isKit(state.world)){ state.kit = kitDesc({ ...state.kit, seed }); fillKit(); }
+  if (isDungeon(state.world)){ state.dungeon = dungeonDesc({ ...state.dungeon, seed }); fillDungeon(); }
   fillWorlds(); fillSeed();
   clearTimeout(seedTimer);
   const go = () => loadWorld(isCaves(state.world) ? true : 'keep');
@@ -1886,9 +1942,9 @@ const mbOf = n => n >= 1e6 ? `${(n / 1e6).toFixed(2)} MB` : n >= 1e4 ? `${(n / 1
 // What a link or a file should say this world was built from.
 function sourceOf(){
   if (isFile(state.world)) return shelfEntry(state.world)?.source ?? null;
-  return { world: state.world, depth: isLattice(state.world) || isKit(state.world) || isClay(state.world) ? null : state.depth,
+  return { world: state.world, depth: isLattice(state.world) || isKit(state.world) || isClay(state.world) || isDungeon(state.world) ? null : state.depth,
            lattice: isLattice(state.world) ? latticeParam(state.lattice) : null, kit: isKit(state.world) ? kitParam(state.kit) : null,
-           clay: isClay(state.world) ? clayParam(state.clay) : null };
+           clay: isClay(state.world) ? clayParam(state.clay) : null, dungeon: isDungeon(state.world) ? dungeonParam(state.dungeon) : null };
 }
 const colourNote = status => ({
   same: 'colour as written',
@@ -2029,6 +2085,7 @@ function goToSource(src){
     if (src.lattice) state.lattice = latticeFromParam(src.lattice, seedOf(id));
     if (src.kit) state.kit = kitFromParam(src.kit, seedOf(id));
     if (src.clay) state.clay = clayFromParam(src.clay);
+    if (src.dungeon) state.dungeon = dungeonFromParam(src.dungeon, seedOf(id));
   } catch { /* a link that no longer parses: the current controls stand */ }
 }
 function removeFromShelf(){
@@ -2067,7 +2124,7 @@ const CLASSES_MAX = 300000;
 const TWICE = 'this file holds a node twice, so its nodes can\'t be imported as they are numbered: it\'s shown, and takes no worlds';
 async function buildWorld(signal, gen){
   const t0 = performance.now();
-  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, clay = null, classes = null, file = null, shaped = false;
+  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, clay = null, dungeon = null, classes = null, file = null, shaped = false;
   // The keys a scene log starts from (a world that takes worlds), and why a world takes none.
   // `lazy`: a view made real when B is first pressed (step 5).
   let sceneKeys = null, noEdit = null, lazy = false;
@@ -2164,6 +2221,18 @@ async function buildWorld(signal, gen){
     ({ store, root, D } = buildClay(clay));
     label = !clay.lump ? (clay.ground ? 'flat ground' : 'empty') : `clay: a ${clay.shape} of side ${clay.lump}${clay.ground ? ' on flat ground' : ''}`;
     colour = clay;
+  } else if (isDungeon(state.world)){
+    /* Here, on this thread, like clay: the plan (seeds, the collapse, the
+       joining) and the DAG are ~170 ms at D = 10 with 4 floors, and it leaves a
+       real store, so both tools work on it. The colour is the descriptor and
+       the plan's table, one int32 a cell, so the workers don't collapse it
+       again (docs/dungeon-log.md). */
+    const desc = state.dungeon, plan = dungeonPlan(desc);
+    dungeon = buildDungeon(desc, { store, plan });
+    ({ root, D } = dungeon);
+    dungeon.desc = desc; dungeon.info = plan.info;
+    label = `dungeon: ${desc.floors} floor${desc.floors > 1 ? 's' : ''} of ${(plan.N ** 2).toLocaleString()} cells`;
+    colour = { ...desc, table: plan.codes };
   } else if (isRow(state.world)){
     const row = ROWS[+state.world.slice(4)], a = automatonOf(CORE, row.cfgFor(state.depth));
     ({ root, D } = store.fromRadix4(state.depth, a.start, a.step, a.accept, a.keyOf));
@@ -2199,12 +2268,12 @@ async function buildWorld(signal, gen){
   // A file of a world that skips them skips them too.
   // Clay skips them for what's coming: createClasses is the slowest thing in an
   // edit's path, for one debug colour mode (realtimecsg.md §4.2).
-  const poseless = scatter || lattice || caves || clay || (file && ['scatter', 'lattice', 'caves', 'clay'].includes(file.colour?.kind));
+  const poseless = scatter || lattice || caves || clay || dungeon || (file && ['scatter', 'lattice', 'caves', 'clay', 'dungeon'].includes(file.colour?.kind));
   if (!poseless && store.size <= CLASSES_MAX) classes = createClasses(store, OH48);
   const snap = worldSnapshot(store, root, D, { counts, classes, colour });
   const t2 = performance.now(), toolWas = W?.edit?.kind;
   W = { id: state.world, label, store, root, D, side: 2 ** D, top: Math.max(0, D - 6), nodes: store.size, voxels: counts.of(root), counts,
-        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, caves, clay, file, colour, source: sourceOf(), classes: classes ? classes.size : null,
+        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, caves, clay, dungeon, file, colour, source: sourceOf(), classes: classes ? classes.size : null,
         // Made with the snapshot, as a tailer starts from what the snapshot holds.
         // Every editable world has one log (docs/onelog-plan.md step 3) and a real store,
         // here, with an interner. Clay takes blocks and worlds, with Tab between (plan
@@ -2216,7 +2285,8 @@ async function buildWorld(signal, gen){
         // file with a named colour after its import above (step 4): `noEdit` is why not.
         // The scatter, the lattice, the caves and a large file wait for B (`lazy`,
         // step 5): their keys and poses are kept for `makeReal`.
-        edit: clay ? newEdit(store, root, counts, classes, snap.keys, ['blocks', 'scene'])
+        // The dungeon has both tools too (docs/dungeon-log.md): blocks to break its walls.
+        edit: clay || dungeon ? newEdit(store, root, counts, classes, snap.keys, ['blocks', 'scene'])
             : kit ? newEdit(store, root, counts, classes, kit.baseKeys, ['scene'])
             : shaped ? newEdit(store, root, counts, classes, snap.keys, ['scene'])
             : sceneKeys ? newEdit(store, root, counts, classes, sceneKeys, ['scene']) : null,
@@ -2228,6 +2298,7 @@ async function buildWorld(signal, gen){
   colourForWorld();
   if (kit) showKit();
   if (clay) showClay();
+  if (dungeon) showDungeon();
   fillShelf();
   // A box is of the world it was opened in. And edit mode doesn't stick to a world that
   // can't be edited, or to one that opens in the other tool: a new world is a new
@@ -2262,6 +2333,8 @@ function defaultView(){
   // The kit from outside its low corner, above it, looking in (the
   // sketch's far view, kit-plan.md §1): all of it at once, then fly in.
   if (W.kit) return { eye: [-0.35 * s, 0.9 * s, -0.45 * s], yaw: 0.68, pitch: -0.5 };
+  // Above the top floor's room nearest the middle, looking across it (dungeon-core's dungeonInfo).
+  if (W.dungeon) return { eye: W.dungeon.info.view.eye.slice(), yaw: W.dungeon.info.view.yaw, pitch: W.dungeon.info.view.pitch };
   // Inside the start chamber, facing its first tunnel (cave-core's caveInfo).
   if (W.caves && W.caves.info.view) return W.caves.info.view;
   // The lump fills about half the view, seen from a little above. Flat ground:
@@ -2338,7 +2411,7 @@ function showPanels(){
   // (The block tool held the pointer's lock until onelog-plan step 3, and the controls
   // and buttons hid under it. Both tools have a free cursor now.)
   $('ctl').hidden = !hudOn;
-  $('hudToggle').hidden = $('wireToggle').hidden = $('aoToggle').hidden = $('helpToggle').hidden = false;
+  $('hudToggle').hidden = $('wireToggle').hidden = $('aoToggle').hidden = $('helpToggle').hidden = $('walkToggle').hidden = false;
   $('hudToggle').textContent = hudOn ? 'hide HUD (H)' : 'show HUD (H)';
 }
 function setHud(on){
@@ -2382,6 +2455,10 @@ addEventListener('keydown', e => {
   if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey){ e.preventDefault(); openHelp(); return; }
   if (editKey(e)) return;
   keys.add(e.code);
+  // Walking (docs/dungeon-log.md §11): C between the walk and the fly, space jumps (and
+  // mustn't press whatever button has the focus).
+  if (e.code === 'KeyC' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setWalk(!walk.on);
+  if (e.code === 'Space' && walk.on) e.preventDefault();
   if (e.code === 'KeyF') toggleFreeze();
   if (e.code === 'KeyH' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setHud(!hudOn);
   if (e.code === 'KeyT' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setWire(!state.wire);
@@ -2435,12 +2512,15 @@ function camTo(c){
 }
 // One gesture's move: orbit and pan at once, a dolly into what's waiting for move() to ease.
 function cameraBy(mode, dx, dy){
+  // Walking, a drag of either button looks where you stand, and nothing dollies (a dolly
+  // would move the eye the walker stands at).
+  if (walk.on){ if (mode !== 'dolly') lookTo(dx, dy); return; }
   const R = orbitRadius();
   if (mode === 'orbit') camTo(camera.orbit(cam, R, dx, dy, innerHeight));
   else if (mode === 'pan') camTo(camera.pan(cam, R, dx, dy, innerHeight));
   else if (mode === 'dolly') orbitCam.pending = camera.addPending(orbitCam.pending, -dy * camera.CAMERA.drag);
 }
-const dollyBy = s => { orbitRadius(); orbitCam.pending = camera.addPending(orbitCam.pending, s); };
+const dollyBy = s => { if (walk.on) return; orbitRadius(); orbitCam.pending = camera.addPending(orbitCam.pending, s); };
 // The fly keys' speed, voxels a second: the world's local scale (§9.3) at alt-wheel's multiple.
 const flySpeed = () => Math.min(W.side / 3, Math.max(2, view.clear)) * cam.speedMul;
 const pushThreshold = () => 0.5 * orbitCam.scale * cam.speedMul;
@@ -2453,12 +2533,82 @@ function cameraEase(dt){
   camTo(camera.dolly(cam, orbitCam.radius, step, { threshold: pushThreshold(), maxRadius: 8 * W.side }));
   if (!orbitCam.pending) saveView();
 }
+/* ---- walking (docs/dungeon-log.md §11) --------------------------------------------
+   Minecraft's way: C turns it on and off, flying stays the default. Every decision
+   is walk-core.js's (held in Node, test/walk-core.test.js); this hands it the keys
+   and the world and puts the eye where the walker's is.
+
+   **The world** is the log's root (as the actors' and the aim's: a block placed on
+   you lifts you at once, not at the flip), as actor-core's dagWorld asks it, with
+   outside the world air beside and above and solid below, and the dungeon's secret
+   doors as holes (dungeon-core's secretDoors, from the table, so a file of one has
+   them too). It's made again when the root or the world changes.
+
+   **The eye is the walker's.** Each frame the eye is put at walkerEye; if anything
+   else moved it in between (a link, a new world, a seed, the home view, a selftest),
+   the walker is put where the eye now is, and falls from there. The mouse looks
+   (lookBy) instead of orbiting: a drag of either button, or with the pointer locked
+   by a click (Esc frees it), the mouse alone. The wheel doesn't dolly. Edit mode
+   still works: the tools aim from the eye as they do flying. */
+const walk = { on: params.get('walk') === '1', w: null, eye: null, world: null, of: null, store: null, root: null, holes: 0, moving: false, note: '' };
+function walkWorld(){
+  const root = W.edit ? W.edit.log.root : W.root;
+  if (walk.of !== W || walk.store !== W.store || walk.root !== root){
+    let holes = [];
+    if (W.colour?.kind === 'dungeon' && W.colour.table){ try { holes = secretDoors(planFromTable(W.colour, W.colour.table)); } catch (e){ console.warn('no secret doors:', e.message); } }
+    walk.world = openWorld(withHoles(dagWorld(W.store, root, W.D).solid, holes), W.side);
+    walk.of = W; walk.store = W.store; walk.root = root; walk.holes = holes.length;
+  }
+  return walk.world;
+}
+function setWalk(on){
+  if (on && W && W.D > ACTOR_MAX_D){ walk.note = `no walking past D = ${ACTOR_MAX_D}`; on = false; }
+  else walk.note = '';
+  walk.on = on; walk.w = null; walk.eye = null; walk.moving = false;
+  keys.delete('Space');
+  if (!on && document.pointerLockElement === canvas) document.exitPointerLock();
+  if (on) orbitCam.pending = 0;
+  $('walkToggle').classList.toggle('on', on);
+  $('walkToggle').textContent = on ? 'fly (C)' : 'walk (C)';
+  linkFlag('walk', on);
+  if (on) say(edit.on ? 'walking: WASD, space jumps, shift runs, a drag looks (C flies)' : 'walking: WASD, space jumps, shift runs; click to look with the mouse (C flies)');
+  else if (walk.note) say(walk.note); else say('flying (C walks)');
+}
+const lookTo = (dx, dy) => { const l = lookBy(cam, dx, dy, innerHeight); cam.yaw = l.yaw; cam.pitch = l.pitch; };
+// One frame of walking, dt in ms. `p` is the pad's reading (or null).
+function walkStep(dt, p){
+  const world = walkWorld(), e = cam.eye;
+  if (!walk.w || !walk.eye || walk.eye.some((v, a) => v !== e[a])){ walk.w = createWalker(e); settleWalker(walk.w, world); }
+  let fw = 0, st = 0;
+  if (keys.has('KeyW')) fw += 1; if (keys.has('KeyS')) fw -= 1;
+  if (keys.has('KeyD')) st += 1; if (keys.has('KeyA')) st -= 1;
+  if (p){ fw += p.move[1]; st += p.move[0]; }
+  const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight') || !!(p && p.held[BUTTON.L3]);
+  const jump = keys.has('Space') || !!(p && p.held[BUTTON.A]);
+  stepWalk(walk.w, world, { move: wishOf(cam.yaw, fw, st), sprint, jump }, dt / 1000);
+  const eye = walkerEye(walk.w);
+  for (let a = 0; a < 3; a++) e[a] = eye[a];
+  walk.eye = e.slice();
+  // The link keeps the eye when the walker comes to rest, as a drag's release does.
+  const moving = Math.hypot(...walk.w.v) > 0.01 || !walk.w.ground;
+  if (walk.moving && !moving) saveView();
+  walk.moving = moving;
+}
+// For test/browser/walk.test.js: what walking is doing, and an eye moved from outside (as a link or a selftest moves it).
+window.__walk = {
+  state: () => ({ on: walk.on, ground: walk.w ? walk.w.ground : null, p: walk.w ? walk.w.p.slice() : null, lift: walk.w ? walk.w.lift : 0,
+                  eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch, holes: walk.holes, url: new URLSearchParams(location.search).get('walk'), height: innerHeight }),
+  eyeTo: e => { cam.eye = e.slice(); },
+};
 const touchPair = () => {
   const t = [...orbitCam.pointers.values()].filter(p => p.touch);
   return t.length === 2 ? { x: (t[0].x + t[1].x) / 2, y: (t[0].y + t[1].y) / 2, distance: Math.hypot(t[0].x - t[1].x, t[0].y - t[1].y) } : null;
 };
 canvas.addEventListener('pointerdown', e => {
   if (edit.on) return;
+  // Walking: a press locks the pointer, and the mouse looks without a button held, as in
+  // a game (Esc frees it). Edit mode's tools keep a free cursor, as they always have.
+  if (walk.on && e.pointerType === 'mouse' && e.button === 0 && document.pointerLockElement !== canvas) canvas.requestPointerLock?.();
   const mode = e.pointerType === 'touch' ? 'orbit' : camera.modeOf(e.button, e.shiftKey);
   if (!mode) return;
   if (e.button === 1) e.preventDefault();     // no autoscroll
@@ -2475,6 +2625,10 @@ canvas.addEventListener('pointermove', e => {
   if (before && after){ const g = camera.pinchOf(before, after); dollyBy(g.log); cameraBy('pan', g.dx, g.dy); }
   else if (orbitCam.pointers.size === 1) cameraBy(p.mode, dx, dy);
 });
+document.addEventListener('mousemove', e => {
+  if (walk.on && document.pointerLockElement === canvas && !edit.on) lookTo(e.movementX, e.movementY);
+});
+document.addEventListener('pointerlockchange', () => { $('crosshair').hidden = document.pointerLockElement !== canvas; if (!$('crosshair').hidden) orbitCam.pointers.clear(); });
 const pointerEnd = e => {
   if (!orbitCam.pointers.delete(e.pointerId)) return;
   if (canvas.hasPointerCapture?.(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
@@ -3697,7 +3851,7 @@ function saveView(){
   const q = new URLSearchParams(location.search);
   // A shelf world's link is what it was built from: a link can't hold the file.
   const src = sourceOf();
-  for (const [k, v] of [['world', src?.world], ['depth', src?.depth], ['lattice', src?.lattice], ['kit', src?.kit], ['clay', src?.clay]])
+  for (const [k, v] of [['world', src?.world], ['depth', src?.depth], ['lattice', src?.lattice], ['kit', src?.kit], ['clay', src?.clay], ['dungeon', src?.dungeon]])
     if (v == null) q.delete(k); else q.set(k, v);
   q.set('eye', cam.eye.map(v => Math.round(v)).join(','));
   q.set('yaw', cam.yaw.toFixed(3)); q.set('pitch', cam.pitch.toFixed(3));
@@ -3713,6 +3867,8 @@ function bindControls(){
   $('wireToggle').addEventListener('click', e => { e.currentTarget.blur(); setWire(!state.wire); });
   $('aoToggle').addEventListener('click', e => { e.currentTarget.blur(); setSSAO(!state.ssao); });
   $('aoToggle').classList.toggle('on', !!state.ssao);
+  $('walkToggle').addEventListener('click', e => { e.currentTarget.blur(); setWalk(!walk.on); });
+  $('walkToggle').classList.toggle('on', walk.on); $('walkToggle').textContent = walk.on ? 'fly (C)' : 'walk (C)';
   $('detail').value = state.detail; $('detailV').textContent = state.detail;
   $('max').value = String(state.max); $('rule').value = state.rule; $('color').value = String(state.color);
   $('cache').value = String(state.cache); $('seams').value = state.seams ? '1' : '0';
@@ -3725,13 +3881,17 @@ function bindControls(){
     pickWorld(id);
   });
   bindRowPicker();
-  bindLattice(); bindKit(); bindClay(); bindSeed(); bindFiles();
+  bindLattice(); bindKit(); bindClay(); bindDungeon(); bindSeed(); bindFiles();
   $('editToggle').addEventListener('click', e => { e.currentTarget.blur(); setEditMode(!edit.on); });
   $('placeWorld').addEventListener('change', e => { setEntry(e.currentTarget.value); e.currentTarget.blur(); });
   $('depth').addEventListener('change', () => {
     state.depth = +$('depth').value;
     if (isKit(state.world)){ const d = kitFromControls(state.depth); if (!d) return; state.kit = d; fillKit(); }
     if (isClay(state.world)){ state.clay = clayDesc({ ...state.clay, D: state.depth }); fillClay(); }
+    if (isDungeon(state.world)){
+      // Fewer floors when the new depth can't hold them (D = 8 holds 16).
+      state.dungeon = dungeonDesc({ ...state.dungeon, D: state.depth, floors: Math.min(state.dungeon.floors, 2 ** state.depth / DUNGEON_CELL) }); fillDungeon();
+    }
     loadWorld(true);
   });
   $('detail').addEventListener('input', () => { state.detail = +$('detail').value; $('detailV').textContent = state.detail; streamer.setOptions({ detail: state.detail }); dirty = true; });
@@ -3780,6 +3940,7 @@ function loadWorld(resetView){
   setBuilding('building ' + (isLattice(state.world) ? `the lattice, R=${state.lattice.R}, ${state.lattice.n.join('×')}`
     : isKit(state.world) ? `the kit, D=${state.kit.D}` : isCaves(state.world) ? `the caves, D=${state.depth}`
     : isClay(state.world) ? `clay, D=${state.clay.D}`
+    : isDungeon(state.world) ? `the dungeon, D=${state.dungeon.D}, ${state.dungeon.floors} floors`
     : isFile(state.world) ? shelfEntry(state.world)?.name ?? state.world : state.world) + ' …', null, true);
   // Let the message paint before a multi-second fromField. The scatter
   // and lattice worlds build in workers, so the page keeps drawing the
@@ -4096,6 +4257,10 @@ function move(dt){
     cam.yaw -= p.look[0] * dt * PAD.YAW;
     cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch + p.look[1] * dt * PAD.PITCH));
   }
+  if (keys.has('ArrowLeft')) cam.yaw += dt * 0.0015; if (keys.has('ArrowRight')) cam.yaw -= dt * 0.0015;
+  if (keys.has('ArrowUp')) cam.pitch = Math.min(1.55, cam.pitch + dt * 0.0012);
+  if (keys.has('ArrowDown')) cam.pitch = Math.max(-1.55, cam.pitch - dt * 0.0012);
+  if (walk.on){ walkStep(dt, p); return; }
   const boost = keys.has('ShiftLeft') || keys.has('ShiftRight') || (p && p.boost);
   cameraEase(dt);
   const base = flySpeed() * (boost ? 8 : 1);
@@ -4106,9 +4271,6 @@ function move(dt){
   if (keys.has('KeyW')) add(f, 1); if (keys.has('KeyS')) add(f, -1);
   if (keys.has('KeyD')) add(r, 1); if (keys.has('KeyA')) add(r, -1);
   if (keys.has('KeyE')) add([0, 1, 0], 1); if (keys.has('KeyQ')) add([0, 1, 0], -1);
-  if (keys.has('ArrowLeft')) cam.yaw += dt * 0.0015; if (keys.has('ArrowRight')) cam.yaw -= dt * 0.0015;
-  if (keys.has('ArrowUp')) cam.pitch = Math.min(1.55, cam.pitch + dt * 0.0012);
-  if (keys.has('ArrowDown')) cam.pitch = Math.max(-1.55, cam.pitch - dt * 0.0012);
   for (let a = 0; a < 3; a++) cam.eye[a] += m[a] * step;
 }
 
@@ -4374,7 +4536,7 @@ function hud(){
     (W.file ? `<span class="sec">file</span> ${W.file.fileName ? esc(W.file.fileName) : 'added here'}, ${k(W.voxels)} voxels, ${colourNote(W.file.colourStatus)}\n` : '') +
     (W.kit ? `<span class="sec">kit</span> ${W.kit.desc.libs.length ? `libraries ${W.kit.desc.libs.join(', ')}` : 'no libraries'}, ${W.kit.desc.ornaments} ornaments, ${W.kit.desc.ground ? 'ground and gravity' : 'floating'}, ` +
       `colour in level-${W.kit.desc.colourLevel} frames: ${k(W.voxels)} voxels, ${W.classes ? `${W.classes.toLocaleString()} Oh classes, ` : ''}${k(W.kit.dropped)} nodes pruned, a real store in ${W.kit.realMs.toFixed(1)} ms\n` : '') +
-    `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}\n` +
+    `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}${walk.on && walk.w ? `  <span class="sec">walk</span> ${walk.w.ground ? 'on the ground' : 'in the air'}${walk.holes ? `, ${walk.holes} secret door halves` : ''}` : ''}\n` +
     `<span class="sec">cut</span> ${sel ? sel.leaves.length : 0} leaves + ${sel ? sel.nodes.size - sel.leaves.length : 0} split  (lod ${lods})${sel && sel.capped ? `  <span class="warn">capped ${sel.capped}</span>` : ''}\n` +
     `<span class="sec">resident</span> ${S.cache.size} chunks, ${mb(S.cacheBytes)}  missing ${missing}${state.cache ? '' : '  <span class="warn">tiny cache</span>'}\n` +
     `<span class="sec">drawn</span> <b>${view.drawn}</b> chunks (${fr.draw.length} in cover, ${view.culled} culled)  <b>${k(view.instances)}</b> cubes  ${fr.draw.filter(d => d.open).length} with open sides\n` +
@@ -4661,6 +4823,71 @@ window.streamSelftest = async function streamSelftest(opts = {}){
     await run('a lump from nothing', { until: isConverged });
     report.clay.fromNothing = { voxels: W.voxels, eyeKept: eye.every((v, a) => v === cam.eye[a]) }; }
   state.clay = savedClay;
+  // 9. The dungeon (docs/dungeon-log.md): planned and built here, D = 9 with 3
+  // floors, held to Node's numbers; then 4 floors through the real control
+  // (keeping the eye), then seed 2 through setSeed.
+  { const savedDungeon = state.dungeon;
+    state.world = 'dungeon:1'; state.dungeon = dungeonDesc({ D: 9, floors: 3, seed: 1 }); fillWorlds(); fillDepth();
+    await loadWorld(true);
+    await run('switch to the dungeon', { until: isConverged });
+    const look = () => ({ param: dungeonParam(W.dungeon.desc), seed: W.dungeon.desc.seed, nodes: W.nodes, voxels: W.voxels, D: W.D, select: $('world').value,
+                          ctlShown: !$('dungeonCtl').hidden, url: new URLSearchParams(location.search).get('dungeon'), world: new URLSearchParams(location.search).get('world'),
+                          rooms: W.dungeon.info.rooms, stairs: W.dungeon.info.stairs, tools: W.edit?.tools.slice() ?? null,
+                          words: [...streamer.S.cache.values()].reduce((a, e) => a + (e.words || 0), 0) });
+    report.dungeon = { first: look() };
+    const eye = cam.eye.slice();
+    $('dungeonFloors').value = '4'; $('dungeonFloors').dispatchEvent(new Event('change'));
+    for (let i = 0; i < 2000 && !(W.dungeon?.desc.floors === 4 && !buildAbort); i++) await sleep(10);
+    await run('four floors', { until: isConverged });
+    report.dungeon.floors = { ...look(), eyeKept: eye.every((v, a) => v === cam.eye[a]) };
+    await setSeed(2, { now: true });
+    await run('the dungeon at seed 2', { until: isConverged });
+    report.dungeon.seed2 = look();
+    // The block tool on it: from its opening view, one voxel broken out of the
+    // floor in the middle of the view, flipped in, then undone to the root before.
+    { const v = defaultView(), root0 = W.root, n0 = W.voxels;
+      cam.eye = v.eye.slice(); cam.yaw = v.yaw; cam.pitch = v.pitch; edit.level = 0;
+      setEditMode(true);
+      const kind = W.edit.kind, broke = editStep('break');
+      await run('a break in the dungeon', { until: isConverged });
+      const after = { root: W.root, voxels: W.voxels };
+      editStep('undo');
+      await run('the break undone', { until: isConverged });
+      report.dungeon.edit = { kind, broke, changed: after.root !== root0, lost: n0 - after.voxels, undone: W.root === root0 && W.voxels === n0 };
+      setEditMode(false); }
+    // Walking (docs/dungeon-log.md §11), by real key events through the page's own
+    // listener and move(): C walks, a fall from the opening view lands flush on the
+    // dungeon, W goes the way the eye looks, space jumps and comes back to the same
+    // floor, the walker follows an eye moved by anything else, C flies again and the
+    // eye stays put. Never inside, by walk-core's own test on the page's world.
+    { const v = defaultView(), key = (type, code) => dispatchEvent(new KeyboardEvent(type, { code, bubbles: true }));
+      cam.eye = v.eye.slice(); cam.yaw = v.yaw; cam.pitch = v.pitch; keys.clear();
+      try {
+        key('keydown', 'KeyC'); key('keyup', 'KeyC');
+        const on = walk.on, y0 = cam.eye[1];
+        let insideAt = null, frames = 0;
+        const tick = () => { move(1000 / 60); frames++; if (walkerInside(walkWorld(), WALK, walk.w.p)) insideAt = walk.w.p.slice(); };
+        for (let i = 0; i < 900 && !(i > 5 && walk.w.ground && !walk.w.lift); i++) tick();
+        const landed = { ground: walk.w.ground, integer: Number.isInteger(walk.w.p[1]), fell: y0 - cam.eye[1] > 0,
+                         eyeIsWalker: walkerEye(walk.w).every((x, a) => x === cam.eye[a]) };
+        const p0 = walk.w.p.slice(), f = [Math.sin(cam.yaw), Math.cos(cam.yaw)];
+        key('keydown', 'KeyW'); for (let i = 0; i < 60; i++) tick(); key('keyup', 'KeyW');
+        const dx = walk.w.p[0] - p0[0], dz = walk.w.p[2] - p0[2], went = dx * f[0] + dz * f[1], aside = Math.abs(dx * f[1] - dz * f[0]);
+        for (let i = 0; i < 60; i++) tick();
+        const yj = walk.w.p[1]; let top = yj;
+        key('keydown', 'Space'); for (let i = 0; i < 4; i++) tick(); key('keyup', 'Space');
+        for (let i = 0; i < 120; i++){ tick(); top = Math.max(top, walk.w.p[1]); }
+        const jump = { rose: +(top - yj).toFixed(3), back: walk.w.p[1] === yj && walk.w.ground };
+        const e2 = [cam.eye[0] + 3, cam.eye[1] + 20, cam.eye[2]]; cam.eye = e2.slice(); tick();
+        const followed = walk.w.p[0] === e2[0] && walk.w.p[1] < e2[1] - WALK.eye;
+        const url = new URLSearchParams(location.search).get('walk'), holes = walk.holes;
+        key('keydown', 'KeyC'); key('keyup', 'KeyC');
+        const eyeBefore = cam.eye.slice();
+        move(1000 / 60);
+        report.dungeon.walk = { on, landed, went: +went.toFixed(2), aside: +aside.toFixed(2), jump, followed, url, holes, insideAt, frames,
+                                off: !walk.on, flyKept: cam.eye.every((x, a) => x === eyeBefore[a]), urlOff: new URLSearchParams(location.search).get('walk') };
+      } finally { if (walk.on) setWalk(false); keys.clear(); } }
+    state.dungeon = savedDungeon; }
   report.glError = gl.getError();
   report.mode = pool.mode; report.completed = pool.completed; report.discarded = streamer.S.stats.discarded;
   report.gpu = { ...gpu };
@@ -5783,6 +6010,8 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       { world: 'lattice:1', lattice: latticeDesc({ R: 11, n: [6, 5, 4], rotate: true }), pin: [24412, 3184] },
       { world: 'caves:1', depth: 10, pin: [386153834, 83692] },
       { world: 'clay', clay: clayDesc({ D: 20, lump: 64, ground: true }) },
+      // The dungeon's colour is its descriptor and the plan's table (TBLE), like the scatter's.
+      { world: 'dungeon:1', dungeon: dungeonDesc({ D: 9, floors: 3, seed: 1 }), pin: [8656926, 1210] },   // the second round's tiles (dungeon-log §10); 8632838 and 1015 before
       { world: 'shape:sphere', depth: 8 },
       { world: 'row:146', depth: 6 },
     ];
@@ -5792,6 +6021,7 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       if (c.kit) state.kit = c.kit;
       if (c.lattice) state.lattice = c.lattice;
       if (c.clay) state.clay = c.clay;
+      if (c.dungeon) state.dungeon = c.dungeon;
       fillWorlds(); fillDepth();
       await loadWorld(true);
       // The nodes the root reaches, which is what a file holds: clay's store keeps

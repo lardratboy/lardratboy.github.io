@@ -142,10 +142,11 @@ export function scatterLayout(desc){
    (inside is monotone in y), so a guess from the height and a step or two
    either way finds it. -1: no ground in this column.
 
-   The voxels (`field`) are a crust CRUST = 64 deep under that surface, as
-   the stream viewer's hills and terrain are (shapes.mjs's crustOf), not solid
-   to the floor (asked 2026-11-13: the hills under the specimens were 35–47% of
-   the world's height). The surface is the same, so `top`, the resting heights
+   The voxels (`field`) are a crust CRUST deep under that surface (8 since
+   commit 5730d19; 64 the day before), as the stream viewer's hills and
+   terrain are (shapes.mjs's crustOf), not solid to the floor (asked
+   2026-11-13: the hills under the specimens were 35–47% of the world's
+   height, and 64 deep was still too many voxels underground). The surface is the same, so `top`, the resting heights
    and every placement are too; `top` reads the solid shape, whose `f` the
    guess needs (the crust's f is a max of two terms). */
 export function groundOf(desc){
