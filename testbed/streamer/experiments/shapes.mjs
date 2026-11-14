@@ -175,7 +175,7 @@ export const SHAPES = [
    viewer's terrain and hills worlds and the scatter's ground (scatter-core's
    groundOf, since 2026-11-13) are crusts, CRUST deep. */
 // How deep a heightfield world's crust is, in voxels: the terrain, the hills, the scatter's ground.
-export const CRUST = 64;
+export const CRUST = 8;
 export function crustOf(shape, D, depth){
   if (!shape.height) throw new Error(`crustOf: ${shape.name} isn't a heightfield`);
   // A shape with a `height` is y ≤ height(x, z), the same expression as its
