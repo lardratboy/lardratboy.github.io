@@ -33,6 +33,19 @@
    and the eye would jerk: `lift` holds the eye where it was and eases it
    to the feet's new height (walkerEye).
 
+   CLIMBING (asked for 2026-11-14: "when using the walk camera in kit worlds
+   the inability to climb walls means you can't just navigate anywhere").
+   With `climb` held (the page's Alt / Option, or the pad's RT), a walker
+   pushing into a wall beside it goes up it at `climb` voxels a second
+   (shift's multiple too), with no gravity; at the top the wall ends, the
+   push carries the box over the lip, and it lands on top. Held beside a wall
+   in the air without pushing into it, it hangs where it is. Let go and it
+   falls. "Beside" is exact: the box's face lies on a voxel face (where a
+   wall stops it, by the dyadic sizes) and the layer beyond is solid. So a
+   walker is only ever moved by a wall it touches, and every move is still
+   moveAxis's, flush and never inside. An overhang stops the climb flush
+   under it, as a ceiling stops a jump.
+
    THE WORLD the viewer hands in is openWorld(withHoles(dag, holes), side):
    - outside the world is air beside and above it, and solid below y = 0,
      so a walker can stand outside a world as on a plain at its foot (the
@@ -54,11 +67,12 @@ export const WALK = {
   accel: 20, airAccel: 4,                // how fast the velocity follows the wish (a second⁻¹)
   substep: 0.25, maxDt: 0.1,             // the longest move tested at once; the longest frame
   ease: 14,                              // how fast the eye catches up with a step (a second⁻¹)
+  climb: 8,                              // up a wall, voxels a second (shift's multiple too)
 };
 const EPS = 1e-6;
 
 export function createWalker(eye, o = WALK){
-  return { p: [eye[0], eye[1] - o.eye, eye[2]], v: [0, 0, 0], ground: false, lift: 0, o };
+  return { p: [eye[0], eye[1] - o.eye, eye[2]], v: [0, 0, 0], ground: false, climbing: false, lift: 0, o };
 }
 export const walkerEye = w => [w.p[0], w.p[1] + w.o.eye - w.lift, w.p[2]];
 
@@ -95,6 +109,26 @@ function moveAxis(w, world, a, d){
   return false;
 }
 
+/* A wall beside the box on side s (±1) of axis a (0 or 2): its face lies
+   exactly on a voxel face and the layer of voxels beyond it is solid. */
+function besideWall(w, world, a, s){
+  const ext = extentOf(w.o, a), edge = w.p[a] + ext[s > 0 ? 1 : 0], L = Math.round(edge);
+  if (Math.abs(edge - L) > EPS) return false;
+  const { lo, hi } = boxOf(w.o, w.p);
+  lo[a] = s > 0 ? L : L - 1; hi[a] = lo[a] + 1;
+  return world(lo, hi);
+}
+/* Climbing's two states for a substep: 'up' (pushing into a wall beside it),
+   'hang' (beside one, in the air, not pushing, not rising: a jump beside a wall
+   rises and hangs at the top), or null. `mv` is the wish. */
+const PUSH = 0.1;   // a wish component below this doesn't push (a pad's drift, a near-parallel slide)
+function climbOf(w, world, mv, noHang){
+  for (const [a, m] of [[0, mv[0]], [2, mv[1]]]) if (Math.abs(m) > PUSH && besideWall(w, world, a, Math.sign(m))) return 'up';
+  if (noHang) return null;
+  for (const a of [0, 2]) for (const s of [-1, 1]) if (besideWall(w, world, a, s)) return 'hang';
+  return null;
+}
+
 /* A sideways move that was stopped, tried a step higher. `from` is where the
    substep started. Taken if it gets further than the stopped one did. */
 function stepUp(w, world, a, d, from){
@@ -128,24 +162,34 @@ export function settle(w, world, reach = 64){
 }
 
 /* One frame of dt seconds. input: { move: [x, z], the wish on the ground,
-   length at most 1 (wishOf); sprint; jump, held }. */
+   length at most 1 (wishOf); sprint; jump, held; climb, held }. */
 export function stepWalk(w, world, input, dt){
   const o = w.o, v = w.v, p = w.p;
   dt = Math.min(Math.max(dt, 0), o.maxDt);
   if (inside(world, o, p)) settle(w, world);
   const speed = o.speed * (input.sprint ? o.sprint : 1), mv = input.move || [0, 0];
-  const k = Math.min(1, dt * (w.ground ? o.accel : o.airAccel));
+  // On a wall the push is as firm as on the ground, so a walker slides along a wall it
+  // climbs as it walks, and over the lip lands well onto the top: at 60 Hz the feet end
+  // 1.13 voxels past the wall's face, 0.32 in the air's ease (on its edge).
+  const k = Math.min(1, dt * (w.ground || w.climbing ? o.accel : o.airAccel));
   v[0] += (mv[0] * speed - v[0]) * k;
   v[2] += (mv[1] * speed - v[2]) * k;
   if (input.jump && w.ground){ v[1] = Math.sqrt(2 * o.gravity * o.jump); w.ground = false; }
-  const fastest = Math.max(Math.abs(v[0]), Math.abs(v[1]) + o.gravity * dt, Math.abs(v[2]));
+  const fastest = Math.max(Math.abs(v[0]), Math.abs(v[1]) + o.gravity * dt, Math.abs(v[2]), input.climb ? o.climb * o.sprint : 0);
   const n = Math.max(1, Math.ceil(fastest * dt / o.substep)), h = dt / n;
   for (let i = 0; i < n; i++){
     const wasGround = w.ground;
     w.ground = false;
-    // Exact under constant gravity (the mean of the substep's velocity): Euler's v·h after
-    // v −= g·h lost half a substep's rise, and a jump of 3.25 rose 3.10.
-    const v1 = Math.max(-o.maxFall, v[1] - o.gravity * h), dy = (v[1] + v1) / 2 * h;
+    const climb = input.climb ? climbOf(w, world, mv, wasGround || v[1] > 0) : null;
+    w.climbing = !!climb;
+    let v1, dy;
+    if (climb === 'up'){ v1 = o.climb * (input.sprint ? o.sprint : 1); dy = v1 * h; }
+    else if (climb === 'hang'){ v1 = 0; dy = 0; }
+    else {
+      // Exact under constant gravity (the mean of the substep's velocity): Euler's v·h after
+      // v −= g·h lost half a substep's rise, and a jump of 3.25 rose 3.10.
+      v1 = Math.max(-o.maxFall, v[1] - o.gravity * h); dy = (v[1] + v1) / 2 * h;
+    }
     v[1] = v1;
     if (moveAxis(w, world, 1, dy)){ if (dy < 0) w.ground = true; v[1] = 0; }
     for (const a of [0, 2]){

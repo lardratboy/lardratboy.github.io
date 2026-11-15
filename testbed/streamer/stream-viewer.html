@@ -223,6 +223,7 @@ middle drag or wheel: dolly (through walls)   two fingers: pinch, pan
 WASD: move   E/Q: up/down   arrows: look   shift: ×8
 alt-wheel: speed   F: freeze cut
 C: walk (or fly again)   walking: WASD, space jumps, shift runs
+  alt (option) held: push into a wall to climb it, still to hang
   a drag looks; a click locks the pointer to look (Esc frees it)
 H: show or hide the panels   T: wireframe   Y: SSAO   ?: this list
 [ / ]: seed − / +   R: a random seed
@@ -243,7 +244,7 @@ drop .vdag files anywhere to open them</pre></section>
   Z / shift-Z: undo / redo   alt-wheel: speed</pre></section>
     <section><h3>a gamepad</h3><pre>pad: L stick move, R stick look, RT/LT up/down
      A or L3 ×8, RB/LB speed ×2/÷2, Y freeze cut
-     walking: A jumps, L3 runs</pre></section>
+     walking: A jumps, L3 runs, RT held climbs</pre></section>
     <section><h3>the link</h3><pre>?world=&amp;depth=&amp;detail=&amp;max=&amp;workers=&amp;eye=x,y,z
 ?world=lattice:1&amp;lattice=R,nx,ny,nz,gap,turns,axes,align
 ?world=kit:1&amp;kit=D,libs,ornaments,ground,colour
@@ -2459,6 +2460,8 @@ addEventListener('keydown', e => {
   // mustn't press whatever button has the focus).
   if (e.code === 'KeyC' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setWalk(!walk.on);
   if (e.code === 'Space' && walk.on) e.preventDefault();
+  // Alt climbs: no menu bar for it to open (Firefox on Windows opens one on Alt's release).
+  if ((e.code === 'AltLeft' || e.code === 'AltRight') && walk.on) e.preventDefault();
   if (e.code === 'KeyF') toggleFreeze();
   if (e.code === 'KeyH' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setHud(!hudOn);
   if (e.code === 'KeyT' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) setWire(!state.wire);
@@ -2472,7 +2475,7 @@ addEventListener('keydown', e => {
     if (e.code === 'KeyR') setSeed(randomSeed());
   }
 });
-addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('keyup', e => { keys.delete(e.code); if ((e.code === 'AltLeft' || e.code === 'AltRight') && walk.on) e.preventDefault(); });
 addEventListener('blur', () => keys.clear());
 /* ---- the mouse camera (docs/camera.md) -----------------------------------------
    As sol-v4-tower-contact-sheet.html's: left drag orbits, right drag (or shift and
@@ -2549,7 +2552,13 @@ function cameraEase(dt){
    the walker is put where the eye now is, and falls from there. The mouse looks
    (lookBy) instead of orbiting: a drag of either button, or with the pointer locked
    by a click (Esc frees it), the mouse alone. The wheel doesn't dolly. Edit mode
-   still works: the tools aim from the eye as they do flying. */
+   still works: the tools aim from the eye as they do flying.
+
+   **Climbing** (asked for 2026-11-14, for the kit, whose walls a walker couldn't
+   leave): Alt (Option) held, or the pad's RT, is walk-core's `climb`. Pushed into a
+   wall, the walker goes up it; beside one in the air, it hangs. A modifier, so W, A, S
+   and D still steer while it's held: Ctrl was the other one, but ctrl-W closes the tab
+   on Windows and Linux before a page can stop it, and Shift already runs. */
 const walk = { on: params.get('walk') === '1', w: null, eye: null, world: null, of: null, store: null, root: null, holes: 0, moving: false, note: '' };
 function walkWorld(){
   const root = W.edit ? W.edit.log.root : W.root;
@@ -2571,7 +2580,7 @@ function setWalk(on){
   $('walkToggle').classList.toggle('on', on);
   $('walkToggle').textContent = on ? 'fly (C)' : 'walk (C)';
   linkFlag('walk', on);
-  if (on) say(edit.on ? 'walking: WASD, space jumps, shift runs, a drag looks (C flies)' : 'walking: WASD, space jumps, shift runs; click to look with the mouse (C flies)');
+  if (on) say(edit.on ? 'walking: WASD, space jumps, shift runs, alt climbs, a drag looks (C flies)' : 'walking: WASD, space jumps, shift runs, alt climbs; click to look with the mouse (C flies)');
   else if (walk.note) say(walk.note); else say('flying (C walks)');
 }
 const lookTo = (dx, dy) => { const l = lookBy(cam, dx, dy, innerHeight); cam.yaw = l.yaw; cam.pitch = l.pitch; };
@@ -2585,7 +2594,8 @@ function walkStep(dt, p){
   if (p){ fw += p.move[1]; st += p.move[0]; }
   const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight') || !!(p && p.held[BUTTON.L3]);
   const jump = keys.has('Space') || !!(p && p.held[BUTTON.A]);
-  stepWalk(walk.w, world, { move: wishOf(cam.yaw, fw, st), sprint, jump }, dt / 1000);
+  const climb = keys.has('AltLeft') || keys.has('AltRight') || !!(p && p.held[BUTTON.RT]);
+  stepWalk(walk.w, world, { move: wishOf(cam.yaw, fw, st), sprint, jump, climb }, dt / 1000);
   const eye = walkerEye(walk.w);
   for (let a = 0; a < 3; a++) e[a] = eye[a];
   walk.eye = e.slice();
@@ -2596,7 +2606,7 @@ function walkStep(dt, p){
 }
 // For test/browser/walk.test.js: what walking is doing, and an eye moved from outside (as a link or a selftest moves it).
 window.__walk = {
-  state: () => ({ on: walk.on, ground: walk.w ? walk.w.ground : null, p: walk.w ? walk.w.p.slice() : null, lift: walk.w ? walk.w.lift : 0,
+  state: () => ({ on: walk.on, ground: walk.w ? walk.w.ground : null, climbing: walk.w ? walk.w.climbing : null, p: walk.w ? walk.w.p.slice() : null, lift: walk.w ? walk.w.lift : 0,
                   eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch, holes: walk.holes, url: new URLSearchParams(location.search).get('walk'), height: innerHeight }),
   eyeTo: e => { cam.eye = e.slice(); },
 };
@@ -4536,7 +4546,7 @@ function hud(){
     (W.file ? `<span class="sec">file</span> ${W.file.fileName ? esc(W.file.fileName) : 'added here'}, ${k(W.voxels)} voxels, ${colourNote(W.file.colourStatus)}\n` : '') +
     (W.kit ? `<span class="sec">kit</span> ${W.kit.desc.libs.length ? `libraries ${W.kit.desc.libs.join(', ')}` : 'no libraries'}, ${W.kit.desc.ornaments} ornaments, ${W.kit.desc.ground ? 'ground and gravity' : 'floating'}, ` +
       `colour in level-${W.kit.desc.colourLevel} frames: ${k(W.voxels)} voxels, ${W.classes ? `${W.classes.toLocaleString()} Oh classes, ` : ''}${k(W.kit.dropped)} nodes pruned, a real store in ${W.kit.realMs.toFixed(1)} ms\n` : '') +
-    `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}${walk.on && walk.w ? `  <span class="sec">walk</span> ${walk.w.ground ? 'on the ground' : 'in the air'}${walk.holes ? `, ${walk.holes} secret door halves` : ''}` : ''}\n` +
+    `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}${walk.on && walk.w ? `  <span class="sec">walk</span> ${walk.w.ground ? 'on the ground' : walk.w.climbing ? 'climbing' : 'in the air'}${walk.holes ? `, ${walk.holes} secret door halves` : ''}` : ''}\n` +
     `<span class="sec">cut</span> ${sel ? sel.leaves.length : 0} leaves + ${sel ? sel.nodes.size - sel.leaves.length : 0} split  (lod ${lods})${sel && sel.capped ? `  <span class="warn">capped ${sel.capped}</span>` : ''}\n` +
     `<span class="sec">resident</span> ${S.cache.size} chunks, ${mb(S.cacheBytes)}  missing ${missing}${state.cache ? '' : '  <span class="warn">tiny cache</span>'}\n` +
     `<span class="sec">drawn</span> <b>${view.drawn}</b> chunks (${fr.draw.length} in cover, ${view.culled} culled)  <b>${k(view.instances)}</b> cubes  ${fr.draw.filter(d => d.open).length} with open sides\n` +
