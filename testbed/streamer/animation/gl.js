@@ -194,9 +194,9 @@ void main(){
 }`;
 
 const BG_VS = `#version 300 es
-const vec2 P[3] = vec2[3](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
+layout(location = 0) in vec2 aP;   // the triangle's corner, from bgVAO
 out vec2 vNdc;
-void main(){ vNdc = P[gl_VertexID]; gl_Position = vec4(P[gl_VertexID], 0.9999, 1.0); }`;
+void main(){ vNdc = aP; gl_Position = vec4(aP, 0.9999, 1.0); }`;
 const BG_FS = `#version 300 es
 precision highp float;
 in vec2 vNdc;
@@ -290,7 +290,14 @@ export function createRenderer(canvas){
   gl.bindBuffer(gl.ARRAY_BUFFER, quadVB); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0,0, 1,0, 1,1, 0,0, 1,1, 0,1]), gl.STATIC_DRAW);
   const segVB = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, segVB); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0,-1, 1,-1, 1,1, 0,-1, 1,1, 0,1]), gl.STATIC_DRAW);
+  // The sky's triangle as attribute 0, not a table read by gl_VertexID:
+  // Firefox on a Mac emulates a missing attribute 0 on every draw, and warns.
   const bgVAO = gl.createVertexArray();
+  gl.bindVertexArray(bgVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
 
   // Cube VAOs: one per instance buffer.
   function cubeVAO(ib){

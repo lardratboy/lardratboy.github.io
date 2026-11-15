@@ -478,8 +478,10 @@ void main(){
    whole ray, covered or not (ray-findings.md, the third bench: 14 far
    chunks of a terrain cost 5.4 ms, more than half of tracing all 705). */
 const RAY_VS = `#version 300 es
+layout(location = 0) in uint aVertex;   // gl_VertexID, from idVAO's buffer
 void main(){
-  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  int id = int(aVertex);
+  vec2 p = vec2((id << 1) & 2, id & 2);
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }`;
 const GLSL_RAY_CAMERA = `
@@ -582,7 +584,24 @@ const RAY_UNIFORMS = ['uTree', 'uPages', 'uBricks', 'uPageAttr', 'uAttrHeap', 'u
                       'uRasterDepth', 'uNearFar'];
 const RAY_PASS_UNIFORMS = [...RAY_UNIFORMS, 'uEyeN', 'uInvSide', 'uLodColors', 'uColorMode', 'uFog', 'uDepthScale'];
 const RU = uniformsOf(rayProg, RAY_PASS_UNIFORMS), RUD = uniformsOf(rayProgDiscard, RAY_PASS_UNIFORMS);
-const emptyVAO = gl.createVertexArray();
+/* The VAO for draws with no attributes of their own (RAY_VS's full-screen
+   triangle, QBOX_VS's boxes): attribute 0 is the vertex's own number, 0 to
+   35, which the shaders read where they read gl_VertexID before. Firefox on
+   a Mac draws through desktop OpenGL, where attribute 0 must be an enabled
+   array the program uses, and it emulated one on every such draw
+   ("Drawing without vertex attrib 0 array enabled forces the browser to do
+   expensive emulation work", 2026-11-15). The buffer is 36 bytes. */
+const idVAO = gl.createVertexArray();
+{
+  const ids = gl.createBuffer();
+  gl.bindVertexArray(idVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, ids);
+  gl.bufferData(gl.ARRAY_BUFFER, Uint8Array.from({ length: 36 }, (_, i) => i), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribIPointer(0, 1, gl.UNSIGNED_BYTE, 0, 0);
+  gl.bindVertexArray(null);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+}
 
 /* ---- screen-space ambient occlusion, a prototype (docs/vdagssao.md) --------
    Two full-screen passes after the frame, reading the raster's depth texture
@@ -1005,7 +1024,8 @@ uniform mat4 uViewProj;
 uniform vec4 uBox;   // eye-relative low corner and side, voxels
 const vec3 CORNER[36] = vec3[36](
   ${glslVec3s(BOX_CORNERS)});
-void main(){ gl_Position = uViewProj * vec4(uBox.xyz + CORNER[gl_VertexID] * uBox.w, 1.0); }`;
+layout(location = 0) in uint aVertex;   // gl_VertexID, from idVAO's buffer
+void main(){ gl_Position = uViewProj * vec4(uBox.xyz + CORNER[aVertex] * uBox.w, 1.0); }`;
 const QBOX_FS = `#version 300 es
 precision highp float;
 out vec4 outColor;
@@ -1041,7 +1061,7 @@ function queryRunner(occ, revisit = OCCLUSION.REVISIT){
       gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(false);
       gl.enable(gl.CULL_FACE);
       gl.colorMask(false, false, false, false);
-      gl.bindVertexArray(emptyVAO);
+      gl.bindVertexArray(idVAO);
       const batch = [];
       for (const { state: s, box } of asks){
         const q = free.pop() || gl.createQuery();
@@ -1136,7 +1156,7 @@ function depthRunner(occ){
       gl.activeTexture(gl.TEXTURE0 + RASTER_DEPTH_UNIT); gl.bindTexture(gl.TEXTURE_2D, T.depth); gl.activeTexture(gl.TEXTURE0);
       gl.uniform1i(TU.uRasterDepth, RASTER_DEPTH_UNIT); gl.uniform2i(TU.uSize, w, h);
       gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.BLEND);
-      gl.bindVertexArray(emptyVAO); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.bindVertexArray(null);
+      gl.bindVertexArray(idVAO); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.bindVertexArray(null);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, x.pbo);
       gl.readPixels(0, 0, tw, th, gl.RGBA, gl.UNSIGNED_BYTE, 0);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
@@ -1204,19 +1224,35 @@ const occlusionDefault = world => {
                needs ~16M words, which is the whole heap. */
 const TREE_ROWS = 64, PAGE_CAP = 4096, BRICK_ROWS = 1024, BRICK_CAP = BRICK_ROW * BRICK_ROWS - 1;
 const HEAP_ROWS = Math.min(4096, gl.getParameter(gl.MAX_TEXTURE_SIZE));
-function intTexture(internal, format, w, h){
+/* Each texture is cleared on the GPU as it's made, to what its mirror
+   starts as. Every upload after is a texSubImage2D of part of it, and
+   Firefox, seeing a partial upload into storage nothing has written,
+   warned ("Texture has not been initialized prior to a partial upload")
+   and zeroed the whole texture from the CPU first, on the first frame:
+   the cover tree is uploaded every frame, raster only too, so every
+   world warned (2026-11-15, the D = 12 terrain). A clear through a
+   framebuffer is a draw, so it counts as written, costs no upload, and
+   makes the textures what the mirrors say they are from the start
+   (pageAttr's mirror starts at ATTR_NONE, the texture at 0 before). */
+function intTexture(internal, format, w, h, fill = 0){
   const t = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, t);
   gl.texStorage2D(gl.TEXTURE_2D, 1, internal, w, h);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  const was = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING), fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+  gl.clearBufferuiv(gl.COLOR, 0, new Uint32Array([fill, 0, 0, 0]));
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, was);
+  gl.deleteFramebuffer(fb);
   return { t, internal, format, w, h };
 }
 const ray = {
   tree: intTexture(gl.RGBA32UI, gl.RGBA_INTEGER, TREE_W, TREE_ROWS),
   pages: intTexture(gl.R32UI, gl.RED_INTEGER, PAGE_WORDS, PAGE_CAP),
   bricks: intTexture(gl.RGBA32UI, gl.RGBA_INTEGER, 4 * BRICK_ROW, BRICK_ROWS),
-  pageAttr: intTexture(gl.R32UI, gl.RED_INTEGER, PAGE_WORDS, PAGE_CAP),
+  pageAttr: intTexture(gl.R32UI, gl.RED_INTEGER, PAGE_WORDS, PAGE_CAP, ATTR_NONE),
   heap: intTexture(gl.R32UI, gl.RED_INTEGER, HEAP_W, HEAP_ROWS),
   treeCPU: new Uint32Array(4 * TREE_W * TREE_ROWS), pagesCPU: new Uint32Array(PAGE_WORDS * PAGE_CAP),
   bricksCPU: new Uint32Array(BRICK_WORDS * (BRICK_CAP + 1)),
@@ -3398,7 +3434,7 @@ function drawSSAO(w, h, o = state.ssao, out = null, show = state.ssaoShow){
   gl.uniform1f(SSAO_U.uRadius, o.radius);
   gl.uniform1f(SSAO_U.uPxPerUnit, h / 2 / Math.tan(0.45));
   gl.uniform1i(SSAO_U.uSlices, o.slices); gl.uniform1i(SSAO_U.uSteps, o.steps);
-  gl.bindVertexArray(emptyVAO);
+  gl.bindVertexArray(idVAO);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   gl.bindFramebuffer(gl.FRAMEBUFFER, out);
   gl.viewport(0, 0, w, h);
@@ -4481,7 +4517,7 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
     gl.uniform1f(RP.uDepthScale, 1 / (8 * W.side));
     gl.disable(gl.CULL_FACE); gl.disable(gl.DEPTH_TEST);
     if (!discardMiss){ gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); }
-    gl.bindVertexArray(emptyVAO);
+    gl.bindVertexArray(idVAO);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     view.rayTriangle = true;
     gl.bindVertexArray(null);
@@ -4989,7 +5025,7 @@ function probeRun(fs, w, h, setup){
   bindRayTextures(P.u);
   gl.uniform1i(P.u.uProbeW, w);
   setup(P.u);
-  gl.bindVertexArray(emptyVAO);
+  gl.bindVertexArray(idVAO);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   gl.bindVertexArray(null);
   const out = new Int32Array(4 * w * h);

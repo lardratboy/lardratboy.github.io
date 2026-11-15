@@ -1158,8 +1158,10 @@ void main(){
   outColor = shadeOut(base, vNormal, vRel);
 }`;
 const RAY_VS = `#version 300 es
+layout(location = 0) in uint aVertex;   // gl_VertexID, from P.emptyVAO's buffer (the viewer's idVAO)
 void main(){
-  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  int id = int(aVertex);
+  vec2 p = vec2((id << 1) & 2, id & 2);
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }`;
 const GLSL_RAY_CAMERA = `
@@ -1246,7 +1248,8 @@ uniform mat4 uViewProj;
 uniform vec4 uBox;
 const vec3 CORNER[36] = vec3[36](
   ${glslVec3s(BOX_CORNERS)});
-void main(){ gl_Position = uViewProj * vec4(uBox.xyz + CORNER[gl_VertexID] * uBox.w, 1.0); }`;
+layout(location = 0) in uint aVertex;
+void main(){ gl_Position = uViewProj * vec4(uBox.xyz + CORNER[aVertex] * uBox.w, 1.0); }`;
 const QBOX_FS = `#version 300 es
 precision highp float;
 out vec4 outColor;
@@ -1318,6 +1321,15 @@ if (gl){
     gl.texStorage2D(gl.TEXTURE_2D, 1, internal, w, h);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    // Cleared on the GPU now, as the viewer's are: every upload is partial,
+    // and Firefox warns on a partial upload into storage never written,
+    // then zeroes the texture from the CPU (stream-viewer's intTexture).
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    gl.clearBufferuiv(gl.COLOR, 0, new Uint32Array(4));
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fb);
     return { t, format, w, h };
   };
   P = {
@@ -1338,6 +1350,13 @@ if (gl){
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, P.cube);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, cubeIndices(), gl.STATIC_DRAW);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+  // Attribute 0 the vertex's number, for the draws with none of their own:
+  // Firefox on a Mac emulates a missing attribute 0 on every draw (the viewer's idVAO).
+  gl.bindVertexArray(P.emptyVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, Uint8Array.from({ length: 36 }, (_, i) => i), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribIPointer(0, 1, gl.UNSIGNED_BYTE, 0, 0);
   gl.bindVertexArray(P.boxVAO);
   gl.bindBuffer(gl.ARRAY_BUFFER, P.boxBuf);
   gl.enableVertexAttribArray(0);
