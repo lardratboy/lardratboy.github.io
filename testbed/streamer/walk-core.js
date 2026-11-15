@@ -35,12 +35,15 @@
 
    CLIMBING (asked for 2026-11-14: "when using the walk camera in kit worlds
    the inability to climb walls means you can't just navigate anywhere").
-   With `climb` held (the page's Alt / Option, or the pad's RT), a walker
-   pushing into a wall beside it goes up it at `climb` voxels a second
-   (shift's multiple too), with no gravity; at the top the wall ends, the
-   push carries the box over the lip, and it lands on top. Held beside a wall
-   in the air without pushing into it, it hangs where it is. Let go and it
-   falls. "Beside" is exact: the box's face lies on a voxel face (where a
+   With `climb` held (the page's run: shift, or the pad's L3; "you run at a
+   wall and it climbs", 2026-11-15), a walker pushing into a wall beside it
+   goes up it at `climb` voxels a second (shift's multiple too), with no
+   gravity; at the top the wall ends, the push carries the box over the lip,
+   and it lands on top. Stop pushing mid-climb with climb still held and it
+   hangs where it is (it can strafe along the wall); let go and it falls. A
+   hang only carries on from a climb: since the run is the climb, a walker
+   running along a wall off a ledge, or jumping beside one, would otherwise
+   have hung in mid-air. "Beside" is exact: the box's face lies on a voxel face (where a
    wall stops it, by the dyadic sizes) and the layer beyond is solid. So a
    walker is only ever moved by a wall it touches, and every move is still
    moveAxis's, flush and never inside. An overhang stops the climb flush
@@ -119,12 +122,14 @@ function besideWall(w, world, a, s){
   return world(lo, hi);
 }
 /* Climbing's two states for a substep: 'up' (pushing into a wall beside it),
-   'hang' (beside one, in the air, not pushing, not rising: a jump beside a wall
-   rises and hangs at the top), or null. `mv` is the wish. */
+   'hang' (beside one, not pushing, and climbing the substep before), or null.
+   `mv` is the wish. A walker that climbed or hung the substep before is never
+   on the ground (neither move ends on a floor), so a hang needs no ground
+   test of its own. */
 const PUSH = 0.1;   // a wish component below this doesn't push (a pad's drift, a near-parallel slide)
-function climbOf(w, world, mv, noHang){
+function climbOf(w, world, mv, holding){
   for (const [a, m] of [[0, mv[0]], [2, mv[1]]]) if (Math.abs(m) > PUSH && besideWall(w, world, a, Math.sign(m))) return 'up';
-  if (noHang) return null;
+  if (!holding) return null;
   for (const a of [0, 2]) for (const s of [-1, 1]) if (besideWall(w, world, a, s)) return 'hang';
   return null;
 }
@@ -180,7 +185,7 @@ export function stepWalk(w, world, input, dt){
   for (let i = 0; i < n; i++){
     const wasGround = w.ground;
     w.ground = false;
-    const climb = input.climb ? climbOf(w, world, mv, wasGround || v[1] > 0) : null;
+    const climb = input.climb ? climbOf(w, world, mv, w.climbing) : null;
     w.climbing = !!climb;
     let v1, dy;
     if (climb === 'up'){ v1 = o.climb * (input.sprint ? o.sprint : 1); dy = v1 * h; }
