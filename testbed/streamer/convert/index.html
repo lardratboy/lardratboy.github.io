@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>glb to vdag</title>
+<!--
+  experiments/mesh-vdag.mjs with a page: drop a glTF binary (or pick one), pick
+  the depths, and save world files the stream viewer opens. Every decision is
+  convert-core.js's, run in convert-worker.js, one worker an asset; this page
+  only moves files and draws the list. docs/convert.md.
+
+  Serve the repo root (npm run serve) and open /convert/: the core imports
+  ../dag-core.js and its neighbours.
+-->
+<style>
+  :root{ --bg:#07070a; --panel:#101016; --line:rgba(255,255,255,.09); --text:#a8a8ba; --dim:#62627a; --hi:#d8d8e6; --accent:#7a8ad0; --warn:#d08a5a; --bad:#d06a6a; }
+  html,body{ margin:0; background:var(--bg); color:var(--text); font:12px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  main{ max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1{ font-size:15px; font-weight:normal; color:var(--hi); margin:0 0 4px; letter-spacing:.04em; }
+  p.lede{ margin:0 0 18px; color:var(--dim); }
+  a{ color:var(--accent); }
+  button, select{ background:#16161f; color:var(--hi); font:inherit; border:1px solid rgba(255,255,255,.16); border-radius:4px; padding:3px 10px; cursor:pointer; }
+  button:hover{ border-color:rgba(255,255,255,.35); }
+  button:disabled{ opacity:.4; cursor:default; }
+  #settings{ display:flex; flex-wrap:wrap; gap:10px 24px; align-items:center; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:10px 14px; margin-bottom:12px; }
+  #settings .label{ color:var(--dim); margin-right:8px; }
+  #depths label{ margin-right:10px; white-space:nowrap; cursor:pointer; }
+  #depths input{ accent-color:var(--accent); vertical-align:-2px; }
+  #drop{ border:1px dashed rgba(255,255,255,.22); border-radius:8px; padding:34px 16px; text-align:center; color:var(--dim); margin-bottom:18px; transition:background .1s, border-color .1s; }
+  #drop.over, body.over #drop{ background:rgba(122,138,208,.08); border-color:var(--accent); color:var(--hi); }
+  #drop b{ color:var(--hi); font-weight:normal; }
+  #drop .hint{ display:block; margin-top:6px; font-size:11px; }
+  .job{ background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:10px 14px; margin-bottom:10px; }
+  .job .top{ display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+  .job .name{ color:var(--hi); overflow-wrap:anywhere; }
+  .job .size{ color:var(--dim); }
+  .job .buttons{ margin-left:auto; display:flex; gap:6px; }
+  .job .status{ margin-top:4px; }
+  .job .status.bad{ color:var(--bad); }
+  .job .status.done{ color:var(--dim); }
+  .job .about{ color:var(--dim); margin-top:2px; }
+  .job .notes{ color:var(--warn); margin-top:2px; }
+  .worlds{ display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }
+  .world{ border:1px solid var(--line); border-radius:5px; padding:8px; width:180px; }
+  .world canvas{ display:block; width:164px; height:164px; image-rendering:pixelated; background:#16161c; border-radius:3px; margin-bottom:6px; }
+  .world .d{ color:var(--hi); }
+  .world .facts{ color:var(--dim); font-size:11px; white-space:pre; }
+  .world a{ display:inline-block; margin-top:4px; }
+  footer{ margin-top:28px; color:var(--dim); font-size:11px; }
+  @media (max-width:520px){ .world{ width:calc(50% - 23px); } .world canvas{ width:100%; height:auto; aspect-ratio:1; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>glb → vdag</h1>
+  <p class="lede">A glTF binary to world files for the <a href="../stream-viewer.html">stream viewer</a>, made as <code>experiments/mesh-vdag.mjs</code> makes them, in this browser. Drop a saved file on the viewer, or open it there with file → open… (<kbd>H</kbd> shows the panels).</p>
+
+  <div id="settings">
+    <div id="depths"><span class="label">depths</span></div>
+    <div><span class="label">colour</span>
+      <select id="colour">
+        <option value="6">baked, 6 bits a channel</option>
+        <option value="8">baked, 8 bits a channel</option>
+        <option value="0">none (the shape alone)</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="drop">
+    <b>Drop .glb files here</b>, or <button id="pick" type="button">choose files…</button>
+    <input id="files" type="file" accept=".glb,model/gltf-binary" multiple hidden>
+    <span class="hint">Each depth D is a world 2<sup>D</sup> voxels a side. D = 10 can take a minute an asset. Nothing leaves this machine.</span>
+  </div>
+
+  <div id="jobs"></div>
+
+  <footer>Settings apply to the files you add next; “again” makes an asset over with the settings as they are now.</footer>
+</main>
+
+<script type="module">
+import { DEPTHS, nameOf } from './convert-core.js';
+
+/* ---- settings, remembered per browser ------------------------------------------------- */
+const KEY = 'glb-to-vdag', depthBox = document.getElementById('depths'), colourSel = document.getElementById('colour');
+let saved = {};
+try { saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') ?? {}; } catch {}
+const chosen = new Set(Array.isArray(saved.depths) ? saved.depths.filter(d => DEPTHS.includes(d)) : [8, 10]);
+for (const D of DEPTHS){
+  const l = document.createElement('label'), c = document.createElement('input');
+  c.type = 'checkbox'; c.value = D; c.checked = chosen.has(D); c.id = `d${D}`;
+  l.append(c, ` D = ${D}`);
+  depthBox.append(l);
+}
+if (['6', '8', '0'].includes(String(saved.colour))) colourSel.value = String(saved.colour);
+const settings = () => {
+  const depths = DEPTHS.filter(D => document.getElementById(`d${D}`).checked), c = +colourSel.value;
+  return { depths, bake: c !== 0, bits: c || 6 };
+};
+const remember = () => { try { localStorage.setItem(KEY, JSON.stringify({ depths: settings().depths, colour: +colourSel.value })); } catch {} };
+depthBox.addEventListener('change', remember);
+colourSel.addEventListener('change', remember);
+
+/* ---- the queue: one asset at a time, one worker each ----------------------------------- */
+const jobsEl = document.getElementById('jobs'), jobs = [];
+let running = null;
+const fmt = n => n.toLocaleString('en-US'), many = (n, one, more = `${one}s`) => `${fmt(n)} ${n === 1 ? one : more}`, kb = n => n < 1024 * 1024 ? `${fmt(Math.ceil(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+const secs = ms => `${(ms / 1000).toFixed(1)} s`;
+const STAGES = { reading: 'reading the file', analysing: 'welding, finding what\'s solid', shape: 'voxelizing the shape', skin: 'the skin',
+                 words: 'baking colours', writing: 'writing the file', checking: 'reading it back', picture: 'a picture' };
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+
+function addFiles(list){
+  const all = [...list], glbs = all.filter(f => /\.glb$/i.test(f.name)), others = all.filter(f => !/\.glb$/i.test(f.name));
+  if (!glbs.length){ if (all.length) flash(`not a .glb: ${all.map(f => f.name).join(', ')}`); return; }
+  const s = settings();
+  if (!s.depths.length){ flash('pick at least one depth'); return; }
+  for (const file of glbs) addJob(file, others, s);
+  next();
+}
+function flash(text){
+  const j = el('div', 'job'); j.append(el('div', 'status bad', text));
+  jobsEl.prepend(j); setTimeout(() => j.remove(), 5000);
+}
+function addJob(file, others, s){
+  const job = { file, others, s, name: nameOf(file.name), state: 'waiting', worlds: [], urls: [], el: el('div', 'job'), started: 0, stage: null };
+  const top = el('div', 'top'), buttons = el('div', 'buttons');
+  job.saveAll = el('button', null, 'save all'); job.cancel = el('button', null, 'cancel'); job.again = el('button', null, 'again'); job.remove = el('button', null, '×');
+  job.remove.title = 'remove from the list';
+  buttons.append(job.saveAll, job.again, job.cancel, job.remove);
+  top.append(el('span', 'name', file.name), el('span', 'size', kb(file.size)), buttons);
+  job.status = el('div', 'status'); job.about = el('div', 'about'); job.notes = el('div', 'notes'); job.list = el('div', 'worlds');
+  job.el.append(top, job.status, job.about, job.notes, job.list);
+  job.saveAll.onclick = () => saveAll(job);
+  job.cancel.onclick = () => cancel(job);
+  job.again.onclick = () => { reset(job, settings()); next(); };
+  job.remove.onclick = () => { cancel(job); clear(job); job.el.remove(); jobs.splice(jobs.indexOf(job), 1); };
+  jobs.push(job); jobsEl.append(job.el);
+  show(job);
+}
+function clear(job){
+  for (const u of job.urls) URL.revokeObjectURL(u);
+  job.urls = []; job.worlds = []; job.list.replaceChildren(); job.about.textContent = ''; job.notes.textContent = '';
+}
+function reset(job, s){
+  if (!s.depths.length){ flash('pick at least one depth'); return; }
+  clear(job); Object.assign(job, { s, state: 'waiting', error: null, stage: null }); show(job);
+}
+function show(job){
+  const run = job.state === 'running', ago = run ? ` · ${secs(performance.now() - job.started)}` : '';
+  const colour = job.s.bake ? `baked, ${job.s.bits} bits` : 'no colour';
+  const text = {
+    waiting: `waiting · D = ${job.s.depths.join(', ')} · ${colour}`,
+    running: `${job.stage?.D != null ? `D = ${job.stage.D}: ` : ''}${STAGES[job.stage?.stage] ?? 'starting'}${ago}`,
+    done: `done in ${secs(job.ms)} · ${colour}`,
+    cancelled: 'cancelled',
+    failed: `failed: ${job.error}`,
+  }[job.state];
+  job.status.textContent = text;
+  job.status.className = `status${job.state === 'failed' ? ' bad' : job.state === 'done' ? ' done' : ''}`;
+  job.cancel.hidden = !(run || job.state === 'waiting');
+  job.again.hidden = run || job.state === 'waiting';
+  job.saveAll.hidden = job.worlds.length < 2;
+}
+setInterval(() => { if (running) show(running); }, 200);
+
+async function next(){
+  if (running) return;
+  const job = jobs.find(j => j.state === 'waiting');
+  if (!job) return;
+  running = job; Object.assign(job, { state: 'running', started: performance.now(), stage: null }); show(job);
+  try {
+    const [glb, files] = await Promise.all([job.file.arrayBuffer(), Promise.all(job.others.map(async f => [f.name, new Uint8Array(await f.arrayBuffer())]))]);
+    if (job.state !== 'running') return;
+    const w = job.worker = new Worker(new URL('./convert-worker.js', import.meta.url), { type: 'module' });
+    await new Promise(resolve => {
+      job.finish = resolve;
+      w.onmessage = ({ data }) => {
+        if (data.asset) about(job, data.asset);
+        if (data.stage){ job.stage = data.stage; show(job); }
+        if (data.world) addWorld(job, data.world);
+        if (data.done){ job.state = 'done'; resolve(); }
+        if (data.error){ Object.assign(job, { state: 'failed', error: data.error }); resolve(); }
+      };
+      w.onerror = e => { e.preventDefault(); Object.assign(job, { state: 'failed', error: e.message || 'the worker failed (out of memory?)' }); resolve(); };
+      w.postMessage({ glb, files, name: job.name, depths: job.s.depths, bits: job.s.bits, bake: job.s.bake }, [glb, ...files.map(([, b]) => b.buffer)]);
+    });
+  } catch (e){
+    if (job.state === 'running') Object.assign(job, { state: 'failed', error: String(e?.message ?? e) });
+  } finally {
+    job.worker?.terminate(); job.worker = null; job.finish = null;
+    job.ms = performance.now() - job.started;
+    running = null; show(job); next();
+  }
+}
+function cancel(job){
+  if (job.state !== 'running' && job.state !== 'waiting') return;
+  job.state = 'cancelled';
+  job.worker?.terminate();
+  job.finish?.();
+  show(job);
+}
+
+function about(job, a){
+  const tex = a.textured ? `, ${a.textured} textured (${a.sizes.join(', ')})` : '';
+  job.about.textContent = `${many(a.triangles, 'triangle')} in ${many(a.meshes, 'mesh', 'meshes')} (${a.instances} placed), ${many(a.components, 'component')}, ${fmt(a.solid)} solid · ${many(a.materials, 'material')}${tex}${a.cutouts ? `, ${many(a.cutouts, 'alpha cutout')}` : ''}${a.vertexColours ? ', vertex colours' : ''}`;
+  job.notes.textContent = a.notes.join(' · ');
+}
+function addWorld(job, w){
+  const url = URL.createObjectURL(new Blob([w.bytes], { type: 'application/octet-stream' }));
+  job.urls.push(url); job.worlds.push({ ...w, url });
+  const card = el('div', 'world'), cv = document.createElement('canvas');
+  if (w.thumb){
+    cv.width = w.thumb.w; cv.height = w.thumb.h;
+    cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(w.thumb.rgba.buffer), w.thumb.w, w.thumb.h), 0, 0);
+  }
+  const build = (w.ms.shape ?? 0) + (w.ms.skin ?? 0) + (w.ms.words ?? 0) + (w.ms.writing ?? 0);
+  const facts = `a ${w.side}³ world\n${fmt(w.voxels)} solid\n${fmt(w.nodes)} nodes${w.skin ? `\n${fmt(w.skin)} words` : ''}\n${kb(w.bytes.length)} · ${secs(build)}`;
+  const a = el('a', null, `save ${w.file}`);
+  a.href = url; a.download = w.file;
+  card.append(cv, el('div', 'd', `D = ${w.D}`), el('div', 'facts', facts), a);
+  job.list.append(card);
+  show(job);
+}
+async function saveAll(job){
+  for (const w of job.worlds){
+    const a = document.createElement('a');
+    a.href = w.url; a.download = w.file; a.click();
+    await new Promise(r => setTimeout(r, 250));
+  }
+}
+
+/* ---- input: the picker and drops anywhere on the page ---------------------------------- */
+const input = document.getElementById('files'), drop = document.getElementById('drop');
+document.getElementById('pick').onclick = () => input.click();
+input.onchange = () => { addFiles(input.files); input.value = ''; };
+let depth = 0;
+const hasFiles = e => [...(e.dataTransfer?.types ?? [])].includes('Files');
+addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); depth++; document.body.classList.add('over'); });
+addEventListener('dragleave', e => { if (!hasFiles(e)) return; if (--depth <= 0){ depth = 0; document.body.classList.remove('over'); } });
+addEventListener('dragover', e => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+addEventListener('drop', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); depth = 0; document.body.classList.remove('over');
+  addFiles(e.dataTransfer.files);
+});
+
+// For the console and test/browser/convert.test.js: the list as data.
+window.__convert = {
+  jobs: () => jobs.map(j => ({ name: j.file.name, state: j.state, error: j.error ?? null, depths: j.s.depths, bits: j.s.bits, bake: j.s.bake,
+                              notes: j.notes.textContent, worlds: j.worlds.map(w => ({ D: w.D, file: w.file, size: w.bytes.length, voxels: w.voxels, nodes: w.nodes, skin: w.skin })) })),
+  bytes: (i, k) => { const b = jobs[i].worlds[k].bytes; let s = ''; for (let o = 0; o < b.length; o += 32768) s += String.fromCharCode(...b.subarray(o, o + 32768)); return btoa(s); },
+  idle: () => !running && !jobs.some(j => j.state === 'waiting'),
+};
+</script>
+</body>
+</html>

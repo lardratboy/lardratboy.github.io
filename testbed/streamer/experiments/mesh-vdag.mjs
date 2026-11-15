@@ -72,15 +72,17 @@
    decided 2026-11-09).
 
    The pieces (the reader, the analysis, the bake, the previews) live in
-   mesh-asset.mjs, shared with label-mesh.mjs. */
+   mesh-asset.mjs, shared with label-mesh.mjs; its pure half is glb-core.mjs,
+   which convert/index.html runs in a browser to make these same files
+   without Node (test/convert-core.test.js holds the two to the same bytes). */
 import zlib from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createCounts, prune, storeView } from '../dag-core.js';
 import { rgb8 } from '../attr-core.js';
 import { writeVdag, readVdag, encodeGraph } from '../vdag-core.js';
-import { voxelize, denseOracle } from './mesh-core.mjs';
-import { readGlb, analyse, place, sampler, cutouts, baker, preview, VIEWS, skinOf, skinOracle, bakeSkin, shownOutside, bakedCost, bitsCost } from './mesh-asset.mjs';
+import { denseOracle } from './mesh-core.mjs';
+import { readGlb, analyse, baker, preview, VIEWS, skinOracle, shownOutside, bakedCost, bitsCost, bakeDepth, assetView } from './mesh-asset.mjs';
 import { createBaked } from '../baked-core.js';
 
 const args = process.argv.slice(2), opt = (k, d) => { const a = args.find(s => s.startsWith(`--${k}=`)); return a ? a.slice(k.length + 3) : d; };
@@ -139,23 +141,21 @@ say(`\nMode: ${MODE}${HOLLOW ? ', hollow (the skin is the shape)' : ''}${BAKE ? 
 say('| D | side | build s | nodes (pruned) | solid voxels | file | written s | read back | previews s |');
 say('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
 for (const D of DEPTHS){
-  const M = place(G, A, D), sample = sampler(G, M);
-  M.keep = cutouts(G, M, sample);
-  const b = voxelize(M, D, MODE);
+  // The build (glb-core's bakeDepth, which convert/ runs too): the shape,
+  // then with the bake the skin in the shape's store and a word per skin
+  // voxel. The checks below only read the store, so they come after it. The
+  // writer keeps only what the roots reach (the shape's, and the skin's when
+  // the colour is written), so the shape's NODE section is byte for byte
+  // what it was without the bake.
+  const { M, sample, b, sk, slow, W } = bakeDepth(G, A, D, { mode: MODE, bake: BAKE });
   if (D === 8){
     const want = denseOracle(M, 8, MODE), got = b.store.expand(b.root, 8);
     let diff = 0; for (let i = 0; i < want.length; i++) if (want[i] !== got[i]) diff++;
     if (diff) throw new Error(`D = 8: ${diff} voxels differ from the dense oracle`);
   }
-  // The skin and its words, in the shape's store. Built before the snapshot;
-  // the writer keeps only what the roots reach (the shape's, and the skin's
-  // when the colour is written), so the shape's NODE section is byte for
-  // byte what it was without the bake.
   let world = b.root, colour = null;
   if (BAKE){
-    const st = b.store, sk = skinOf(M, D, st, b.root);
-    if (st.union(b.root, sk.root) !== b.root) throw new Error(`D = ${D}: the skin isn't inside the shape`);
-    const slow = baker(G, M, sample), W = bakeSkin(G, M, sample, st, sk.root, D, slow);
+    const st = b.store;
     if (D === 8){
       const want = skinOracle(M, 8, st.expand(b.root, 8)), got = st.expand(sk.root, 8);
       let diff = 0; for (let i = 0; i < want.length; i++) if (want[i] !== got[i]) diff++;
@@ -192,13 +192,8 @@ for (const D of DEPTHS){
   // The writer prunes to what the roots reach (the skin's too); keys here are
   // for the node count, the shape's alone, as the file's DESC says.
   const all = b.store.snapshot().keys, { keys } = prune(all, [world]);
-  // In front of the asset (+z), looking back along −z at the middle of its
-  // box, far enough to see all of it: level with a tall asset, from above
-  // (0.45 rad) a flat one such as a level.
-  const side = M.side, e = M.hi.map((v, a) => v - M.lo[a]), c = M.lo.map((v, a) => v + e[a] / 2);
-  // (A level at the tall asset's distance was a speck on screen, all coarse lods.)
-  const tall = e[1] >= 0.5 * Math.max(e[0], e[2]), elev = tall ? 0.05 : 0.5, dist = tall ? 1.55 * Math.max(e[0], e[1]) + e[2] / 2 : 0.8 * Math.max(e[0], e[2]);
-  const view = { eye: [c[0], c[1] + dist * Math.sin(elev), c[2] + dist * Math.cos(elev)], yaw: Math.PI, pitch: -elev };
+  // The view the file opens on (glb-core's assetView): in front of the asset, looking back at it.
+  const side = M.side, view = assetView(M);
   const t1 = performance.now();
   const bytes = await writeVdag([{ keys: all, root: world, D, name: `${NAME} (D = ${D})`, colour, view, source: null }]);
   const out = path.join(OUT, `${SLUG}-d${D}.vdag`);
