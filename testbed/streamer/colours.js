@@ -29,6 +29,12 @@
                                   floor, from the table of tile codes the
                                   plan made (one int32 a cell), so a worker
                                   needn't run the collapse again
+     { kind: 'city', D, seed }     the city's (city-core.js, cityColour):
+                                  by material and building, from the plan,
+                                  which the field rebuilds from the
+                                  descriptor (~10–90 ms; floor plans are
+                                  made as they're first read). No table: a
+                                  D = 12 city is 20 million tiles
      { kind: 'baked', skin, words, bits }
                                   an imported asset's own colours
                                   (baked-core.js, createBaked): data, not a
@@ -61,6 +67,7 @@ import { kitColour } from './kit-core.js';
 import { caveColour } from './cave-core.js';
 import { clayColour } from './clay-core.js';
 import { dungeonColour } from './dungeon-core.js';
+import { cityColour } from './city-core.js';
 import { createBaked } from './baked-core.js';
 
 const TAU = 2 * Math.PI;
@@ -105,5 +112,6 @@ export function colourOf(desc, world = null){
   if (desc.kind === 'caves') return caveColour(desc, rgb8);
   if (desc.kind === 'clay') return clayColour(desc, rgb8);
   if (desc.kind === 'dungeon') return dungeonColour(desc, rgb8);
+  if (desc.kind === 'city') return cityColour(desc, rgb8);
   throw new Error(`colourOf: unknown kind '${desc.kind}'`);
 }

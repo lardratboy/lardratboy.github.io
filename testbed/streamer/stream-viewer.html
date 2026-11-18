@@ -178,6 +178,9 @@
     <label>floors <select id="dungeonFloors"></select></label>
     <div id="dungeonInfo"></div>
   </div>
+  <div id="cityCtl" hidden>
+    <div id="cityInfo"></div>
+  </div>
   <div id="clayCtl" hidden>
     <label>lump <select id="clayLump"></select></label>
     <label>shape <select id="clayShape"><option value="ball">a ball</option><option value="block">a block</option></select></label>
@@ -251,6 +254,7 @@ drop .vdag files anywhere to open them</pre></section>
 ?world=caves:&lt;seed&gt;&amp;depth=10..12   (scatter:, lattice:, kit: the same)
 ?world=clay&amp;clay=D,lump,shape,ground   (lump 0: flat ground, or empty without ground)
 ?world=dungeon:&lt;seed&gt;&amp;dungeon=D,floors
+?world=city:&lt;seed&gt;&amp;depth=9..13
 ?hud=1 opens with the panels   ?wire=1 with the wireframe   ?walk=1 walking
 ?quiet draws once converged   ?selftest runs streamSelftest()
 ?ray=off|density|0..6 (raster only by default)   ?rule=shadow|any|adaptive (shadow by default)
@@ -347,6 +351,7 @@ import { kitDesc, kitFromParam, kitParam, sideOf, KIT_LIMITS } from './kit-core.
 import { caveDesc } from './cave-core.js';
 import { clayDesc, clayFromParam, clayParam, buildClay, clayPlace, CLAY_LIMITS, CLAY_DEFAULTS, GROUND_DEPTH } from './clay-core.js';
 import { dungeonDesc, dungeonFromParam, dungeonParam, dungeonPlan, buildDungeon, planFromTable, secretDoors, DUNGEON_LIMITS, CELL as DUNGEON_CELL } from './dungeon-core.js';
+import { buildCity, cityPlan, cityDesc, TYPE_NAMES as CITY_TYPES, TOWER_NAMES as CITY_TOWERS, DISTRICT_NAMES as CITY_DISTRICTS } from './city-core.js';
 import { createWalker, stepWalk, walkerEye, wishOf, lookBy, openWorld, withHoles, inside as walkerInside, settle as settleWalker, WALK } from './walk-core.js';
 
 const $ = id => document.getElementById(id);
@@ -1205,9 +1210,10 @@ function setOcclusion(mode, { chosen = false } = {}){
    other worlds, and on an open view every query is pure cost, so they
    stay off. */
 const occlusionDefault = world => {
-  if (isFile(world)){ const kind = shelfEntry(world)?.colour?.kind; return kind === 'caves' || kind === 'kit' || kind === 'dungeon' ? 'queries' : 'off'; }
+  if (isFile(world)){ const kind = shelfEntry(world)?.colour?.kind; return ['caves', 'kit', 'dungeon', 'city'].includes(kind) ? 'queries' : 'off'; }
   // The dungeon too (unmeasured: docs/dungeon-log.md): inside it, floors and walls hide most of it.
-  return isCaves(world) || isKit(world) || isDungeon(world) ? 'queries' : 'off';
+  // And the city (unmeasured: docs/city-log.md): down in its streets, the buildings hide the rest.
+  return isCaves(world) || isKit(world) || isDungeon(world) || isCity(world) ? 'queries' : 'off';
 };
 
 /* The ray path's three textures, with CPU mirrors laid out word for word
@@ -1561,6 +1567,7 @@ const catalogue = () => {
   out.push({ id: 'kit:' + state.kit.seed, label: 'kit: nested 4³ assemblies of parts', group: 'kit world' });
   out.push({ id: isCaves(state.world) ? state.world : 'caves:1', label: 'caves under mountains (water, lava)', group: 'natural' });
   out.push({ id: 'dungeon:' + state.dungeon.seed, label: 'dungeon: floors of rooms, halls and stairs', group: 'built (wave function collapse)' });
+  out.push({ id: isCity(state.world) ? state.world : 'city:1', label: 'city: districts, towers, rooms to walk into, parks', group: 'built (districts and lots)' });
   out.push({ id: 'clay', label: 'clay, flat ground or empty', group: 'to sculpt' });
   for (const e of shelf) out.push({ id: e.id, label: e.name, group: 'shelf' });
   return out;
@@ -1699,6 +1706,7 @@ function bindRowPicker(){
 const isRow = id => id.startsWith('row:'), isScatter = id => id.startsWith('scatter:'), isLattice = id => id.startsWith('lattice:');
 const isKit = id => id.startsWith('kit:'), isCaves = id => /^caves:\d+$/.test(id), isClay = id => id === 'clay';
 const isDungeon = id => /^dungeon:\d+$/.test(id);
+const isCity = id => /^city:\d+$/.test(id);
 const isShape = id => id.startsWith('shape:');
 /* Which worlds take worlds (gizmo-plan §7 steps 4 and 5, vdagplacement §1): every
    world with a named colour. The kit, the shapes and the testbed rows are real stores
@@ -1716,7 +1724,7 @@ function fileWhyNot(e){
   if (e.colour.kind === 'baked') return 'a world with baked colour can\'t take worlds yet: the scene\'s colour needs a parent with a named one';
   return null;
 }
-const takesWorlds = id => isKit(id) || isShape(id) || isRow(id) || isScatter(id) || isLattice(id) || isCaves(id) || isDungeon(id) || (isFile(id) && !fileWhyNot(shelfEntry(id)));
+const takesWorlds = id => isKit(id) || isShape(id) || isRow(id) || isScatter(id) || isLattice(id) || isCaves(id) || isDungeon(id) || isCity(id) || (isFile(id) && !fileWhyNot(shelfEntry(id)));
 // The kit: 12, 14 and 16 as planned (decision 7), 10, small enough for the self-test,
 // and 8 and 6 (asked for 2026-11-14): at 6 the world is one 64³ assembly of parts, one chunk.
 const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: `L=${L} (${(4 ** L).toLocaleString()}³)` }))
@@ -1724,6 +1732,8 @@ const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: 
   : isCaves(id) ? [10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }))
   // The dungeon: N × N cells of 16 a floor, N = 2^(D − 4) (docs/dungeon-log.md).
   : isDungeon(id) ? [8, 9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** (D - 4)).toLocaleString()}² rooms' cells a floor)` }))
+  // The city: 2^(D − 8) blocks a side (docs/city-log.md). D = 13 is ~1 s to build, here on this thread.
+  : isCity(id) ? [9, 10, 11, 12, 13].map(D => ({ v: D, label: `D=${D} (${(2 ** (D - 8)) ** 2} block${D === 8 ? '' : 's'})` }))
   // Clay stops at 20 here, though its descriptor goes on: the ray pass holds
   // the eye as float32 voxels (docs/clay-log.md §3). ?clay= asks for more.
   : isClay(id) ? [12, 14, 16, 18, 20].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }))
@@ -1736,6 +1746,7 @@ function fillDepth(){
   $('kitCtl').hidden = !isKit(state.world);
   $('clayCtl').hidden = !isClay(state.world);
   $('dungeonCtl').hidden = !isDungeon(state.world);
+  $('cityCtl').hidden = !isCity(state.world);
   // The world tool is every named world's with a real store (takesWorlds), and clay's,
   // which has blocks too (onelog-plan Q1).
   $('editL').hidden = !isClay(state.world) && !takesWorlds(state.world);
@@ -1756,7 +1767,7 @@ function fillDepth(){
     sel.value = String(state.depth); fillClay(); return;
   }
   if (state.depth === null || !depthChoices(state.world).some(c => c.v === state.depth))
-    state.depth = isRow(state.world) ? 8 : isScatter(state.world) || isCaves(state.world) ? 12 : (state.world === 'shape:gyroid' ? 9 : 10);
+    state.depth = isRow(state.world) ? 8 : isScatter(state.world) || isCaves(state.world) ? 12 : isCity(state.world) ? 11 : (state.world === 'shape:gyroid' ? 9 : 10);
   sel.value = String(state.depth);
 }
 
@@ -1905,6 +1916,20 @@ function bindDungeon(){
   });
 }
 
+/* ---- the city's panel (docs/city-log.md) -------------------------------------
+   The depth is the depth select and the seed the seed control; this says what
+   was built: blocks by district, buildings by kind, towers by shape, the
+   tallest, the rooms, and what the build cost. */
+function showCity(){
+  const b = W?.city, i = b?.info;
+  if (!i) { $('cityInfo').textContent = ''; return; }
+  const list = (names, n) => names.map((s, k) => n[k] ? `${n[k].toLocaleString()} ${s}` : null).filter(Boolean).join(', ');
+  $('cityInfo').textContent = `${i.blocks.toLocaleString()} blocks: ${list(CITY_DISTRICTS, i.byDistrict)}\n` +
+    `${i.buildings.toLocaleString()} buildings: ${list(CITY_TYPES.map(s => s + 's'), i.byType)}\n` +
+    `towers: ${list(CITY_TOWERS, i.towers)}; the tallest ${i.tallest ? `${i.tallest.storeys} storeys, ${i.tallest.height} voxels` : '—'}\n` +
+    `${b.rooms.toLocaleString()} rooms in ${i.storeys.toLocaleString()} storeys; planned in ${i.planMs} ms, built in ${b.ms} ms, ${W.nodes.toLocaleString()} nodes (${b.tiles.toLocaleString()} tiles)`;
+}
+
 /* ---- the seed (asked for 2026-11-04) -------------------------------------
    Four worlds take a seed: the scatter, the lattice, the kit and the
    caves. It was always the number after the colon in the world id
@@ -1920,7 +1945,7 @@ function bindDungeon(){
    leave it in rock). Seeds wrap within 1…65,535, kitDesc's and
    latticeDesc's range. */
 const SEED_MAX = 0xffff, SEED_DEBOUNCE = 250;
-const isSeeded = id => isScatter(id) || isLattice(id) || isKit(id) || isCaves(id) || isDungeon(id);
+const isSeeded = id => isScatter(id) || isLattice(id) || isKit(id) || isCaves(id) || isDungeon(id) || isCity(id);
 const seedOf = id => +id.slice(id.indexOf(':') + 1) || 1;
 const wrapSeed = s => ((Math.round(s) - 1) % SEED_MAX + SEED_MAX) % SEED_MAX + 1;
 const randomSeed = () => 1 + Math.floor(Math.random() * SEED_MAX);
@@ -2161,7 +2186,7 @@ const CLASSES_MAX = 300000;
 const TWICE = 'this file holds a node twice, so its nodes can\'t be imported as they are numbered: it\'s shown, and takes no worlds';
 async function buildWorld(signal, gen){
   const t0 = performance.now();
-  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, clay = null, dungeon = null, classes = null, file = null, shaped = false;
+  let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, clay = null, dungeon = null, city = null, classes = null, file = null, shaped = false;
   // The keys a scene log starts from (a world that takes worlds), and why a world takes none.
   // `lazy`: a view made real when B is first pressed (step 5).
   let sceneKeys = null, noEdit = null, lazy = false;
@@ -2270,6 +2295,17 @@ async function buildWorld(signal, gen){
     dungeon.desc = desc; dungeon.info = plan.info;
     label = `dungeon: ${desc.floors} floor${desc.floors > 1 ? 's' : ''} of ${(plan.N ** 2).toLocaleString()} cells`;
     colour = { ...desc, table: plan.codes };
+  } else if (isCity(state.world)){
+    /* Here, on this thread, like the dungeon: the plan and the DAG are ~0.15 s at
+       the default D = 11 (1 s at D = 13), and it leaves a real store, so both tools
+       work on it. The colour is the descriptor alone: each chunk worker rebuilds
+       the plan (docs/city-log.md). */
+    const desc = cityDesc({ D: state.depth, seed: seedOf(state.world) }), plan = cityPlan(desc);
+    city = buildCity(desc, { store, plan });
+    ({ root, D } = city);
+    city.desc = desc; city.info = plan.info;
+    label = `city: ${plan.info.blocks} block${plan.info.blocks > 1 ? 's' : ''}, ${plan.info.buildings.toLocaleString()} buildings`;
+    colour = desc;
   } else if (isRow(state.world)){
     const row = ROWS[+state.world.slice(4)], a = automatonOf(CORE, row.cfgFor(state.depth));
     ({ root, D } = store.fromRadix4(state.depth, a.start, a.step, a.accept, a.keyOf));
@@ -2305,12 +2341,12 @@ async function buildWorld(signal, gen){
   // A file of a world that skips them skips them too.
   // Clay skips them for what's coming: createClasses is the slowest thing in an
   // edit's path, for one debug colour mode (realtimecsg.md §4.2).
-  const poseless = scatter || lattice || caves || clay || dungeon || (file && ['scatter', 'lattice', 'caves', 'clay', 'dungeon'].includes(file.colour?.kind));
+  const poseless = scatter || lattice || caves || clay || dungeon || city || (file && ['scatter', 'lattice', 'caves', 'clay', 'dungeon', 'city'].includes(file.colour?.kind));
   if (!poseless && store.size <= CLASSES_MAX) classes = createClasses(store, OH48);
   const snap = worldSnapshot(store, root, D, { counts, classes, colour });
   const t2 = performance.now(), toolWas = W?.edit?.kind;
   W = { id: state.world, label, store, root, D, side: 2 ** D, top: Math.max(0, D - 6), nodes: store.size, voxels: counts.of(root), counts,
-        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, caves, clay, dungeon, file, colour, source: sourceOf(), classes: classes ? classes.size : null,
+        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, caves, clay, dungeon, city, file, colour, source: sourceOf(), classes: classes ? classes.size : null,
         // Made with the snapshot, as a tailer starts from what the snapshot holds.
         // Every editable world has one log (docs/onelog-plan.md step 3) and a real store,
         // here, with an interner. Clay takes blocks and worlds, with Tab between (plan
@@ -2322,8 +2358,8 @@ async function buildWorld(signal, gen){
         // file with a named colour after its import above (step 4): `noEdit` is why not.
         // The scatter, the lattice, the caves and a large file wait for B (`lazy`,
         // step 5): their keys and poses are kept for `makeReal`.
-        // The dungeon has both tools too (docs/dungeon-log.md): blocks to break its walls.
-        edit: clay || dungeon ? newEdit(store, root, counts, classes, snap.keys, ['blocks', 'scene'])
+        // The dungeon has both tools too (docs/dungeon-log.md): blocks to break its walls. So has the city.
+        edit: clay || dungeon || city ? newEdit(store, root, counts, classes, snap.keys, ['blocks', 'scene'])
             : kit ? newEdit(store, root, counts, classes, kit.baseKeys, ['scene'])
             : shaped ? newEdit(store, root, counts, classes, snap.keys, ['scene'])
             : sceneKeys ? newEdit(store, root, counts, classes, sceneKeys, ['scene']) : null,
@@ -2336,6 +2372,7 @@ async function buildWorld(signal, gen){
   if (kit) showKit();
   if (clay) showClay();
   if (dungeon) showDungeon();
+  if (city) showCity();
   fillShelf();
   // A box is of the world it was opened in. And edit mode doesn't stick to a world that
   // can't be edited, or to one that opens in the other tool: a new world is a new
@@ -2372,6 +2409,8 @@ function defaultView(){
   if (W.kit) return { eye: [-0.35 * s, 0.9 * s, -0.45 * s], yaw: 0.68, pitch: -0.5 };
   // Above the top floor's room nearest the middle, looking across it (dungeon-core's dungeonInfo).
   if (W.dungeon) return { eye: W.dungeon.info.view.eye.slice(), yaw: W.dungeon.info.view.yaw, pitch: W.dungeon.info.view.pitch };
+  // Outside the city's corner nearest its tallest tower, over the skyline, looking at the tower (city-core's cityInfo).
+  if (W.city) return { eye: W.city.info.view.eye.slice(), yaw: W.city.info.view.yaw, pitch: W.city.info.view.pitch };
   // Inside the start chamber, facing its first tunnel (cave-core's caveInfo).
   if (W.caves && W.caves.info.view) return W.caves.info.view;
   // The lump fills about half the view, seen from a little above. Flat ground:
@@ -3985,6 +4024,7 @@ function loadWorld(resetView){
     : isKit(state.world) ? `the kit, D=${state.kit.D}` : isCaves(state.world) ? `the caves, D=${state.depth}`
     : isClay(state.world) ? `clay, D=${state.clay.D}`
     : isDungeon(state.world) ? `the dungeon, D=${state.dungeon.D}, ${state.dungeon.floors} floors`
+    : isCity(state.world) ? `the city, D=${state.depth}`
     : isFile(state.world) ? shelfEntry(state.world)?.name ?? state.world : state.world) + ' …', null, true);
   // Let the message paint before a multi-second fromField. The scatter
   // and lattice worlds build in workers, so the page keeps drawing the
@@ -4932,6 +4972,22 @@ window.streamSelftest = async function streamSelftest(opts = {}){
                                 off: !walk.on, flyKept: cam.eye.every((x, a) => x === eyeBefore[a]), urlOff: new URLSearchParams(location.search).get('walk') };
       } finally { if (walk.on) setWalk(false); keys.clear(); } }
     state.dungeon = savedDungeon; }
+  // 10. The city (docs/city-log.md): planned and built here, D = 9, held to Node's
+  // numbers (buildCity), its panel and its link; then seed 2 through setSeed,
+  // keeping the eye.
+  { state.world = 'city:1'; state.depth = 9; fillWorlds(); fillDepth();
+    await loadWorld(true);
+    await run('switch to the city', { until: isConverged });
+    const look = () => ({ seed: W.city.desc.seed, D: W.D, nodes: W.nodes, voxels: W.voxels, buildings: W.city.info.buildings, rooms: W.city.rooms,
+                          select: $('world').value, ctlShown: !$('cityCtl').hidden, said: /buildings/.test($('cityInfo').textContent),
+                          world: new URLSearchParams(location.search).get('world'), depth: new URLSearchParams(location.search).get('depth'),
+                          tools: W.edit?.tools.slice() ?? null, occlusion: state.occlusion,
+                          words: [...streamer.S.cache.values()].reduce((a, e) => a + (e.words || 0), 0) });
+    report.city = { first: look() };
+    const eye = cam.eye.slice();
+    await setSeed(2, { now: true });
+    await run('the city at seed 2', { until: isConverged });
+    report.city.seed2 = { ...look(), eyeKept: eye.every((v, a) => v === cam.eye[a]) }; }
   report.glError = gl.getError();
   report.mode = pool.mode; report.completed = pool.completed; report.discarded = streamer.S.stats.discarded;
   report.gpu = { ...gpu };
@@ -6056,6 +6112,8 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       { world: 'clay', clay: clayDesc({ D: 20, lump: 64, ground: true }) },
       // The dungeon's colour is its descriptor and the plan's table (TBLE), like the scatter's.
       { world: 'dungeon:1', dungeon: dungeonDesc({ D: 9, floors: 3, seed: 1 }), pin: [8656926, 1210] },   // the second round's tiles (dungeon-log §10); 8632838 and 1015 before
+      // The city's colour is its descriptor alone: the reader's colourOf rebuilds the plan (docs/city-log.md).
+      { world: 'city:1', depth: 9, pin: [5423681, 3525] },
       { world: 'shape:sphere', depth: 8 },
       { world: 'row:146', depth: 6 },
     ];
