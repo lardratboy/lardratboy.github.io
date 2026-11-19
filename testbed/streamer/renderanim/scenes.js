@@ -741,7 +741,7 @@ export const SCENES = [
   steps: (P, D) => [
     [0, `What's drawn for every record is one cube, from one tiny index buffer made once when the page starts: <code>cubeIndex</code>, 36 bytes of triangles (and 60 of wireframe lines after them).`],
     [5, `It indexes 24 corners, four a face, in the mask's face order: corners 0–3 are +X, 4–7 are −X, and so on. A face is two triangles, <code>b, b+1, b+2</code> and <code>b, b+2, b+3</code>. Corners aren't shared between faces, so each face knows which it is: <code>face = corner / 4</code>.`],
-    [11.5, `There's no vertex buffer at all. The vertex shader gets the corner as <code>gl_VertexID</code> (an index from this buffer) and looks its offset up in a constant table, <code>CORNER[24]</code>, the page's <code>FACE_OFF</code>.`],
+    [11.5, `There's no vertex buffer at all. The viewer draws the first 18 indices, three faces, and the vertex shader gets each as <code>gl_VertexID</code>, 0 to 11. It turns that into a corner of the face on the eye's side, one an axis, and looks its offset up in a constant table, <code>CORNER[24]</code>, the page's <code>FACE_OFF</code>.`],
   ],
   cam: t => ({ target: [0, 40, 0], yaw: 0.65 + 0.35 * t / 17, pitch: 0.38, dist: 135 }),
   env: () => ({ grid: 0.4 }),
@@ -780,7 +780,7 @@ export const SCENES = [
     SIDE_NAMES.forEach((s, f) => text(g, `${s}: ${4 * f}–${4 * f + 3}`, x + (f * 6 + 3) * cw, y + 42, { size: 11, weight: 700, color: FACE6[f], alpha: a, align: 'center', mono: true, shadow: false }));
     code(c, 'cubeIndex', { alpha: fade(t, 0.5, 1.3, 11, 11.8), hl: t < 5 ? 'idx.set([b, b+1, b+2, b, b+2, b+3], 6 * f);' : 'const b = 4 * f;', span: 1 });
     code(c, 'faceOff', { alpha: fade(t, 11.5, 12.3, 16.2, 17), hl: 0, span: 4 });
-    code(c, 'rasterVS', { alpha: fade(t, 12, 12.8, 16.2, 17), y: P.lay.codeY + 150, hl: 'uint corner = uint(gl_VertexID), face = corner / 4u;', span: 2 });
+    code(c, 'rasterVS', { alpha: fade(t, 12, 12.8, 16.2, 17), y: P.lay.codeY + 150, hl: 'uint v = uint(gl_VertexID), k = v / 4u;', span: 3 });
   },
 },
 /* 13 ----------------------------------------------------------------------------- */
@@ -788,7 +788,7 @@ export const SCENES = [
   key: 'draw', stage: 'draw', title: 'renderView: one draw call a chunk', dur: 20, side: true,
   steps: (P, D) => [
     [0, `Each frame, <code>renderView</code> takes the streamer's cover (what to draw now), keeps the chunks resident and installed, and sorts them near to far. Chunks outside the view's frustum are skipped: here <b>${P.view.culled.length}</b> of ${P.view.list.length}.`],
-    [6, `For each one it sets three uniforms and makes <b>one call</b>: <code>drawElementsInstanced(TRIANGLES, 36, UNSIGNED_BYTE, 0, n)</code>. 36 indices, n instances: one cube per record. <code>uOrigin</code> is the chunk's corner <b>minus the eye</b>, so a huge world keeps its precision near the eye.`],
+    [6, `For each one it sets three uniforms and makes <b>one call</b>: <code>drawElementsInstanced(TRIANGLES, rasterDraw.tris, UNSIGNED_BYTE, 0, n)</code>. 18 indices, the first three faces of the cube index, and n instances: one cube per record. <code>uOrigin</code> is the chunk's corner <b>minus the eye</b>, so a huge world keeps its precision near the eye.`],
     [13.5, `That's the whole of the CPU's work per frame for raster chunks: a sort, a frustum test and a few uniforms a chunk. ${P.view.drawn.length} calls draw ${fmt(P.view.drawn.reduce((a, q) => a + P.job(q.d.key).count, 0))} cubes here.`],
   ],
   cam: t => ({ target: [-45, 20, -35], yaw: -0.95 + 0.12 * t / 20, pitch: 0.78, dist: 540 }),
@@ -828,7 +828,7 @@ export const SCENES = [
     }
     code(c, 'drawList', { alpha: fade(t, 0.5, 1.3, 19.2, 20), hl: 'const e = streamer.entry(d.key);', span: 2, maxLines: 8 });
     codeWalk(c, 'drawCall', t, [[0, 'for (const { d, e, rel } of list){'], [1.5, 'if (!boxVisible(planes, rel, d.size))'], [3.5, 'const open = state.seams ? d.open : 0'], [6, 'gl.uniform3f(U.uOrigin', 3],
-                                [8.5, 'gl.bindVertexArray(e.gpu.vao);'], [9.5, 'gl.drawElementsInstanced(gl.TRIANGLES, 36'], [12, 'view.drawn++; view.instances += n;']],
+                                [8.5, 'gl.bindVertexArray(e.gpu.vao);'], [9.5, 'gl.drawElementsInstanced(gl.TRIANGLES, rasterDraw.tris'], [12, 'view.drawn++; view.instances += n;']],
              { alpha: fade(t, 0.5, 1.3, 19.2, 20), y: P.lay.codeY + 170 });
   },
 },
@@ -836,9 +836,9 @@ export const SCENES = [
 {
   key: 'vertex', stage: 'vertex', title: 'The vertex shader rebuilds the cube', dur: 24, side: true,
   steps: (P, D) => [
-    [0, `On the GPU the call runs the vertex shader 36 times per instance. Each run gets its instance's record as <code>aRec</code> and an index into the 24 corners as <code>gl_VertexID</code>. First the cell: <code>mortonDecode</code> pulls x, y and z back out of the index's bits.`],
-    [5.5, `The cube's centre is <code>uOrigin + (cell + 0.5) · uCellSize</code>, and each corner adds <code>CORNER[corner] · uCellSize</code>. The same 24 offsets for every cube; only the record differs.`],
-    [11.5, `Then <code>face = corner / 4</code>. If the record's mask hides that face, the vertex is put at <code>(2, 2, 2, 1)</code>, outside clip space, so its triangles are clipped away whole. (Drawn here as flying off; the shader does it in one step.)`],
+    [0, `On the GPU the call runs the vertex shader 18 times per instance, over 12 corners: three faces of four. Each run gets its instance's record as <code>aRec</code> and its corner as <code>gl_VertexID</code>, 0 to 11. First the cell: <code>mortonDecode</code> pulls x, y and z back out of the index's bits.`],
+    [5.5, `The cube's centre is <code>uOrigin + (cell + 0.5) · uCellSize</code>, and each corner adds <code>CORNER[corner] · uCellSize</code>. The same 24 offsets for every cube; only the record differs. Here all six faces are built, so you can see them.`],
+    [11.5, `Which faces: <code>k = corner / 4</code> is an axis, and of its two faces only the one on the eye's side can face it, so <code>face = 2k + (c[k] < 0 ? 0 : 1)</code>. The other three are never sent. If the record's mask hides the face, the vertex is put at <code>(2, 2, 2, 1)</code>, outside clip space, so its triangles are clipped away whole. (Drawn here as flying off; the shader does it in one step.)`],
     [17.5, `Every instance of the chunk at once: the faces against neighbours go, and what's left is the chunk's surface. A vertex shader the size of a paragraph, no geometry stored anywhere.`],
   ],
   cam: t => camKeys(t, [
@@ -887,10 +887,10 @@ export const SCENES = [
     card(g, x, y, 340, 'one instance, one corner', [
       ['gl_InstanceID', fmt(idx)], ['aRec', hex(r.rec), ACCENT], ['recCell(aRec)', `(${r.x}, ${r.y}, ${r.z})`, ACCENT],
       ['uOrigin (here: the corner)', `(${P.F.job.lo.join(', ')})`], ['uCellSize', '1'],
-      ['face = corner / 4', t < 11.5 ? '…' : '0 … 5', GOLD], ['faceShown', t < 11.5 ? '…' : SIDE_NAMES.map((s, f) => (r.mask >> f & 1) ? s : '').filter(Boolean).join(' '), GREEN],
+      ['face = 2k + side', t < 11.5 ? '…' : '0 … 5', GOLD], ['faceShown', t < 11.5 ? '…' : SIDE_NAMES.map((s, f) => (r.mask >> f & 1) ? s : '').filter(Boolean).join(' '), GREEN],
     ], { alpha: a, color: GPU });
-    codeWalk(c, 'rasterVS', t, [[0, 'void main(){'], [2, 'vAttr = aAttr;'], [5.5, 'vec3 p = recCentre(aRec) + CORNER[corner] * uCellSize;'], [8, 'gl_Position = uViewProj * vec4(p, 1.0);'],
-                                [11.5, 'uint corner = uint(gl_VertexID), face = corner / 4u;'], [13, 'if (!faceShown(aRec, face)']], { alpha: fade(t, 0.5, 1.3, 23.2, 24) });
+    codeWalk(c, 'rasterVS', t, [[0, 'void main(){'], [2, 'vAttr = aAttr;'], [5.5, 'vec3 p = c + CORNER[corner] * uCellSize;'], [8, 'gl_Position = uViewProj * vec4(p, 1.0);'],
+                                [11.5, 'uint face = ALL_SIX ? k'], [13, 'if (!faceShown(aRec, face)']], { alpha: fade(t, 0.5, 1.3, 23.2, 24) });
     codeWalk(c, 'decode', t, [[0, 'uvec3 mortonDecode(uint i){'], [2.5, 'uvec3 recCell(uint r)'], [5.5, 'vec3  recCentre(uint r)'], [11.5, 'uint  recShown(uint r)'], [13, 'bool  faceShown(uint r, uint f)']],
              { alpha: fade(t, 0.8, 1.6, 23.2, 24), y: P.lay.codeY + 248, maxLines: 22 });
   },

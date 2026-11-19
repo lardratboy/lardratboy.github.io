@@ -40,7 +40,7 @@ export const SNIPS = {
   faceOff:       { file: 'stream-viewer.html', at: 'const FACE_OFF = [', n: 4, title: 'FACE_OFF: 24 corners' },
   drawList:      { file: 'stream-viewer.html', at: '    list.push({ d, e, rel, dist: Math.hypot(', from: -4, n: 7, title: 'renderView: the list' },
   drawCall:      { file: 'stream-viewer.html', at: '      gl.uniform3f(U.uOrigin, rel[0], rel[1], rel[2]);', from: -14, n: 24, title: 'renderView: one draw a chunk' },
-  rasterVS:      { file: 'stream-viewer.html', at: '  vInst = gl_InstanceID;', from: -1, n: 13, title: 'rasterVS (GLSL)' },
+  rasterVS:      { file: 'stream-viewer.html', at: '  vInst = gl_InstanceID;', from: -1, n: 14, title: 'rasterVS (GLSL)' },
   decode:        { file: 'chunk-glsl.js', at: 'uvec3 mortonDecode(uint i){', n: 22, title: 'GLSL_DECODE' },
   shadeOut:      { file: 'stream-viewer.html', at: 'vec4 shadeOut(vec3 base, vec3 normal, vec3 rel){', from: -4, n: 16, title: 'GLSL_SHADE' },
   fsMain:        { file: 'stream-viewer.html', at: '            : uColorMode == 8 ? attrColour(vAttr) : vec3(0.75);', from: -6, n: 9, title: 'the raster FS' },

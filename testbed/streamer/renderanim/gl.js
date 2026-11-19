@@ -261,7 +261,11 @@ const glslVec3s = a => a.map(v => `vec3(${v.map(x => x.toFixed(1)).join(',')})`)
      uGrow       corners scaled about the centre (a cube being built);
      uHiddenT    ≥ 0: a hidden face is drawn after all, slid out along its
                  normal by uHiddenT and shrunk, to show where it goes. The
-                 viewer has no such state: a hidden face is gone in one step. */
+                 viewer has no such state: a hidden face is gone in one step.
+   Six faces, 36 indices, as the viewer drew before 2026-11-18: since then it
+   draws the three that can face the eye (rasterVS, docs/city-frame-cost.md),
+   which the film says, but uAllFaces and uHiddenT show the other three, so
+   the film's own shader keeps them. */
 const REC_VS = `#version 300 es
 precision highp float;
 precision highp int;

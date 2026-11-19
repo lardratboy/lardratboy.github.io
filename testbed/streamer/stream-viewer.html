@@ -370,7 +370,21 @@ const FACE_OFF = [
   [.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5],[-.5,-.5,.5],   [-.5,-.5,-.5],[-.5,.5,-.5],[.5,.5,-.5],[.5,-.5,-.5]];
 const glslVec3s = a => a.map(v => `vec3(${v.map(x => x.toFixed(1)).join(',')})`).join(',\n  ');
 
-const rasterVS = hideAlso => `#version 300 es
+/* Three faces a cube, not six (docs/city-frame-cost.md, 2026-11-18). A cube
+   has at most three faces toward the eye, one an axis, and which is the
+   sign of its centre from the eye (p is eye-relative): +x can face the eye
+   only if the centre is at negative x, and so on. So a record is drawn as
+   12 vertices, `k` the axis and the side chosen here, not 24 with the far
+   three left to culling. When the eye is inside the cube's slab on an axis
+   both of that axis's faces are back-facing, so either choice is culled:
+   that needs CULL_FACE, which the raster pass has on (the wireframe, which
+   hasn't, drops back faces itself, hideAlso). The pass is bound by
+   geometry, not pixels (the same view at 1 and 7.7 Mpx costs the same),
+   and the shader runs per vertex whatever the mask shows, so this halved
+   it: the D = 13 city from 600 up 26–31 ms → 15.0, the D = 14 kit 5.8 →
+   3.9, in Chrome on the M2 Max, with the same frame byte for byte.
+   `all` is the six faces of before (36 indices), facesSelftest's reference. */
+const rasterVS = (hideAlso, all = false) => `#version 300 es
 precision highp float;
 precision highp int;
 ${GLSL_DECODE}
@@ -379,6 +393,7 @@ layout(location = 1) in uint aAttr;   // the record's attribute word (step 6)
 uniform mat4 uViewProj;    // rotation and projection only: positions are eye-relative
 uniform vec3 uEyeN;        // the eye over the world side, for gamut colour
 uniform float uInvSide;
+const bool ALL_SIX = ${all};   // facesSelftest's reference: every face, 24 vertices
 const vec3 CORNER[24] = vec3[24](
   ${glslVec3s(FACE_OFF)});
 const vec3 NORMAL[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
@@ -391,8 +406,10 @@ flat out int vInst;
 void main(){
   vInst = gl_InstanceID;
   vAttr = aAttr;
-  uint corner = uint(gl_VertexID), face = corner / 4u;
-  vec3 p = recCentre(aRec) + CORNER[corner] * uCellSize;
+  vec3 c = recCentre(aRec);
+  uint v = uint(gl_VertexID), k = v / 4u;
+  uint face = ALL_SIX ? k : 2u * k + (c[k] < 0.0 ? 0u : 1u), corner = 4u * face + v % 4u;
+  vec3 p = c + CORNER[corner] * uCellSize;
   vRel = p;
   vGamut = uEyeN + p * uInvSide;
   vNormal = NORMAL[face];
@@ -574,6 +591,10 @@ const RASTER_UNIFORMS = ['uViewProj', 'uEyeN', 'uInvSide', 'uOrigin', 'uCellSize
   'uColorMode', 'uChunkColor', 'uLodColor', 'uFog', 'uDepthScale', 'uDrawIndex'];
 const U = uniformsOf(prog, RASTER_UNIFORMS);
 const wireProg = link(WIRE_VS, FS), WU = uniformsOf(wireProg, RASTER_UNIFORMS);
+// What renderView draws records with: three faces a cube (rasterVS has why). facesSelftest
+// swaps in the six-face reference to hold one to the other, then puts this back.
+const RASTER_DRAW = { prog, U, tris: 18 };
+let rasterDraw = RASTER_DRAW;
 /* A miss writes transparent black, and the pass blends over the raster
    (ONE, ONE_MINUS_SRC_ALPHA): a hit's alpha is exactly 1, so it replaces
    the pixel, and a miss leaves it. The first ray pass discarded a miss,
@@ -1309,6 +1330,8 @@ function syncCoverTree(){
   texRows(ray.tree, ray.treeCPU.subarray(0, 4 * TREE_W * rows), 0, rows);
   ray.treeNodes = nodes;
 }
+// The raster and the wireframe draw the first three faces' indices only (18 and 30),
+// as rasterVS's three faces a cube; the preview and the bodies, six (their shaders turn the cube).
 const CUBE_TRIS = 36, CUBE_LINES = 60;
 const cubeIndex = gl.createBuffer();
 {
@@ -3427,7 +3450,7 @@ function drawWire(w, h){
     gl.uniform3fv(WU.uLodColor, LOD_COLORS[d.lod]);
     gl.uniform3fv(WU.uChunkColor, chunkColor(d));
     gl.bindVertexArray(e.gpu.vao);
-    gl.drawElementsInstanced(gl.LINES, CUBE_LINES, gl.UNSIGNED_BYTE, CUBE_TRIS, n);
+    gl.drawElementsInstanced(gl.LINES, CUBE_LINES / 2, gl.UNSIGNED_BYTE, CUBE_TRIS, n);
   }
   const f = fwd(), near = view.near * 1.01, runs = [];
   let words = 0;
@@ -3494,8 +3517,9 @@ function drawSSAO(w, h, o = state.ssao, out = null, show = state.ssaoShow){
   gl.activeTexture(gl.TEXTURE0 + SSAO_AO_UNIT); gl.bindTexture(gl.TEXTURE_2D, null);
   gl.activeTexture(gl.TEXTURE0);
 }
-/* The count beside it. A cube is 12 triangles to the GPU whatever it shows: the vertex
-   shader collapses a hidden face to a point after it's been sent. So the headline is what
+/* The count beside it. A cube is 6 triangles to the GPU whatever it shows (three faces,
+   rasterVS; 12 before 2026-11-18): the vertex shader collapses a hidden face to a point
+   after it's been sent. So the headline is what
    can reach the screen, the exposed faces plus the traced chunks' stencil boxes and the
    ray pass's one triangle, and "sent" is the raster's cost in vertices. Occlusion's
    boxes aren't in it: they ask a question and draw nothing. */
@@ -3503,7 +3527,7 @@ function showTriangles(){
   if (!state.wire) return;
   const boxes = 12 * view.marked, screen = view.rayTriangle ? 1 : 0;
   $('tris').innerHTML = `<b>${k(view.triangles + boxes + screen)}</b> triangles\n` +
-    `raster ${k(view.triangles)} exposed of ${k(12 * view.instances)} sent` +
+    `raster ${k(view.triangles)} exposed of ${k(rasterDraw.tris / 3 * view.instances)} sent` +
     (view.rayChunks ? `\ntraced ${view.rayChunks} chunks: ${k(boxes)} in boxes, ${screen} full-screen` : '');
 }
 /* ---- the preview: the child drawn in the box (docs/gizmo-plan.md step 3) --------
@@ -4456,7 +4480,8 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
   const far = view.far = 4 * W.side + Math.hypot(...cam.eye);
   const M = viewProj(w / h, view.near, far), planes = frustumPlanes(M);
   const run = timeIt ? timed : (_, fn) => fn();
-  gl.useProgram(prog);
+  const { U } = rasterDraw;
+  gl.useProgram(rasterDraw.prog);
   gl.uniformMatrix4fv(U.uViewProj, false, M);
   gl.uniform3f(U.uEyeN, cam.eye[0] / W.side, cam.eye[1] / W.side, cam.eye[2] / W.side);
   gl.uniform1f(U.uInvSide, 1 / W.side);
@@ -4520,7 +4545,7 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
       gl.uniform1i(U.uDrawIndex, view.drawn);
       view.drawList[view.drawn] = d.key;
       gl.bindVertexArray(e.gpu.vao);
-      gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_BYTE, 0, n);
+      gl.drawElementsInstanced(gl.TRIANGLES, rasterDraw.tris, gl.UNSIGNED_BYTE, 0, n);
       view.drawn++; view.instances += n; view.triangles += 2 * quadsShown(e.quads, e.openQuads, open);
       if (state.wire) wireList.push({ d, e, rel, open, n });
     }
@@ -5432,7 +5457,11 @@ window.raySelftest = async function raySelftest(opts = {}){
     r.classify = [11, 12345].map(seed => classifyProbe(seed, 128, 128))
       .reduce((a, b) => ({ cells: a.cells + b.cells, hits: a.hits + b.hits, mismatches: a.mismatches + b.mismatches, first: a.first.concat(b.first).slice(0, 4) }));
     r.trace = traceProbe(96, 72);
-    r.attr = attrProbe(96, 72);
+    // 128 × 96, its default: at 96 × 72 the terrain's eight traced chunks gave 886 hits,
+    // 840 of them with a word, under ray.test.js's 1,000. They were 2,017 before the
+    // crust went from 64 voxels to 8 (5730d19), but 1,238 of those were rays under
+    // the near raster hitting the crust's buried sides, cells with no word to compare.
+    r.attr = attrProbe(128, 96);
     r.bound = boundProbe(160, 120);
     r.mask = maskProbe(160, 120);
     // The eye inside a traced chunk, which only its back faces can mark
@@ -6568,6 +6597,63 @@ window.wireSelftest = async function wireSelftest({ countOnly = false } = {}){
     state.color = saved.color; state.wire = saved.wire; showWire();
     setPath(saved.path);
   }
+  return report;
+};
+/* facesSelftest(): three faces a cube (rasterVS) against the six drawn before,
+   the reference. The same converged view is drawn both ways, raster only, in the
+   page's colours and as distance (mode 5, 24 bits), and must be the same bytes.
+   At the eye as it is, then a few voxels off the surface ahead of it, on a face
+   plane (integers) and in a cube's middle (halves), where the cubes beside the
+   eye sit in its slab and the side chosen is the one culling must drop. Each
+   eye looks six ways (±x, ±z, up, down), so every face of a cube is drawn
+   toward the eye somewhere. The investigation's copy of the page found 0 bytes
+   different on six views (docs/city-frame-cost.md §3); this keeps it so. */
+let sixFaces = null;
+window.facesSelftest = async function facesSelftest({ size = [320, 200] } = {}){
+  sixFaces ??= (() => { const p = link(rasterVS('', true), FS); return { prog: p, U: uniformsOf(p, RASTER_UNIFORMS), tris: CUBE_TRIS }; })();
+  const saved = { eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch, path: state.path };
+  const [w, h] = size, report = { world: W.id, views: [], converged: true };
+  const settle = async () => {
+    const end = performance.now() + 120000;
+    for (let f = 0; performance.now() < end; f++){ if (f > 2 && isConverged()) return true; await sleep(16); }
+    return false;
+  };
+  const differ = (a, b) => { let n = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++; return n; };
+  try {
+    setPath('off');
+    // The eyes: as it is, then walked ahead to a few voxels off whatever it looks at.
+    const eyes = [saved.eye.slice()];
+    const f = fwd(), e = saved.eye.slice();
+    for (let i = 0; i < 400; i++){
+      cam.eye = e; const d = clearance();
+      if (d < 6) break;
+      for (let a = 0; a < 3; a++) e[a] += f[a] * Math.max(1, d - 4);
+    }
+    if (clearance() < 6){ eyes.push(e.map(Math.floor)); eyes.push(e.map(v => Math.floor(v) + 0.5)); }
+    const HEADINGS = [[0, 0], [Math.PI / 2, 0], [Math.PI, 0], [-Math.PI / 2, 0], [0, 1.5], [0, -1.5]];
+    for (const eye of eyes){
+      cam.eye = eye.slice(); dirty = true;
+      if (!await settle()) report.converged = false;
+      for (const [yaw, pitch] of HEADINGS){
+        cam.yaw = yaw; cam.pitch = pitch;
+        for (const mode of new Set([state.color, 5])){
+          rasterDraw = sixFaces; const six = renderPixels(w, h, mode, 'raster');
+          rasterDraw = RASTER_DRAW; const three = renderPixels(w, h, mode, 'raster');
+          let lit = 0;
+          for (let i = 3; i < three.length; i += 4) if (three[i]) lit++;
+          report.views.push({ eye: eye.slice(), yaw, pitch, mode, diff: differ(six, three), lit, cubes: view.instances });
+        }
+      }
+    }
+  } finally {
+    rasterDraw = RASTER_DRAW;
+    cam.eye = saved.eye; cam.yaw = saved.yaw; cam.pitch = saved.pitch; dirty = true;
+    setPath(saved.path);
+  }
+  report.eyes = new Set(report.views.map(v => v.eye.join(','))).size;
+  report.diff = report.views.reduce((a, v) => a + v.diff, 0);
+  report.drawn = report.views.filter(v => v.lit > 0).length;
+  window.__facesSelftest = report;
   return report;
 };
 /* The selftests' twin (editSelftest, sceneSelftest): the world's live ops, blocks and
