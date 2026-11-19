@@ -3,12 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>glb to vdag</title>
+<title>glb and ply to vdag</title>
 <!--
-  experiments/mesh-vdag.mjs with a page: drop a glTF binary (or pick one), pick
-  the depths, and save world files the stream viewer opens. Every decision is
-  convert-core.js's, run in convert-worker.js, one worker an asset; this page
-  only moves files and draws the list. docs/convert.md.
+  experiments/mesh-vdag.mjs with a page: drop a glTF binary or a PLY file (or
+  pick one), pick the depths, and save world files the stream viewer opens.
+  Every decision is convert-core.js's (and ply-core.js's), run in
+  convert-worker.js, one worker an asset; this page only moves files and
+  draws the list. A .ply goes to the worker as the File itself and is read
+  there a slice at a time, since they run to 190 MB. docs/convert.md.
 
   Serve the repo root (npm run serve) and open /convert/: the core imports
   ../dag-core.js and its neighbours.
@@ -53,8 +55,8 @@
 </head>
 <body>
 <main>
-  <h1>glb → vdag</h1>
-  <p class="lede">A glTF binary to world files for the <a href="../stream-viewer.html">stream viewer</a>, made as <code>experiments/mesh-vdag.mjs</code> makes them, in this browser. Drop a saved file on the viewer, or open it there with file → open… (<kbd>H</kbd> shows the panels).</p>
+  <h1>glb, ply → vdag</h1>
+  <p class="lede">A glTF binary or a PLY mesh or point cloud to world files for the <a href="../stream-viewer.html">stream viewer</a>, made as <code>experiments/mesh-vdag.mjs</code> makes them, in this browser. Drop a saved file on the viewer, or open it there with file → open… (<kbd>H</kbd> shows the panels).</p>
 
   <div id="settings">
     <div id="depths"><span class="label">depths</span></div>
@@ -68,9 +70,9 @@
   </div>
 
   <div id="drop">
-    <b>Drop .glb files here</b>, or <button id="pick" type="button">choose files…</button>
-    <input id="files" type="file" accept=".glb,model/gltf-binary" multiple hidden>
-    <span class="hint">Each depth D is a world 2<sup>D</sup> voxels a side. D = 10 can take a minute an asset. Nothing leaves this machine.</span>
+    <b>Drop .glb or .ply files here</b>, or <button id="pick" type="button">choose files…</button>
+    <input id="files" type="file" accept=".glb,.ply,model/gltf-binary" multiple hidden>
+    <span class="hint">Each depth D is a world 2<sup>D</sup> voxels a side. D = 10 can take a minute an asset. A point cloud's points each fill the voxel they fall in. Nothing leaves this machine.</span>
   </div>
 
   <div id="jobs"></div>
@@ -106,16 +108,16 @@ const jobsEl = document.getElementById('jobs'), jobs = [];
 let running = null;
 const fmt = n => n.toLocaleString('en-US'), many = (n, one, more = `${one}s`) => `${fmt(n)} ${n === 1 ? one : more}`, kb = n => n < 1024 * 1024 ? `${fmt(Math.ceil(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
 const secs = ms => `${(ms / 1000).toFixed(1)} s`;
-const STAGES = { reading: 'reading the file', analysing: 'welding, finding what\'s solid', shape: 'voxelizing the shape', skin: 'the skin',
+const STAGES = { reading: 'reading the file', analysing: 'welding, finding what\'s solid', shape: 'voxelizing the shape', skin: 'the skin', points: 'sorting the points into voxels',
                  words: 'baking colours', writing: 'writing the file', checking: 'reading it back', picture: 'a picture' };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 
 function addFiles(list){
-  const all = [...list], glbs = all.filter(f => /\.glb$/i.test(f.name)), others = all.filter(f => !/\.glb$/i.test(f.name));
-  if (!glbs.length){ if (all.length) flash(`not a .glb: ${all.map(f => f.name).join(', ')}`); return; }
+  const all = [...list], models = all.filter(f => /\.(glb|ply)$/i.test(f.name)), others = all.filter(f => !/\.(glb|ply)$/i.test(f.name));
+  if (!models.length){ if (all.length) flash(`not a .glb or .ply: ${all.map(f => f.name).join(', ')}`); return; }
   const s = settings();
   if (!s.depths.length){ flash('pick at least one depth'); return; }
-  for (const file of glbs) addJob(file, others, s);
+  for (const file of models) addJob(file, others, s);
   next();
 }
 function flash(text){
@@ -151,7 +153,7 @@ function show(job){
   const colour = job.s.bake ? `baked, ${job.s.bits} bits` : 'no colour';
   const text = {
     waiting: `waiting · D = ${job.s.depths.join(', ')} · ${colour}`,
-    running: `${job.stage?.D != null ? `D = ${job.stage.D}: ` : ''}${STAGES[job.stage?.stage] ?? 'starting'}${ago}`,
+    running: `${job.stage?.D != null ? `D = ${job.stage.D}: ` : ''}${STAGES[job.stage?.stage] ?? 'starting'}${job.stage?.frac != null ? ` ${Math.floor(100 * job.stage.frac)}%` : ''}${ago}`,
     done: `done in ${secs(job.ms)} · ${colour}`,
     cancelled: 'cancelled',
     failed: `failed: ${job.error}`,
@@ -170,7 +172,9 @@ async function next(){
   if (!job) return;
   running = job; Object.assign(job, { state: 'running', started: performance.now(), stage: null }); show(job);
   try {
-    const [glb, files] = await Promise.all([job.file.arrayBuffer(), Promise.all(job.others.map(async f => [f.name, new Uint8Array(await f.arrayBuffer())]))]);
+    // A .ply isn't read here: the worker gets the File and reads it a slice at a time.
+    const ply = /\.ply$/i.test(job.file.name), opts = { name: job.name, depths: job.s.depths, bits: job.s.bits, bake: job.s.bake };
+    const [glb, files] = ply ? [null, []] : await Promise.all([job.file.arrayBuffer(), Promise.all(job.others.map(async f => [f.name, new Uint8Array(await f.arrayBuffer())]))]);
     if (job.state !== 'running') return;
     const w = job.worker = new Worker(new URL('./convert-worker.js', import.meta.url), { type: 'module' });
     await new Promise(resolve => {
@@ -183,7 +187,8 @@ async function next(){
         if (data.error){ Object.assign(job, { state: 'failed', error: data.error }); resolve(); }
       };
       w.onerror = e => { e.preventDefault(); Object.assign(job, { state: 'failed', error: e.message || 'the worker failed (out of memory?)' }); resolve(); };
-      w.postMessage({ glb, files, name: job.name, depths: job.s.depths, bits: job.s.bits, bake: job.s.bake }, [glb, ...files.map(([, b]) => b.buffer)]);
+      if (ply) w.postMessage({ ply: job.file, ...opts });
+      else w.postMessage({ glb, files, ...opts }, [glb, ...files.map(([, b]) => b.buffer)]);
     });
   } catch (e){
     if (job.state === 'running') Object.assign(job, { state: 'failed', error: String(e?.message ?? e) });
@@ -202,9 +207,19 @@ function cancel(job){
 }
 
 function about(job, a){
+  job.notes.textContent = a.notes.join(' · ');
+  const kind = a.format === 'ascii' ? 'ASCII' : 'binary';
+  if (a.kind === 'points'){
+    const colour = { vertex: 'coloured', splat: 'Gaussian splats (their centres, their base colour)' }[a.colour] ?? 'no colour';
+    job.about.textContent = `a point cloud (PLY, ${kind}): ${many(a.points, 'point')}, ${colour}`;
+    return;
+  }
+  if (a.kind === 'mesh'){
+    job.about.textContent = `a mesh (PLY, ${kind}): ${many(a.triangles, 'triangle')}, ${many(a.components, 'component')}, ${fmt(a.solid)} solid · ${a.vertexColours ? 'vertex colours' : 'no colour'}`;
+    return;
+  }
   const tex = a.textured ? `, ${a.textured} textured (${a.sizes.join(', ')})` : '';
   job.about.textContent = `${many(a.triangles, 'triangle')} in ${many(a.meshes, 'mesh', 'meshes')} (${a.instances} placed), ${many(a.components, 'component')}, ${fmt(a.solid)} solid · ${many(a.materials, 'material')}${tex}${a.cutouts ? `, ${many(a.cutouts, 'alpha cutout')}` : ''}${a.vertexColours ? ', vertex colours' : ''}`;
-  job.notes.textContent = a.notes.join(' · ');
 }
 function addWorld(job, w){
   const url = URL.createObjectURL(new Blob([w.bytes], { type: 'application/octet-stream' }));

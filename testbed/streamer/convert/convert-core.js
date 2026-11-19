@@ -25,18 +25,27 @@
    step; a PNG the script can't decode is skipped there (the factor colours
    its materials) and handed to the browser here. And the script names a file
    with a hash for a name (Tripo's) after its folder, which a page can't see:
-   here it's always the file's own name. */
-import { createCounts, prune } from '../dag-core.js';
+   here it's always the file's own name.
+
+   PLY (2026-11-18, docs/convert.md §PLY): `convertPly` takes the file as a
+   stream of chunks (ply-core.js's reader), since they run to 190 MB. A
+   point cloud's points each fill their voxel, coloured by their mean; a
+   mesh is glb-core's G from there on, so it shares bakeDepth with the .glb.
+   Both end in `finishDepth`, the .glb's own writing, reading back and
+   picture, so a world is the same file whichever way its voxels came;
+   experiments/ply-vdag.mjs is the CLI over the same function. */
+import { createStore, createCounts, prune } from '../dag-core.js';
 import { writeVdag, readVdag } from '../vdag-core.js';
 import { createBaked } from '../baked-core.js';
+import { readPly, plyMesh, pointBox, pointsDepth } from './ply-core.js';
 import { pngParts, pngPixels, concatBytes, parseGlb, glbImages, glbMesh, analyse, bakeDepth, assetView, firstAlong, VIEWS } from '../experiments/glb-core.mjs';
 
 // The depths the page offers: D = 10 takes seconds to a minute an asset in
 // the script, and D = 12 minutes and over a gigabyte, so the page stops at 10.
 export const DEPTHS = [6, 7, 8, 9, 10];
 
-// The script's names: the file's name without .glb, and a slug of it for the file.
-export const nameOf = fileName => fileName.replace(/^.*[\\/]/, '').replace(/\.glb$/i, '');
+// The script's names: the file's name without .glb (or .ply), and a slug of it for the file.
+export const nameOf = fileName => fileName.replace(/^.*[\\/]/, '').replace(/\.(glb|ply)$/i, '');
 export const slugOf = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'asset';
 
 async function inflate(bytes){
@@ -122,28 +131,85 @@ export async function convertGlb(bytes, { name = 'asset', depths = [8, 10], bits
   const A = analyse(G), asset = summaryOf(G, A, notes), slug = slugOf(name), worlds = [];
   onAsset(asset);
   for (const D of depths){
-    const ms = {}, t = { at: performance.now(), stage: null };
-    const stage = s => { const now = performance.now(); if (t.stage) ms[t.stage] = now - t.at; Object.assign(t, { at: now, stage: s }); onStage(D, s); };
+    const ms = {}, stage = stager(D, ms, onStage);
     const { M, b, sk, W } = bakeDepth(G, A, D, { bake, stage });
-    const colour = W ? { kind: 'baked', skin: sk.root, words: W.words, bits } : null, root = b.root;
-    stage('writing');
-    const keys = b.store.snapshot().keys;
-    const file = await writeVdag([{ keys, root, D, name: `${name} (D = ${D})`, colour, view: assetView(M), source: null }]);
-    stage('checking');
-    const counts = createCounts(b.store), voxels = counts.of(root), { worlds: [back] } = await readVdag(file);
-    if (back.voxels !== voxels || (colour ? back.colourStatus !== 'baked' : back.colour !== null))
-      throw new Error(`D = ${D}: the file doesn't read back as the world written`);
-    let thumb = null;
-    if (thumbs){
-      stage('picture');
-      const field = W ? createBaked(b.store, sk.root, D, W.words, { counts }) : null;
-      thumb = thumbnail(b.store, root, D, field);
-    }
-    stage(null);
-    const world = { D, side: M.side, file: `${slug}-d${D}.vdag`, bytes: file, voxels, nodes: prune(keys, [root]).keys.length / 9,
-                    skin: W ? W.words.length : 0, bits: colour ? bits : 0, ms, thumb };
+    const world = await finishDepth({ store: b.store, root: b.root, D, M, skin: sk?.root, words: W?.words, bits, name, slug, thumbs, stage, ms });
     worlds.push(world);
     onWorld(world);
+  }
+  return { asset, worlds };
+}
+
+/* Each stage's time, and the page told: stage(s) closes the one before. */
+function stager(D, ms, onStage){
+  const t = { at: performance.now(), stage: null };
+  return s => { const now = performance.now(); if (t.stage) ms[t.stage] = now - t.at; Object.assign(t, { at: now, stage: s }); onStage(D, s); };
+}
+/* One depth's file from its store: written, read back (it must hold the
+   world it was written from: its voxels and, baked, its colour), and a
+   picture. Shared by the .glb and the .ply, so a world is the same file
+   whichever way its voxels came. */
+async function finishDepth({ store, root, D, M, skin, words, bits, name, slug, thumbs, stage, ms }){
+  const colour = words ? { kind: 'baked', skin, words, bits } : null;
+  stage('writing');
+  const keys = store.snapshot().keys;
+  const file = await writeVdag([{ keys, root, D, name: `${name} (D = ${D})`, colour, view: assetView(M), source: null }]);
+  stage('checking');
+  const counts = createCounts(store), voxels = counts.of(root), { worlds: [back] } = await readVdag(file);
+  if (back.voxels !== voxels || (colour ? back.colourStatus !== 'baked' : back.colour !== null))
+    throw new Error(`D = ${D}: the file doesn't read back as the world written`);
+  let thumb = null;
+  if (thumbs){
+    stage('picture');
+    const field = words ? createBaked(store, skin, D, words, { counts }) : null;
+    thumb = thumbnail(store, root, D, field);
+  }
+  stage(null);
+  return { D, side: M.side, file: `${slug}-d${D}.vdag`, bytes: file, voxels, nodes: prune(keys, [root]).keys.length / 9,
+           skin: words ? words.length : 0, bits: colour ? bits : 0, ms, thumb };
+}
+
+/* A PLY file (ply-core.js): a point cloud, each point the voxel it falls in
+   coloured by the mean of its points, or a mesh, which goes the .glb's way
+   from glb-core's analyse on (its vertex colours as COLOR_0). `chunks` is
+   any async iterable of byte chunks, so a 190 MB file is never held whole:
+   the worker hands in a File's slices, Node an fs stream. `size` is the
+   file's length, for `onProgress(fraction)` while it's read. A file with no
+   colour is written as the shape alone, whatever `bake` says (the viewer
+   then draws it in gamut, as a .glb with no colour would). */
+export async function convertPly(chunks, { name = 'asset', depths = [8, 10], bits = 6, bake = true, size = 0,
+                                          onAsset = () => {}, onStage = () => {}, onProgress = () => {}, onWorld = () => {}, thumbs = true } = {}){
+  if (bits !== 6 && bits !== 8) throw new Error('bits is 6 or 8');
+  for (const D of depths) if (!DEPTHS.includes(D)) throw new Error(`D = ${D}: the page makes ${DEPTHS[0]} to ${DEPTHS.at(-1)}`);
+  onStage(null, 'reading');
+  const P = await readPly(chunks, { onProgress: read => onProgress(size ? Math.min(1, read / size) : 0) });
+  const notes = P.notes, slug = slugOf(name), worlds = [];
+  const coloured = !!P.rgb;
+  if (bake && !coloured) notes.push(`no colour in the file: the shape alone`);
+  bake = bake && coloured;
+  if (P.nt){
+    onStage(null, 'analysing');
+    const G = plyMesh(P), A = analyse(G), asset = { ...summaryOf(G, A, notes), kind: 'mesh', format: P.format };
+    onAsset(asset);
+    for (const D of depths){
+      const ms = {}, stage = stager(D, ms, onStage);
+      const { M, b, sk, W } = bakeDepth(G, A, D, { bake, stage });
+      const world = await finishDepth({ store: b.store, root: b.root, D, M, skin: sk?.root, words: W?.words, bits, name, slug, thumbs, stage, ms });
+      worlds.push(world); onWorld(world);
+    }
+    return { asset, worlds };
+  }
+  const box = pointBox(P);
+  if (!box.kept) throw new Error('no point with finite coordinates');
+  if (box.kept < P.n) notes.push(`${(P.n - box.kept).toLocaleString('en-US')} points with no finite place dropped`);
+  const asset = { kind: 'points', format: P.format, points: P.n, kept: box.kept, colour: P.colour, notes };
+  onAsset(asset);
+  for (const D of depths){
+    const ms = {}, stage = stager(D, ms, onStage);
+    stage('points');
+    const store = createStore(), r = pointsDepth(P, box, D, store, { bake });
+    const world = await finishDepth({ store, root: r.root, D, M: r.M, skin: r.root, words: r.words, bits, name, slug, thumbs, stage, ms });
+    worlds.push(world); onWorld(world);
   }
   return { asset, worlds };
 }
