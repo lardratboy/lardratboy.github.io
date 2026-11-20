@@ -378,6 +378,23 @@ export function cellAttr(store, counts, colour, id, lod, meanDepth, x, y, z){
   const n = counts.of(id);
   return attrOf8(ACC[0] / n, ACC[1] / n, ACC[2] / n);
 }
+/* The same mean before it's made six bits: three 8-bit channels as floats
+   in `out`, for export/'s eight-bit colours (docs/export.md §2, asked for
+   2026-11-20: a baked 8-bit file's lod 0 exports its own words). cellAttr
+   is attrOf8 of this, written apart so the job's hot path stays one call. */
+export function cellMean(store, counts, colour, id, lod, meanDepth, x, y, z, out){
+  if (colour.mean) return colour.mean(lod, x, y, z, out), out;
+  if (lod === 0){
+    const c = colour(x + 0.5, y + 0.5, z + 0.5, 0);
+    out[0] = c & 255; out[1] = c >> 8 & 255; out[2] = c >> 16 & 255;
+    return out;
+  }
+  ACC.fill(0);
+  meanUnder(store, counts, colour, id, lod, Math.max(0, lod - meanDepth), x, y, z);
+  const w = counts.of(id);
+  out[0] = ACC[0] / w; out[1] = ACC[1] / w; out[2] = ACC[2] / w;
+  return out;
+}
 
 /* The six apron slabs: which neighbour chunk, where its corner sits
    relative to ours, and the one-cell box of it that faces us. */
