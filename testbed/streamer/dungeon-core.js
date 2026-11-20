@@ -89,6 +89,12 @@ export function dungeonDesc({ D = DUNGEON_DEFAULTS.D, seed = 1, floors = DUNGEON
   if (!Number.isInteger(seed) || seed < 1 || seed > 0xffff) throw new Error(`dungeon: seed ${seed} is outside 1…65535`);
   return { kind: 'dungeon', D, seed, floors };
 }
+/* The ground's datum for a universe (docs/universe-plan.md §4, step 5): the slab's
+   top. Every cell on the world's edge closes its outer side, and a closed side is
+   wall to the top of its floor, so a walker at the edge stands on the top floor's
+   walls, y = 16·F, and the roofless top floor opens below the plane like a ruin.
+   test/universe-core.test.js holds it against every edge column. */
+export const dungeonGround = desc => CELL * desc.floors;
 export const dungeonParam = d => [d.D, d.floors].join(',');
 export function dungeonFromParam(s, seed = 1){
   const p = String(s).split(',').map(Number);

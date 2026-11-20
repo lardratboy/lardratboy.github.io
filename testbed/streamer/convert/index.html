@@ -12,6 +12,12 @@
   draws the list. A .ply goes to the worker as the File itself and is read
   there a slice at a time, since they run to 190 MB. docs/convert.md.
 
+  The PLY row (convert.md §PLY, answered 2026-11-18): what a cloud's point
+  fills, the opacity under which a splat (or any point with alpha) is
+  dropped, and whether a mesh's colour comes from its triangles or its
+  vertices. A textured .ply's images are dropped or picked with it, as a
+  .glb's are. Their defaults write the files written before them.
+
   Serve the repo root (npm run serve) and open /convert/: the core imports
   ../dag-core.js and its neighbours.
 -->
@@ -27,6 +33,8 @@
   button:disabled{ opacity:.4; cursor:default; }
   #settings{ display:flex; flex-wrap:wrap; gap:10px 24px; align-items:center; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:10px 14px; margin-bottom:12px; }
   #settings .label{ color:var(--dim); margin-right:8px; }
+  #settings .row{ display:flex; flex-wrap:wrap; gap:10px 24px; align-items:center; width:100%; }
+  #settings input[type=number]{ background:#16161f; color:var(--hi); font:inherit; border:1px solid rgba(255,255,255,.16); border-radius:4px; padding:2px 6px; width:4.5em; }
   #depths label{ margin-right:10px; white-space:nowrap; cursor:pointer; }
   #depths input{ accent-color:var(--accent); vertical-align:-2px; }
   #drop{ border:1px dashed rgba(255,255,255,.22); border-radius:8px; padding:34px 16px; text-align:center; color:var(--dim); margin-bottom:18px; transition:background .1s, border-color .1s; }
@@ -59,20 +67,43 @@
   <p class="lede">A glTF binary or a PLY mesh or point cloud to world files for the <a href="../stream-viewer.html">stream viewer</a>, made as <code>experiments/mesh-vdag.mjs</code> makes them, in this browser. Drop a saved file on the viewer, or open it there with file → open… (<kbd>H</kbd> shows the panels).</p>
 
   <div id="settings">
-    <div id="depths"><span class="label">depths</span></div>
-    <div><span class="label">colour</span>
-      <select id="colour">
-        <option value="6">baked, 6 bits a channel</option>
-        <option value="8">baked, 8 bits a channel</option>
-        <option value="0">none (the shape alone)</option>
-      </select>
+    <div class="row">
+      <div id="depths"><span class="label">depths</span></div>
+      <div><span class="label">colour</span>
+        <select id="colour">
+          <option value="6">baked, 6 bits a channel</option>
+          <option value="8">baked, 8 bits a channel</option>
+          <option value="0">none (the shape alone)</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <span class="label">PLY</span>
+      <div><span class="label">a point fills</span>
+        <select id="point">
+          <option value="cube:0">its voxel</option>
+          <option value="cube:1">a cube, 3³</option>
+          <option value="cube:2">a cube, 5³</option>
+          <option value="cube:3">a cube, 7³</option>
+          <option value="ball:1">a ball, radius 1½</option>
+          <option value="ball:2">a ball, radius 2½</option>
+          <option value="ball:3">a ball, radius 3½</option>
+        </select>
+      </div>
+      <div><label class="label" for="opacity">drop points fainter than</label><input id="opacity" type="number" min="0" max="1" step="0.05" value="0"></div>
+      <div><span class="label">a mesh's colour</span>
+        <select id="meshColour">
+          <option value="triangles">nearest triangle (as a .glb)</option>
+          <option value="vertices">from its vertices (fast, for scans)</option>
+        </select>
+      </div>
     </div>
   </div>
 
   <div id="drop">
     <b>Drop .glb or .ply files here</b>, or <button id="pick" type="button">choose files…</button>
-    <input id="files" type="file" accept=".glb,.ply,model/gltf-binary" multiple hidden>
-    <span class="hint">Each depth D is a world 2<sup>D</sup> voxels a side. D = 10 can take a minute an asset. A point cloud's points each fill the voxel they fall in. Nothing leaves this machine.</span>
+    <input id="files" type="file" accept=".glb,.ply,.png,.jpg,.jpeg,model/gltf-binary" multiple hidden>
+    <span class="hint">Each depth D is a world 2<sup>D</sup> voxels a side. D = 10 can take a minute an asset. A textured .ply's images go with it. Nothing leaves this machine.</span>
   </div>
 
   <div id="jobs"></div>
@@ -85,6 +116,7 @@ import { DEPTHS, nameOf } from './convert-core.js';
 
 /* ---- settings, remembered per browser ------------------------------------------------- */
 const KEY = 'glb-to-vdag', depthBox = document.getElementById('depths'), colourSel = document.getElementById('colour');
+const pointSel = document.getElementById('point'), opacityIn = document.getElementById('opacity'), meshSel = document.getElementById('meshColour');
 let saved = {};
 try { saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') ?? {}; } catch {}
 const chosen = new Set(Array.isArray(saved.depths) ? saved.depths.filter(d => DEPTHS.includes(d)) : [8, 10]);
@@ -95,13 +127,16 @@ for (const D of DEPTHS){
   depthBox.append(l);
 }
 if (['6', '8', '0'].includes(String(saved.colour))) colourSel.value = String(saved.colour);
+if ([...pointSel.options].some(o => o.value === saved.point)) pointSel.value = saved.point;
+if (Number.isFinite(saved.opacity) && saved.opacity >= 0 && saved.opacity <= 1) opacityIn.value = String(saved.opacity);
+if (saved.meshColour === 'vertices' || saved.meshColour === 'triangles') meshSel.value = saved.meshColour;
+const opacityOf = () => { const v = Number(opacityIn.value); return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0; };
 const settings = () => {
-  const depths = DEPTHS.filter(D => document.getElementById(`d${D}`).checked), c = +colourSel.value;
-  return { depths, bake: c !== 0, bits: c || 6 };
+  const depths = DEPTHS.filter(D => document.getElementById(`d${D}`).checked), c = +colourSel.value, [shape, r] = pointSel.value.split(':');
+  return { depths, bake: c !== 0, bits: c || 6, point: { shape, r: +r }, opacity: opacityOf(), meshColour: meshSel.value };
 };
-const remember = () => { try { localStorage.setItem(KEY, JSON.stringify({ depths: settings().depths, colour: +colourSel.value })); } catch {} };
-depthBox.addEventListener('change', remember);
-colourSel.addEventListener('change', remember);
+const remember = () => { try { localStorage.setItem(KEY, JSON.stringify({ depths: settings().depths, colour: +colourSel.value, point: pointSel.value, opacity: opacityOf(), meshColour: meshSel.value })); } catch {} };
+for (const e of [depthBox, colourSel, pointSel, opacityIn, meshSel]) e.addEventListener('change', remember);
 
 /* ---- the queue: one asset at a time, one worker each ----------------------------------- */
 const jobsEl = document.getElementById('jobs'), jobs = [];
@@ -148,9 +183,12 @@ function reset(job, s){
   if (!s.depths.length){ flash('pick at least one depth'); return; }
   clear(job); Object.assign(job, { s, state: 'waiting', error: null, stage: null }); show(job);
 }
+const pointText = p => p.r ? (p.shape === 'cube' ? `a point a ${2 * p.r + 1}³ cube` : `a point a ball of radius ${p.r}½`) : '';
 function show(job){
   const run = job.state === 'running', ago = run ? ` · ${secs(performance.now() - job.started)}` : '';
-  const colour = job.s.bake ? `baked, ${job.s.bits} bits` : 'no colour';
+  // A .ply's settings, where they differ from the defaults.
+  const plyBits = /\.ply$/i.test(job.file.name) ? [pointText(job.s.point), job.s.opacity ? `opacity ≥ ${job.s.opacity}` : '', job.s.meshColour === 'vertices' && job.s.bake ? 'a mesh coloured from its vertices' : ''].filter(Boolean) : [];
+  const colour = [job.s.bake ? `baked, ${job.s.bits} bits` : 'no colour', ...plyBits].join(' · ');
   const text = {
     waiting: `waiting · D = ${job.s.depths.join(', ')} · ${colour}`,
     running: `${job.stage?.D != null ? `D = ${job.stage.D}: ` : ''}${STAGES[job.stage?.stage] ?? 'starting'}${job.stage?.frac != null ? ` ${Math.floor(100 * job.stage.frac)}%` : ''}${ago}`,
@@ -173,8 +211,10 @@ async function next(){
   running = job; Object.assign(job, { state: 'running', started: performance.now(), stage: null }); show(job);
   try {
     // A .ply isn't read here: the worker gets the File and reads it a slice at a time.
+    // Its images go with it (a .glb's beside it, a .ply's TextureFiles), read here: they're small.
     const ply = /\.ply$/i.test(job.file.name), opts = { name: job.name, depths: job.s.depths, bits: job.s.bits, bake: job.s.bake };
-    const [glb, files] = ply ? [null, []] : await Promise.all([job.file.arrayBuffer(), Promise.all(job.others.map(async f => [f.name, new Uint8Array(await f.arrayBuffer())]))]);
+    if (ply) Object.assign(opts, { point: job.s.point, opacity: job.s.opacity, meshColour: job.s.meshColour });
+    const [glb, files] = await Promise.all([ply ? null : job.file.arrayBuffer(), Promise.all(job.others.map(async f => [f.name, new Uint8Array(await f.arrayBuffer())]))]);
     if (job.state !== 'running') return;
     const w = job.worker = new Worker(new URL('./convert-worker.js', import.meta.url), { type: 'module' });
     await new Promise(resolve => {
@@ -187,7 +227,7 @@ async function next(){
         if (data.error){ Object.assign(job, { state: 'failed', error: data.error }); resolve(); }
       };
       w.onerror = e => { e.preventDefault(); Object.assign(job, { state: 'failed', error: e.message || 'the worker failed (out of memory?)' }); resolve(); };
-      if (ply) w.postMessage({ ply: job.file, ...opts });
+      if (ply) w.postMessage({ ply: job.file, files, ...opts }, files.map(([, b]) => b.buffer));
       else w.postMessage({ glb, files, ...opts }, [glb, ...files.map(([, b]) => b.buffer)]);
     });
   } catch (e){
@@ -211,11 +251,14 @@ function about(job, a){
   const kind = a.format === 'ascii' ? 'ASCII' : 'binary';
   if (a.kind === 'points'){
     const colour = { vertex: 'coloured', splat: 'Gaussian splats (their centres, their base colour)' }[a.colour] ?? 'no colour';
-    job.about.textContent = `a point cloud (PLY, ${kind}): ${many(a.points, 'point')}, ${colour}`;
+    const kept = a.faint ? `, ${fmt(a.kept)} kept` : '', fill = pointText(a.point);
+    job.about.textContent = `a point cloud (PLY, ${kind}): ${many(a.points, 'point')}, ${colour}${kept}${fill ? ` · ${fill}` : ''}`;
     return;
   }
   if (a.kind === 'mesh'){
-    job.about.textContent = `a mesh (PLY, ${kind}): ${many(a.triangles, 'triangle')}, ${many(a.components, 'component')}, ${fmt(a.solid)} solid · ${a.vertexColours ? 'vertex colours' : 'no colour'}`;
+    const how = a.textured ? `${many(a.textured, 'texture')}` : a.vertexColours ? 'vertex colours' : 'no colour';
+    const from = a.meshColour === 'vertices' ? ', coloured from its vertices' : '';
+    job.about.textContent = `a mesh (PLY, ${kind}): ${many(a.triangles, 'triangle')}, ${many(a.components, 'component')}, ${fmt(a.solid)} solid · ${how}${from}`;
     return;
   }
   const tex = a.textured ? `, ${a.textured} textured (${a.sizes.join(', ')})` : '';
@@ -263,7 +306,7 @@ addEventListener('drop', e => {
 // For the console and test/browser/convert.test.js: the list as data.
 window.__convert = {
   jobs: () => jobs.map(j => ({ name: j.file.name, state: j.state, error: j.error ?? null, depths: j.s.depths, bits: j.s.bits, bake: j.s.bake,
-                              notes: j.notes.textContent, worlds: j.worlds.map(w => ({ D: w.D, file: w.file, size: w.bytes.length, voxels: w.voxels, nodes: w.nodes, skin: w.skin })) })),
+                              point: j.s.point, opacity: j.s.opacity, meshColour: j.s.meshColour, about: j.about.textContent, status: j.status.textContent, notes: j.notes.textContent, worlds: j.worlds.map(w => ({ D: w.D, file: w.file, size: w.bytes.length, voxels: w.voxels, nodes: w.nodes, skin: w.skin })) })),
   bytes: (i, k) => { const b = jobs[i].worlds[k].bytes; let s = ''; for (let o = 0; o < b.length; o += 32768) s += String.fromCharCode(...b.subarray(o, o + 32768)); return btoa(s); },
   idle: () => !running && !jobs.some(j => j.state === 'waiting'),
 };

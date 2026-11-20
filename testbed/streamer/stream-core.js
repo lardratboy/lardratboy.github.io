@@ -27,6 +27,11 @@
    in one world come as one log (log-core.js), its delta in the tail's `ops`
    (docs/onelog-plan.md step 2).
 
+   A universe (universe-core.js, docs/universe-plan.md) is many worlds drawn as
+   instances: selectForest and coverForest (§1b) are the cut and the cover over
+   all of them at once, and setUniverse is the streamer's way in. A universe
+   doesn't edit.
+
    Addresses. A chunk at lod l is a 64³ grid of level-l cells, i.e. the
    DAG node at level l + 6, and the chunk grid at lod l has side
    2^(D − l − 6). The top chunk (lod D − 6) is the whole world. Positions
@@ -37,6 +42,7 @@ import { CHUNK_LEVELS, CHUNK_SIDE, chunkNode, expandChunk } from './chunk-core.j
 import { fastChunk, createJobCache } from './job-core.js';
 import { pageJob, RUN_HEAD, ATTR_NONE } from './ray-core.js';
 import { createBlockTable, editedField } from './edit-core.js';
+import { toLocal } from './universe-core.js';
 import { createSceneTable } from './scene-core.js';
 import { createOneTable } from './log-core.js';
 
@@ -216,6 +222,129 @@ export function coverOf(sel, has){
       open |= 1 << f;
     });
     d.open = open;
+  }
+  return out;
+}
+
+/* ---- 1b. the forest: a universe's cut and cover ------------------------------
+   A universe (universe-core.js) is instances of worlds, each in its own frame.
+   selectForest cuts them all at once: each instance's root chunk is a tree,
+   its distances measured from the eye mapped into the world's voxels
+   (toLocal), and every tree's chunks go in **one heap**, so one maxChunks is
+   spent where it shows most across the whole universe. That needs nothing
+   new, because the rank dist / size is the same number in either frame: a
+   scale multiplies both, and a turn moves neither. So a near chunk of a small
+   world and a far chunk of a big one are compared as they look, and worlds of
+   different depths and scales each get the right lod with nothing added.
+
+   Each tree is what selectChunks would give for its instance alone, keys and
+   all (`trees[i].sel`, unprefixed, so coverOf runs on it unchanged), and every
+   promise of selectChunks holds per tree: a partition of the world, face
+   neighbours a lod apart. With one instance at the identity it is
+   selectChunks exactly, and test/stream-core.test.js holds that key for key.
+
+   For the streamer, the forest is also one cut of **world chunks**, keyed
+   `world/lod:x,y,z` (`nodes`, `leaves`): two copies of a world want the same
+   chunk once, and its entry stands in the cache once. A chunk two trees want
+   is listed with the nearer tree's distance (in universe voxels, `dist` and
+   `size` scaled by 2^scale, so `dist / size` is still the rank). */
+export const forestKey = (world, key) => world + '/' + key;
+export function selectForest(universe, eye, { detail = 2, maxChunks = 1024, minLod = 0 } = {}){
+  const fsel = { universe, eye: [eye[0], eye[1], eye[2]], detail, trees: [], nodes: new Map(), leaves: [], leafKeys: new Set(), capped: 0 };
+  const heap = [], rank = c => c.dist / c.size;
+  const push = c => {
+    heap.push(c);
+    for (let i = heap.length - 1; i > 0;){
+      const p = (i - 1) >> 1;
+      if (rank(heap[p]) <= rank(heap[i])) break;
+      [heap[p], heap[i]] = [heap[i], heap[p]]; i = p;
+    }
+  };
+  const pop = () => {
+    const top = heap[0], last = heap.pop();
+    if (heap.length){
+      heap[0] = last;
+      for (let i = 0;;){
+        const l = 2 * i + 1, r = l + 1;
+        let m = i;
+        if (l < heap.length && rank(heap[l]) < rank(heap[m])) m = l;
+        if (r < heap.length && rank(heap[r]) < rank(heap[m])) m = r;
+        if (m === i) break;
+        [heap[m], heap[i]] = [heap[i], heap[m]]; i = m;
+      }
+    }
+    return top;
+  };
+  for (const [index, inst] of universe.instances.entries()){
+    const w = universe.worlds.get(inst.world), world = createWorld(w.store, w.root, w.D), local = toLocal(inst.frame, eye);
+    const sel = { world, eye: local, detail, nodes: new Map(), leaves: [], leafKeys: new Set(), root: null, capped: 0 };
+    const tree = { index, inst, key: inst.world, world, eye: local, sel };
+    fsel.trees.push(tree);
+    if (world.root === EMPTY) continue;
+    const root = sel.root = makeChunk(world.top, 0, 0, 0, world.root, null);
+    root.tree = tree; root.dist = boxDistance(local, root);
+    push(root);
+  }
+  let count = heap.length;
+  while (heap.length){
+    const c = pop(), { sel, world, eye: local } = c.tree;
+    sel.nodes.set(c.key, c);
+    if (c.lod > minLod && c.dist < detail * c.size){
+      const kids = childrenOf(world, c);
+      if (count - 1 + kids.length <= maxChunks){
+        c.kids = kids; count += kids.length - 1;
+        for (const k of kids){ k.tree = c.tree; k.dist = boxDistance(local, k); push(k); }
+        continue;
+      }
+      sel.capped++; fsel.capped++;
+    }
+    sel.leaves.push(c);
+    sel.leafKeys.add(c.key);
+  }
+  /* The world chunks. A tree's chunk becomes { key: world/…, world, lod, x, y,
+     z, id, dist, size, chunk } in universe voxels; the first tree to list a
+     key keeps it unless a later one's rank is smaller. */
+  const wrap = (t, c) => {
+    const k = t.inst.frame.k;
+    return { key: forestKey(t.key, c.key), world: t.key, tree: t.index, lod: c.lod, x: c.x, y: c.y, z: c.z, id: c.id,
+             dist: c.dist * k, size: c.size * k, chunk: c };
+  };
+  const leafSet = new Set();
+  for (const t of fsel.trees){
+    const { sel } = t;
+    sel.leaves.sort((a, b) => a.dist - b.dist || b.lod - a.lod);
+    for (const c of sel.nodes.values()){
+      const w = wrap(t, c), had = fsel.nodes.get(w.key);
+      if (!had || rank(w) < rank(had)) fsel.nodes.set(w.key, w);
+    }
+    for (const c of sel.leaves) leafSet.add(forestKey(t.key, c.key));
+  }
+  for (const k of leafSet){ fsel.leaves.push(fsel.nodes.get(k)); fsel.leafKeys.add(k); }
+  fsel.leaves.sort((a, b) => a.dist - b.dist || b.lod - a.lod);
+  return fsel;
+}
+/* The cover of a forest: coverOf on each tree, asked whether a chunk is
+   resident by its world key. `draw` holds one item an instance's chunk, so a
+   chunk two copies show is drawn twice from one entry: { key (the world
+   chunk's, for the cache), tree (the instance), lod, x, y, z, id, lo and size
+   (in the world's own voxels: the page turns them), open, chunk }. `drawKeys`
+   and `holes` are world chunks, what the streamer protects and asks for. */
+export function coverForest(fsel, has){
+  const out = { draw: [], drawKeys: new Set(), holes: [], up: 0, down: 0, maxUp: 0, trees: [] };
+  for (const t of fsel.trees){
+    const fr = coverOf(t.sel, (key, c) => has(forestKey(t.key, key), c));
+    out.trees.push(fr);
+    for (const d of fr.draw){
+      const key = forestKey(t.key, d.key);
+      out.draw.push({ key, world: t.key, tree: t.index, lod: d.lod, x: d.x, y: d.y, z: d.z, id: d.id, lo: d.lo, size: d.size, open: d.open, chunk: d });
+      out.drawKeys.add(key);
+    }
+    for (const h of fr.holes){
+      const key = forestKey(t.key, h.key);
+      out.holes.push(fsel.nodes.get(key) ?? { key, world: t.key, tree: t.index, lod: h.lod, x: h.x, y: h.y, z: h.z, id: h.id,
+                                                dist: h.dist * t.inst.frame.k, size: h.size * t.inst.frame.k, chunk: h });
+    }
+    out.up += fr.up; out.down += fr.down; out.maxUp = Math.max(out.maxUp, fr.maxUp);
   }
   return out;
 }
@@ -469,7 +598,7 @@ export function createStreamer(options = {}){
   const S = {
     cfg, world: null, revision: 0, serial: 0,
     cache: new Map(), cacheBytes: 0, pending: new Map(), results: [], failures: new Map(),
-    sel: null, frame: coverOf({ root: null }, () => false), queue: [], tick: 0, pinned: null, kinds: new Map(),
+    sel: null, frame: coverOf({ root: null }, () => false), queue: [], tick: 0, pinned: null, pins: new Set(), kinds: new Map(),
     // Edits (§2c, §3): the open one, the root waiting for it to finish, the
     // counters, the shown root's colour index and its memo of current stamps.
     edit: null, next: null, gen: 0, shownGen: 0, colourRev: 0, shownRev: 0, paint: null, stamps: new Map(),
@@ -481,11 +610,55 @@ export function createStreamer(options = {}){
   function setWorld(world){
     reset();
     S.world = world; S.sel = null; S.queue = [];
-    S.pinned = pinOf(world);
+    S.pinned = pinOf(world); S.pins = new Set(S.pinned ? [S.pinned] : []);
     S.paint = world ? createPaint(world.D) : null;
     S.frame = coverOf({ root: null }, has);
   }
   const pinOf = world => world && world.root !== EMPTY ? keyOf(world.top, 0, 0, 0) : null;
+  /* A universe instead of a world (§1b, universe-core.js's createUniverse): the
+     cut is selectForest's, the cover coverForest's, and the cache is keyed by
+     world chunk, so copies of a world share their entries. Each world's top
+     chunk is pinned, so every instance always has something to draw. It has
+     no edits (setRoot and setStore throw) and no ray path: every chunk is
+     records. A job names its world (`job.world`), whose snapshot the pool
+     holds by that key.
+
+     `keep` (universe-plan step 5, the endless lattice): another universe in place
+     of this one with no flush, for a window that moved or a world that landed. A
+     world under the same key with the same store, root and depth is the same
+     world, and keeps its entries, its jobs out and its results waiting; nothing
+     about a chunk depends on where its instances are, since entries are in their
+     world's own frame. Every other world's entries go at once (no instance can
+     draw them), and its jobs out are forgotten, so a result for it is dropped
+     when it lands (complete's pending check), even if the key comes back. The
+     revision stays, so the jobs kept still land. The cut and the queue are made
+     again at the next update: until then nothing is drawn, so call update first. */
+  function setUniverse(u, { keep = false } = {}){
+    if (!u || !u.universe) throw new Error('setUniverse: not a universe (universe-core\'s createUniverse makes one)');
+    const old = keep && forest() ? S.world.worlds : null;
+    if (!old) reset();
+    const worlds = new Map();
+    for (const [k, w] of u.worlds){
+      const was = old?.get(k);
+      worlds.set(k, was && was.store === w.store && was.root === w.root && was.D === w.D ? was : createWorld(w.store, w.root, w.D));
+    }
+    if (old){
+      const gone = k => !worlds.has(k) || worlds.get(k) !== old.get(k);
+      for (const [key, e] of S.cache) if (gone(e.world)){ dispose(e); S.cache.delete(key); S.cacheBytes -= e.bytes; S.stats.evictions++; }
+      for (const [key, j] of S.pending) if (gone(j.world)) S.pending.delete(key);
+      S.results = S.results.filter(r => !gone(r.job.world));
+      for (const key of S.failures.keys()) if (gone(key.slice(0, key.indexOf('/')))) S.failures.delete(key);
+    }
+    S.world = { universe: u, worlds }; S.sel = null; S.queue = [];
+    S.pinned = null; S.paint = null;
+    S.pins = new Set();
+    for (const inst of u.instances){
+      const w = worlds.get(inst.world);
+      if (w.root !== EMPTY) S.pins.add(forestKey(inst.world, keyOf(w.top, 0, 0, 0)));
+    }
+    S.frame = coverOf({ root: null }, has);
+  }
+  const forest = () => !!(S.world && S.world.universe);
   // Forget every chunk and every job, keeping the world: a new revision.
   function reset(){
     S.revision++;
@@ -509,6 +682,7 @@ export function createStreamer(options = {}){
      importSame), since this can only check the count. */
   function setStore(store){
     if (!S.world) throw new Error('setStore: no world');
+    if (forest()) throw new Error('setStore: a universe has no store of its own');
     if (S.edit || S.next) throw new Error('setStore: an edit is open');
     if (store.maxId !== S.world.store.maxId) throw new Error(`setStore: the store ends at id ${store.maxId}, the world's at ${S.world.store.maxId}`);
     S.world = { ...S.world, store };
@@ -540,6 +714,7 @@ export function createStreamer(options = {}){
      say that (§2c), so the same root with paint still opens an edit. */
   function setRoot(root, { paint = [] } = {}){
     if (!S.world) throw new Error('setRoot: no world');
+    if (forest()) throw new Error('setRoot: a universe doesn\'t edit (universe-plan §1: an edit would change every copy)');
     const last = S.next ? S.next.root : S.edit ? S.edit.root : S.world.root;
     if (root === last && !paint.length) return;
     S.next = { root, paint: S.next ? S.next.paint.concat(paint) : paint };
@@ -590,7 +765,7 @@ export function createStreamer(options = {}){
     const E = S.edit;
     for (const b of E.blocks) S.paint.touch(b, E.rev);
     S.world = E.world; S.sel = E.sel; S.stamps = E.stamps; S.shownGen = E.gen; S.shownRev = E.rev;
-    S.pinned = pinOf(S.world); S.edit = null;
+    S.pinned = pinOf(S.world); S.pins = new Set(S.pinned ? [S.pinned] : []); S.edit = null;
     let accepted = 0, bytes = 0;
     for (const item of E.held.values()){
       if (!demanded(item.job.key) && !E.drawn.has(item.job.key)){ S.pending.delete(item.job.key); S.stats.discarded++; continue; }
@@ -604,9 +779,9 @@ export function createStreamer(options = {}){
 
   function recover(){
     const t0 = now();
-    S.frame = coverOf(S.sel, has);
+    S.frame = forest() ? coverForest(S.sel, has) : coverOf(S.sel, has);
     S.stats.coverMs = now() - t0;
-    S.kinds = chooseKinds(S.sel, key => S.cache.get(key), cfg);
+    S.kinds = forest() ? new Map() : chooseKinds(S.sel, key => S.cache.get(key), cfg);
     S.tick++;
     for (const leaf of S.sel.leaves){ const e = S.cache.get(leaf.key); if (e) e.seen = S.tick; }
     for (const d of S.frame.draw){ const e = S.cache.get(d.key); if (e) e.seen = S.tick; }
@@ -628,12 +803,13 @@ export function createStreamer(options = {}){
     // Last come chunks resident in the wrong kind (§2b): they already draw
     // correctly, so a switch only makes them cheaper.
     const holeKeys = new Set(S.frame.holes.map(h => h.key)), q = [];
-    if (S.pinned && !has(S.pinned)) q.push(S.sel.root);
+    // The pinned top chunk: a universe has one a world (§1b), a world one.
+    for (const k of S.pins) if (!has(k)){ const c = S.sel.nodes.get(k); if (c) q.push(c); }
     for (const leaf of S.sel.leaves) if (!has(leaf.key) && holeKeys.has(leaf.key)) q.push(leaf);
     const rest = [], drawnOld = [], otherOld = [], switches = [], wanted = cfg.splitsResident ? S.sel.nodes.values() : S.sel.leaves;
     for (const c of wanted){
       const e = S.cache.get(c.key);
-      if (!e){ if (!holeKeys.has(c.key) && c.key !== S.pinned) rest.push(c); }
+      if (!e){ if (!holeKeys.has(c.key) && !S.pins.has(c.key)) rest.push(c); }
       else if (!current(e)) (S.frame.drawKeys.has(c.key) ? drawnOld : otherOld).push(c);
       else if (e.kind !== kindOf(c.key)) switches.push(c);
     }
@@ -646,7 +822,7 @@ export function createStreamer(options = {}){
   function update(eye){
     if (!S.world) return S.frame;
     const t0 = now();
-    S.sel = selectChunks(S.world, eye, cfg);
+    S.sel = forest() ? selectForest(S.world.universe, eye, cfg) : selectChunks(S.world, eye, cfg);
     if (S.edit) S.edit.sel = selectChunks(S.edit.world, eye, cfg);
     else if (S.next) openEdit();
     S.stats.selectMs = now() - t0;
@@ -658,7 +834,7 @@ export function createStreamer(options = {}){
     const p = new Set(S.frame.drawKeys);
     if (S.sel) for (const k of (cfg.splitsResident ? S.sel.nodes.keys() : S.sel.leafKeys)) p.add(k);
     if (S.edit) for (const k of S.edit.sel.nodes.keys()) p.add(k);
-    if (S.pinned) p.add(S.pinned);
+    for (const k of S.pins) p.add(k);
     return p;
   };
   function evict(){
@@ -675,7 +851,7 @@ export function createStreamer(options = {}){
 
   // Wanted: anything in the cut, leaf or split (a split one is still a
   // fallback for its children), plus the pinned top chunk.
-  const demanded = key => key === S.pinned || (S.sel !== null && S.sel.nodes.has(key)) || (S.edit !== null && S.edit.sel.nodes.has(key));
+  const demanded = key => S.pins.has(key) || (S.sel !== null && S.sel.nodes.has(key)) || (S.edit !== null && S.edit.sel.nodes.has(key));
   const reserved = () => {
     let b = 0;
     for (const j of S.pending.values()) if (!j.done) b += j.estimate;
@@ -687,17 +863,19 @@ export function createStreamer(options = {}){
     let inFlight = 0;
     for (const j of S.pending.values()) if (!j.done) inFlight++;
     if (inFlight + S.results.length >= cfg.resultLimit) return null;
-    const r = reserved(), E = S.edit, world = E ? E.world : S.world;
+    const r = reserved(), E = S.edit, world = E ? E.world : S.world, worlds = forest() ? S.world.worlds : null;
     for (const c of S.queue){
       // An open edit's queue is exactly what it still needs.
       if ((!E && has(c.key) && !stale(c.key)) || S.pending.has(c.key) || (S.failures.get(c.key) || 0) >= 2) continue;
       if (r && r + cfg.estimate > cfg.resultBytes) return null;
-      const job = { key: c.key, lod: c.lod, cx: c.x, cy: c.y, cz: c.z, lodRule: cfg.lodRuleOf(c.lod), kind: E ? E.kinds.get(c.key) : kindOf(c.key),
+      // In a universe the chunk's own world (§1b), which the job names.
+      const w = worlds ? worlds.get(c.world) : world;
+      const job = { key: c.key, ...(worlds ? { world: c.world } : {}), lod: c.lod, cx: c.x, cy: c.y, cz: c.z, lodRule: cfg.lodRuleOf(c.lod), kind: E ? E.kinds.get(c.key) : kindOf(c.key),
                     revision: S.revision, jobId: ++S.serial, estimate: cfg.estimate, done: false,
                     // What it reads: the entry's stamp, if it gets in. The worker
                     // is at this root and this colour by the time it runs (§4b).
-                    root: world.root, gen: E ? E.gen : S.shownGen, colourRev: E ? E.rev : S.shownRev,
-                    stamp: stampOf(world.store, world.root, world.D, c.lod, c.x, c.y, c.z) };
+                    root: w.root, gen: E ? E.gen : S.shownGen, colourRev: E ? E.rev : S.shownRev,
+                    stamp: stampOf(w.store, w.root, w.D, c.lod, c.x, c.y, c.z) };
       S.pending.set(c.key, job);
       return job;
     }
@@ -749,7 +927,7 @@ export function createStreamer(options = {}){
     const holeKeys = new Set(S.frame.holes.map(h => h.key));
     const rank = item => {
       const k = item.job.key, c = S.sel.nodes.get(k);
-      return k === S.pinned ? -2 : holeKeys.has(k) ? -1 : (c ? c.dist / c.size : 1e9);
+      return S.pins.has(k) ? -2 : holeKeys.has(k) ? -1 : (c ? c.dist / c.size : 1e9);
     };
     S.results.sort((a, b) => rank(a) - rank(b));
     let accepted = 0, bytes = 0;
@@ -776,7 +954,7 @@ export function createStreamer(options = {}){
                     origin: [job.cx * side, job.cy * side, job.cz * side], cellSize: 2 ** job.lod,
                     bytes: size, seen: S.tick, gpu: null, recordCount: result.recordCount ?? null,
                     occupancy: result.occupied != null ? result.occupied / CHUNK_SIDE ** 3 : null,
-                    stamp: job.stamp, colourRev: job.colourRev, gen: job.gen, root: job.root };
+                    stamp: job.stamp, colourRev: job.colourRev, gen: job.gen, root: job.root, world: job.world ?? null };
     if (job.kind === 'page'){
       // A page keeps its grid of node ids: the brick pool releases by it.
       // words / shown: attribute words and shown cells (step 6), equal
@@ -802,7 +980,7 @@ export function createStreamer(options = {}){
   }
 
   return {
-    S, setWorld, setStore, setRoot, setOptions, update, nextJob, complete, fail, service, evict,
+    S, setWorld, setUniverse, setStore, setRoot, setOptions, update, nextJob, complete, fail, service, evict,
     get frame(){ return S.frame; }, get sel(){ return S.sel; }, get revision(){ return S.revision; },
     entry: key => S.cache.get(key), kindOf, stale,
     // Is this resident entry built from what the shown root holds?

@@ -35,7 +35,7 @@ export function decodePng(buf){
 /* JPEG: no decoder here. The platform converts it to PNG: sips on macOS,
    ffmpeg wherever it's installed. Neither present, the image is skipped and
    its materials use their factor. (The third asset, from Tripo, was JPEG.) */
-function decodeJpeg(bytes){
+export function decodeJpeg(bytes){
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-vdag-')), jpg = path.join(dir, 'in.jpg'), png = path.join(dir, 'out.png');
   try {
     fs.writeFileSync(jpg, bytes);

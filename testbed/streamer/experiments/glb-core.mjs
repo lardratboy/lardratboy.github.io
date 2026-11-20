@@ -228,7 +228,7 @@ export function place(G, A, D){
   tris.forEach(({ t, closed: cl }, i) => { put(i, ...[0, 1, 2].map(e => X([A.V[3 * A.tv[3 * t + e]], A.V[3 * A.tv[3 * t + e] + 1], A.V[3 * A.tv[3 * t + e] + 2]]))); closed[i] = cl; src[i] = t; });
   caps.forEach(({ T, closed: cl }, j) => { const i = tris.length + j; put(i, ...T.map(X)); closed[i] = cl; cap[i] = 1; });
   const at = [lo.map((v, a) => v * s + off[a]), hi.map((v, a) => v * s + off[a])];
-  return { n, V0, E1, E2, closed, cap, src, side, scale: s, lo: at[0], hi: at[1] };
+  return { n, V0, E1, E2, closed, cap, src, side, scale: s, off, lo: at[0], hi: at[1] };
 }
 
 /* ---- the bake: colour, and alpha for cutouts ---------------------------------------------
@@ -407,8 +407,25 @@ export function skinOracle(M, D, shape){
    index order, so ties go to the lowest index, as baker's do.
    With cutouts, the nearest kept triangle can lie outside the list (keep is
    a test at a point, so it can't narrow a cell). When the list's nearest
-   isn't kept there, the voxel asks baker itself: `fellBack` counts those. */
-export function bakeSkin(G, M, sample, store, skin, D, slow){
+   isn't kept there, the voxel asks baker itself: `fellBack` counts those.
+
+   Where the walk starts (docs/convert.md §PLY, question 2, 2026-11-18). From
+   the root, every triangle is tested at the root, then at each of its
+   children, and so on until the cells are small enough to narrow: 8^k
+   cells a level times nearly every triangle, which is nothing at a game
+   asset's 20–100K triangles and was 82 s of a 1.8M-triangle scan's bake
+   at D = 8 and 10. So by default (`start: 'grid'`) the walk only descends
+   above level g = max(3, D − 6) (cells of side/64, at least 8, baker's
+   grid), and each skin cell at level g takes its list from a triangle grid
+   of that side: the triangles within best + 2h√3 of its centre, rings of
+   bins outward until no farther bin can hold one (a bin r rings out is at
+   least (r − ½)·side from the centre). That is the list the walk would
+   have handed it, by the same bound: the walk's list at a cell is every
+   triangle within its own bound, kept because the parent's bound is
+   looser. Same list, same index order, so the same words, bit for bit;
+   test/convert-core.test.js holds the two starts to each other.
+   `start: 'root'` is the walk as it was. */
+export function bakeSkin(G, M, sample, store, skin, D, slow, { start = 'grid' } = {}){
   const t0 = performance.now(), nA = assetCount(M), R3 = Math.sqrt(3);
   const total = createCounts(store).of(skin), words = new Uint32Array(total);
   const lists = Array.from({ length: D + 2 }, () => new Int32Array(nA)), lens = new Int32Array(D + 2);
@@ -416,8 +433,15 @@ export function bakeSkin(G, M, sample, store, skin, D, slow){
   lens[D + 1] = nA;
   const dist = new Float64Array(nA), bary = [0, 0, 0], p = [0, 0, 0];
   let r = 0, tests = 0, fellBack = 0;
+  const g = start === 'grid' ? Math.min(D, Math.max(3, D - 6)) : D + 1, inset = start === 'grid' ? 0.5 : 0;
+  const near = g <= D ? cellLists(M, nA, g, lists[g + 1], lens, dist, bary, p) : null;
   const rec = (k, x, y, z, id) => {
     if (id === EMPTY) return;
+    if (k > g){
+      for (let o = 0; o < 8; o++) rec(k - 1, 2 * x + (o & 1), 2 * y + (o >> 1 & 1), 2 * z + (o >> 2), store.child(id, o));
+      return;
+    }
+    if (k === g) tests += near(x, y, z);
     const P = lists[k + 1], np = lens[k + 1], s = 2 ** k, h = s / 2;
     p[0] = x * s + h; p[1] = y * s + h; p[2] = z * s + h;
     let best = Infinity, bi = -1;
@@ -433,7 +457,7 @@ export function bakeSkin(G, M, sample, store, skin, D, slow){
       words[r++] = rgb8(c[0], c[1], c[2]);
       return;
     }
-    const lim = Math.sqrt(best) + 2 * h * R3 + 1e-9 * s, out = lists[k];
+    const lim = Math.sqrt(best) + 2 * (h - inset) * R3 + 1e-9 * s, out = lists[k];
     let n = 0;
     for (let j = 0; j < np; j++) if (Math.sqrt(dist[j]) <= lim) out[n++] = P[j];
     lens[k] = n;
@@ -442,6 +466,51 @@ export function bakeSkin(G, M, sample, store, skin, D, slow){
   rec(D, 0, 0, 0, skin);
   if (r !== total) throw new Error(`bakeSkin: ${r} words for ${total} skin voxels`);
   return { words, tests, fellBack, ms: performance.now() - t0 };
+}
+/* The list a level-g cell starts with, written into `out` (lens[g + 1] its
+   length), in index order: every asset triangle within best + 2h√3 of the
+   cell's centre. Bins of the cell's own side, so a cell is one bin; a
+   triangle is in every bin its box meets, so a bin r rings out holds
+   nothing nearer the centre than (r − ½)·side. Returns the tests made. */
+function cellLists(M, nA, g, out, lens, dist, bary, p){
+  const side = 2 ** g, h = side / 2, n = Math.ceil(M.side / side), bins = new Map(), R3 = Math.sqrt(3);
+  for (let i = 0; i < nA; i++){
+    const o = 3 * i, lo = [], hi = [];
+    for (let k = 0; k < 3; k++){ const a = M.V0[o + k], b = a + M.E1[o + k], c = a + M.E2[o + k]; lo.push(Math.max(0, Math.floor(Math.min(a, b, c) / side))); hi.push(Math.min(n - 1, Math.floor(Math.max(a, b, c) / side))); }
+    for (let z = lo[2]; z <= hi[2]; z++) for (let y = lo[1]; y <= hi[1]; y++) for (let x = lo[0]; x <= hi[0]; x++){ const k = x + n * (y + n * z); let b = bins.get(k); if (!b) bins.set(k, b = []); b.push(i); }
+  }
+  const seen = new Int32Array(nA).fill(-1), got = [];
+  let cell = 0;
+  return (x, y, z) => {
+    cell++;
+    got.length = 0;
+    p[0] = x * side + h; p[1] = y * side + h; p[2] = z * side + h;
+    let best = Infinity, tests = 0;
+    // Rings outward: until one holds a triangle, then until no farther ring can hold one within the bound.
+    for (let r = 0; r < n; r++){
+      if (best < Infinity && (r - 0.5) * side > Math.sqrt(best) + 2 * (h - 0.5) * R3 + 1e-9 * side) break;
+      for (let dz = -r; dz <= r; dz++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++){
+        if (Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz)) !== r) continue;
+        const X = x + dx, Y = y + dy, Z = z + dz;
+        if (X < 0 || Y < 0 || Z < 0 || X >= n || Y >= n || Z >= n) continue;
+        const b = bins.get(X + n * (Y + n * Z));
+        if (b) for (const i of b){
+          if (seen[i] === cell) continue;
+          seen[i] = cell;
+          const d = closestOnTri(M, i, p, bary);
+          tests++;
+          dist[i] = d; got.push(i);
+          if (d < best) best = d;
+        }
+      }
+    }
+    const lim = Math.sqrt(best) + 2 * (h - 0.5) * R3 + 1e-9 * side;
+    let m = 0;
+    for (const i of got) if (Math.sqrt(dist[i]) <= lim) out[m++] = i;
+    out.subarray(0, m).sort();
+    lens[g + 1] = m;
+    return tests;
+  };
 }
 
 /* ---- previews ----------------------------------------------------------------------------
@@ -478,7 +547,7 @@ export const VIEWS = { front: { ax: 2, U: 0, Vax: 1, flipU: false, flipV: true }
    checks after this; anything that interned between these steps would move
    the ids, and with them the file's bytes. `stage(name)` is called before
    each step, for a page's progress. */
-export function bakeDepth(G, A, D, { mode = 'conservative', bake = true, stage = () => {} } = {}){
+export function bakeDepth(G, A, D, { mode = 'conservative', bake = true, stage = () => {}, colour = null } = {}){
   stage('shape');
   const M = place(G, A, D), sample = sampler(G, M);
   M.keep = cutouts(G, M, sample);
@@ -488,7 +557,8 @@ export function bakeDepth(G, A, D, { mode = 'conservative', bake = true, stage =
   const st = b.store, sk = skinOf(M, D, st, b.root);
   if (st.union(b.root, sk.root) !== b.root) throw new Error(`D = ${D}: the skin isn't inside the shape`);
   stage('words');
-  const slow = baker(G, M, sample), W = bakeSkin(G, M, sample, st, sk.root, D, slow);
+  // `colour(M, store, skin, D, slow)` makes the words some other way (a PLY scan's vertices, convert.md §PLY), after the same three steps.
+  const slow = baker(G, M, sample), W = colour ? colour(M, st, sk.root, D, slow) : bakeSkin(G, M, sample, st, sk.root, D, slow);
   return { M, sample, b, sk, slow, W };
 }
 /* The view a file opens on. In front of the asset (+z), looking back along −z

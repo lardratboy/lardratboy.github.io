@@ -37,7 +37,7 @@
 import { createStore, createCounts, prune } from '../dag-core.js';
 import { writeVdag, readVdag } from '../vdag-core.js';
 import { createBaked } from '../baked-core.js';
-import { readPly, plyMesh, pointBox, pointsDepth } from './ply-core.js';
+import { readPly, plyMesh, pointBox, pointsDepth, kernelOf, vertexWords } from './ply-core.js';
 import { pngParts, pngPixels, concatBytes, parseGlb, glbImages, glbMesh, analyse, bakeDepth, assetView, firstAlong, VIEWS } from '../experiments/glb-core.mjs';
 
 // The depths the page offers: D = 10 takes seconds to a minute an asset in
@@ -65,7 +65,7 @@ const noPlatform = async () => { throw new Error('no image decoder here'); };
    factor, as in the script. */
 async function decodeImage(im, i, bytes, platform, notes){
   const skip = e => { notes.push(`image ${i} (${im.name}) skipped: ${e.message ?? e}; its materials use their factor`); return null; };
-  if (!bytes) return skip(new Error(`${im.uri} isn't in the .glb (drop it with the .glb to use it)`));
+  if (!bytes) return skip(new Error(im.missing ?? `${im.uri} isn't in the .glb (drop it with the .glb to use it)`));
   try {
     if (bytes[0] === 0xff && bytes[1] === 0xd8) return await platform(bytes, 'image/jpeg');
     if (im.mimeType && im.mimeType !== 'image/png') return await platform(bytes, im.mimeType);
@@ -176,39 +176,77 @@ async function finishDepth({ store, root, D, M, skin, words, bits, name, slug, t
    the worker hands in a File's slices, Node an fs stream. `size` is the
    file's length, for `onProgress(fraction)` while it's read. A file with no
    colour is written as the shape alone, whatever `bake` says (the viewer
-   then draws it in gamut, as a .glb with no colour would). */
-export async function convertPly(chunks, { name = 'asset', depths = [8, 10], bits = 6, bake = true, size = 0,
+   then draws it in gamut, as a .glb with no colour would).
+
+   The answers to convert.md §PLY's questions (2026-11-18), each a setting
+   whose default writes the files written before it:
+     - `point` ({ shape: 'cube' | 'ball', r: 0–3 }): what a cloud's point
+       fills (ply-core's growCloud). r = 0, its own voxel, by default;
+     - `opacity` (0–1): a cloud's points (a splat's, or any with alpha)
+       below it are dropped before the fit. 0 keeps them all;
+     - `meshColour` ('triangles' | 'vertices'): a mesh's words by the
+       nearest triangle (bakeSkin, the .glb's way, the default) or from its
+       vertices the cloud's way (vertexWords: about a second for a scan
+       whose triangle bake takes tens);
+     - a textured mesh's TextureFiles are looked for in `files` (name →
+       bytes, the files dropped with it) and decoded as a .glb's images
+       are (`platform` for JPEG). */
+export async function convertPly(chunks, { name = 'asset', depths = [8, 10], bits = 6, bake = true, size = 0, point = { shape: 'cube', r: 0 }, opacity = 0,
+                                          meshColour = 'triangles', files = new Map(), platform = noPlatform,
                                           onAsset = () => {}, onStage = () => {}, onProgress = () => {}, onWorld = () => {}, thumbs = true } = {}){
   if (bits !== 6 && bits !== 8) throw new Error('bits is 6 or 8');
   for (const D of depths) if (!DEPTHS.includes(D)) throw new Error(`D = ${D}: the page makes ${DEPTHS[0]} to ${DEPTHS.at(-1)}`);
+  kernelOf(point.shape, point.r);
+  if (!(opacity >= 0 && opacity <= 1)) throw new Error(`opacity is 0 to 1, not ${opacity}`);
+  if (meshColour !== 'triangles' && meshColour !== 'vertices') throw new Error(`a mesh's colour is from its triangles or its vertices, not ${meshColour}`);
   onStage(null, 'reading');
   const P = await readPly(chunks, { onProgress: read => onProgress(size ? Math.min(1, read / size) : 0) });
   const notes = P.notes, slug = slugOf(name), worlds = [];
-  const coloured = !!P.rgb;
-  if (bake && !coloured) notes.push(`no colour in the file: the shape alone`);
-  bake = bake && coloured;
   if (P.nt){
+    // Its textures, by name among the files dropped with it.
+    const images = [];
+    for (const [i, t] of P.textures.entries()){
+      const own = files.get(t.replace(/^.*[\\/]/, '')) ?? null;
+      images.push(await decodeImage({ name: t, uri: t, mimeType: null, missing: `${t} wasn't with the .ply (pick or drop it with the .ply to use it)` }, i, own, platform, notes));
+    }
+    const textured = images.some(Boolean);
+    if (textured && P.rgb) notes.push('textured: its vertex colours left out');
+    let coloured = textured || !!P.rgb;
+    if (bake && !coloured) notes.push(`no colour in the file: the shape alone`);
+    let vertices = meshColour === 'vertices' && bake && coloured;
+    if (vertices && textured){ notes.push('textured: coloured from the texture, not its vertices'); vertices = false; }
+    bake = bake && coloured;
     onStage(null, 'analysing');
-    const G = plyMesh(P), A = analyse(G), asset = { ...summaryOf(G, A, notes), kind: 'mesh', format: P.format };
+    const G = plyMesh(P, images), A = analyse(G);
+    const asset = { ...summaryOf(G, A, notes), kind: 'mesh', format: P.format, meshColour: bake ? (vertices ? 'vertices' : 'triangles') : null };
     onAsset(asset);
     for (const D of depths){
       const ms = {}, stage = stager(D, ms, onStage);
-      const { M, b, sk, W } = bakeDepth(G, A, D, { bake, stage });
+      let fellBack = 0;
+      const colour = vertices ? (M, st, skin, d, slow) => { const r = vertexWords(P, M, st, skin, d, slow); fellBack = r.fellBack; return r; } : null;
+      const { M, b, sk, W } = bakeDepth(G, A, D, { bake, stage, colour });
       const world = await finishDepth({ store: b.store, root: b.root, D, M, skin: sk?.root, words: W?.words, bits, name, slug, thumbs, stage, ms });
+      if (vertices) world.fellBack = fellBack;
       worlds.push(world); onWorld(world);
     }
     return { asset, worlds };
   }
-  const box = pointBox(P);
-  if (!box.kept) throw new Error('no point with finite coordinates');
-  if (box.kept < P.n) notes.push(`${(P.n - box.kept).toLocaleString('en-US')} points with no finite place dropped`);
-  const asset = { kind: 'points', format: P.format, points: P.n, kept: box.kept, colour: P.colour, notes };
+  const coloured = !!P.rgb;
+  if (bake && !coloured) notes.push(`no colour in the file: the shape alone`);
+  bake = bake && coloured;
+  if (opacity > 0 && !P.alpha) notes.push('no alpha or opacity in the file: every point kept');
+  const box = pointBox(P, { opacity });
+  if (!box.kept) throw new Error(box.faint ? `every point is fainter than the opacity ${opacity}` : 'no point with finite coordinates');
+  if (box.kept + box.faint < P.n) notes.push(`${(P.n - box.kept - box.faint).toLocaleString('en-US')} points with no finite place dropped`);
+  if (box.faint) notes.push(`${box.faint.toLocaleString('en-US')} points under opacity ${opacity} dropped`);
+  const asset = { kind: 'points', format: P.format, points: P.n, kept: box.kept, faint: box.faint, colour: P.colour, alpha: P.alphaKind, point, notes };
   onAsset(asset);
   for (const D of depths){
     const ms = {}, stage = stager(D, ms, onStage);
     stage('points');
-    const store = createStore(), r = pointsDepth(P, box, D, store, { bake });
-    const world = await finishDepth({ store, root: r.root, D, M: r.M, skin: r.root, words: r.words, bits, name, slug, thumbs, stage, ms });
+    const store = createStore(), r = pointsDepth(P, box, D, store, { bake, point });
+    const world = await finishDepth({ store, root: r.root, D, M: r.M, skin: r.skin, words: r.words, bits, name, slug, thumbs, stage, ms });
+    world.points = r.points;
     worlds.push(world); onWorld(world);
   }
   return { asset, worlds };

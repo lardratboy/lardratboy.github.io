@@ -76,7 +76,7 @@ for (const line of ['idx.set([b, b+1, b+2, b, b+2, b+3], 6 * f);', 'idx.set([b, 
                     'gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_INT, 4, 4 * n);', 'gl.vertexAttribDivisor(1, 1);',
                     'gl.bufferData(gl.ARRAY_BUFFER, both, gl.STATIC_DRAW);'])
   check(page.includes(line) && gl.includes(line), `the page and gl.js should both say: ${line}`);
-check(page.includes('gl.drawElementsInstanced(gl.TRIANGLES, rasterDraw.tris, gl.UNSIGNED_BYTE, 0, n);'), 'renderView\'s draw call moved: the film shows it');
+check(page.includes('gl.drawElementsInstanced(gl.TRIANGLES, RD.tris, gl.UNSIGNED_BYTE, 0, n);'), 'renderView\'s draw call moved: the film shows it');
 check(page.includes('const RASTER_DRAW = { prog, U, tris: 18 };'), 'the raster\'s index count moved: the film says 18');
 check(page.includes('uint face = ALL_SIX ? k : 2u * k + (c[k] < 0.0 ? 0u : 1u), corner = 4u * face + v % 4u;'), 'rasterVS\'s three faces moved: the film shows them');
 check(page.includes('if (!faceShown(aRec, face)${hideAlso}) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);'), 'rasterVS\'s hidden face moved: the film shows it');

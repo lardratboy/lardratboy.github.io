@@ -82,6 +82,13 @@ export const PART = 16, PART_LEVELS = 4;
    a skyline) with parts in its slots. D = 8 was the floor before. */
 export const KIT_LIMITS = { D: [6, 16], lib: [1, 1024], ornaments: [0, 256], share: [0, 100], seed: [1, 0xffff], nodes: 4e6 };
 export const KIT_DEFAULTS = { seed: 1, D: 14, libs: null, ornaments: 4, ground: true, colourLevel: 2, share: null };
+/* The ground's datum for a universe (docs/universe-plan.md §4): a grounded
+   kit is solid for y < 4 edge to edge (decision 4, above), so a walker at its
+   edge stands at y = 4. Without the ground it has none, and stands on the
+   plane by its content's bottom. test/universe-core.test.js holds it to the
+   voxels. */
+export const KIT_GROUND_Y = 4;
+export const kitGround = desc => desc.ground ? KIT_GROUND_Y : null;
 export const levelsOf = D => (D - PART_LEVELS) / 2;
 export const sideOf = l => PART * 4 ** l;
 // The sketch's library sizes, bottom up (struct16's were 8, 6, 4, 3, 2).

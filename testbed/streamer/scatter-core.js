@@ -164,6 +164,21 @@ export function groundOf(desc){
   return { shape, crust, top, field: fieldOf(crust, desc.D) };
 }
 
+/* The ground's datum for a universe (docs/universe-plan.md §4, question 5,
+   answered 2026-11-19: "the hills, lined up at their lowest edge height, steps
+   and all"): one above the lowest ground top along the world's edge, so the
+   scatter never dips below the plane, and wherever its edge stands higher it
+   is a step up from its neighbours (with the crust 8 deep, a step over 8 shows
+   the hollow under it). The cells' margin keeps every specimen off the edge,
+   so the edge's voxels are the ground's. Four edges of side columns each. */
+export function scatterGround(desc, ground = groundOf(desc)){
+  const side = 2 ** desc.D;
+  let low = Infinity;
+  for (let i = 0; i < side; i++)
+    low = Math.min(low, ground.top(i, 0), ground.top(i, side - 1), ground.top(0, i), ground.top(side - 1, i));
+  return low + 1;
+}
+
 /* The resting height: the lowest y0 at which every occupied column of the
    turned specimen has its lowest voxel above the ground's top voxel, so
    no voxel is buried and at least one stands directly on the ground. */

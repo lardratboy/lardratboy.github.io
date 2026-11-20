@@ -99,6 +99,13 @@ import { createStore, EMPTY } from './dag-core.js';
 export const TILE = 8, TILE_LEVEL = 3, BLOCK_TILES = 32, STOREY = 8;
 export const CITY_LIMITS = { D: [9, 13] };
 export const CITY_DEFAULTS = { D: 11 };
+/* The ground's datum for a universe (docs/universe-plan.md §4): the road's
+   top. Layer ty = 0 is solid with the asphalt as its top voxel (y = 7), and
+   the world's edge is a block's road ring, so a walker at the edge stands at
+   y = 8, a step below the sidewalks. From D = 10 the coast and the railway
+   reach the edge too (city-log §10): there the edge is water or a viaduct, and
+   the datum is still the road's. test/universe-core.test.js holds it at D = 9. */
+export const cityGround = () => TILE;
 
 export function cityDesc({ D = CITY_DEFAULTS.D, seed = 1 } = {}){
   if (!Number.isInteger(D) || D < CITY_LIMITS.D[0] || D > CITY_LIMITS.D[1]) throw new Error(`city: D=${D} is outside ${CITY_LIMITS.D.join('…')}`);

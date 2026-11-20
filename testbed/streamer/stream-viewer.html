@@ -191,7 +191,7 @@
   <label id="placeL" hidden title="the shelf world a click opens a box for (1-8 in edit mode)">place <select id="placeWorld"></select></label>
   <div id="fileCtl">
     <label>file <button id="fileOpen" title="open .vdag files (or drop them anywhere on the page)">open…</button><button id="fileExport" title="save the world on screen as one .vdag file">export this world</button></label>
-    <label>shelf <button id="shelfAdd" title="keep the world on screen, and this view of it, on the shelf">add this world</button><button id="shelfRemove" title="take the world on screen off the shelf">remove</button><button id="shelfExport" title="save every world on the shelf in one .vdag file">export all</button></label>
+    <label>shelf <button id="shelfAdd" title="keep the world on screen, and this view of it, on the shelf">add this world</button><button id="shelfRemove" title="take the world on screen off the shelf">remove</button><button id="shelfUniverse" title="put the shelf world on screen in the universe, beside the kits, the cities and the scatter">to the universe</button><button id="shelfExport" title="save every world on the shelf in one .vdag file">export all</button></label>
     <div id="fileInfo"></div>
     <input id="fileInput" type="file" accept=".vdag" multiple hidden>
   </div>
@@ -255,6 +255,7 @@ drop .vdag files anywhere to open them</pre></section>
 ?world=clay&amp;clay=D,lump,shape,ground   (lump 0: flat ground, or empty without ground)
 ?world=dungeon:&lt;seed&gt;&amp;dungeon=D,floors
 ?world=city:&lt;seed&gt;&amp;depth=9..13
+?world=universe:&lt;seed&gt;   kits, cities and the scatter on one plane   ?tint=0 no tint far off
 ?hud=1 opens with the panels   ?wire=1 with the wireframe   ?walk=1 walking
 ?quiet draws once converged   ?selftest runs streamSelftest()
 ?ray=off|density|0..6 (raster only by default)   ?rule=shadow|any|adaptive (shadow by default)
@@ -330,7 +331,7 @@ import { createOneLog, createOneTable, replayLog } from './log-core.js';
 import * as gizmo from './gizmo-core.js';
 import * as camera from './camera-core.js';
 import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
-import { createWorld, createStreamer, worldSnapshot, createTailer, keyOf, DEFAULTS, clearance as clearanceOf } from './stream-core.js';
+import { createWorld, createStreamer, worldSnapshot, createTailer, createJobRunner, keyOf, forestKey, DEFAULTS, clearance as clearanceOf } from './stream-core.js';
 import { aimAt, aimInAir, pick, boxOf, boxEdges, reachOf, createRepeat, PALETTE, MAX_BLOCK_LEVEL, AIR_PER_SIDE, BREAK } from './edit-core.js';
 import { colourOf } from './colours.js';
 import { StreamPool } from './stream-pool.js';
@@ -344,14 +345,18 @@ import { SHAPES, fieldOf, crustOf, CRUST } from './experiments/shapes.mjs';
 import { dagWorld, createActors, spawnNear, tickFliers, advanceFliers, regather, restHits, rescue, diffBox, trapped, mix as actorMix, FLIER, ONE as ACTOR_ONE, MAX_D as ACTOR_MAX_D } from './actor-core.js';
 import { actorBody, bodyRecords, makeBody, turnMap, turnedBox } from './body-core.js';
 import { sliceCore, rowsOf, automatonOf, AXIS_NAMES } from './testbed-rows.js';
-import { scatterDesc, groundOf, rotateOcc, unturn, PROPER } from './scatter-core.js';
+import { scatterDesc, groundOf, scatterGround, rotateOcc, unturn, PROPER } from './scatter-core.js';
 import { buildScatterInWorkers, buildKitInWorkers, ornamentsKept, isAbort } from './scatter-build.js';
 import { latticeDesc, latticeFromParam, latticeParam, budgetOf, maxCube, stackOf, gapOf } from './lattice-core.js';
-import { kitDesc, kitFromParam, kitParam, sideOf, KIT_LIMITS } from './kit-core.js';
+import { kitDesc, kitFromParam, kitParam, sideOf, buildKit, kitGround, KIT_LIMITS } from './kit-core.js';
 import { caveDesc } from './cave-core.js';
 import { clayDesc, clayFromParam, clayParam, buildClay, clayPlace, CLAY_LIMITS, CLAY_DEFAULTS, GROUND_DEPTH } from './clay-core.js';
-import { dungeonDesc, dungeonFromParam, dungeonParam, dungeonPlan, buildDungeon, planFromTable, secretDoors, DUNGEON_LIMITS, CELL as DUNGEON_CELL } from './dungeon-core.js';
-import { buildCity, cityPlan, cityDesc, TYPE_NAMES as CITY_TYPES, TOWER_NAMES as CITY_TOWERS, DISTRICT_NAMES as CITY_DISTRICTS } from './city-core.js';
+import { dungeonDesc, dungeonFromParam, dungeonParam, dungeonPlan, buildDungeon, dungeonGround, planFromTable, secretDoors, DUNGEON_LIMITS, CELL as DUNGEON_CELL } from './dungeon-core.js';
+import { buildCity, cityPlan, cityDesc, cityGround, TYPE_NAMES as CITY_TYPES, TOWER_NAMES as CITY_TOWERS, DISTRICT_NAMES as CITY_DISTRICTS } from './city-core.js';
+import { createUniverse, planeOf, flatGround, flatKey, toLocal, dirToLocal, boxToUniverse, turnMatrix, instanceAt, demoUniverse, tintOf, tintAt, universeWorld, universeHoles,
+         endlessOf, endlessWindow, recentre, cellAt, cellOf, districtOf, worldsToDrop, ENDLESS, ENDLESS_KINDS } from './universe-core.js';
+import { tileGrounds, buildTile } from './tile-worlds.js';
+import { TileBuilder } from './endless-build.js';
 import { createWalker, stepWalk, walkerEye, wishOf, lookBy, openWorld, withHoles, inside as walkerInside, settle as settleWalker, WALK } from './walk-core.js';
 
 const $ = id => document.getElementById(id);
@@ -383,8 +388,15 @@ const glslVec3s = a => a.map(v => `vec3(${v.map(x => x.toFixed(1)).join(',')})`)
    and the shader runs per vertex whatever the mask shows, so this halved
    it: the D = 13 city from 600 up 26–31 ms → 15.0, the D = 14 kit 5.8 →
    3.9, in Chrome on the M2 Max, with the same frame byte for byte.
-   `all` is the six faces of before (36 indices), facesSelftest's reference. */
-const rasterVS = (hideAlso, all = false) => `#version 300 es
+   `all` is the six faces of before (36 indices), facesSelftest's reference.
+   `turned` is a universe's (universe-plan §5, step 3): the records stay in
+   their world's frame, uOrigin is the chunk's corner less the eye mapped into
+   that frame (toLocal), so the face of each axis is picked where it's right,
+   and uTurn (universe-core's turnMatrix: the turn times 2^scale) takes the
+   eye-relative point and the normal to the universe. A plain world draws
+   without it, the shader as it was; universeSelftest holds one identity
+   instance through it to that, byte for byte. */
+const rasterVS = (hideAlso, all = false, turned = false) => `#version 300 es
 precision highp float;
 precision highp int;
 ${GLSL_DECODE}
@@ -393,6 +405,7 @@ layout(location = 1) in uint aAttr;   // the record's attribute word (step 6)
 uniform mat4 uViewProj;    // rotation and projection only: positions are eye-relative
 uniform vec3 uEyeN;        // the eye over the world side, for gamut colour
 uniform float uInvSide;
+${turned ? 'uniform mat3 uTurn;       // a world vector to the universe: the turn, times 2^scale\nuniform float uScale;     // 2^scale, so the normal comes out a unit' : ''}
 const bool ALL_SIX = ${all};   // facesSelftest's reference: every face, 24 vertices
 const vec3 CORNER[24] = vec3[24](
   ${glslVec3s(FACE_OFF)});
@@ -410,11 +423,12 @@ void main(){
   uint v = uint(gl_VertexID), k = v / 4u;
   uint face = ALL_SIX ? k : 2u * k + (c[k] < 0.0 ? 0u : 1u), corner = 4u * face + v % 4u;
   vec3 p = c + CORNER[corner] * uCellSize;
-  vRel = p;
+  vec3 q = ${turned ? 'uTurn * p' : 'p'};
+  vRel = q;
   vGamut = uEyeN + p * uInvSide;
-  vNormal = NORMAL[face];
+  vNormal = ${turned ? 'uTurn * NORMAL[face] / uScale' : 'NORMAL[face]'};
   vPose = recPose(aRec);
-  gl_Position = uViewProj * vec4(p, 1.0);
+  gl_Position = uViewProj * vec4(q, 1.0);
   if (!faceShown(aRec, face)${hideAlso}) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
 }`;
 const VS = rasterVS('');
@@ -458,6 +472,7 @@ flat in int vInst;
 uniform vec3 uChunkColor;
 uniform vec3 uLodColor;
 uniform int uDrawIndex;    // colour mode 7 (debugging): which draw and instance
+uniform vec4 uTint;        // a universe's tint a world (Q8): rgb, and how much; never set in a plain world
 ${GLSL_SHADE}
 ${GLSL_ATTR}
 vec3 orbitColor(float bi, float order){
@@ -476,6 +491,7 @@ void main(){
             : uColorMode == 3 ? clamp(vGamut, 0.0, 1.0)
             : uColorMode == 6 ? vec3(0.85, 0.62, 0.42)
             : uColorMode == 8 ? attrColour(vAttr) : vec3(0.75);
+  if (uTint.a > 0.0) base = mix(base, uTint.rgb, uTint.a);
   outColor = shadeOut(base, vNormal, vRel);
   if (uColorMode == 9) outColor = vec4(vec3(attrRGB(vAttr) << 2u) / 255.0, 1.0);
   if (uColorMode == 7){
@@ -588,13 +604,20 @@ function link(vs, fs){
 const prog = link(VS, FS);
 const uniformsOf = (p, names) => Object.fromEntries(names.map(n => [n, gl.getUniformLocation(p, n)]));
 const RASTER_UNIFORMS = ['uViewProj', 'uEyeN', 'uInvSide', 'uOrigin', 'uCellSize', 'uOpenSides',
-  'uColorMode', 'uChunkColor', 'uLodColor', 'uFog', 'uDepthScale', 'uDrawIndex'];
+  'uColorMode', 'uChunkColor', 'uLodColor', 'uFog', 'uDepthScale', 'uDrawIndex', 'uTint'];
+const RASTER_UNIFORMS_U = [...RASTER_UNIFORMS, 'uTurn', 'uScale'];
 const U = uniformsOf(prog, RASTER_UNIFORMS);
 const wireProg = link(WIRE_VS, FS), WU = uniformsOf(wireProg, RASTER_UNIFORMS);
 // What renderView draws records with: three faces a cube (rasterVS has why). facesSelftest
 // swaps in the six-face reference to hold one to the other, then puts this back.
 const RASTER_DRAW = { prog, U, tris: 18 };
 let rasterDraw = RASTER_DRAW;
+// A universe's: the same, turned (rasterVS's `turned`). The wireframe's turned twin is
+// made the first time a universe draws one.
+const uniProg = link(rasterVS('', false, true), FS);
+const RASTER_DRAW_U = { prog: uniProg, U: uniformsOf(uniProg, RASTER_UNIFORMS_U), tris: 18 };
+let rasterDrawU = RASTER_DRAW_U, wireU = null;
+const wireDrawU = () => wireU ??= (() => { const p = link(rasterVS(' || dot(NORMAL[face], p) >= 0.0', false, true), FS); return { prog: p, U: uniformsOf(p, RASTER_UNIFORMS_U) }; })();
 /* A miss writes transparent black, and the pass blends over the raster
    (ONE, ONE_MINUS_SRC_ALPHA): a hit's alpha is exactly 1, so it replaces
    the pixel, and a miss leaves it. The first ray pass discarded a miss,
@@ -1316,7 +1339,8 @@ function putBrick(slot, bits){
    streamer's frame changes (a new cut, or an admission). A few hundred
    nodes, a few KB. */
 function syncCoverTree(){
-  if (!W || ray.frame === streamer.frame) return;
+  // A universe has no ray path (universe-plan §5): every chunk is records.
+  if (!W || W.universe || ray.frame === streamer.frame) return;
   ray.frame = streamer.frame;
   const words = buildCoverTree(W.top, streamer.frame.draw, d => {
     const e = streamer.entry(d.key);
@@ -1428,6 +1452,11 @@ const state = {
   // (A link can't name a file: saveView writes what a shelf world was built from.)
   world: /^file:/.test(params.get('world') || '') ? 'kit:1' : params.get('world') || 'kit:1',
   depth: params.has('depth') ? +params.get('depth') : null,
+  // A universe (universe-plan step 3): the far view's tint a world (Q8; ?tint=0 for
+  // none), and the shelf's worlds added to it ("to the universe"), by shelf id. A
+  // link can't hold them, as it can't hold a file.
+  tint: params.get('tint') !== '0',
+  uniFiles: [],
   // Split a chunk while the eye is closer than `detail` chunk sides. 4 on
   // this page since 2026-11-09 (the streamer's own default is 2): a coarse
   // cell is drawn half as wide on screen, about 1–4 px instead of 2–7
@@ -1592,6 +1621,8 @@ const catalogue = () => {
   out.push({ id: 'dungeon:' + state.dungeon.seed, label: 'dungeon: floors of rooms, halls and stairs', group: 'built (wave function collapse)' });
   out.push({ id: isCity(state.world) ? state.world : 'city:1', label: 'city: districts, towers, rooms to walk into, parks', group: 'built (districts and lots)' });
   out.push({ id: 'clay', label: 'clay, flat ground or empty', group: 'to sculpt' });
+  out.push({ id: isUniverse(state.world) ? state.world : 'universe:1', label: `universe: kits, cities and the scatter on one plane${state.uniFiles.length ? ` (+${state.uniFiles.length} from the shelf)` : ''}`, group: 'universe' });
+  out.push({ id: isEndless(state.world) ? state.world : 'endless:1', label: `endless: districts of worlds, built as you fly${state.uniFiles.length ? ` (+${state.uniFiles.length} from the shelf)` : ''}`, group: 'universe' });
   for (const e of shelf) out.push({ id: e.id, label: e.name, group: 'shelf' });
   return out;
 };
@@ -1730,6 +1761,9 @@ const isRow = id => id.startsWith('row:'), isScatter = id => id.startsWith('scat
 const isKit = id => id.startsWith('kit:'), isCaves = id => /^caves:\d+$/.test(id), isClay = id => id === 'clay';
 const isDungeon = id => /^dungeon:\d+$/.test(id);
 const isCity = id => /^city:\d+$/.test(id);
+const isUniverse = id => /^universe:\d+$/.test(id);
+// The endless lattice (universe-plan step 5): a universe too, so everything a universe refuses it refuses.
+const isEndless = id => /^endless:\d+$/.test(id);
 const isShape = id => id.startsWith('shape:');
 /* Which worlds take worlds (gizmo-plan §7 steps 4 and 5, vdagplacement §1): every
    world with a named colour. The kit, the shapes and the testbed rows are real stores
@@ -1765,7 +1799,8 @@ const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: 
 function fillDepth(){
   fillSeed();
   // The lattice has no depth to pick: its controls show instead.
-  $('depthL').hidden = isLattice(state.world) || isFile(state.world); $('latticeCtl').hidden = !isLattice(state.world);
+  // Nor a universe: each of its worlds is the depth demoUniverse gives it.
+  $('depthL').hidden = isLattice(state.world) || isFile(state.world) || isUniverse(state.world) || isEndless(state.world); $('latticeCtl').hidden = !isLattice(state.world);
   $('kitCtl').hidden = !isKit(state.world);
   $('clayCtl').hidden = !isClay(state.world);
   $('dungeonCtl').hidden = !isDungeon(state.world);
@@ -1971,7 +2006,7 @@ function showCity(){
    leave it in rock). Seeds wrap within 1…65,535, kitDesc's and
    latticeDesc's range. */
 const SEED_MAX = 0xffff, SEED_DEBOUNCE = 250;
-const isSeeded = id => isScatter(id) || isLattice(id) || isKit(id) || isCaves(id) || isDungeon(id) || isCity(id);
+const isSeeded = id => isScatter(id) || isLattice(id) || isKit(id) || isCaves(id) || isDungeon(id) || isCity(id) || isUniverse(id) || isEndless(id);
 const seedOf = id => +id.slice(id.indexOf(':') + 1) || 1;
 const wrapSeed = s => ((Math.round(s) - 1) % SEED_MAX + SEED_MAX) % SEED_MAX + 1;
 const randomSeed = () => 1 + Math.floor(Math.random() * SEED_MAX);
@@ -2030,7 +2065,7 @@ const mbOf = n => n >= 1e6 ? `${(n / 1e6).toFixed(2)} MB` : n >= 1e4 ? `${(n / 1
 // What a link or a file should say this world was built from.
 function sourceOf(){
   if (isFile(state.world)) return shelfEntry(state.world)?.source ?? null;
-  return { world: state.world, depth: isLattice(state.world) || isKit(state.world) || isClay(state.world) || isDungeon(state.world) ? null : state.depth,
+  return { world: state.world, depth: isLattice(state.world) || isKit(state.world) || isClay(state.world) || isDungeon(state.world) || isUniverse(state.world) || isEndless(state.world) ? null : state.depth,
            lattice: isLattice(state.world) ? latticeParam(state.lattice) : null, kit: isKit(state.world) ? kitParam(state.kit) : null,
            clay: isClay(state.world) ? clayParam(state.clay) : null, dungeon: isDungeon(state.world) ? dungeonParam(state.dungeon) : null };
 }
@@ -2051,11 +2086,12 @@ function fillShelf(){
   // Neither a file nor the shelf can hold edits yet (realtimecsg.md §11.8 step 9),
   // and writing the shape without its block colours would look right and be wrong.
   const edited = hasEdits();
-  $('shelfAdd').disabled = !W || !!W.file || edited;
+  $('shelfAdd').disabled = !W || !!W.file || !!W.universe || edited;
+  $('shelfUniverse').disabled = !W || !W.file || state.uniFiles.includes(W.id);
   $('shelfRemove').disabled = !onShelf;
   $('shelfExport').disabled = !shelf.length;
   $('shelfExport').textContent = shelf.length ? `export all (${shelf.length})` : 'export all';
-  $('fileExport').disabled = !W || edited;
+  $('fileExport').disabled = !W || !!W.universe || edited;
 }
 const currentView = () => ({ eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch });
 const worldName = () => `${W.label}${isSeeded(W.id) ? `, seed ${seedOf(W.id)}` : ''}, D=${W.D}`;
@@ -2186,6 +2222,16 @@ function removeFromShelf(){
   showFile(`removed from the shelf: ${esc(gone.name)}`);
   return loadWorld(true);
 }
+/* "To the universe" (universe-plan step 3): the shelf world on screen joins the
+   universe as one more tile, upright on the plane after the demo's nine, and the
+   universe opens. A link can't hold it, as it can't hold the file. */
+function toUniverse(){
+  if (!W?.file) return;
+  if (!state.uniFiles.includes(W.id)) state.uniFiles.push(W.id);
+  state.world = 'universe:1';
+  fillWorlds(); fillSeed();
+  return loadWorld(true);
+}
 function bindFiles(){
   // Off the button after a click: a button with focus takes the next Space.
   const on = (id, f) => $(id).addEventListener('click', e => { e.currentTarget.blur(); f(); });
@@ -2193,6 +2239,7 @@ function bindFiles(){
   on('fileExport', exportThis);
   on('shelfAdd', addToShelf);
   on('shelfRemove', removeFromShelf);
+  on('shelfUniverse', toUniverse);
   on('shelfExport', exportShelf);
   $('fileInput').addEventListener('change', () => { openFiles($('fileInput').files); $('fileInput').value = ''; });
   // Text or a link dragged over the page isn't ours: only a drag of files.
@@ -2210,7 +2257,244 @@ let W = null;                    // the current world: { id, store, root, D, sid
    a superseded build stops at once (scatter-build.js). */
 const CLASSES_MAX = 300000;
 const TWICE = 'this file holds a node twice, so its nodes can\'t be imported as they are numbered: it\'s shown, and takes no worlds';
+/* A universe (docs/universe-plan.md step 3, docs/universe-log.md): universe-core's
+   demoUniverse(seed) says which worlds and where, plus the shelf's worlds added to
+   it (`state.uniFiles`). Each world is built as the page builds it alone: the kits
+   and the cities here (about 45 and 80 ms for the three and the two, in Node), the
+   scatter in the workers with the toast, a file from its keys. Then
+   installUniverse lays them on the plane. A file taken off the shelf since it
+   was added is left out. */
+async function buildUniverse(signal, gen){
+  const t0 = performance.now(), seed = seedOf(state.world);
+  state.uniFiles = state.uniFiles.filter(id => shelfEntry(id));
+  const demo = demoUniverse(seed, state.uniFiles), worlds = new Map();
+  for (const [n, w] of demo.worlds.entries()){
+    setBuilding(`building the universe: ${w.key} (${n + 1} of ${demo.worlds.length})`, n / demo.worlds.length);
+    await new Promise(r => setTimeout(r, 0));
+    if (gen !== buildGen) return false;
+    if (w.kind === 'kit'){
+      const desc = kitDesc({ D: w.D, seed: w.seed }), k = buildKit(desc);
+      worlds.set(w.key, { store: k.store, root: k.root, D: w.D, ground: kitGround(desc), colour: desc, label: `kit, seed ${w.seed}` });
+    } else if (w.kind === 'city'){
+      const desc = cityDesc({ D: w.D, seed: w.seed }), c = buildCity(desc);
+      worlds.set(w.key, { store: c.store, root: c.root, D: w.D, ground: cityGround(desc), colour: desc, label: `city, seed ${w.seed}` });
+    } else if (w.kind === 'scatter'){
+      const desc = scatterDesc({ seed: w.seed, D: w.D });
+      const sc = await buildScatterInWorkers(desc, { workers: workerCount, signal,
+        onPhase: (t, f) => setBuilding(`building the universe: the scatter, D=${desc.D} … ${t}`, f) });
+      if (gen !== buildGen) return false;
+      worlds.set(w.key, { store: sc.store, root: sc.root, D: w.D, ground: scatterGround(desc), colour: { kind: 'scatter', ...desc, table: sc.table }, label: `scatter, seed ${w.seed}` });
+    } else {
+      const f = shelfEntry(w.key);
+      worlds.set(w.key, { store: storeView({ keys: f.keys }), root: f.root, D: f.D, ground: null, colour: f.colour, label: f.name });
+    }
+  }
+  if (gen !== buildGen) return false;
+  setBuilding('building the universe: the plane and the snapshots', 1);
+  await new Promise(r => setTimeout(r, 0));
+  if (gen !== buildGen) return false;
+  installUniverse({ id: state.world, worlds, tiles: demo.tiles, cols: demo.cols, buildMs: performance.now() - t0 });
+  return true;
+}
+/* Lay a universe's worlds on the plane and hand it to the streamer and the pool
+   (step 2's setUniverse on both): planeOf's layout, clay's flat ground for the
+   gaps (`flats`, one world a tile size, every flat tile a copy), createUniverse's
+   checks. `worlds` is key → { store, root, D, ground, colour, label }. W is the
+   universe: `universe` (createUniverse's), `worlds` (each with its counts and
+   side), `plane`, and the plain world's fields where the page reads them
+   (`side`, the power of two round the plane, for the far plane, the fog and the
+   fly speed; `D` its log). It has no store, root or edit: `noEdit` says why.
+   universeSelftest calls it with worlds of its own. */
+function installUniverse({ id, label = null, worlds, tiles = null, cols = 3, instances = null, buildMs = 0 }){
+  const t1 = performance.now();
+  let plane = null;
+  if (!instances){
+    plane = planeOf(worlds, tiles, { cols });
+    for (const k of plane.flats){
+      const d = clayDesc({ D: k, lump: 0, ground: true }), f = buildClay(d);
+      worlds.set(flatKey(k), { store: f.store, root: f.root, D: k, ground: flatGround(k), colour: d, label: `flat ground, ${2 ** k}²` });
+    }
+    instances = plane.instances;
+  }
+  const u = createUniverse(worlds, instances), snaps = new Map(), held = new Map(), named = new Set(u.instances.map(x => x.world));
+  // Only the worlds an instance names go to the workers.
+  for (const [key, w] of worlds){
+    if (!named.has(key)) continue;
+    const counts = w.counts ?? createCounts(w.store);
+    held.set(key, { ...w, key, counts, side: 2 ** w.D, nodes: w.store.size });
+    snaps.set(key, worldSnapshot(w.store, w.root, w.D, { counts, colour: w.colour ?? null }));
+  }
+  let voxels = 0, nodes = 0;
+  for (const inst of u.instances){ const h = held.get(inst.world); voxels += h.counts.of(h.root) * inst.frame.k ** 3; }
+  for (const h of held.values()) nodes += h.nodes;
+  const ext = u.box ? Math.max(...[0, 1, 2].map(a => u.box.hi[a] - Math.min(0, u.box.lo[a]))) : 1;
+  const D = Math.max(1, Math.ceil(Math.log2(ext)));
+  const tiled = new Set((tiles ?? []).map(t => t.world));
+  setEditMode(false);
+  W = { id, label: label ?? `universe: ${tiled.size || held.size} worlds, ${u.instances.length} instances on one plane`, universe: u, worlds: held, plane,
+        D, side: 2 ** D, top: 0, nodes, voxels, counts: null, store: null, root: null,
+        buildMs, prepMs: performance.now() - t1, colour: { kind: 'universe' }, source: sourceOf(), classes: null,
+        edit: null, lazy: null, importing: null,
+        noEdit: 'a universe doesn\'t edit: an edit would change every copy of a world (universe-plan §1). Open a world on its own to edit it' };
+  ray.frame = null;
+  streamer.setUniverse(u);
+  pool.setUniverse(snaps, ++worldEpoch);
+  dirty = true;
+  colourForWorld();
+  fillShelf();
+  edit.box = null; edit.press = null; edit.hot = null; edit.repeat.clear();
+  showEdit();
+  // Walking carries on into a universe (step 4), unless it can't hold this one: then setWalk says why.
+  if (walk.on){ try { walkWorld(); } catch { setWalk(true); } }
+  return W;
+}
+/* ---- the endless lattice (docs/universe-plan.md step 5, docs/universe-log.md) ------
+   `endless:<seed>`: a universe with no list of worlds. universe-core decides
+   everything: which world each cell of 512 holds (cellOf, districts from a slow
+   field), the window of cells round the eye (endlessWindow, a disc of radius 4), when
+   it re-centres (recentre) and which built worlds to let go (worldsToDrop). The page
+   moves the eye, builds and hands over:
+     - worlds are built by tile-worlds.js in two long-lived world workers
+       (endless-build.js), nearest first, the queue being exactly what the window
+       wants and nothing holds; each comes back as keys, read as a storeView, and is
+       held here with its counts and its snapshot, made once (`E.held`);
+     - a cell whose world hasn't landed is a park (four tiles of flat:8) until it
+       does; a world landing, or the window re-centring, makes a new window, and
+       installEndless hands it over with no flush: the streamer's setUniverse with
+       `keep` (a world's entries stay as long as some cell names it) and the pool's
+       updateUniverse (only the worlds gained, and a drop for each lost);
+     - THE ORIGIN ROLLS: the window's coordinates start at its low corner cell, so a
+       re-centre moves them by whole cells, and shiftOrigin moves the eye, the walker
+       and the orbit camera's memory by the same whole number of voxels. Exact in
+       float64, so nothing on screen moves, and no coordinate grows however far you
+       fly. The link holds the eye absolute (absoluteEye), so a link made anywhere
+       opens there;
+     - held worlds stay under ENDLESS_BUDGET bytes (keys, counts and snapshot, about
+       48 bytes a node), so flying back finds them built; the flat world and the
+       shelf's files are never let go;
+     - a new seed keeps every held world: a key names everything that makes its world
+       (`kit:5` is the D = 8 kit at seed 5 in any lattice), so the scatters, the
+       costly ones, carry over.
+   W is one object for the lattice's life: W.universe, W.worlds and W.side follow the
+   window, W.endless holds the rest. */
+const ENDLESS_BUDGET = 96 * 1048576, NODE_BYTES = 48;
+let tileBuilder = null;
+const absoluteEye = () => W?.endless ? cam.eye.map((v, a) => v + W.endless.win.offset[a]) : cam.eye.slice();
+// The fog: a universe's side, or in the endless lattice its horizon's (step 5), so the window's edge fades out.
+const fogDist = () => W?.endless ? W.endless.fog : 1.5 * W.side;
+function holdWorld(E, key, w){
+  const counts = w.counts ?? createCounts(w.store), nodes = w.store.size;
+  const world = { ...w, key, counts, side: 2 ** w.D, nodes };
+  E.held.set(key, { key, world, snap: worldSnapshot(w.store, w.root, w.D, { counts, colour: w.colour ?? null }), bytes: NODE_BYTES * nodes, seen: E.tick, pinned: !!w.pinned });
+}
+function landTile(tile, data){
+  const E = W?.endless;
+  if (!E) return;
+  const store = storeView({ keys: data.keys });
+  holdWorld(E, tile.world, { store, root: data.root, D: data.D, ground: data.ground, colour: data.colour, label: data.label });
+  E.built++; E.buildMs += data.ms;
+  if (E.win.want.some(t => t.world === tile.world)) E.landed = true;
+}
+async function buildEndless(){
+  const seed = seedOf(state.world), old = W?.endless ?? null;
+  state.uniFiles = state.uniFiles.filter(id => shelfEntry(id));
+  const files = state.uniFiles.map(id => { const f = shelfEntry(id); return { key: id, f, world: { store: storeView({ keys: f.keys }), root: f.root, D: f.D } }; });
+  const L = endlessOf(seed, { grounds: tileGrounds(ENDLESS_KINDS), files });
+  // The eye, absolute: from a link (no lattice yet), or the lattice before this seed.
+  const abs = absoluteEye();
+  const E = { L, held: old ? old.held : new Map(), failed: old ? old.failed : new Map(), tick: old ? old.tick : 0, recentres: 0, installs: 0, built: 0, buildMs: 0, landed: false,
+              fog: 0.7 * L.radius * L.cell, budget: old ? old.budget : ENDLESS_BUDGET, win: null, t0: performance.now() };
+  if (!E.held.has(flatKey(L.flatK))){
+    const d = clayDesc({ D: L.flatK, lump: 0, ground: true }), f = buildClay(d);
+    holdWorld(E, flatKey(L.flatK), { store: f.store, root: f.root, D: L.flatK, ground: flatGround(L.flatK), colour: d, label: `flat ground, ${2 ** L.flatK}²`, pinned: true });
+  }
+  for (const { key, f, world } of files) if (!E.held.has(key)) holdWorld(E, key, { ...world, ground: null, colour: f.colour, label: f.name, pinned: true });
+  tileBuilder ??= new TileBuilder({ workers: workerCount ? 2 : 0, onBuilt: landTile,
+                                    onFailed: (t, why) => { console.warn('endless: no', t.world, why); W?.endless?.failed.set(t.world, why); } });
+  const win = endlessWindow(L, cellAt(L, abs), heldWorlds(E));
+  installEndless(E, win, true);
+  cam.eye = abs.map((v, a) => v - win.offset[a]);
+  return true;
+}
+const heldWorlds = E => new Map([...E.held].map(([k, h]) => [k, h.world]));
+/* A window to the streamer and the pool. `fresh`: the lattice's first, a new W, a new
+   revision; otherwise W stays and the universe is swapped with no flush. Only the
+   worlds an instance names go to either (an unbuilt cell names flat:8). */
+function installEndless(E, win, fresh){
+  const named = new Set(win.instances.map(x => x.world)), worlds = new Map(), snaps = new Map();
+  for (const k of named){ const h = E.held.get(k); worlds.set(k, h.world); snaps.set(k, h.snap); h.seen = E.tick; }
+  const u = createUniverse(worlds, win.instances);
+  E.win = win; E.installs++;
+  let voxels = 0, nodes = 0;
+  for (const inst of u.instances){ const w = worlds.get(inst.world); voxels += w.counts.of(w.root) * inst.frame.k ** 3; }
+  for (const w of worlds.values()) nodes += w.nodes;
+  if (fresh){
+    setEditMode(false);
+    W = { id: state.world, label: `endless universe, seed ${E.L.seed}`, universe: u, worlds, plane: { Y: E.L.Y, size: [win.side, win.side] }, endless: E,
+          D: Math.log2(win.side), side: win.side, top: 0, nodes, voxels, counts: null, store: null, root: null,
+          buildMs: 0, prepMs: 0, colour: { kind: 'universe' }, source: sourceOf(), classes: null, edit: null, lazy: null, importing: null,
+          noEdit: 'a universe doesn\'t edit: an edit would change every copy of a world (universe-plan §1). Open a world on its own to edit it' };
+    ray.frame = null;
+    streamer.setUniverse(u);
+    pool.setUniverse(snaps, ++worldEpoch);
+    colourForWorld(); fillShelf();
+    edit.box = null; edit.press = null; edit.hot = null; edit.repeat.clear();
+    showEdit();
+  } else {
+    Object.assign(W, { universe: u, worlds, nodes, voxels, D: Math.log2(win.side), side: win.side });
+    streamer.setUniverse(u, { keep: true });
+    pool.updateUniverse(snaps);
+    // Occlusion's results are keyed by instance, and a window numbers them afresh.
+    if (state.occlusion !== 'off') setOcclusion(state.occlusion);
+  }
+  dirty = true;
+  if (walk.on){ try { walkWorld(); } catch { setWalk(true); } }
+}
+/* Move every position the page holds by d, whole voxels: the eye, the last eye the cut
+   was made at, the walker and its eye, and the orbit camera's note that it last moved
+   the camera (camKey has the eye in it). */
+function shiftOrigin(d){
+  const ours = orbitCam.seen === camKey();
+  for (let a = 0; a < 3; a++){
+    cam.eye[a] += d[a]; lastEye[a] += d[a];
+    if (walk.w) walk.w.p[a] += d[a];
+    if (walk.eye) walk.eye[a] += d[a];
+  }
+  if (ours) orbitCam.seen = camKey();
+}
+function endlessTick(){
+  const E = W.endless, L = E.L;
+  E.tick++;
+  const centre = recentre(L, E.win, cam.eye), moved = centre !== E.win.centre;
+  if (moved || E.landed){
+    E.landed = false;
+    const win = endlessWindow(L, centre, heldWorlds(E));
+    if (moved){ shiftOrigin(E.win.offset.map((v, a) => v - win.offset[a])); E.recentres++; }
+    installEndless(E, win, false);
+    saveView();
+  }
+  tileBuilder.want(E.win.want.filter(t => t.kind !== 'file' && !E.failed.has(t.world)), k => E.held.has(k));
+  if (E.tick % 60 === 0) endlessDrop(E);
+}
+// The held worlds over the budget, least recently wanted first; never one the window wants, the flat world or a file.
+function endlessDrop(E){
+  const want = new Set(E.win.want.map(t => t.world)), drop = worldsToDrop([...E.held.values()].filter(h => !h.pinned), want, E.budget);
+  for (const k of drop) E.held.delete(k);
+  return drop;
+}
+function endlessLine(){
+  const E = W.endless, abs = absoluteEye(), cell = cellAt(E.L, abs), d = districtOf(E.L, cell[0], cell[1]);
+  let bytes = 0;
+  for (const h of E.held.values()) bytes += h.bytes;
+  const built = E.win.cells.filter(c => c.built).length, parks = E.win.cells.filter(c => !c.tile).length;
+  return `<span class="sec">endless</span> seed ${E.L.seed}, cell ${cell.join(', ')} (${d.kind.kind === 'park' ? 'a park district' : `${d.kind.kind}s`})  ` +
+    `window ${E.win.cells.length} cells round ${E.win.centre.join(', ')}: ${built} built, ${parks} parks, ${E.win.cells.length - built - parks} to come  ` +
+    `worlds held ${E.held.size} (${mbOf(bytes)}), building ${tileBuilder.busy}, queued ${tileBuilder.queue.length}${E.failed.size ? `, <span class="warn">${E.failed.size} failed</span>` : ''}  ` +
+    `origin rolled ${E.recentres}×, at ${E.win.offset[0]}, ${E.win.offset[2]}`;
+}
 async function buildWorld(signal, gen){
+  if (isUniverse(state.world)) return buildUniverse(signal, gen);
+  if (isEndless(state.world)) return buildEndless();
   const t0 = performance.now();
   let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, clay = null, dungeon = null, city = null, classes = null, file = null, shaped = false;
   // The keys a scene log starts from (a world that takes worlds), and why a world takes none.
@@ -2421,6 +2705,18 @@ function defaultView(){
   // A file opens where it was saved, if it says.
   if (W.file?.view) return { eye: W.file.view.eye.slice(), yaw: W.file.view.yaw, pitch: W.file.view.pitch };
   if (isRow(W.id)) return { eye: [-0.15 * s, 1.1 * s, -0.25 * s], yaw: 0.62, pitch: -0.5 };
+  // The endless lattice: low over its centre cell's near edge, looking along z over it.
+  if (W.endless){
+    const { L, win } = W.endless, C = L.cell, c = [win.centre[0] - win.origin[0], win.centre[1] - win.origin[1]];
+    return { eye: [(c[0] + 0.5) * C + 0.37, L.Y + 180.21, c[1] * C + 0.06 * C + 0.53], yaw: 0, pitch: -0.3 };
+  }
+  // A universe from outside the plane's low corner, above it, looking at its middle:
+  // every world at once, then fly from one to the next.
+  if (W.universe){
+    const b = W.universe.box, c = [0.5 * (b.lo[0] + b.hi[0]), W.plane ? W.plane.Y : 0.5 * (b.lo[1] + b.hi[1]), 0.5 * (b.lo[2] + b.hi[2])];
+    const ext = Math.max(b.hi[0] - b.lo[0], b.hi[2] - b.lo[2]), eye = [b.lo[0] - 0.12 * ext, c[1] + 0.42 * ext, b.lo[2] - 0.18 * ext], v = c.map((x, a) => x - eye[a]);
+    return { eye, yaw: Math.atan2(v[0], v[2]), pitch: Math.atan2(v[1], Math.hypot(v[0], v[2])) };
+  }
   // A couple of specimen heights over the ground, near one edge, looking across the field.
   if (W.scatter){ const x = 0.5 * s, z = 0.03 * s; return { eye: [x, W.scatter.groundTop(x, z) + 160, z], yaw: 0, pitch: -0.16 }; }
   // Outside the lattice's low corner, above it, looking at its centre
@@ -2473,7 +2769,33 @@ function mul4(A, B){
 /* §9.3's local scale: how far the nearest voxel is (stream-core's
    clearance, a budgeted best-first search of the DAG; a lower bound when
    the budget runs out). */
-function clearance(){ return clearanceOf(streamer.S.world, cam.eye, 2048).d; }
+function clearance(){ return W?.universe ? universeClearance(cam.eye) : clearanceOf(streamer.S.world, cam.eye, 2048).d; }
+/* A universe's (step 3): the nearest voxel of any instance, each asked in its own
+   world's frame (the eye by toLocal, the distance back times 2^scale, which a turn
+   doesn't change), nearest cube first, and stopping at the first cube farther than
+   the best so far, so a frame asks one or two instances, not all of them. */
+function universeClearance(eye){
+  const u = W.universe, gap = c => Math.hypot(...[0, 1, 2].map(a => Math.max(0, c.lo[a] - eye[a], eye[a] - c.hi[a])));
+  const order = u.instances.map((inst, i) => ({ i, d: gap(inst.cube) })).sort((a, b) => a.d - b.d);
+  let best = Infinity;
+  for (const { i, d } of order){
+    if (d >= best) break;
+    const inst = u.instances[i];
+    best = Math.min(best, clearanceOf(W.worlds.get(inst.world), toLocal(inst.frame, eye), 2048).d * inst.frame.k);
+  }
+  return best;
+}
+/* The first voxel a ray meets in a universe: pick (edit-core) in every instance,
+   the ray mapped into its world (toLocal, dirToLocal), so each hit's t is the
+   universe's, and the nearest wins. The orbit camera's target (orbitRadius). */
+function pickUniverse(o, d){
+  let best = null;
+  for (const inst of W.universe.instances){
+    const w = W.worlds.get(inst.world), hit = pick(w.store, w.root, w.D, toLocal(inst.frame, o), dirToLocal(inst.frame, d));
+    if (hit && (!best || hit.t < best.t)) best = { ...hit, inst };
+  }
+  return best;
+}
 function viewProj(aspect, near, far){
   const f = 1 / Math.tan(0.45);
   const P = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), -1, 0, 0, 2 * far * near / (near - far), 0];
@@ -2601,7 +2923,7 @@ const orbitCam = { radius: null, scale: 2, seen: '', pending: 0, pointers: new M
 const camKey = () => `${cam.eye[0]},${cam.eye[1]},${cam.eye[2]},${cam.yaw},${cam.pitch}`;
 function orbitRadius(){
   if (orbitCam.radius !== null && orbitCam.seen === camKey()) return orbitCam.radius;
-  const hit = W ? pick(W.store, W.edit ? W.edit.log.root : W.root, W.D, cam.eye, fwd()) : null;
+  const hit = !W ? null : W.universe ? pickUniverse(cam.eye, fwd()) : pick(W.store, W.edit ? W.edit.log.root : W.root, W.D, cam.eye, fwd());
   orbitCam.radius = hit ? Math.max(hit.t, 0.5) : orbitCam.radius ?? Math.max(16, Math.min(4 * (W?.side ?? 1024), view.clear || 0));
   orbitCam.scale = W ? flySpeed() / cam.speedMul : 2;
   orbitCam.seen = camKey();
@@ -2653,6 +2975,14 @@ function cameraEase(dt){
    by a click (Esc frees it), the mouse alone. The wheel doesn't dolly. Edit mode
    still works: the tools aim from the eye as they do flying.
 
+   **In a universe** (docs/universe-plan.md step 4): the world is universe-core's
+   universeWorld, every instance asked in its own world's frame (scene-core's
+   compositeWorld over an empty parent the universe's side), so the walker steps off
+   one world onto the next with nothing at the border, and the grounds meet flush
+   because the plane put them at one height. A dungeon off the shelf keeps its secret
+   doors: universeHoles turns each world's into the universe with every copy. The
+   eye is the walker's in either, so the HUD's "you are in" follows it across.
+
    **Climbing** (asked for 2026-11-14, for the kit, whose walls a walker couldn't
    leave): the run is walk-core's `climb` too, shift or the pad's L3, so you run at a
    wall and it climbs (2026-11-15). A walker on a wall that stops pushing, shift held,
@@ -2660,19 +2990,34 @@ function cameraEase(dt){
    tab in the user's Chrome, and ctrl-W does the same on Windows and Linux; a page
    can stop neither. */
 const walk = { on: params.get('walk') === '1', w: null, eye: null, world: null, of: null, store: null, root: null, holes: 0, moving: false, note: '' };
+// A dungeon's secret doors, from its descriptor's table (a file of one has it too).
+function doorsOf(colour){
+  if (colour?.kind !== 'dungeon' || !colour.table) return null;
+  try { return secretDoors(planFromTable(colour, colour.table)); } catch (e){ console.warn('no secret doors:', e.message); return null; }
+}
 function walkWorld(){
+  if (W.universe){
+    // By the universe, not W: the endless lattice swaps its universe under one W (step 5).
+    if (walk.of !== W.universe){
+      const holes = universeHoles(W.universe, (key, w) => doorsOf(w.colour));
+      walk.world = openWorld(withHoles(universeWorld(W.universe, W.side).solid, holes), W.side);
+      walk.of = W.universe; walk.store = null; walk.root = null; walk.holes = holes.length;
+    }
+    return walk.world;
+  }
   const root = W.edit ? W.edit.log.root : W.root;
   if (walk.of !== W || walk.store !== W.store || walk.root !== root){
-    let holes = [];
-    if (W.colour?.kind === 'dungeon' && W.colour.table){ try { holes = secretDoors(planFromTable(W.colour, W.colour.table)); } catch (e){ console.warn('no secret doors:', e.message); } }
+    const holes = doorsOf(W.colour) ?? [];
     walk.world = openWorld(withHoles(dagWorld(W.store, root, W.D).solid, holes), W.side);
     walk.of = W; walk.store = W.store; walk.root = root; walk.holes = holes.length;
   }
   return walk.world;
 }
 function setWalk(on){
+  walk.note = '';
   if (on && W && W.D > ACTOR_MAX_D){ walk.note = `no walking past D = ${ACTOR_MAX_D}`; on = false; }
-  else walk.note = '';
+  // universeWorld refuses a universe it can't hold (a world outside its side): say so here, not every frame.
+  else if (on && W?.universe){ try { walkWorld(); } catch (e){ walk.note = `no walking in this universe: ${e.message}`; on = false; } }
   walk.on = on; walk.w = null; walk.eye = null; walk.moving = false;
   keys.delete('Space');
   if (!on && document.pointerLockElement === canvas) document.exitPointerLock();
@@ -3435,20 +3780,28 @@ function drawWire(w, h){
   gl.clearColor(0.027, 0.027, 0.039, 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
   gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.STENCIL_TEST); gl.disable(gl.BLEND);
-  gl.useProgram(wireProg);
-  gl.uniformMatrix4fv(WU.uViewProj, false, M);
-  gl.uniform3f(WU.uEyeN, cam.eye[0] / W.side, cam.eye[1] / W.side, cam.eye[2] / W.side);
-  gl.uniform1f(WU.uInvSide, 1 / W.side);
-  gl.uniform1i(WU.uColorMode, state.color);
-  gl.uniform1f(WU.uFog, 1 / (1.5 * W.side));
-  gl.uniform1f(WU.uDepthScale, 1 / (8 * W.side));
+  // A universe's chunks turned, as the raster drew them (renderView's placeChunk).
+  const WD = W.universe ? wireDrawU() : { prog: wireProg, U: WU }, WU_ = WD.U;
+  gl.useProgram(WD.prog);
+  gl.uniformMatrix4fv(WU_.uViewProj, false, M);
+  gl.uniform3f(WU_.uEyeN, cam.eye[0] / W.side, cam.eye[1] / W.side, cam.eye[2] / W.side);
+  gl.uniform1f(WU_.uInvSide, 1 / W.side);
+  gl.uniform1i(WU_.uColorMode, state.color);
+  gl.uniform1f(WU_.uFog, 1 / fogDist());
+  gl.uniform1f(WU_.uDepthScale, 1 / (8 * W.side));
   for (let i = wireList.length - 1; i >= 0; i--){
-    const { d, e, rel, open, n } = wireList[i];
-    gl.uniform3f(WU.uOrigin, rel[0], rel[1], rel[2]);
-    gl.uniform1f(WU.uCellSize, e.cellSize);
-    gl.uniform1ui(WU.uOpenSides, open);
-    gl.uniform3fv(WU.uLodColor, LOD_COLORS[d.lod]);
-    gl.uniform3fv(WU.uChunkColor, chunkColor(d));
+    const { d, e, origin, P, open, n } = wireList[i];
+    if (P){
+      gl.uniformMatrix3fv(WU_.uTurn, false, P.M);
+      gl.uniform1f(WU_.uScale, P.f.k);
+      gl.uniform3f(WU_.uEyeN, P.eyeN[0], P.eyeN[1], P.eyeN[2]);
+      gl.uniform1f(WU_.uInvSide, P.invSide);
+    }
+    gl.uniform3f(WU_.uOrigin, origin[0], origin[1], origin[2]);
+    gl.uniform1f(WU_.uCellSize, e.cellSize);
+    gl.uniform1ui(WU_.uOpenSides, open);
+    gl.uniform3fv(WU_.uLodColor, LOD_COLORS[d.lod]);
+    gl.uniform3fv(WU_.uChunkColor, chunkColor(d));
     gl.bindVertexArray(e.gpu.vao);
     gl.drawElementsInstanced(gl.LINES, CUBE_LINES / 2, gl.UNSIGNED_BYTE, CUBE_TRIS, n);
   }
@@ -3507,7 +3860,7 @@ function drawSSAO(w, h, o = state.ssao, out = null, show = state.ssaoShow){
   common(SSAO_BU);
   gl.activeTexture(gl.TEXTURE0 + SSAO_AO_UNIT); gl.bindTexture(gl.TEXTURE_2D, A.tex);
   gl.uniform1i(SSAO_BU.uAO, SSAO_AO_UNIT);
-  gl.uniform1f(SSAO_BU.uFog, 1 / (1.5 * W.side));
+  gl.uniform1f(SSAO_BU.uFog, 1 / fogDist());
   gl.uniform1i(SSAO_BU.uShow, show ? 1 : 0);
   gl.uniform1i(SSAO_BU.uDepthBlur, o.depthBlur ? 1 : 0);
   if (!show){ gl.enable(gl.BLEND); gl.blendFunc(gl.ZERO, gl.SRC_COLOR); }
@@ -3794,7 +4147,7 @@ function drawPreview(w, h, out = null, mode = 0, force = null){
   gl.uniform3f(u.uShift, map.shift[0] - e[0], map.shift[1] - e[1], map.shift[2] - e[2]);
   gl.uniform1ui(u.uOpenSides, 0);
   gl.uniform1i(u.uColorMode, mode);
-  gl.uniform1f(u.uFog, 1 / (1.5 * W.side));
+  gl.uniform1f(u.uFog, 1 / fogDist());
   gl.uniform1f(u.uDepthScale, 1 / (8 * W.side));
   gl.uniform1i(u.uHasAttr, g.attr ? 1 : 0);
   gl.uniform1f(u.uBehind, mode ? 0.5 : PREVIEW_BEHIND);
@@ -3963,7 +4316,8 @@ function saveView(){
   const src = sourceOf();
   for (const [k, v] of [['world', src?.world], ['depth', src?.depth], ['lattice', src?.lattice], ['kit', src?.kit], ['clay', src?.clay], ['dungeon', src?.dungeon]])
     if (v == null) q.delete(k); else q.set(k, v);
-  q.set('eye', cam.eye.map(v => Math.round(v)).join(','));
+  // The endless lattice's eye is in its window's coordinates: a link holds it absolute (step 5).
+  q.set('eye', absoluteEye().map(v => Math.round(v)).join(','));
   q.set('yaw', cam.yaw.toFixed(3)); q.set('pitch', cam.pitch.toFixed(3));
   history.replaceState(null, '', '?' + q);
 }
@@ -4052,6 +4406,7 @@ function loadWorld(resetView){
     : isClay(state.world) ? `clay, D=${state.clay.D}`
     : isDungeon(state.world) ? `the dungeon, D=${state.dungeon.D}, ${state.dungeon.floors} floors`
     : isCity(state.world) ? `the city, D=${state.depth}`
+    : isUniverse(state.world) ? 'the universe' : isEndless(state.world) ? 'the endless universe'
     : isFile(state.world) ? shelfEntry(state.world)?.name ?? state.world : state.world) + ' …', null, true);
   // Let the message paint before a multi-second fromField. The scatter
   // and lattice worlds build in workers, so the page keeps drawing the
@@ -4247,6 +4602,8 @@ const spawnSlot = (world, A, i, at) => spawnNear(world, A, i, actors.bodies[i].s
 function ensureActors(){
   if (actors.A && actors.of === W) return actors.A;
   actors.note = '';
+  // Actors moving between worlds come after the universe works (universekit Q9).
+  if (W.universe){ actors.note = 'no actors in a universe yet'; actors.A = null; return null; }
   if (W.D > ACTOR_MAX_D){ actors.note = `no actors past D = ${ACTOR_MAX_D}`; actors.A = null; return null; }
   actors.bodies = Array.from({ length: actors.n }, (_, i) => bodyOfSlot(i));
   actors.world = null;
@@ -4321,7 +4678,7 @@ function drawActors(M, planes, T, w, h, colorMode){
   gl.uniformMatrix4fv(BODY_U.uViewProj, false, M);
   gl.uniform1ui(BODY_U.uOpenSides, 0);
   gl.uniform1i(BODY_U.uColorMode, colorMode);
-  gl.uniform1f(BODY_U.uFog, 1 / (1.5 * W.side));
+  gl.uniform1f(BODY_U.uFog, 1 / fogDist());
   gl.uniform1f(BODY_U.uDepthScale, 1 / (8 * W.side));
   for (let i = 0; i < A.N; i++){
     if (!A.alive[i]) continue;
@@ -4391,6 +4748,8 @@ let frameTick = 0;   // page frames, for the occlusion tracker's pauses
 function frame({ draw: doDraw = true } = {}){
   if (!W) return;
   frameTick++;
+  // The endless lattice: re-centre the window, take the worlds that landed (step 5).
+  if (W.endless) endlessTick();
   const e = cam.eye;
   if (!state.freeze && (dirty || Math.abs(e[0] - lastEye[0]) + Math.abs(e[1] - lastEye[1]) + Math.abs(e[2] - lastEye[2]) > 0.25)){
     streamer.update(e); lastEye = e.slice(); dirty = false;
@@ -4457,6 +4816,49 @@ function pollTimers(){
    screen's is occlusionOf()), skips the raster chunks its tracker says
    are hidden and queries the boxes it asks about, after the raster pass
    and against its depth; null draws every chunk, as before. */
+/* A universe's instances as the raster draws them this frame (universe-plan §5),
+   made the first time a frame draws one: its frame, the eye in its world's voxels
+   (toLocal), its matrix (turnMatrix), whether it mirrors (a mirror reverses every
+   face's winding, so CULL_FACE wants the other order), its world's gamut terms
+   and its tint. */
+function instancePlaces(){
+  const u = W.universe, eye = cam.eye, out = new Array(u.instances.length);
+  return t => out[t] ??= (() => {
+    const inst = u.instances[t], f = inst.frame, w = W.worlds.get(inst.world), le = toLocal(f, eye), M = turnMatrix(f);
+    const det = M[0] * (M[4] * M[8] - M[7] * M[5]) - M[3] * (M[1] * M[8] - M[7] * M[2]) + M[6] * (M[1] * M[5] - M[4] * M[2]);
+    return { index: t, inst, f, w, le, M, mirrored: det < 0, eyeN: le.map(v => v / w.side), invSide: 1 / w.side, tint: tintOf(inst.world) };
+  })();
+}
+/* A universe's raster loop moving to instance P (`at` the one before): its turn, its
+   world's gamut terms and which way round a front face winds, then its tint at this
+   chunk's lod. Returns P, the new `at`. */
+function instanceUniforms(U, P, at, lod){
+  if (P !== at){
+    gl.uniformMatrix3fv(U.uTurn, false, P.M);
+    gl.uniform1f(U.uScale, P.f.k);
+    gl.uniform3f(U.uEyeN, P.eyeN[0], P.eyeN[1], P.eyeN[2]);
+    gl.uniform1f(U.uInvSide, P.invSide);
+    gl.frontFace(P.mirrored ? gl.CW : gl.CCW);
+    view.inView.add(P.index);
+  }
+  const a = state.tint ? tintAt(lod) : 0;
+  gl.uniform4f(U.uTint, P.tint[0], P.tint[1], P.tint[2], a);
+  return P;
+}
+/* Where a drawn chunk is, for the raster loop: `rel` its box's low corner less the
+   eye and `size` its side, in the universe (or the world), for culling, sorting and
+   occlusion; `origin` the same corner in its own world's frame, for uOrigin. A plain
+   world's are one: origin is rel. `okey` is occlusion's key, an instance's chunk. */
+function placeChunk(d, places){
+  const eye = cam.eye;
+  if (!places){
+    const rel = [d.lo[0] - eye[0], d.lo[1] - eye[1], d.lo[2] - eye[2]];
+    return { rel, size: d.size, origin: rel, P: null, okey: d.key };
+  }
+  const P = places(d.tree), b = boxToUniverse(P.f, d.lo, [d.lo[0] + d.size, d.lo[1] + d.size, d.lo[2] + d.size]);
+  return { rel: [b.lo[0] - eye[0], b.lo[1] - eye[1], b.lo[2] - eye[2]], size: d.size * P.f.k,
+           origin: [d.lo[0] - P.le[0], d.lo[1] - P.le[1], d.lo[2] - P.le[2]], P, okey: d.tree + '|' + d.key };
+}
 function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.039, 1], passes = 'both', out = null, occ = null){
   const doRaster = passes === 'both' || passes === 'raster' || passes === 'mask', doRay = passes === 'both' || passes === 'ray' || passes === 'mask';
   const T = rasterTarget(w, h);
@@ -4477,23 +4879,27 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
   // rock 60 voxels off while they flew 20 from the eye. Without actors this
   // is the line it always was.
   view.near = Math.max(0.05, Math.min(64, 0.5 * Math.min(view.clear || clearance(), actors.A && actors.n ? actorClearance() : Infinity)));
-  const far = view.far = 4 * W.side + Math.hypot(...cam.eye);
+  // The endless lattice's eye is always inside its window, whose coordinates roll with
+  // it: no eye term, so a frame doesn't change when the origin does (step 5).
+  const far = view.far = W.endless ? 4 * W.side : 4 * W.side + Math.hypot(...cam.eye);
   const M = viewProj(w / h, view.near, far), planes = frustumPlanes(M);
   const run = timeIt ? timed : (_, fn) => fn();
-  const { U } = rasterDraw;
-  gl.useProgram(rasterDraw.prog);
+  // A universe draws turned (rasterVS's `turned`), its gamut a world's own, set per
+  // instance below; the fog and the depth scale are the universe's, one for the view.
+  const places = W.universe ? instancePlaces() : null, RD = places ? rasterDrawU : rasterDraw, { U } = RD;
+  gl.useProgram(RD.prog);
   gl.uniformMatrix4fv(U.uViewProj, false, M);
   gl.uniform3f(U.uEyeN, cam.eye[0] / W.side, cam.eye[1] / W.side, cam.eye[2] / W.side);
   gl.uniform1f(U.uInvSide, 1 / W.side);
   gl.uniform1i(U.uColorMode, colorMode);
-  gl.uniform1f(U.uFog, 1 / (1.5 * W.side));
+  gl.uniform1f(U.uFog, 1 / fogDist());
   gl.uniform1f(U.uDepthScale, 1 / (8 * W.side));
   const list = [];
   for (const d of streamer.frame.draw){
     const e = streamer.entry(d.key);
     if (!e || !e.gpu) continue;
-    const rel = [d.lo[0] - cam.eye[0], d.lo[1] - cam.eye[1], d.lo[2] - cam.eye[2]];
-    list.push({ d, e, rel, dist: Math.hypot(rel[0] + d.size / 2, rel[1] + d.size / 2, rel[2] + d.size / 2) });
+    const q = placeChunk(d, places), { rel, size } = q;
+    list.push({ d, e, ...q, dist: Math.hypot(rel[0] + size / 2, rel[1] + size / 2, rel[2] + size / 2) });
   }
   list.sort((a, b) => a.dist - b.dist);
   // The voxels the view stands for: the world's occupied voxels, at full
@@ -4503,7 +4909,8 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
   // the world's, a bound on it). One counts lookup a chunk: each cover
   // entry carries its DAG node.
   view.voxels = 0;
-  for (const { d, rel } of list) if (boxVisible(planes, rel, d.size)) view.voxels += W.counts.of(d.id);
+  for (const { d, rel, size } of list) if (boxVisible(planes, rel, size)) view.voxels += (places ? W.worlds.get(d.world).counts.of(d.id) * (size / d.size) ** 3 : W.counts.of(d.id));
+  view.inView = places ? new Set() : null;
   view.culled = 0; view.instances = 0; view.triangles = 0; view.rayTriangle = false; view.drawn = 0; view.drawList = [];
   wireList = [];
   view.occluded = 0; view.occludedCubes = 0; view.queried = 0; view.nearEye = 0; view.occlPollMs = 0; view.occlRunMs = 0;
@@ -4523,21 +4930,23 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
     occl.occ.begin(occ === occlusion ? frameTick : undefined);
   }
   run('raster', () => {
-    for (const { d, e, rel } of list){
+    let at = null;
+    for (const { d, e, rel, size, origin, P, okey } of list){
       if (e.kind === 'page' || !doRaster) continue;
-      if (!boxVisible(planes, rel, d.size)){ view.culled++; continue; }
+      if (!boxVisible(planes, rel, size)){ view.culled++; continue; }
       const open = state.seams ? d.open : 0, n = open ? e.total : e.count;
       if (!n) continue;
       if (occl){
-        const pad = d.size / 64, lo = [rel[0] - pad, rel[1] - pad, rel[2] - pad], side = d.size + 2 * pad;
+        const pad = size / 64, lo = [rel[0] - pad, rel[1] - pad, rel[2] - pad], side = size + 2 * pad;
         if (nearEye(lo, side, nearR)) view.nearEye++;
         else {
-          const c = occl.occ.consider(d.key, e);
+          const c = occl.occ.consider(okey, e);
           if (c.query) asks.push({ state: c.state, box: [lo[0], lo[1], lo[2], side] });
           if (!c.draw){ view.occluded++; view.occludedCubes += n; continue; }
         }
       }
-      gl.uniform3f(U.uOrigin, rel[0], rel[1], rel[2]);
+      if (P) at = instanceUniforms(U, P, at, d.lod);
+      gl.uniform3f(U.uOrigin, origin[0], origin[1], origin[2]);
       gl.uniform1f(U.uCellSize, e.cellSize);
       gl.uniform1ui(U.uOpenSides, open);
       gl.uniform3fv(U.uLodColor, LOD_COLORS[d.lod]);
@@ -4545,11 +4954,12 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
       gl.uniform1i(U.uDrawIndex, view.drawn);
       view.drawList[view.drawn] = d.key;
       gl.bindVertexArray(e.gpu.vao);
-      gl.drawElementsInstanced(gl.TRIANGLES, rasterDraw.tris, gl.UNSIGNED_BYTE, 0, n);
+      gl.drawElementsInstanced(gl.TRIANGLES, RD.tris, gl.UNSIGNED_BYTE, 0, n);
       view.drawn++; view.instances += n; view.triangles += 2 * quadsShown(e.quads, e.openQuads, open);
-      if (state.wire) wireList.push({ d, e, rel, open, n });
+      if (state.wire) wireList.push({ d, e, rel, origin, P, open, n });
     }
     gl.bindVertexArray(null);
+    gl.frontFace(gl.CCW);
     if (occl){
       const t = performance.now();
       occl.run(M, asks, T, w, h);
@@ -4581,7 +4991,7 @@ function renderView(w, h, colorMode, timeIt = false, clear = [0.027, 0.027, 0.03
     gl.uniform1f(RP.uInvSide, 1 / W.side);
     gl.uniform3fv(RP.uLodColors, LOD_COLORS.flat());
     gl.uniform1i(RP.uColorMode, passes === 'mask' ? 10 : colorMode);
-    gl.uniform1f(RP.uFog, 1 / (1.5 * W.side));
+    gl.uniform1f(RP.uFog, 1 / fogDist());
     gl.uniform1f(RP.uDepthScale, 1 / (8 * W.side));
     gl.disable(gl.CULL_FACE); gl.disable(gl.DEPTH_TEST);
     if (!discardMiss){ gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); }
@@ -4625,6 +5035,23 @@ const k = n => n >= 1e12 ? (n / 1e12).toFixed(2) + 'T' : n >= 1e9 ? (n / 1e9).to
 const mb = b => (b / 1048576).toFixed(1) + ' MB';
 // Two significant figures below 10%, so a street's share of a world isn't 0.0%.
 const pct = (a, b) => { const p = b ? 100 * a / b : 0; return (p >= 10 || p === 0 ? p.toFixed(1) : p.toPrecision(2)) + '%'; };
+/* Where the eye is in a universe (universe-plan §5, "the HUD names the world the eye
+   is in"): the instance whose cube holds it (universe-core's instanceAt, the worlds
+   listed before their flat ground), as its world's key and which copy of how many,
+   or null between them. */
+function whereInUniverse(){
+  const u = W.universe, i = instanceAt(u, cam.eye);
+  if (i < 0) return null;
+  const key = u.instances[i].world, copies = u.instances.filter(x => x.world === key);
+  return { index: i, world: key, copy: copies.indexOf(u.instances[i]) + 1, of: copies.length, label: W.worlds.get(key).label };
+}
+function universeLine(){
+  const at = whereInUniverse(), inView = view.inView ? view.inView.size : 0, u = W.universe;
+  const worldsInView = view.inView ? new Set([...view.inView].map(i => u.instances[i].world)).size : 0;
+  return `<span class="sec">universe</span> ${at ? `in <b>${esc(at.world)}</b>${at.of > 1 ? `, copy ${at.copy} of ${at.of}` : ''} (${esc(at.label)})` : 'between worlds'}  ` +
+    `${inView} of ${u.instances.length} instances in view, of ${worldsInView} of ${W.worlds.size} worlds${W.plane ? `  plane at y = ${W.plane.Y}, ${W.plane.size.join(' × ')}` : ''}  ` +
+    `tint ${state.tint ? 'on' : 'off'}`;
+}
 function hud(){
   if (!W){ if (building.text) $('hud').textContent = building.text; return; }
   const S = streamer.S, sel = streamer.sel, fr = streamer.frame;
@@ -4645,6 +5072,7 @@ function hud(){
       `${W.lattice.threads ? `${W.lattice.threads} threads` : '<span class="warn">main thread</span>'} ${(W.buildMs / 1000).toFixed(1)} s\n` : '') +
     (W.caves ? `<span class="sec">caves</span> ${W.caves.info.tunnels.toLocaleString()} tunnels (${W.caves.info.mouths} mouths), ${W.caves.info.worms.toLocaleString()} worms, ` +
       `${k(W.voxels)} voxels, ${W.caves.threads ? `${W.caves.threads} threads, slowest part ${(W.caves.ms.slowestPart / 1000).toFixed(1)} s` : '<span class="warn">main thread</span>'}\n` : '') +
+    (W.universe ? universeLine() + '\n' : '') + (W.endless ? endlessLine() + '\n' : '') +
     (W.file ? `<span class="sec">file</span> ${W.file.fileName ? esc(W.file.fileName) : 'added here'}, ${k(W.voxels)} voxels, ${colourNote(W.file.colourStatus)}\n` : '') +
     (W.kit ? `<span class="sec">kit</span> ${W.kit.desc.libs.length ? `libraries ${W.kit.desc.libs.join(', ')}` : 'no libraries'}, ${W.kit.desc.ornaments} ornaments, ${W.kit.desc.ground ? 'ground and gravity' : 'floating'}, ` +
       `colour in level-${W.kit.desc.colourLevel} frames: ${k(W.voxels)} voxels, ${W.classes ? `${W.classes.toLocaleString()} Oh classes, ` : ''}${k(W.kit.dropped)} nodes pruned, a real store in ${W.kit.realMs.toFixed(1)} ms\n` : '') +
@@ -4681,7 +5109,9 @@ function hud(){
                              skipped: W.lattice.skipped, blocks: W.lattice.blocks, dropped: W.lattice.dropped, threads: W.lattice.threads, fellBack: W.lattice.fellBack || null, ms: W.lattice.ms } : null,
       kit: W.kit ? { param: kitParam(W.kit.desc), seed: W.kit.desc.seed, nodes: W.kit.nodes, dropped: W.kit.dropped, classes: W.classes, ms: W.kit.totalMs, realMs: W.kit.realMs } : null,
       caves: W.caves ? { desc: W.caves.desc, info: W.caves.info, threads: W.caves.threads, fellBack: W.caves.fellBack || null, ms: W.caves.ms } : null,
-      file: W.file ? { name: W.file.name, fileName: W.file.fileName, colourStatus: W.file.colourStatus } : null },
+      file: W.file ? { name: W.file.name, fileName: W.file.fileName, colourStatus: W.file.colourStatus } : null,
+      universe: W.universe ? { worlds: W.worlds.size, instances: W.universe.instances.length, Y: W.plane?.Y ?? null, at: whereInUniverse(), inView: view.inView ? view.inView.size : 0,
+                               worldsInView: view.inView ? new Set([...view.inView].map(i => W.universe.instances[i].world)).size : 0 } : null },
     edit: window.__edit.state(), eye: cam.eye.slice(), view: { ...view }, gpu: { ...gpu },
     cut: sel ? { leaves: sel.leaves.length, nodes: sel.nodes.size, capped: sel.capped } : null,
     resident: S.cache.size, cacheBytes: S.cacheBytes, missing, drawn: fr.draw.length, holes: fr.holes.length,
@@ -4772,10 +5202,32 @@ function invariants(phase, report, { noHoles, oneRoot = false }){
     // Step 6, as in stream-core.test.js's frameChecker: one word per
     // record, or per shown cell of a page.
     else if (e.kind === 'records' ? e.words !== e.total : e.words !== e.shown) bad(`${d.key}: ${e.words} words for ${e.kind === 'records' ? e.total + ' records' : e.shown + ' shown cells'}`);
+    if (W.universe) continue;
     for (let l = d.lod + 1; l <= W.D - 6; l++){
       const s = l - d.lod;
       if (drawn.has(keyOf(l, d.x >> s, d.y >> s, d.z >> s))) bad(`${d.key} drawn under ${keyOf(l, d.x >> s, d.y >> s, d.z >> s)}`);
     }
+  }
+  /* A universe (stream-core §1b), as frameChecker holds a forest: each instance's
+     chunks drawn under none of its own ancestors (an instance's tree is a partition
+     of its world, a copy's chunks are another tree's), every entry its own world's,
+     a pin a world, and every chunk records (no ray path). */
+  if (W.universe){
+    const mine = new Set(fr.draw.map(d => d.tree + '|' + d.key));
+    for (const d of fr.draw){
+      const e = S.cache.get(d.key), D = W.worlds.get(d.world).D;
+      if (e && (e.world !== d.world || e.key !== forestKey(d.world, keyOf(e.lod, e.x, e.y, e.z)))) bad(`${d.key}'s entry is world ${e.world}'s`);
+      for (let l = d.lod + 1; l <= D - 6; l++){
+        const s = l - d.lod, up = forestKey(d.world, keyOf(l, d.x >> s, d.y >> s, d.z >> s));
+        if (mine.has(d.tree + '|' + up)) bad(`${d.key} drawn under ${up} in instance ${d.tree}`);
+      }
+    }
+    const named = new Set(W.universe.instances.map(x => x.world).filter(k => W.worlds.get(k).root !== EMPTY));
+    if (S.pins.size !== named.size || [...named].some(k => !S.pins.has(forestKey(k, keyOf(Math.max(0, W.worlds.get(k).D - 6), 0, 0, 0))))) bad(`${S.pins.size} pins for ${named.size} worlds drawn`);
+    for (const e of S.cache.values()) if (e.kind !== 'records'){ bad(`${e.key} is a ${e.kind} in a universe`); break; }
+    // The endless lattice swaps its universe without a flush (step 5): never an entry of a world it hasn't got.
+    for (const e of S.cache.values()) if (!W.worlds.has(e.world)){ bad(`${e.key} of a world the universe hasn't got`); break; }
+    if (noHoles && [...S.pins].every(k => S.cache.has(k)) && fr.holes.length) bad(`${fr.holes.length} holes`);
   }
   if (S.stats.lastInstalls > 1 && S.stats.lastUpload > S.cfg.uploadBytes) bad(`uploaded ${S.stats.lastUpload}`);
   if (S.cacheBytes > S.cfg.cacheBytes){
@@ -4790,7 +5242,7 @@ function invariants(phase, report, { noHoles, oneRoot = false }){
   for (const e of S.cache.values()) bytes += e.bytes;
   if (bytes !== S.cacheBytes) bad(`cacheBytes ${S.cacheBytes}, entries hold ${bytes}`);
   const sel = streamer.sel, cfg = S.cfg, want = new Map();
-  if (sel) for (const c of sel.nodes.values()){
+  if (sel && !W.universe) for (const c of sel.nodes.values()){
     const e = S.cache.get(c.key), parent = c.parent ? want.get(c.parent.key) : 'records';
     let k;
     if (cfg.kindRule) k = cfg.kindRule(c);
@@ -5022,6 +5474,709 @@ window.streamSelftest = async function streamSelftest(opts = {}){
   report.ms = Math.round(performance.now() - t0);
   auto = saved.auto;
   window.__streamSelftest = report;
+  return report;
+};
+
+/* poolSelftest(): docs/universe-plan.md step 2, many worlds in the pool and the
+   workers, with real threads and nothing drawn (the page draws a universe in
+   step 3). A universe of the demo's kinds on the plane: the D = 8 kit at two
+   turns, the D = 9 city, and the flat ground round them (planeOf), so three
+   worlds, three colour descriptors and copies sharing chunks. A streamer of its
+   own (keepRecords, no GPU) and a StreamPool of its own fly it from the kit over
+   the city, with one worker killed part way, then rest. Held to:
+     - every frame: every chunk drawn is resident and its entry is its world's;
+     - at rest: converged, and every entry's records and words are what a
+       main-thread createJobRunner of its own world's snapshot makes of that job,
+       word for word (so each job ran in the world it names);
+     - the killed worker restarted, was handed every snapshot, and did jobs after;
+       no failure but the kill's;
+     - the same flight on a pool of no workers (the main-thread runners, one a
+       world) rests to the same bytes;
+     - on the workers' pool: a plain world after the universe (one revision on,
+       so the workers forget it) and the universe again, each to the same bytes;
+     - a tail refused in a universe.
+   `opts.pool` imports another StreamPool (test/browser/stream.test.js's mutants
+   of stream-pool.js and chunk-worker.js), and `opts.bail` stops at the first
+   error, for them. */
+window.poolSelftest = async function poolSelftest(opts = {}){
+  const t0 = performance.now(), { StreamPool: Pool } = opts.pool ? await import(opts.pool) : { StreamPool };
+  const report = { ok: false, errors: [] }, err = m => { if (report.errors.length < 20) report.errors.push(m); };
+  const kd = kitDesc({ D: 8 }), kitW = buildKit(kd), cd = cityDesc({ D: 9, seed: 1 }), cityW = buildCity(cd);
+  const worlds = new Map([['kit:1', { store: kitW.store, root: kitW.root, D: 8, ground: kitGround(kd), colour: kd }],
+                          ['city:1', { store: cityW.store, root: cityW.root, D: 9, ground: cityGround(cd), colour: cd }]]);
+  const plane = planeOf(worlds, [{ world: 'kit:1' }, { world: 'city:1' }, { world: 'kit:1', turn: 41 }], { cols: 3 });
+  for (const k of plane.flats){
+    const d = clayDesc({ D: k, lump: 0, ground: true }), w = buildClay(d);
+    worlds.set(flatKey(k), { store: w.store, root: w.root, D: k, ground: flatGround(k), colour: d });
+  }
+  const u = createUniverse(worlds, plane.instances);
+  const snaps = new Map([...worlds].map(([k, w]) => [k, worldSnapshot(w.store, w.root, w.D, { counts: createCounts(w.store), colour: w.colour })]));
+  const direct = new Map([...snaps].map(([k, sn]) => [k, createJobRunner(sn, colourOf)]));
+  report.worlds = [...worlds.keys()]; report.instances = u.instances.length; report.Y = plane.Y;
+  const workers = opts.workers ?? 2, frames = opts.frames ?? 150;
+  const from = [128.37, plane.Y + 60.21, 128.53], to = [plane.size[0] - 128.29, plane.Y + 90.77, 200.61];
+  const eyeAt = f => { const a = Math.min(1, f / frames); return [0, 1, 2].map(i => from[i] + a * (to[i] - from[i])); };
+  const tick = () => new Promise(r => setTimeout(r, 4));
+  // Every entry against its own world's runner, as the job it was made by.
+  const same = (a, b) => !!a && !!b && a.length === b.length && a.every((v, i) => v === b[i]);
+  const restBytes = (st, label) => {
+    let n = 0, bad = 0;
+    for (const e of st.S.cache.values()){
+      const r = direct.get(e.world)?.({ lod: e.lod, cx: e.x, cy: e.y, cz: e.z, lodRule: st.S.cfg.lodRuleOf(e.lod), kind: 'records', root: e.root });
+      n++;
+      if (!r || !same(e.records, r.records) || !same(e.attrs, r.attrs)){ if (!bad++) err(`${label}: ${e.key} isn't its world's bytes`); }
+    }
+    return { entries: n, bad };
+  };
+  const fly = async (pool, st, { label, kill = false, plain = null }) => {
+    const out = { label, frames: 0, killedAt: -1 };
+    let killed = null, before = 0;
+    for (let f = 0; f < frames + 2000; f++){
+      const eye = plain ? plain.eye : eyeAt(f);
+      st.update(eye); pool.dispatch(); st.service();
+      const fr = st.frame;
+      for (const d of fr.draw){
+        const e = st.S.cache.get(d.key);
+        if (!e){ err(`${label} frame ${f}: ${d.key} drawn, not resident`); break; }
+        if (!plain && (e.world !== d.world || e.key !== forestKey(e.world, keyOf(e.lod, e.x, e.y, e.z)))){ err(`${label} frame ${f}: ${d.key}'s entry is world ${e.world}'s`); break; }
+      }
+      if (kill && f === frames >> 1 && pool.liveWorkers > 1){
+        killed = pool.slots.find(sl => !sl.dead && sl.ready); before = killed.completed || 0;
+        killed.fail('poolSelftest: a worker died'); out.killedAt = f;
+      }
+      out.frames = f + 1;
+      if (opts.bail && report.errors.length) break;
+      const S = st.S;
+      if (f >= frames && !S.queue.some(c => !S.cache.has(c.key)) && !S.pending.size && !S.results.length && !fr.holes.length && st.sel.leaves.every(l => S.cache.has(l.key))) break;
+      await tick();
+    }
+    const S = st.S;
+    out.converged = !S.pending.size && !st.frame.holes.length && st.sel.leaves.every(l => S.cache.has(l.key));
+    out.drawn = st.frame.draw.length; out.distinct = new Set(st.frame.draw.map(d => d.key)).size;
+    out.failed = S.stats.failed;
+    if (killed) out.restarted = { restarts: killed.restarts, dead: killed.dead, after: (killed.completed || 0) - before };
+    Object.assign(out, restBytes(st, label));
+    return out;
+  };
+  const streamerOf = () => createStreamer({ keepRecords: true });
+  let pool = null, compat = null;
+  try {
+    const st = streamerOf(); st.setUniverse(u);
+    pool = new Pool(st, { workerCount: workers }); pool.start();
+    pool.setUniverse(snaps, 1);
+    report.workers = await fly(pool, st, { label: 'workers', kill: true });
+    report.mode = pool.mode;
+    try { pool.tail({}); report.tailRefused = false; } catch (e){ report.tailRefused = /no tails/.test(e.message); }
+    // The main thread's runners, one a world.
+    const st0 = streamerOf(); st0.setUniverse(u);
+    compat = new Pool(st0, { workerCount: 0 }); compat.start(); compat.setUniverse(snaps, 1);
+    const bailed = () => opts.bail && report.errors.length;
+    if (bailed()) throw new Error('bailed: ' + report.errors[0]);
+    report.compat = await fly(compat, st0, { label: 'main thread' });
+    report.compat.runners = compat.runners.size;
+    // A plain world on the workers' pool, then the universe again.
+    const city = worlds.get('city:1'), st1 = streamerOf();
+    st1.setWorld(createWorld(city.store, city.root, city.D));
+    // The same pool and workers under a new streamer (the page has one for its
+    // life, and moves it from world to world; this one is made a flight).
+    pool.streamer = st1; pool.setWorld(snaps.get('city:1'), 2);
+    direct.set(null, direct.get('city:1'));
+    report.plain = await fly(pool, st1, { label: 'a plain world after', plain: { eye: [256.37, 70.21, 256.53] } });
+    if (bailed()) throw new Error('bailed: ' + report.errors[0]);
+    const st2 = streamerOf(); st2.setUniverse(u);
+    pool.streamer = st2; pool.setUniverse(snaps, 3);
+    report.again = await fly(pool, st2, { label: 'the universe again' });
+    const runs = [report.workers, report.compat, report.plain, report.again];
+    for (const r of runs){
+      if (!r.converged) err(`${r.label}: didn't converge in ${r.frames} frames`);
+      if (!r.entries) err(`${r.label}: nothing resident`);
+    }
+    if (report.workers.killedAt < 0) err('no worker was killed (fewer than two live)');
+    else {
+      const k = report.workers.restarted;
+      if (k.restarts !== 1 || k.dead || !(k.after > 0)) err(`the killed worker: ${JSON.stringify(k)} (restarted once, alive, and jobs after)`);
+    }
+    if (report.workers.failed > 1) err(`workers: ${report.workers.failed} failures (the kill's only)`);
+    for (const r of [report.compat, report.plain, report.again]) if (r.failed) err(`${r.label}: ${r.failed} failures`);
+    if (!(report.workers.drawn > report.workers.distinct)) err('no world chunk drawn by two copies');
+    if (report.compat.runners !== worlds.size) err(`main thread: ${report.compat.runners} runners for ${worlds.size} worlds`);
+    if (!report.tailRefused) err('a tail in a universe wasn\'t refused');
+    report.ok = !report.errors.length;
+  } catch (e){ err(String(e.stack || e)); }
+  finally { pool?.suspend(); compat?.suspend(); }
+  report.ms = Math.round(performance.now() - t0);
+  window.__poolSelftest = report;
+  return report;
+};
+
+/* endlessSelftest(): docs/universe-plan.md step 5, the endless lattice (docs/universe-log.md).
+   Raster only, real chunk workers and world workers, every frame held to invariants()
+   (per instance, and never an entry of a world the universe hasn't got). Held to:
+     - endless:1 through the menu's road: every cell of the opening window built in the
+       world workers and drawn, every ground at the plane's 195, and three of the workers'
+       worlds (a kit, a city, a dungeon) the bytes tile-worlds' buildTile makes here;
+     - a flight of 2,600 voxels across x and z by dyadic steps, as move() would fly it:
+       re-centred at least four times, the absolute eye exactly the steps' sum every frame
+       (the origin rolls by whole voxels), the streamer never flushed (one revision, every
+       entry still resident the same object), converged at the end;
+     - a frame unchanged by the origin: the same absolute eye, looking down, with the
+       window centred on two different cells (the margin lets the eye sit in a cell the
+       window isn't centred on), byte for byte in two colour modes;
+     - the link: the eye saveView writes is absolute, and opening the lattice at it (from
+       another world, the eye kept) puts the eye back there, centred on its cell;
+     - a new seed keeps the eye where it is and every world it held;
+     - walking across a re-centre: over two parks side by side at a run, the walker
+       standing on the plane every frame and moving on by under half a voxel a frame,
+       the origin rolling under it;
+     - the held worlds over a budget of 0: every world the window doesn't want let go, and
+       none it does. */
+window.endlessSelftest = async function endlessSelftest(opts = {}){
+  const t0 = performance.now();
+  const saved = { auto, path: state.path, occ: state.occlusion, chosen: state.occlusionChosen, color: state.color, world: state.world, uniFiles: state.uniFiles.slice(),
+                  eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch };
+  auto = false;
+  const report = { violations: [], errors: [], frames: 0, ok: false };
+  const err = m => { if (report.errors.length < 40) report.errors.push(m); };
+  const W_ = 200, H_ = 150;
+  const pump = async (n, phase) => {
+    for (let f = 0; f < n; f++){ frame({ draw: false }); report.frames++; invariants(phase, report, { noHoles: false }); await sleep(4); }
+  };
+  const builtAll = () => { const E = W.endless; return E.win.cells.every(c => !c.tile || c.built || E.failed.has(c.tile.world)) && !tileBuilder.busy; };
+  const settle = async (phase, all = false) => {
+    const end = performance.now() + (opts.settleMs ?? 90000);
+    for (let f = 0; performance.now() < end; f++){ await pump(1, phase); if (f > 2 && (!all || builtAll()) && isConverged()) return true; }
+    err(`${phase}: didn't converge${all && !builtAll() ? ' (worlds still to come)' : ''}`); return false;
+  };
+  const differ = (a, b) => { let n = 0; for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) n++; return n; };
+  const lit = a => { let n = 0; for (let i = 3; i < a.length; i += 4) if (a[i]) n++; return n; };
+  // The eye at an absolute point (a jump: the next frame re-centres on it).
+  const jumpTo = (abs, yaw, pitch) => { cam.eye = abs.map((v, a) => v - W.endless.win.offset[a]); cam.yaw = yaw; cam.pitch = pitch; dirty = true; };
+  const sameAbs = (a, b) => a.every((v, i) => v === b[i]);
+  try {
+    setPath('off'); setOcclusion('off', { chosen: true }); state.uniFiles = [];
+    state.world = 'endless:1'; fillWorlds(); fillSeed();
+    if (!await loadWorld(true)) err('endless:1 didn\'t load');
+    const E = W.endless, L = E.L, C = L.cell;
+    // ---- the opening window, every cell built ----
+    await settle('opening', true);
+    report.opening = { cells: E.win.cells.length, built: E.win.cells.filter(c => c.built).length, parks: E.win.cells.filter(c => !c.tile).length, worlds: E.held.size,
+                       instances: W.universe.instances.length, ms: Math.round(performance.now() - E.t0), failed: [...E.failed.keys()] };
+    if (E.failed.size) err(`worlds failed to build: ${[...E.failed].map(([k, why]) => `${k}: ${why}`).join('; ')}`);
+    if (L.Y !== 195) err(`the plane at ${L.Y}, not the scatter's 195`);
+    const datum = { kit: kitGround(kitDesc({ D: 8 })), city: cityGround(cityDesc({ D: 9 })), dungeon: dungeonGround(dungeonDesc({ D: 9, floors: 3 })), scatter: scatterGround(scatterDesc({ D: 9 })), flat: flatGround(8) };
+    for (const x of W.universe.instances){
+      const kind = x.world.slice(0, x.world.indexOf(':'));
+      if (x.at[1] + datum[kind] * 2 ** x.scale !== L.Y){ err(`${x.world} at ${x.at}: its ground isn't at the plane's ${L.Y}`); break; }
+    }
+    { const kinds = new Set(E.win.want.map(t => t.kind)), checked = [];
+      for (const kind of ['kit', 'city', 'dungeon']){
+        const t = E.win.want.find(x => x.kind === kind);
+        if (!t){ continue; }
+        const mine = buildTile(t).store.snapshot().keys, theirs = E.held.get(t.world)?.world.store.snapshot().keys;
+        if (!theirs || mine.length !== theirs.length || mine.some((v, i) => v !== theirs[i])) err(`${t.world}: the world worker's keys aren't buildTile's`);
+        if (E.held.get(t.world)?.world.root !== buildTile(t).root) err(`${t.world}: the world worker's root isn't buildTile's`);
+        checked.push(t.world);
+      }
+      report.opening.kinds = [...kinds]; report.opening.checked = checked;
+      if (checked.length < 2) err(`only ${checked.length} kinds near the opening to check against buildTile`); }
+
+    // ---- a flight across cells: the origin rolls, nothing flushes ----
+    { const rev = streamer.S.revision, r0 = E.recentres, step = [2.5, 0, 1.25], frames = 700;
+      let abs = absoluteEye(), lost = 0;
+      cam.yaw = 1.1; cam.pitch = -0.25;
+      for (let f = 0; f < frames; f++){
+        const before = new Map(streamer.S.cache);
+        for (let a = 0; a < 3; a++){ cam.eye[a] += step[a]; abs[a] += step[a]; }
+        await pump(1, 'flight');
+        if (!sameAbs(absoluteEye(), abs) && !lost++) err(`flight frame ${f}: the eye is at ${absoluteEye()}, the steps say ${abs}`);
+        for (const [k, e] of before) if (streamer.S.cache.has(k) && streamer.S.cache.get(k) !== e){ err(`flight frame ${f}: ${k} replaced`); break; }
+      }
+      if (streamer.S.revision !== rev) err(`the flight flushed the streamer (revision ${rev} → ${streamer.S.revision})`);
+      report.flight = { recentres: E.recentres - r0, offset: E.win.offset.slice(), held: E.held.size };
+      if (E.recentres - r0 < 4) err(`the flight re-centred ${E.recentres - r0} times`);
+      await settle('after the flight', true); }
+
+    // ---- a frame unchanged by the origin ----
+    { // A built cell, the eye over it 30 voxels inside its +x neighbour's margin, looking down.
+      const c = E.win.cells.find(x => x.built && Math.abs(x.i - E.win.centre[0]) <= 1 && Math.abs(x.j - E.win.centre[1]) <= 1) ?? E.win.cells[0];
+      const P = [(c.i + 1) * C - 30.25, L.Y + 140.5, c.j * C + 256.75], yaw = -1.2, pitch = -1.1;
+      jumpTo(P, yaw, pitch); await settle('origin A', true);
+      const centreA = E.win.centre.slice(), a8 = renderPixels(W_, H_, 8, 'raster'), a5 = renderPixels(W_, H_, 5, 'raster');
+      // Into the neighbour (re-centres there), and back to P, inside its margin: the centre stays.
+      jumpTo([P[0] + 200, P[1], P[2]], yaw, pitch); await pump(3, 'origin, away');
+      jumpTo(P, yaw, pitch); await settle('origin B', true);
+      const centreB = E.win.centre.slice(), b8 = renderPixels(W_, H_, 8, 'raster'), b5 = renderPixels(W_, H_, 5, 'raster');
+      report.origin = { centreA, centreB, attr: differ(a8, b8), dist: differ(a5, b5), lit: lit(a8) };
+      if (centreA[0] === centreB[0] && centreA[1] === centreB[1]) err(`the origin test's windows have one centre (${centreA})`);
+      if (!sameAbs(absoluteEye(), P)) err(`the origin test's eye moved: ${absoluteEye()} for ${P}`);
+      if (report.origin.attr || report.origin.dist) err(`a frame changed with the origin: ${report.origin.attr} pixels in colour, ${report.origin.dist} in distance`);
+      if (report.origin.lit < 2000) err(`the origin test's frame is nearly empty (${report.origin.lit} lit)`); }
+
+    // ---- the link ----
+    { const abs = [C * 7 + 100.5, L.Y + 90.25, -C * 5 + 300.75];
+      jumpTo(abs, 0.4, -0.2); await pump(3, 'link');
+      saveView();
+      const link = new URLSearchParams(location.search).get('eye').split(',').map(Number);
+      report.link = { link, abs };
+      if (!sameAbs(link, abs.map(Math.round))) err(`the link holds ${link}, the absolute eye is ${abs}`);
+      // Open the lattice at it from another world, the eye kept.
+      state.world = 'clay'; fillWorlds(); await loadWorld(true);
+      cam.eye = link.slice(); state.world = 'endless:1'; fillWorlds(); fillSeed();
+      await loadWorld('keep');
+      if (!sameAbs(absoluteEye(), link)) err(`opened at the link, the eye is at ${absoluteEye()}, not ${link}`);
+      const want = cellAt(W.endless.L, link);
+      if (W.endless.win.centre[0] !== want[0] || W.endless.win.centre[1] !== want[1]) err(`opened at the link, the window is round ${W.endless.win.centre}, not ${want}`);
+      await settle('link', true); }
+
+    // ---- a new seed: the eye where it was, every world kept ----
+    { const E1 = W.endless, abs = absoluteEye(), had = [...E1.held.keys()];
+      await setSeed(2, { now: true });
+      if (W.endless.L.seed !== 2) err(`setSeed(2) made seed ${W.endless.L.seed}`);
+      if (!sameAbs(absoluteEye(), abs)) err(`a new seed moved the eye: ${absoluteEye()} from ${abs}`);
+      const lost = had.filter(k => !W.endless.held.has(k));
+      report.seed = { held: had.length, lost: lost.length };
+      if (lost.length) err(`a new seed let go of ${lost.length} worlds (${lost.slice(0, 3)})`);
+      await settle('seed 2', true);
+      await setSeed(1, { now: true }); await settle('seed 1 again', true); }
+
+    // ---- walking across a re-centre, along a row of parks ----
+    { const L1 = W.endless.L;
+      let row = null;
+      for (let j = -20; j < 20 && !row; j++) for (let i = -20; i < 20 && !row; i++)
+        if (!cellOf(L1, i, j) && !cellOf(L1, i + 1, j)) row = [i, j];
+      if (!row) err('no two parks side by side near the origin');
+      else {
+        const start = [row[0] * C + C - 40.5, L1.Y + WALK.eye, row[1] * C + 256.5];
+        jumpTo(start, Math.PI / 2, 0); await settle('walk', true);
+        setWalk(true);
+        if (!walk.on) err(`walking didn't start: ${walk.note}`);
+        const r0 = W.endless.recentres;
+        // At a run (21 voxels a second), over the border and on past the margin.
+        const goal = (row[0] + 1) * C + L1.margin + 40;
+        keys.clear(); keys.add('KeyW'); keys.add('ShiftLeft');
+        let last = null, bad = 0, frames = 0;
+        for (; frames < 900 && (!last || last[0] < goal); frames++){
+          move(1000 / 60); frame({ draw: false }); report.frames++; invariants('walk', report, { noHoles: false });
+          const p = walk.w.p.map((v, a) => v + W.endless.win.offset[a]);
+          if (last && walk.w.ground){
+            const dx = p[0] - last[0];
+            if ((p[1] !== L1.Y || dx < 0 || dx > 0.5 || p[2] !== last[2]) && !bad++) err(`walking frame ${frames}: from ${last} to ${p}`);
+          }
+          last = p;
+          if (frames % 8 === 0) await sleep(0);
+        }
+        keys.clear();
+        report.walk = { row, frames, recentres: W.endless.recentres - r0, at: last };
+        if (W.endless.recentres - r0 < 1) err('the walk crossed no re-centre');
+        if (!last || last[0] < goal) err(`the walk stopped at ${last}, short of ${goal}`);
+        setWalk(false);
+      } }
+
+    // ---- the held worlds under a budget of 0 ----
+    { const E2 = W.endless;
+      jumpTo([C * 30 + 256.5, E2.L.Y + 200.5, C * 30 + 256.5], 0, -0.3); await settle('far off', true);
+      const before = E2.held.size, budget = E2.budget;
+      E2.budget = 0;
+      const dropped = endlessDrop(E2), want = new Set(E2.win.want.map(t => t.world));
+      E2.budget = budget;
+      report.budget = { before, dropped: dropped.length, after: E2.held.size };
+      if (!dropped.length) err('a budget of 0 let nothing go');
+      for (const [k, h] of E2.held) if (!h.pinned && !want.has(k)){ err(`${k} kept under a budget of 0, unwanted`); break; }
+      for (const k of want) if (E2.win.cells.some(c => c.built && c.tile?.world === k) && !E2.held.has(k)){ err(`${k} let go, and the window wants it`); break; }
+      await pump(5, 'after the budget'); }
+  } catch (e){ err(String(e.stack || e)); }
+  finally {
+    if (walk.on) setWalk(false); keys.clear();
+    state.uniFiles = saved.uniFiles; setPath(saved.path); state.color = saved.color;
+    if (saved.chosen) setOcclusion(saved.occ, { chosen: true }); else { state.occlusionChosen = false; setOcclusion(occlusionDefault(saved.world)); }
+    auto = saved.auto;
+  }
+  report.ok = !report.errors.length && !report.violations.length;
+  report.ms = Math.round(performance.now() - t0);
+  window.__endlessSelftest = report;
+  return report;
+};
+/* universeSelftest(): docs/universe-plan.md step 3, the page drawing a universe
+   (docs/universe-log.md). Raster only, real workers, every frame held to the page's
+   invariants() (per instance in a universe). Held to:
+     - **one world as one identity instance is today's frame, byte for byte**: the
+       D = 8 kit drawn as a plain world by the plain shader, and as a universe of
+       one instance at the identity by the turned one (rasterVS's `turned`), in
+       the attribute, gamut, distance, word and lod colours, the tint off;
+     - **instances against their bake**: kits, spheres and tori of D = 6 placed apart
+       in a D = 8 box, upright, turned about y and off it, mirrored, and one at ×2,
+       must draw the frame of the same placements baked into one DAG (a one log's
+       drops in a store of its own, twinWorld's way) at lod 0, from eyes exact in
+       float32: the words (colour mode 9) and the shading (mode 4) byte for byte,
+       distances within a hair (`distTol`, the 24-bit depth's last steps, where two
+       triangulations of one face interpolate differently);
+     - the eye's clearance and the orbit camera's picks against the bake's own
+       (stream-core's clearance, edit-core's pick on the baked DAG);
+     - the HUD's "you are in": each instance's centre names it, its copy and count;
+     - copies share chunks: a kit drawn three times, its chunks resident once;
+     - occlusion by queries changes no frame at rest; the wireframe draws turned;
+     - the demo, `universe:1`, through loadWorld: 21 instances of 7 worlds, every
+       ground at the plane's height (each core's datum, read here), converged with
+       no holes, every instance in the opening view, the tint changing a far frame;
+       no edit, no actors, no export, each saying why;
+     - **walking across** (step 4): the page's own walkStep, its keys and yaw, steered
+       round four of the turned instances and back on the bake and then on the
+       instances, the same numbers every frame, walking kept on as the universe comes
+       in, never inside the bake, through three instances at least by the HUD; in the
+       demo, from flat ground onto city:1's road and back at a corridor read off the
+       two worlds' own DAGs, standing at the plane's height every frame;
+     - "to the universe": a sphere put on the shelf, then in the universe, drawn; a
+       dungeon with it, whose secret doors are holes in the universe where it stands.
+   `opts.quick` skips the demo (the mutants that don't touch it). */
+window.universeSelftest = async function universeSelftest(opts = {}){
+  const t0 = performance.now();
+  const saved = { auto, path: state.path, detail: state.detail, tint: state.tint, occ: state.occlusion, chosen: state.occlusionChosen, color: state.color, wire: state.wire,
+                  world: state.world, depth: state.depth, uniFiles: state.uniFiles.slice(), eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch, dungeon: state.dungeon };
+  auto = false;
+  const report = { violations: [], errors: [], frames: 0, ok: false };
+  const err = m => { if (report.errors.length < 40) report.errors.push(m); };
+  const W_ = 200, H_ = 150, distTol = opts.distTol ?? 256;
+  const pump = async (n, phase) => {
+    for (let f = 0; f < n; f++){ frame({ draw: false }); report.frames++; invariants(phase, report, { noHoles: true }); await sleep(4); }
+  };
+  const settle = async phase => {
+    const end = performance.now() + (opts.settleMs ?? 60000);
+    for (let f = 0; performance.now() < end; f++){ await pump(1, phase); if (f > 2 && isConverged()) return true; }
+    err(`${phase}: didn't converge`); return false;
+  };
+  const look = (eye, at) => { const v = at.map((x, a) => x - eye[a]); cam.eye = eye.slice(); cam.yaw = Math.atan2(v[0], v[2]); cam.pitch = Math.atan2(v[1], Math.hypot(v[0], v[2])); dirty = true; };
+  // Pixels that differ, and the largest difference of a 24-bit distance (mode 5).
+  const differ = (a, b) => { let n = 0; for (let i = 0; i < a.length; i += 4) if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) n++; return n; };
+  const distDiff = (a, b) => { let n = 0, max = 0, small = 0; for (let i = 0; i < a.length; i += 4){ const d = Math.abs((a[i] << 16 | a[i + 1] << 8 | a[i + 2]) - (b[i] << 16 | b[i + 1] << 8 | b[i + 2])); if (d){ n++; max = Math.max(max, d); if (d <= 2) small++; } } return { n, max, small }; };
+  const lit = a => { let n = 0; for (let i = 3; i < a.length; i += 4) if (a[i]) n++; return n; };
+  const shots = modes => { view.clear = clearance(); return Object.fromEntries(modes.map(m => [m, renderPixels(W_, H_, m, 'raster')])); };
+  const plainWorld = (w, label) => {
+    const counts = createCounts(w.store), snap = worldSnapshot(w.store, w.root, w.D, { counts, colour: w.colour });
+    setEditMode(false);
+    W = { id: 'selftest', label, store: w.store, root: w.root, D: w.D, side: 2 ** w.D, top: Math.max(0, w.D - 6), nodes: w.store.size, voxels: counts.of(w.root), counts,
+          buildMs: 0, prepMs: 0, colour: w.colour, source: null, classes: null, edit: null, lazy: null, importing: null, noEdit: 'a selftest world' };
+    ray.frame = null;
+    streamer.setWorld(createWorld(w.store, w.root, w.D));
+    pool.setWorld(snap, ++worldEpoch);
+    dirty = true;
+    return { counts };
+  };
+  try {
+    setPath('off'); setOcclusion('off', { chosen: true });
+    // ---- one identity instance against the plain world ----
+    { const kd = kitDesc({ D: 8 }), k = buildKit(kd), kit = { store: k.store, root: k.root, D: 8, colour: kd, ground: kitGround(kd) };
+      state.tint = false;
+      const eyes = [[-60.5, 210.25, -80.75], [128.5, 40.25, 300.5], [200.25, 90.5, 20.75]], modes = [8, 3, 5, 9, 0];
+      const plain = [], uni = [];
+      plainWorld(kit, 'the kit, plain');
+      for (const [i, e] of eyes.entries()){ look(e, [128, 40, 128]); await settle(`plain ${i}`); plain.push(shots(modes)); }
+      installUniverse({ id: 'selftest', label: 'the kit, one identity instance', worlds: new Map([['kit', kit]]), instances: [{ world: 'kit', at: [0, 0, 0], turn: 0, scale: 0 }] });
+      if (W.side !== 256) err(`one kit's universe is ${W.side} a side, not 256`);
+      for (const [i, e] of eyes.entries()){ look(e, [128, 40, 128]); await settle(`identity ${i}`); uni.push(shots(modes)); }
+      report.identity = eyes.map((_, i) => Object.fromEntries(modes.map(m => [m, differ(plain[i][m], uni[i][m])])));
+      report.identityLit = lit(plain[0][8]);
+      for (const [i, r] of report.identity.entries()) for (const m of modes) if (r[m]) err(`identity eye ${i}, mode ${m}: ${r[m]} pixels differ from the plain world's`);
+      if (report.identityLit < 1000) err(`the identity frames are nearly empty (${report.identityLit} lit)`); }
+
+    // ---- instances against their bake ----
+    const kd6 = kitDesc({ D: 6 }), k6 = buildKit(kd6);
+    const shape = name => { const st = createStore(); return { store: st, root: st.fromField(6, fieldOf(SHAPES.find(x => x.name === name), 6)).root, D: 6, colour: { kind: 'shape', name, D: 6 } }; };
+    const kids = { kit6: { store: k6.store, root: k6.root, D: 6, colour: kd6 }, ball: shape('sphere'), torus: shape('torus'), baked: null };
+    // A sphere with its named colours baked into its skin (sceneChildren's): a word a
+    // voxel, the same at any point in it, which the ×2 case below needs.
+    { const D = 6, R = 64, f = colourOf(kids.ball.colour), occ = new Uint8Array(R ** 3), cell = fieldOf(SHAPES.find(x => x.name === 'sphere'), D);
+      for (let z = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) occ[x + R * (y + R * z)] = cell(0, x, y, z) === 1 ? 1 : 0;
+      const at = (x, y, z) => x >= 0 && y >= 0 && z >= 0 && x < R && y < R && z < R && occ[x + R * (y + R * z)];
+      const skinOcc = new Uint8Array(R ** 3), words = [];
+      for (let i = 0; i < R ** 3; i++){
+        const p = [0, 0, 0]; for (let l = 0; l < D; l++) for (let a = 0; a < 3; a++) p[a] |= (i >> 3 * l + a & 1) << l;
+        const [x, y, z] = p;
+        if (!at(x, y, z) || (at(x + 1, y, z) && at(x - 1, y, z) && at(x, y + 1, z) && at(x, y - 1, z) && at(x, y, z + 1) && at(x, y, z - 1))) continue;
+        skinOcc[x + R * (y + R * z)] = 1; words.push(f(x + 0.5, y + 0.5, z + 0.5));
+      }
+      const st = createStore(), root = st.fromDense(occ, R).root, skin = st.fromDense(skinOcc, R).root;
+      kids.baked = { store: st, root, D, skin, colour: { kind: 'baked', skin, words: Uint32Array.from(words) } }; }
+    for (const [n, w] of Object.entries(kids)){ w.ground = null; w.name = n; }
+    // Apart, one to each octant of the box (no cube meets another), off the chunk grid:
+    // the four proper turns about y, turns off y, two mirrors (1: x flipped; 8: y and z
+    // swapped), a kit three times. Their cubes reach the box's far corner, so the
+    // universe is 256 a side as the bake is, and the fog and the depth scale agree.
+    const P = [
+      { world: 'kit6', at: [4, 4, 4], turn: 0 },              { world: 'ball', at: [148, 2, 6], turn: 41 },
+      { world: 'torus', at: [10, 134, 10], turn: 5 },         { world: 'kit6', at: [6, 3, 158], turn: 44 },
+      { world: 'kit6', at: [152, 132, 40], turn: 1 },         { world: 'torus', at: [178, 9, 140], turn: 8 },
+      { world: 'ball', at: [30, 168, 131], turn: 19 },        { world: 'torus', at: [190, 190, 190], turn: 0 },
+    ].map(p => ({ scale: 0, ...p })).filter((_, i) => !opts.only || opts.only.includes(i));
+    // At ×2, alone in the far octant: a world voxel is one cube of side 2 here and
+    // eight unit cubes in the bake, rasterised from different vertices, so a pixel
+    // exactly on an edge may go either way (the same as a raster against the ray,
+    // gradeRasterVsRay). Its words may differ only there: each differing pixel on an edge
+    // in one frame or the other (the first rule, its value within a pixel or two in the
+    // other frame, failed on a lone pixel of a voxel behind, seen at a corner), and under
+    // 0.2% of the lit pixels. A wrong turn, place or word moves faces' insides. The child is the
+    // baked sphere: the bake asks a named child's field at the parent voxel's centre, a
+    // quarter voxel off the child voxel's own, and the kit's colour moved a 6-bit step
+    // there in a few pixels; a baked child's word is the voxel's wherever it's asked.
+    // Shading isn't compared: its fog reads the distance, which two triangulations of a
+    // face interpolate differently, and it rounded a step apart in a few pixels.
+    const P2 = [{ world: 'baked', at: [128, 128, 128], turn: 44, scale: 1 }];
+    const worlds = new Map(Object.entries(kids));
+    // The same placements baked, a one log's drops in a store of its own, drawn as a
+    // plain world (twinWorld's road), then as instances.
+    const bakeOf = list => {
+      const store = createStore(), log = createOneLog(EMPTY);
+      for (const p of list) if (!log.drop(store, 8, { world: kids[p.world], at: p.at, turn: p.turn, scale: p.scale })) err(`the bake refused ${p.world} at ${p.at}`);
+      const root = log.root, counts = createCounts(store), colour = clayDesc({ D: 8, lump: 0, ground: false });
+      const snap = worldSnapshot(store, root, 8, { counts, colour }), tailer = createTailer(store, { counts, oneLog: log });
+      setEditMode(false);
+      W = { id: 'selftest', label: 'the bake', store, root, D: 8, side: 256, top: 2, nodes: store.size, voxels: counts.of(root), counts,
+            buildMs: 0, prepMs: 0, colour, source: null, classes: null, edit: null, lazy: null, importing: null, noEdit: 'a selftest world' };
+      ray.frame = null;
+      streamer.setWorld(createWorld(store, root, 8));
+      pool.setWorld(snap, ++worldEpoch);
+      pool.tail(tailer());
+      dirty = true;
+      return { store, root };
+    };
+    // Pixels that differ, and of those, any inside a face in both frames: all eight
+    // neighbours hold its own value, in the bake's frame and in the instances'.
+    const edgesOnly = (a, b) => {
+      let n = 0, far = 0;
+      const at = (px, x, y) => { const i = 4 * (y * W_ + x); return px[i] | px[i + 1] << 8 | px[i + 2] << 16 | px[i + 3] << 24; };
+      const inside = (px, x, y, v) => { for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++){ const X = x + dx, Y = y + dy; if (X >= 0 && Y >= 0 && X < W_ && Y < H_ && at(px, X, Y) !== v) return false; } return true; };
+      for (let y = 0; y < H_; y++) for (let x = 0; x < W_; x++){
+        const va = at(a, x, y), vb = at(b, x, y);
+        if (va === vb) continue;
+        n++;
+        if (inside(a, x, y, va) && inside(b, x, y, vb)) far++;
+      }
+      return { n, far };
+    };
+    state.detail = 1e6; streamer.setOptions({ detail: state.detail });
+    const bakeCase = async (name, list, eyes, at, exact) => {
+      const modes = [9, 4, 5], baked = [], inst = [], clearB = [], bk = bakeOf(list);
+      for (const [i, e] of eyes.entries()){
+        look(e, at); await settle(`${name} bake ${i}`);
+        if (streamer.frame.draw.some(d => d.lod)) err(`${name} bake eye ${i}: a chunk above lod 0`);
+        baked.push(shots(modes)); clearB.push(clearanceOf(createWorld(bk.store, bk.root, 8), cam.eye, 1 << 20));
+      }
+      // The picks: rays from each eye at points of the box, the bake's t against the universe's.
+      const rand = mulberry(7), rays = eyes.flatMap(e => Array.from({ length: 40 }, () => { const q = [rand() * 256, rand() * 256, rand() * 256]; return { o: e, d: norm(q.map((v, a) => v - e[a])) }; }));
+      const pickB = rays.map(r => pick(bk.store, bk.root, 8, r.o, r.d)?.t ?? null);
+      installUniverse({ id: 'selftest', label: `${name} as instances`, worlds: new Map(worlds), instances: list });
+      if (W.side !== 256) err(`${name}: the universe is ${W.side} a side, the bake 256`);
+      for (const [i, e] of eyes.entries()){
+        look(e, at); await settle(`${name} instances ${i}`);
+        if (streamer.frame.draw.some(d => d.lod)) err(`${name} instances eye ${i}: a chunk above lod 0`);
+        inst.push(shots(modes));
+        const c = clearance();
+        if (!(Math.abs(c - clearB[i].d) < 1e-9)) err(`${name} eye ${i}: the universe's clearance ${c}, the bake's ${clearB[i].d}`);
+      }
+      const out = eyes.map((_, i) => ({ words: edgesOnly(baked[i][9], inst[i][9]), shade: edgesOnly(baked[i][4], inst[i][4]), dist: distDiff(baked[i][5], inst[i][5]), lit: lit(baked[i][9]) }));
+      for (const [i, r] of out.entries()){
+        if (!exact && r.words.n > 0.002 * r.lit) err(`${name} eye ${i}: ${r.words.n} pixels' words differ from the bake's, of ${r.lit}`);
+        if (exact ? r.words.n : r.words.far) err(`${name} eye ${i}: ${exact ? r.words.n : r.words.far} pixels' words differ from the bake's${exact ? '' : ' away from an edge'}`);
+        if (exact && r.shade.n) err(`${name} eye ${i}: ${r.shade.n} pixels' shading differs from the bake's`);
+        if (exact && r.dist.max > distTol) err(`${name} eye ${i}: a distance ${r.dist.max} steps from the bake's (${r.dist.n} pixels differ)`);
+        if (r.lit < 500) err(`${name} eye ${i}: nearly empty (${r.lit} lit)`);
+      }
+      let bad = 0;
+      for (const [j, r] of rays.entries()){ const t = pickUniverse(r.o, r.d)?.t ?? null; if (!(t === pickB[j] || (t !== null && pickB[j] !== null && Math.abs(t - pickB[j]) < 1e-9))){ if (!bad++) err(`${name}: a pick from ${r.o}: the universe's t ${t}, the bake's ${pickB[j]}`); } }
+      return { eyes: out, picks: { rays: rays.length, hits: pickB.filter(t => t !== null).length, bad } };
+    };
+    const eyes = [[-40.5, 180.25, -60.75], [300.5, 90.25, 128.5], [128.5, -30.5, 200.25], [70.5, 60.25, 70.75]], at = [128, 100, 128];
+    report.bake = await bakeCase('turned', P, eyes, at, true);
+    report.scaled = await bakeCase('×2', P2, [[300.5, 230.25, 60.75], [60.5, 200.25, 300.5], [100.5, 300.25, 100.5]], [192, 150, 192], false);
+
+    // ---- walking across (step 4): the walker on the bake, then on the instances ----
+    /* The page's walkStep with its keys and yaw, from above the first kit round three
+       instances and back (route), the run held so it climbs what it meets, a jump and a
+       sway when it stops getting nearer: the same numbers every frame on the bake (a
+       plain world: walkWorld's dagWorld) and on the instances (universeWorld). Nothing
+       is drawn, so nothing settles: the walk asks the world, not the frame. */
+    if (!opts.only){
+      const route = [0, 1, 5, 3, 0].map(i => { const p = P[i], h = 2 ** (kids[p.world].D + p.scale) / 2; return [p.at[0] + h + 0.5, p.at[2] + h + 0.5]; });
+      const walkRun = each => {
+        cam.eye = [route[0][0], 100 + WALK.eye, route[0][1]]; cam.pitch = 0; walk.w = null;
+        const trace = [];
+        let ti = 1, frames = 0, best = Infinity, since = 0;
+        while (ti < route.length && frames < 60 * 120){
+          const at = walk.w ? walk.w.p : cam.eye, dx = route[ti][0] - at[0], dz = route[ti][1] - at[2], l = Math.hypot(dx, dz);
+          if (l < 2){ ti++; best = Infinity; since = 0; continue; }
+          if (l < best - 0.5){ best = l; since = 0; } else since++;
+          cam.yaw = Math.atan2(dx, dz) + (since > 120 ? Math.sin(frames / 40) : 0);
+          keys.clear(); keys.add('KeyW'); keys.add('ShiftLeft'); if (since > 60 && since % 90 < 10) keys.add('Space');
+          walkStep(1000 / 60, null);
+          frames++;
+          const w = walk.w; trace.push(w.p[0], w.p[1], w.p[2], w.v[0], w.v[1], w.v[2], w.lift, +w.ground, +w.climbing, cam.eye[1]);
+          each?.(w);
+        }
+        keys.clear();
+        return { reached: ti - 1, frames, trace };
+      };
+      bakeOf(P);
+      setWalk(true);
+      const onBake = walkWorld(), a = walkRun(null);
+      installUniverse({ id: 'selftest', label: 'walking across, as instances', worlds: new Map(worlds), instances: P });
+      if (!walk.on) err('walking stopped as the universe came in');
+      const seen = [];
+      let inside = 0;
+      const b = walkRun(w => {
+        if (walkerInside(onBake, WALK, w.p) && !inside++) err(`walking across: the walker is inside the bake at ${w.p}`);
+        const at = whereInUniverse(); if (at && seen[seen.length - 1] !== at.index) seen.push(at.index);
+      });
+      setWalk(false);
+      let first = -1;
+      for (let i = 0; i < Math.max(a.trace.length, b.trace.length) && first < 0; i++) if (a.trace[i] !== b.trace[i]) first = i;
+      report.walk = { frames: a.frames, reached: a.reached, of: route.length - 1, instances: new Set(seen).size, differ: first < 0 ? null : Math.floor(first / 10) };
+      if (a.reached !== route.length - 1) err(`walking across: the walk on the bake reached ${a.reached} of ${route.length - 1} places`);
+      if (first >= 0) err(`walking across: frame ${report.walk.differ} on the instances isn't the bake's (${b.trace[first]} for ${a.trace[first]})`);
+      if (new Set(seen).size < 3) err(`walking across: the HUD saw instances ${seen}, not three`);
+    }
+    installUniverse({ id: 'selftest', label: 'the bake as instances', worlds, instances: P });
+    // The HUD: each instance's centre names it.
+    { const u = W.universe;
+      for (const [i, x] of u.instances.entries()){
+        cam.eye = [0, 1, 2].map(a => (x.cube.lo[a] + x.cube.hi[a]) / 2);
+        const w = whereInUniverse(), copies = u.instances.filter(y => y.world === x.world);
+        if (!w || w.index !== i || w.world !== x.world || w.of !== copies.length || w.copy !== copies.indexOf(x) + 1) err(`the HUD at instance ${i}'s centre says ${JSON.stringify(w)}`);
+      } }
+    // Copies share chunks: the kit drawn by three instances, its one chunk resident once.
+    { look(eyes[0], at); await settle('copies');
+      const draws = streamer.frame.draw.filter(d => d.world === 'kit6'), keys = new Set(draws.map(d => d.key));
+      report.copies = { draws: draws.length, chunks: keys.size, entries: [...streamer.S.cache.values()].filter(e => e.world === 'kit6').length };
+      if (!(draws.length >= 3 && keys.size < draws.length && report.copies.entries === keys.size)) err(`the kit's copies: ${JSON.stringify(report.copies)}`); }
+    // Occlusion by queries changes no frame at rest.
+    { look(eyes[3], at); await settle('occlusion');
+      const off = renderPixels(W_, H_, 9, 'raster');
+      setOcclusion('queries', { chosen: true });
+      let px = null;
+      for (let f = 0; f < 12; f++){ frameTick++; px = renderPixels(W_, H_, 9, 'raster', occlusion); await sleep(30); }
+      report.occlusion = { differ: differ(off, px), skipped: view.occluded, asked: view.queried };
+      if (report.occlusion.differ) err(`occlusion changed ${report.occlusion.differ} pixels of a frame at rest`);
+      setOcclusion('off', { chosen: true }); }
+    // The wireframe, turned: lines, and no GL error.
+    { state.wire = true; gl.getError();
+      // draw() and readPixels in one task: the canvas keeps nothing past it (wireSelftest's).
+      draw();
+      const cw = canvas.width, ch = canvas.height, px = new Uint8Array(4 * cw * ch); gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, cw, ch, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      let n = 0; for (let i = 0; i < px.length; i += 4) if (Math.abs(px[i] - 7) > 2 || Math.abs(px[i + 1] - 7) > 2 || Math.abs(px[i + 2] - 10) > 2) n++;
+      report.wire = { lit: n, lines: wireList.length, glError: gl.getError() };
+      state.wire = false;
+      if (report.wire.glError || !n) err(`the wireframe: ${JSON.stringify(report.wire)}`); }
+    state.detail = saved.detail; streamer.setOptions({ detail: state.detail });
+
+    // ---- the demo, through the menu's road ----
+    if (!opts.quick){
+      state.tint = true; state.uniFiles = [];
+      state.world = 'universe:1'; fillWorlds(); fillSeed();
+      if (!await loadWorld(true)) err('universe:1 didn\'t load');
+      const u = W.universe, pl = W.plane;
+      report.demo = { worlds: W.worlds.size, instances: u.instances.length, Y: pl.Y };
+      if (u.instances.length !== 21 || W.worlds.size !== 7) err(`the demo: ${u.instances.length} instances of ${W.worlds.size} worlds, not 21 of 7`);
+      const datum = key => { const [kind, n] = key.split(':'); return kind === 'kit' ? kitGround(kitDesc({ D: 8, seed: +n })) : kind === 'city' ? cityGround(cityDesc({ D: 9, seed: +n }))
+        : kind === 'scatter' ? scatterGround(scatterDesc({ D: 9, seed: +n })) : flatGround(+n); };
+      for (const x of u.instances) if (x.at[1] + datum(x.world) * 2 ** x.scale !== pl.Y) err(`${x.world} at ${x.at}: its ground isn't at the plane's ${pl.Y}`);
+      if (pl.Y !== 195) err(`the plane at ${pl.Y}, not the D = 9 scatter's 195`);
+      await settle('demo');
+      frame(); report.demo.inView = view.inView.size;
+      if (view.inView.size !== u.instances.length) err(`the opening view shows ${view.inView.size} of ${u.instances.length} instances`);
+      // The tint: a far frame with it isn't the frame without.
+      { const a = renderPixels(W_, H_, 8, 'raster'); state.tint = false; const b = renderPixels(W_, H_, 8, 'raster'); state.tint = true;
+        report.demo.tinted = differ(a, b);
+        if (!report.demo.tinted) err('the tint changed nothing in the opening view'); }
+      // What a universe refuses, and says why.
+      if (setEditMode(true) || edit.on || !/universe/.test(W.noEdit)) err('edit mode opened in a universe, or didn\'t say why');
+      setWalk(true); if (!walk.on || walk.note) err(`walking didn't start in a universe: ${walk.note}`);
+      // From flat ground onto city:1's road and back (step 4), at a corridor read off the
+      // two worlds' own DAGs (both upright: a voxel is the universe's less the corner),
+      // standing at the plane's height every frame: the datums meet flush.
+      { const city = u.instances.find(x => x.world === 'city:1'), Y = pl.Y, edge = city.cube.lo[0], from = edge - 12, to = edge + 12;
+        const own = (lo, hi) => u.instances.some(x => {
+          const w = W.worlds.get(x.world), R = 2 ** w.D, L = lo.map((v, i) => Math.max(v, x.at[i]) - x.at[i]), H = hi.map((v, i) => Math.min(v, x.at[i] + R) - x.at[i]);
+          if (!L.every((v, i) => v < H[i])) return false;
+          if (x.turn || x.scale) throw new Error(`the corridor meets ${x.world}, which is turned or scaled`);
+          return dagWorld(w.store, w.root, w.D).solid(L, H);
+        });
+        let c = -1;
+        for (let z = city.cube.lo[2] + 8; z < city.cube.hi[2] - 8 && c < 0; z++){
+          if (own([from - 2, Y, z - 1], [to + 2, Y + 6, z + 2])) continue;
+          let floor = true;
+          for (let x = from - 2; x < to + 2 && floor; x++) for (let d = -1; d < 2 && floor; d++) floor = own([x, Y - 1, z + d], [x + 1, Y, z + d + 1]);
+          if (floor) c = z;
+        }
+        if (c < 0) err('no clear corridor from flat ground onto city:1');
+        else {
+          cam.eye = [from + 0.5, Y + WALK.eye, c + 0.5]; cam.yaw = Math.PI / 2; cam.pitch = 0; walk.w = null;
+          const was = [];
+          let off = 0;
+          for (const [key, goal, dir] of [['KeyW', to + 0.5, 1], ['KeyS', from + 0.5, -1]]){
+            keys.clear(); keys.add(key);
+            for (let n = 0; n < 600 && dir * (goal - (walk.w ? walk.w.p[0] : cam.eye[0])) > 0; n++){
+              walkStep(1000 / 60, null);
+              if ((!walk.w.ground || walk.w.p[1] !== Y) && !off++) err(`the walk onto city:1: at ${walk.w.p} the walker isn't standing at the plane's ${Y}`);
+              const at = whereInUniverse()?.world ?? null; if (was[was.length - 1] !== at) was.push(at);
+            }
+          }
+          keys.clear();
+          report.demo.crossing = { z: c, was };
+          if (was.length !== 3 || was[1] !== 'city:1' || !/^flat:/.test(was[0]) || was[2] !== was[0]) err(`the walk onto city:1 went through ${was}`);
+        } }
+      setWalk(false);
+      setActors(4); if (ensureActors() || actors.A || !/universe/.test(actors.note)) err('actors came into a universe'); setActors(0);
+      fillShelf();
+      if (!$('fileExport').disabled || !$('shelfAdd').disabled) err('a universe can be exported or shelved');
+      // "To the universe": a dungeon and a sphere on the shelf, then in it.
+      state.world = 'dungeon:1'; state.dungeon = dungeonDesc({ D: 9, floors: 3, seed: 1 }); fillWorlds(); fillDepth();
+      await loadWorld(true);
+      const dg = addToShelf();
+      state.uniFiles.push(dg.id);
+      state.world = 'shape:sphere'; state.depth = 7; fillWorlds();
+      await loadWorld(true);
+      const e = addToShelf();
+      state.world = e.id; fillWorlds(); await loadWorld(true);
+      if (!W.file) err('the shelf world isn\'t on screen');
+      await toUniverse();
+      const mine = W.universe.instances.findIndex(x => x.world === e.id);
+      report.demo.added = { instances: W.universe.instances.length, at: mine };
+      if (mine < 0) err('the shelf world isn\'t in the universe');
+      if (mine >= 0){
+        const x = W.universe.instances[mine], c = x.content;
+        look([c.hi[0] + 40.5, c.hi[1] + 30.25, c.hi[2] + 40.75], [0, 1, 2].map(a => (c.lo[a] + c.hi[a]) / 2));
+        await settle('added');
+        frame();
+        if (!view.inView.has(mine)) err('the shelf world isn\'t drawn in the universe');
+        if (!streamer.frame.draw.some(d => d.world === e.id && streamer.entry(d.key)?.count)) err('the shelf world has no cubes in the universe');
+      }
+      // The dungeon's secret doors, holes in the universe where it stands (it's upright: a
+      // door's box is the dungeon's less its corner), the doors themselves solid there.
+      { const d = W.universe.instances.find(x => x.world === dg.id), doors = secretDoors(dungeonPlan(dungeonDesc({ D: 9, floors: 3, seed: 1 })));
+        setWalk(true);
+        const held = walk.on ? walkWorld() : null, bare = universeWorld(W.universe, W.side).solid;
+        report.demo.doors = { doors: doors.length, holes: walk.holes, at: d?.at ?? null };
+        if (!d || !held) err(`the dungeon isn't in the universe (${!!d}) or can't be walked (${walk.note})`);
+        else {
+          if (!doors.length || walk.holes !== doors.length) err(`the dungeon's ${doors.length} secret doors are ${walk.holes} holes in the universe`);
+          let bad = 0;
+          for (const h of doors){
+            const lo = [0, 1, 2].map(i => h[i] + d.at[i]), hi = [0, 1, 2].map(i => h[3 + i] + d.at[i]);
+            if ((held(lo, hi) || !bare(lo, hi)) && !bad++) err(`a secret door at [${lo}, ${hi}): ${bare(lo, hi) ? 'solid' : 'clear'} alone, ${held(lo, hi) ? 'solid' : 'clear'} to the walker`);
+          }
+        }
+        setWalk(false); }
+      shelf.splice(shelf.indexOf(e), 1); shelf.splice(shelf.indexOf(dg), 1);
+    }
+  } catch (e){ err(String(e.stack || e)); }
+  finally {
+    state.tint = saved.tint; state.detail = saved.detail; streamer.setOptions({ detail: state.detail }); state.wire = saved.wire; state.color = saved.color;
+    state.uniFiles = saved.uniFiles; setPath(saved.path); state.dungeon = saved.dungeon;
+    if (walk.on) setWalk(false); keys.clear();
+    if (saved.chosen) setOcclusion(saved.occ, { chosen: true }); else { state.occlusionChosen = false; setOcclusion(occlusionDefault(saved.world)); }
+    auto = saved.auto;
+  }
+  report.ok = !report.errors.length && !report.violations.length;
+  report.ms = Math.round(performance.now() - t0);
+  window.__universeSelftest = report;
   return report;
 };
 

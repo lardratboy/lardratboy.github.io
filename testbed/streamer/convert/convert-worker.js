@@ -12,7 +12,8 @@
    A .ply comes as the File itself, not its bytes: the page never reads it,
    and this reads it a slice at a time (8 MB), so a 190 MB file is never in
    memory whole, on either thread. While it reads, the fraction read goes to
-   the page at most ten times a second. */
+   the page at most ten times a second. Its settings (point, opacity, mesh
+   colour) and the images dropped with it (its TextureFiles) come with it. */
 import { convertGlb, convertPly } from './convert-core.js';
 
 const SLICE = 8 << 20;
@@ -36,6 +37,7 @@ self.onmessage = async ({ data }) => {
       let last = 0;
       await convertPly(slices(data.ply), {
         name: data.name, depths: data.depths, bits: data.bits, bake: data.bake, size: data.ply.size,
+        point: data.point, opacity: data.opacity, meshColour: data.meshColour, files: new Map(data.files ?? []), platform,
         onAsset: asset => post({ asset }),
         onStage: (D, stage) => post({ stage: { D, stage } }),
         onProgress: frac => { const now = performance.now(); if (now - last >= 100 || frac === 1){ last = now; post({ stage: { D: null, stage: 'reading', frac } }); } },

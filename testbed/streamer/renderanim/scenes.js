@@ -788,7 +788,7 @@ export const SCENES = [
   key: 'draw', stage: 'draw', title: 'renderView: one draw call a chunk', dur: 20, side: true,
   steps: (P, D) => [
     [0, `Each frame, <code>renderView</code> takes the streamer's cover (what to draw now), keeps the chunks resident and installed, and sorts them near to far. Chunks outside the view's frustum are skipped: here <b>${P.view.culled.length}</b> of ${P.view.list.length}.`],
-    [6, `For each one it sets three uniforms and makes <b>one call</b>: <code>drawElementsInstanced(TRIANGLES, rasterDraw.tris, UNSIGNED_BYTE, 0, n)</code>. 18 indices, the first three faces of the cube index, and n instances: one cube per record. <code>uOrigin</code> is the chunk's corner <b>minus the eye</b>, so a huge world keeps its precision near the eye.`],
+    [6, `For each one it sets three uniforms and makes <b>one call</b>: <code>drawElementsInstanced(TRIANGLES, RD.tris, UNSIGNED_BYTE, 0, n)</code>. 18 indices, the first three faces of the cube index, and n instances: one cube per record. <code>uOrigin</code> is the chunk's corner <b>minus the eye</b>, so a huge world keeps its precision near the eye.`],
     [13.5, `That's the whole of the CPU's work per frame for raster chunks: a sort, a frustum test and a few uniforms a chunk. ${P.view.drawn.length} calls draw ${fmt(P.view.drawn.reduce((a, q) => a + P.job(q.d.key).count, 0))} cubes here.`],
   ],
   cam: t => ({ target: [-45, 20, -35], yaw: -0.95 + 0.12 * t / 20, pitch: 0.78, dist: 540 }),
@@ -827,8 +827,8 @@ export const SCENES = [
       ], { alpha: a, color: GOLD });
     }
     code(c, 'drawList', { alpha: fade(t, 0.5, 1.3, 19.2, 20), hl: 'const e = streamer.entry(d.key);', span: 2, maxLines: 8 });
-    codeWalk(c, 'drawCall', t, [[0, 'for (const { d, e, rel } of list){'], [1.5, 'if (!boxVisible(planes, rel, d.size))'], [3.5, 'const open = state.seams ? d.open : 0'], [6, 'gl.uniform3f(U.uOrigin', 3],
-                                [8.5, 'gl.bindVertexArray(e.gpu.vao);'], [9.5, 'gl.drawElementsInstanced(gl.TRIANGLES, rasterDraw.tris'], [12, 'view.drawn++; view.instances += n;']],
+    codeWalk(c, 'drawCall', t, [[0, 'for (const { d, e, rel, size, origin, P, okey } of list){'], [1.5, 'if (!boxVisible(planes, rel, size))'], [3.5, 'const open = state.seams ? d.open : 0'], [6, 'gl.uniform3f(U.uOrigin', 3],
+                                [8.5, 'gl.bindVertexArray(e.gpu.vao);'], [9.5, 'gl.drawElementsInstanced(gl.TRIANGLES, RD.tris'], [12, 'view.drawn++; view.instances += n;']],
              { alpha: fade(t, 0.5, 1.3, 19.2, 20), y: P.lay.codeY + 170 });
   },
 },
@@ -889,7 +889,7 @@ export const SCENES = [
       ['uOrigin (here: the corner)', `(${P.F.job.lo.join(', ')})`], ['uCellSize', '1'],
       ['face = 2k + side', t < 11.5 ? '…' : '0 … 5', GOLD], ['faceShown', t < 11.5 ? '…' : SIDE_NAMES.map((s, f) => (r.mask >> f & 1) ? s : '').filter(Boolean).join(' '), GREEN],
     ], { alpha: a, color: GPU });
-    codeWalk(c, 'rasterVS', t, [[0, 'void main(){'], [2, 'vAttr = aAttr;'], [5.5, 'vec3 p = c + CORNER[corner] * uCellSize;'], [8, 'gl_Position = uViewProj * vec4(p, 1.0);'],
+    codeWalk(c, 'rasterVS', t, [[0, 'void main(){'], [2, 'vAttr = aAttr;'], [5.5, 'vec3 p = c + CORNER[corner] * uCellSize;'], [8, 'gl_Position = uViewProj * vec4(q, 1.0);'],
                                 [11.5, 'uint face = ALL_SIX ? k'], [13, 'if (!faceShown(aRec, face)']], { alpha: fade(t, 0.5, 1.3, 23.2, 24) });
     codeWalk(c, 'decode', t, [[0, 'uvec3 mortonDecode(uint i){'], [2.5, 'uvec3 recCell(uint r)'], [5.5, 'vec3  recCentre(uint r)'], [11.5, 'uint  recShown(uint r)'], [13, 'bool  faceShown(uint r, uint f)']],
              { alpha: fade(t, 0.8, 1.6, 23.2, 24), y: P.lay.codeY + 248, maxLines: 22 });

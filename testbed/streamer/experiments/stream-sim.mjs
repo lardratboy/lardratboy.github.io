@@ -31,8 +31,22 @@ import { colourOf } from '../colours.js';
 
 // The snapshot's colour descriptor, if any, is resolved as a worker would
 // (colours.js), so simulated jobs carry their attribute words (step 6).
-export function createSim({ world, snap, memo = new Map() }){
-  const runner = createJobRunner(snap, colourOf);
+// A universe (stream-core §1b) instead of a world: `universe` and a snapshot
+// a world (`snaps`, by key), each job run by its own world's runner, made the
+// first time a job names it, so a flight that changes the universe (the endless
+// lattice's windows, step 5) may add to `snaps` as it goes.
+export function createSim({ world, snap, memo = new Map(), universe = null, snaps = null }){
+  const runners = universe ? new Map() : null;
+  const runnerOf = k => {
+    let r = runners.get(k);
+    if (!r){
+      if (!snaps.has(k)) throw new Error(`stream-sim: a job for a world '${k}' with no snapshot`);
+      runners.set(k, r = createJobRunner(snaps.get(k), colourOf));
+    }
+    return r;
+  };
+  const runner = universe ? job => runnerOf(job.world)(job) : createJobRunner(snap, colourOf);
+  if (universe) runner.tail = () => { throw new Error('a universe has no tails'); };
   const run = job => {
     // Root and colour too, for an edited world. A world never edited has one
     // of each, so its memo can be shared between flights as before.
@@ -48,13 +62,15 @@ export function createSim({ world, snap, memo = new Map() }){
   const makeStreamer = (options = {}) => {
     const st = createStreamer({ now: () => 0, keepRecords: false, ...options,
                                 dispose: e => { disposed.push(e.key); options.dispose?.(e); } });
-    st.setWorld(world);
+    if (universe) st.setUniverse(universe); else st.setWorld(world);
     return st;
   };
   /* Fly `path(t)` (t in ms → eye) for `frames` frames. `check(frame, ctx)`
-     is called after every frame; `options` go to createStreamer. */
+     is called after every frame; `options` go to createStreamer. `rebase(frame,
+     st, eye)`, after `before`, may hand the streamer another universe and return
+     the eye in its coordinates (the endless lattice's rolling origin). */
   function fly({ path, frames, workers = 4, frameMs = 1000 / 60, jobMs = null, jobScale = 1, cost = null,
-                 options = {}, check = null, streamer = null, before = null }){
+                 options = {}, check = null, streamer = null, before = null, rebase = null }){
     const st = streamer || makeStreamer(options);
     const slots = Array.from({ length: workers }, () => ({ job: null, result: null, done: 0, free: 0 }));
     const log = [];
@@ -62,9 +78,10 @@ export function createSim({ world, snap, memo = new Map() }){
     for (let f = 0; f < frames; f++){
       t += frameMs;
       disposed.length = 0;
-      const eye = path(t);
+      let eye = path(t);
       // before(frame, st): an edit, say, made when a page would handle input.
       before?.(f, st, eye);
+      if (rebase) eye = rebase(f, st, eye);
       st.update(eye);
       let started = 0;
       for (const s of slots) for (;;){
