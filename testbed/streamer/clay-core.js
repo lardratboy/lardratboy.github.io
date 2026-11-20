@@ -5,6 +5,7 @@
      lump > 0, no ground     clay: a lump floating at the world's centre
      lump > 0, ground        the lump pressed onto flat ground
      lump = 0, ground        flat ground: a slab GROUND_DEPTH voxels deep under the centre plane
+                             (or `depth` deep: the universes' flat ground is the hills' crust, 8)
      lump = 0, no ground     empty: root EMPTY, nothing to draw
 
    You asked for "some volume to play with and sculpt down from, think clay".
@@ -37,6 +38,13 @@ export const CLAY_DEFAULTS = { D: 20, lump: 256, shape: 'ball', ground: false };
    at most 1,024/16 = 64, so its bottom cap is never below the slab. The
    smallest world (D = 8) has 128 under the plane, so the slab always fits. */
 export const GROUND_DEPTH = 64;
+/* `depth` (asked for 2026-11-19): the slab another depth. The universes' flat ground
+   (universe-core's flatDesc) is 8, the hills' CRUST, so the green checkerboard between
+   worlds is a crust as the hills beside it are. It's left out of the descriptor at
+   GROUND_DEPTH, so every clay descriptor written before it (files, links, vdag's golden
+   hashes) is the same object, and one read from a file without it is 64 deep. The page's
+   clay worlds never set it, so clayParam has no field for it. */
+export const groundDepth = d => d.depth ?? GROUND_DEPTH;
 
 export function clayDesc(over = {}){
   const d = { ...CLAY_DEFAULTS, ...over, kind: 'clay' };
@@ -47,6 +55,8 @@ export function clayDesc(over = {}){
   // the lump stands on the centre plane rather than straddling it.
   if (d.lump > 2 ** (d.D - 1)) throw new Error(`clay: a lump of ${d.lump} doesn't fit a world of side ${2 ** d.D}`);
   d.ground = !!d.ground;
+  if (d.depth === undefined || d.depth === GROUND_DEPTH) delete d.depth;
+  else if (!Number.isInteger(d.depth) || d.depth < 1 || d.depth > 2 ** (d.D - 1)) throw new Error(`clay: a ground ${d.depth} deep doesn't fit under the centre plane of a world of side ${2 ** d.D}`);
   return d;
 }
 export const clayParam = d => [d.D, d.lump, d.shape, d.ground ? 1 : 0].join(',');
@@ -57,7 +67,7 @@ export function clayFromParam(s){
 }
 
 /* Where things are. The centre plane is y = c, the top of the ground, whose
-   bottom is c − GROUND_DEPTH. A ball
+   bottom is c − groundDepth (GROUND_DEPTH unless the descriptor says). A ball
    on the ground is pressed in by an eighth of its radius, as a lump dropped on
    a table would be: resting on one point it'd stand on a single voxel. A block
    stands on the plane exactly. Off the ground, the lump straddles the centre,
@@ -74,7 +84,7 @@ export function clayPlace(desc){
    The ground wins in its slab, so a pressed ball's bottom cap is ground. */
 export function clayVoxel(desc, x, y, z){
   const { c, r, centre, lo, hi } = clayPlace(desc);
-  if (desc.ground && y < c && y >= c - GROUND_DEPTH) return 2;
+  if (desc.ground && y < c && y >= c - groundDepth(desc)) return 2;
   if (!desc.lump) return 0;
   if (desc.shape === 'block') return x >= lo[0] && y >= lo[1] && z >= lo[2] && x < hi[0] && y < hi[1] && z < hi[2] ? 1 : 0;
   const dx = x + 0.5 - centre[0], dy = y + 0.5 - centre[1], dz = z + 0.5 - centre[2];
@@ -88,7 +98,7 @@ export function clayVoxel(desc, x, y, z){
    that's solid only by their union. That's harmless: the walk goes down and
    hash-consing hands back solid(k)'s own id. */
 export function clayCell(desc, ground = desc.ground){
-  const { c, r, centre, lo, hi } = clayPlace(desc), r2 = r * r, lump = desc.lump, ball = desc.shape === 'ball', g0 = c - GROUND_DEPTH;
+  const { c, r, centre, lo, hi } = clayPlace(desc), r2 = r * r, lump = desc.lump, ball = desc.shape === 'ball', g0 = c - groundDepth(desc);
   const lumpCell = (s, x, y, z) => {
     if (!lump) return 0;
     if (!ball){
@@ -130,7 +140,7 @@ export function buildClay(desc, store = createStore()){
   // ground left out but placed as on it, joins by union; equal sets are equal
   // ids, so the root is the one fromField would give (clay-core.test.js holds
   // it to the dense stamp). The lump's nodes the ground covers stay in the store.
-  const c = 2 ** (desc.D - 1), g0 = c - GROUND_DEPTH, memo = new Map();
+  const c = 2 ** (desc.D - 1), g0 = c - groundDepth(desc), memo = new Map();
   const slab = (k, y) => {
     const s = 2 ** k;
     if (y * s >= g0 && (y + 1) * s <= c) return store.solid(k);

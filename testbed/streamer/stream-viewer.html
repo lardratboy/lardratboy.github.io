@@ -353,7 +353,7 @@ import { caveDesc } from './cave-core.js';
 import { clayDesc, clayFromParam, clayParam, buildClay, clayPlace, CLAY_LIMITS, CLAY_DEFAULTS, GROUND_DEPTH } from './clay-core.js';
 import { dungeonDesc, dungeonFromParam, dungeonParam, dungeonPlan, buildDungeon, dungeonGround, planFromTable, secretDoors, DUNGEON_LIMITS, CELL as DUNGEON_CELL } from './dungeon-core.js';
 import { buildCity, cityPlan, cityDesc, cityGround, TYPE_NAMES as CITY_TYPES, TOWER_NAMES as CITY_TOWERS, DISTRICT_NAMES as CITY_DISTRICTS } from './city-core.js';
-import { createUniverse, planeOf, flatGround, flatKey, toLocal, dirToLocal, boxToUniverse, turnMatrix, instanceAt, demoUniverse, tintOf, tintAt, universeWorld, universeHoles,
+import { createUniverse, planeOf, flatGround, flatKey, flatDesc, toLocal, dirToLocal, boxToUniverse, turnMatrix, instanceAt, demoUniverse, tintOf, tintAt, universeWorld, universeHoles,
          endlessOf, endlessWindow, recentre, cellAt, cellOf, districtOf, worldsToDrop, ENDLESS, ENDLESS_KINDS } from './universe-core.js';
 import { tileGrounds, buildTile } from './tile-worlds.js';
 import { TileBuilder } from './endless-build.js';
@@ -2311,7 +2311,7 @@ function installUniverse({ id, label = null, worlds, tiles = null, cols = 3, ins
   if (!instances){
     plane = planeOf(worlds, tiles, { cols });
     for (const k of plane.flats){
-      const d = clayDesc({ D: k, lump: 0, ground: true }), f = buildClay(d);
+      const d = flatDesc(k), f = buildClay(d);
       worlds.set(flatKey(k), { store: f.store, root: f.root, D: k, ground: flatGround(k), colour: d, label: `flat ground, ${2 ** k}²` });
     }
     instances = plane.instances;
@@ -2385,7 +2385,8 @@ const fogDist = () => W?.endless ? W.endless.fog : 1.5 * W.side;
 function holdWorld(E, key, w){
   const counts = w.counts ?? createCounts(w.store), nodes = w.store.size;
   const world = { ...w, key, counts, side: 2 ** w.D, nodes };
-  E.held.set(key, { key, world, snap: worldSnapshot(w.store, w.root, w.D, { counts, colour: w.colour ?? null }), bytes: NODE_BYTES * nodes, seen: E.tick, pinned: !!w.pinned });
+  const colour = w.colour ?? null;
+  E.held.set(key, { key, world, snap: worldSnapshot(w.store, w.root, w.D, { counts, colour }), bytes: NODE_BYTES * nodes, seen: E.tick, pinned: !!w.pinned });
 }
 function landTile(tile, data){
   const E = W?.endless;
@@ -2405,7 +2406,7 @@ async function buildEndless(){
   const E = { L, held: old ? old.held : new Map(), failed: old ? old.failed : new Map(), tick: old ? old.tick : 0, recentres: 0, installs: 0, built: 0, buildMs: 0, landed: false,
               fog: 0.7 * L.radius * L.cell, budget: old ? old.budget : ENDLESS_BUDGET, win: null, t0: performance.now() };
   if (!E.held.has(flatKey(L.flatK))){
-    const d = clayDesc({ D: L.flatK, lump: 0, ground: true }), f = buildClay(d);
+    const d = flatDesc(L.flatK), f = buildClay(d);
     holdWorld(E, flatKey(L.flatK), { store: f.store, root: f.root, D: L.flatK, ground: flatGround(L.flatK), colour: d, label: `flat ground, ${2 ** L.flatK}²`, pinned: true });
   }
   for (const { key, f, world } of files) if (!E.held.has(key)) holdWorld(E, key, { ...world, ground: null, colour: f.colour, label: f.name, pinned: true });
@@ -2448,7 +2449,8 @@ function installEndless(E, win, fresh){
     if (state.occlusion !== 'off') setOcclusion(state.occlusion);
   }
   dirty = true;
-  if (walk.on){ try { walkWorld(); } catch { setWalk(true); } }
+  // Walking carries on across a window, unless universeWorld can't hold it: then setWalk says why.
+  if (walk.on) try { walkWorld(); } catch { setWalk(true); }
 }
 /* Move every position the page holds by d, whole voxels: the eye, the last eye the cut
    was made at, the walker and its eye, and the orbit camera's note that it last moved
@@ -5506,7 +5508,7 @@ window.poolSelftest = async function poolSelftest(opts = {}){
                           ['city:1', { store: cityW.store, root: cityW.root, D: 9, ground: cityGround(cd), colour: cd }]]);
   const plane = planeOf(worlds, [{ world: 'kit:1' }, { world: 'city:1' }, { world: 'kit:1', turn: 41 }], { cols: 3 });
   for (const k of plane.flats){
-    const d = clayDesc({ D: k, lump: 0, ground: true }), w = buildClay(d);
+    const d = flatDesc(k), w = buildClay(d);
     worlds.set(flatKey(k), { store: w.store, root: w.root, D: k, ground: flatGround(k), colour: d });
   }
   const u = createUniverse(worlds, plane.instances);
@@ -5636,10 +5638,14 @@ window.endlessSelftest = async function endlessSelftest(opts = {}){
                   eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch };
   auto = false;
   const report = { violations: [], errors: [], frames: 0, ok: false };
-  const err = m => { if (report.errors.length < 40) report.errors.push(m); };
+  // opts.bail (the mutants): stop at the first error or violation, which the catch below reports.
+  const err = m => { if (report.errors.length < 40) report.errors.push(m); if (opts.bail && !report.bailed){ report.bailed = true; throw new Error(m); } };
   const W_ = 200, H_ = 150;
   const pump = async (n, phase) => {
-    for (let f = 0; f < n; f++){ frame({ draw: false }); report.frames++; invariants(phase, report, { noHoles: false }); await sleep(4); }
+    for (let f = 0; f < n; f++){
+      frame({ draw: false }); report.frames++; invariants(phase, report, { noHoles: false }); await sleep(4);
+      if (opts.bail && report.violations.length) err(report.violations[0]);
+    }
   };
   const builtAll = () => { const E = W.endless; return E.win.cells.every(c => !c.tile || c.built || E.failed.has(c.tile.world)) && !tileBuilder.busy; };
   const settle = async (phase, all = false) => {
@@ -5766,6 +5772,18 @@ window.endlessSelftest = async function endlessSelftest(opts = {}){
           if (frames % 8 === 0) await sleep(0);
         }
         keys.clear();
+        // The walker's world is the window's now, not the one it set out on: boxes all over
+        // the window answer as a world made afresh from the universe on screen.
+        { const fresh = openWorld(universeWorld(W.universe, W.side).solid, W.side), held = walkWorld(), side = W.endless.win.side;
+          let n = 0, solid = 0;
+          for (let k = 0; k < 4000; k++){
+            const lo = [(k * 0.6180339887 % 1) * 4600, W.endless.L.Y - 60 + (k * 0.7548776662 % 1) * 200, (k * 0.5698402910 % 1) * 4600].map(Math.floor), hi = lo.map(v => v + 3);
+            const a = held(lo, hi);
+            solid += a;
+            if (a !== fresh(lo, hi) && !n++) err(`walking: the walker's world says ${a} at ${lo}, the universe on screen ${!a}`);
+          }
+          report.walk_probe = { solid };
+          if (solid < 400) err(`walking: only ${solid} of 4,000 probes solid`); }
         report.walk = { row, frames, recentres: W.endless.recentres - r0, at: last };
         if (W.endless.recentres - r0 < 1) err('the walk crossed no re-centre');
         if (!last || last[0] < goal) err(`the walk stopped at ${last}, short of ${goal}`);
@@ -5784,7 +5802,7 @@ window.endlessSelftest = async function endlessSelftest(opts = {}){
       for (const [k, h] of E2.held) if (!h.pinned && !want.has(k)){ err(`${k} kept under a budget of 0, unwanted`); break; }
       for (const k of want) if (E2.win.cells.some(c => c.built && c.tile?.world === k) && !E2.held.has(k)){ err(`${k} let go, and the window wants it`); break; }
       await pump(5, 'after the budget'); }
-  } catch (e){ err(String(e.stack || e)); }
+  } catch (e){ if (!report.bailed) err(String(e.stack || e)); }
   finally {
     if (walk.on) setWalk(false); keys.clear();
     state.uniFiles = saved.uniFiles; setPath(saved.path); state.color = saved.color;
