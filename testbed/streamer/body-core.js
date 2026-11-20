@@ -41,7 +41,7 @@ import { createSpecimenCore, sampleRecipe } from './specimen-core.js';
 import { stackOf } from './lattice-core.js';
 import { PROPER } from './scatter-core.js';
 import { attrOf8 } from './attr-core.js';
-import { mix } from './actor-core.js';
+import { mix, KIND, DIR6, HEADINGS } from './actor-core.js';
 
 export const BODY_R = Object.freeze([3, 11]);
 export const BODY_TYPES = 64;              // the library's size: 7 bodies at each R, 8 at R = 3
@@ -175,4 +175,53 @@ export const bodyWord = (R, x, y, z) => { const c = bodyColour(R)(x + 0.5, y + 0
 export function actorBody(seed, i){
   const k = mix(seed, i, 79) % BODY_TYPES, e = TURNS[mix(seed, i, 80) % TURNS.length], body = bodyOf(k), t = turnedBox(body, e);
   return { k, e, body, size: t.size, off: t.lo };
+}
+
+/* ---- a kind's pose (actors-log step 4) -------------------------------------------
+   An explorer faces the way it crawls with its feet on its face; a vehicle faces
+   its heading, upright. A flier keeps its turn alone. The pose is a rotation of
+   the body's box about its centre, on top of the slot's turn: the body's own +x
+   is its front and −y its feet. Bodies fill their R on every axis (goodBody), so
+   the box is a cube and every quarter turn keeps it; the moving box is still
+   the core's, and between quarters (a vehicle's 16 headings, a turn eased on
+   screen) a corner pokes out by at most (√2 − 1)·R/2. Row major, like turnMap.
+
+     explorer   columns: front = DIR6[heading], up = −DIR6[down], side = front × up
+     vehicle    front = (cos, 0, sin) of HEADINGS[heading] / 256, up = +y */
+export function poseOf(kind, heading, down){
+  if (kind === KIND.explorer){
+    const f = DIR6[heading], u = DIR6[down].map(v => -v), s = [f[1] * u[2] - f[2] * u[1], f[2] * u[0] - f[0] * u[2], f[0] * u[1] - f[1] * u[0]];
+    return [f[0], u[0], s[0], f[1], u[1], s[1], f[2], u[2], s[2]];
+  }
+  if (kind === KIND.vehicle){
+    const c = HEADINGS[2 * heading] / 256, s = HEADINGS[2 * heading + 1] / 256, n = Math.hypot(c, s);
+    return [c / n, 0, -s / n, 0, 1, 0, s / n, 0, c / n];
+  }
+  return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+}
+/* A rotation as a unit quaternion [w, x, y, z] and back, and the shorter way
+   between two: the page eases a pose on screen with them (a frame's share of
+   the way, so a quarter turn takes about a sixth of a second), while the core
+   has already turned. Drawing only: nothing an actor decides reads it. */
+export function quatOf(M){
+  const [a, b, c, d, e, f, g, h, k] = M, tr = a + e + k;
+  let q;
+  if (tr > 0){ const s = 2 * Math.sqrt(tr + 1); q = [s / 4, (h - f) / s, (c - g) / s, (d - b) / s]; }
+  else if (a > e && a > k){ const s = 2 * Math.sqrt(1 + a - e - k); q = [(h - f) / s, s / 4, (b + d) / s, (c + g) / s]; }
+  else if (e > k){ const s = 2 * Math.sqrt(1 + e - a - k); q = [(c - g) / s, (b + d) / s, s / 4, (f + h) / s]; }
+  else { const s = 2 * Math.sqrt(1 + k - a - e); q = [(d - b) / s, (c + g) / s, (f + h) / s, s / 4]; }
+  const n = Math.hypot(...q);
+  return q.map(v => v / n);
+}
+export function matOfQuat([w, x, y, z]){
+  return [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+          2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+          2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)];
+}
+export function slerp(p, q, t){
+  let d = p[0] * q[0] + p[1] * q[1] + p[2] * q[2] + p[3] * q[3], r = q;
+  if (d < 0){ d = -d; r = q.map(v => -v); }
+  if (d > 0.9995){ const m = p.map((v, i) => v + (r[i] - v) * t), n = Math.hypot(...m); return m.map(v => v / n); }
+  const th = Math.acos(d), a = Math.sin((1 - t) * th) / Math.sin(th), b = Math.sin(t * th) / Math.sin(th);
+  return p.map((v, i) => a * v + b * r[i]);
 }

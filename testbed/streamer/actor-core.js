@@ -176,7 +176,28 @@ const noRoom = (out, o) => { out[o] = 1; out[o + 3] = 0; };     // lo > hi: hold
      room    the room cache, [lo, hi) in voxels; a cache, not state
 
    `t` is the population's clock. A tick reads it and adds one, so a fast
-   forward (Q6) is ticks in a loop, and gives the bytes watching would. */
+   forward (Q6) is ticks in a loop, and gives the bytes watching would.
+
+   **Kinds** (actors-log step 4, asked for 2026-11-19: "explorers that follow
+   the edges of the world they are in, and vehicles"): `kind` per slot, 0 a
+   flier, 1 an explorer, 2 a vehicle, set by whoever makes the population and
+   fixed for its life. A body is a body whatever its kind (the same specimens);
+   only the behaviour changes. The kinds' own state:
+
+     hold     explorer: HOLD on a surface, ROUND just over an edge, FALL;
+              vehicle: 1 on the ground, 0 in the air
+     heading  explorer: the way it crawls, one of DIR6 (2·axis + 1 if minus);
+              vehicle: one of the 16 HEADINGS
+     down     explorer: the face it holds, one of DIR6 (−y on a floor)
+     goal     vehicle: the heading it's turning toward
+     speed    vehicle: along its heading, 1/256 voxel a tick (minus reversing)
+     calm     vehicle: the tick until which it ignores the eye, after backing
+              off a wall it couldn't drive up
+
+   A flier reads none of them, so a population of fliers ticks to the bytes
+   it always did. */
+export const KIND = Object.freeze({ flier: 0, explorer: 1, vehicle: 2 });
+export const KINDS = Object.freeze(['flier', 'explorer', 'vehicle']);
 export function createActors(N){
   const A = {
     N, t: 0,
@@ -185,6 +206,8 @@ export function createActors(N){
     epoch: new Int32Array(N), until: new Int32Array(N),
     old: new Int32Array(3 * N),
     room: new Int32Array(6 * N), roomWorld: null,
+    kind: new Uint8Array(N), hold: new Uint8Array(N),
+    heading: new Int32Array(N), down: new Int32Array(N), goal: new Int32Array(N), speed: new Int32Array(N), calm: new Int32Array(N),
   };
   for (let i = 0; i < N; i++) noRoom(A.room, 6 * i);
   return A;
@@ -337,9 +360,18 @@ export function pushOf(A, grid, i, sep, push, out){
    also turn down places inside the eye's personal space (spaceOf), so a
    flier isn't born in the camera. Only the first half: in a tunnel narrower
    than the space every place is inside it, and a slot left dead would be
-   worse than one pushed out in a fifth of a second. */
+   worse than one pushed out in a fifth of a second.
+
+   **Ground kinds** (step 4): an explorer or a vehicle (A.kind[i] set before
+   the spawn) wants something under it, or it falls for as long as the world
+   is tall: 2,000 voxels in the clay block's world, half a minute. So the
+   first three quarters of the tries also turn down a place with nothing
+   within `drop` voxels below (one probe, the box swept down). The last
+   quarter take anywhere clear, so a world with no floor near still gets its
+   actors, falling. A flier never asks. */
 export const inside = (world, centre) => centre.map(v => Math.max(0, Math.min(world.side - 1, Math.floor(v))));
-export function spawnNear(world, A, i, size, seed, centre, radius, tries = 64, trap = 0, away = null){
+export const SPAWN_DROP = 64;
+export function spawnNear(world, A, i, size, seed, centre, radius, tries = 64, trap = 0, away = null, drop = SPAWN_DROP){
   for (let a = 0; a < 3; a++) A.size[3 * i + a] = size[a];
   A.alive[i] = 0;
   const c = inside(world, centre);
@@ -353,6 +385,7 @@ export function spawnNear(world, A, i, size, seed, centre, radius, tries = 64, t
     if (!ok) break;
     if (restHits(world, A, i)) continue;
     if (away && away.inner > 0 && 2 * k < tries && gapTo(A, i, away.at) < away.inner * ONE) continue;
+    if (A.kind[i] && drop > 0 && 4 * k < 3 * tries && !sweptHits(world, A, i, 1, -drop * ONE, false, null)) continue;
     // Not into a sealed pocket either (the kit has millions): it would live
     // there pressed against the wall nearest the eye.
     if (trap > 0){ const [lo, hi] = restBox(A, i); if (sealedAt(world, lo, hi, trap)) continue; }
@@ -361,6 +394,10 @@ export function spawnNear(world, A, i, size, seed, centre, radius, tries = 64, t
     A.vel.fill(0, 3 * i, 3 * i + 3);
     A.epoch[i] = 0; A.until[i] = 0;                  // a goal at its first tick
     noRoom(A.room, 6 * i);
+    // The kinds' state: an explorer falls until it lands on something, a vehicle
+    // drops to the ground facing a heading from the same hash as its place.
+    A.hold[i] = 0; A.down[i] = DOWN; A.speed[i] = 0; A.calm[i] = 0;
+    A.heading[i] = A.goal[i] = mix(seed, i, k, 9) & 15;
     return true;
   }
   return false;
@@ -431,8 +468,13 @@ export function gapTo(A, i, at){
   return gap / 2;
 }
 
+/* One tick for everyone, every kind (tickFliers is the same function, from
+   before there were kinds). The preamble is the population's: rooms dropped
+   for a new world, last tick's positions kept for the pushes, the grid. Then
+   each actor moves by its kind's rule, reading only its own state, `old`, the
+   world and the eye, so the order still can't change a byte. */
 const PUSH_OUT = new Int32Array(3), SPACE_OUT = new Int32Array(3);
-export function tickFliers(world, A, params = FLIER, { order = null, log = null, stats = null, rooms = true, grid = true } = {}){
+export function tickActors(world, A, params = FLIER, { order = null, log = null, stats = null, rooms = true, grid = true } = {}){
   const P = params, t = A.t, L = P.leash;
   const useRooms = rooms && typeof world.room === 'function';
   if (useRooms && A.roomWorld !== world){
@@ -441,10 +483,18 @@ export function tickFliers(world, A, params = FLIER, { order = null, log = null,
   }
   A.old.set(A.pos);
   const g = grid ? buildGrid(A, world.D, P.sep) : null, push = PUSH_OUT, space = SPACE_OUT;
+  const X = P.explorer ?? EXPLORER, V = P.vehicle ?? VEHICLE;
   const n = order ? order.length : A.N;
   for (let k = 0; k < n; k++){
     const i = order ? order[k] : k;
     if (!A.alive[i]) continue;
+    const kind = A.kind[i];
+    if (kind !== KIND.flier){
+      pushOf(A, g, i, P.sep, P.push, push);
+      if (kind === KIND.explorer) explorerStep(world, A, i, P, X, t, push, useRooms, log, stats);
+      else vehicleStep(world, A, i, P, V, t, push, useRooms, log, stats);
+      continue;
+    }
     if (t >= A.until[i]){
       A.epoch[i]++;
       A.until[i] = t + P.spanMin + (mix(P.seed, i, A.epoch[i], 1) & P.spanMask);
@@ -470,6 +520,225 @@ export function tickFliers(world, A, params = FLIER, { order = null, log = null,
     }
   }
   A.t = t + 1;
+}
+export const tickFliers = tickActors;
+
+/* ---- the explorer ------------------------------------------------------------------
+   Asked for 2026-11-19: "explorers that follow the edges of the world they are
+   in", read (by the user's pick) as surfaces: it crawls along any solid face,
+   floor, wall or ceiling, holding it, the way an ant follows edges. In a voxel
+   world every face is axis-aligned (actors.md §2's climber, "unusually well
+   suited"), so the face it holds is one of six directions, `down`, and the way
+   it crawls is another, `heading`, at right angles to it. A tick:
+
+     crawl    `crawl` along the heading, swept like any move;
+     a wall   cut short: something is ahead, so that's a surface too. It
+              climbs it (3 ticks in 4, by hash), down becoming the heading and
+              the heading away from the old face, or turns to run along its
+              foot (the third axis, either way);
+     press    otherwise it presses `press` (a voxel) toward its face. A press
+              cut short is contact: it HOLDs. A press that goes the whole way
+              found nothing: it went over an edge, so it ROUNDs it, the face
+              it was crawling away from becoming its face (down = heading's
+              opposite) and its old face's direction the way on (heading =
+              down). Next tick it crawls round and presses back onto the far
+              side. A ROUND whose press finds nothing again is lost: it FALLs,
+              `fall` a tick straight down, until it lands on its feet.
+
+   So it goes up walls, over roofs, along ceilings and down the far side,
+   exploring everything a flier can't see from the air. In a universe the
+   surface carries on into the next world wherever two worlds meet (the
+   plane's grounds are flush), so an explorer crosses on foot like the walker.
+
+   HOLD means contact, exactly: the last move toward its face was cut short,
+   so 1/256 more would hit. The test holds every HOLD to it on a dense twin.
+   Pushes from neighbours act before the crawl, on the two axes along the
+   face, never into it or off it, for the same reason.
+
+   **The eye**: on the leash's terms (the same box, `radius`), an explorer
+   past it crawls toward the eye on whichever axis along its face is farthest
+   over, so it climbs whatever's between, and inside the personal space it
+   crawls away on the axis it's most off. It can't fly, so when you outrun
+   it the page's regather fetches it, as it does a flier. Its new heading at
+   each epoch (2–6 s) is a hash, as a flier's goal is. */
+export const DIR6 = Object.freeze([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]);
+export const DOWN = 3;                               // −y: a floor
+export const HOLD = 2, ROUND = 1, FALL = 0;
+export const EXPLORER = Object.freeze({ crawl: 64, press: 256, fall: 384, spanMin: 120, spanMask: 255 });
+const sgn6 = d => d & 1 ? -1 : 1;
+// The k-th (0–3) of the four directions along a face held in direction `down`.
+export const along = (down, k) => 2 * (((down >> 1) + 1 + (k >> 1)) % 3) + (k & 1);
+const CENTRE = new Int32Array(3);
+function centreOf(A, i, out){ for (let a = 0; a < 3; a++) out[a] = A.pos[3 * i + a] + A.size[3 * i + a] * (ONE >> 1); return out; }
+/* The eye's say in an explorer's heading, or −1 for none: away inside the
+   personal space, toward it past the leash, on an axis along its face. */
+export function steerAlong(L, A, i, down){
+  if (!L) return -1;
+  const c = centreOf(A, i, CENTRE), dax = down >> 1;
+  let best = 0, dir = -1;
+  if (L.inner > 0 && gapTo(A, i, L.at) < L.inner * ONE){
+    for (let a = 0; a < 3; a++){
+      if (a === dax) continue;
+      const d = c[a] - L.at[a];
+      if (Math.abs(d) > best){ best = Math.abs(d); dir = 2 * a + (d < 0 ? 1 : 0); }
+    }
+    return dir;
+  }
+  for (let a = 0; a < 3; a++){
+    if (a === dax) continue;
+    const d = L.at[a] - c[a], over = Math.abs(d) - L.radius * ONE;
+    if (over > best){ best = over; dir = 2 * a + (d < 0 ? 1 : 0); }
+  }
+  return dir;
+}
+function explorerStep(world, A, i, P, X, t, push, rooms, log, stats){
+  const s = A.hold[i], p3 = 3 * i;
+  const from0 = A.pos[p3], from1 = A.pos[p3 + 1], from2 = A.pos[p3 + 2];
+  if (t >= A.until[i]){
+    A.epoch[i]++;
+    A.until[i] = t + X.spanMin + (mix(P.seed, i, A.epoch[i], 1) & X.spanMask);
+    A.heading[i] = along(A.down[i], mix(P.seed, i, A.epoch[i], 7) & 3);
+  }
+  if (s === FALL){
+    // Lost: straight down until it lands, then a way along the floor.
+    if (A.down[i] !== DOWN){ A.down[i] = DOWN; A.heading[i] = along(DOWN, mix(P.seed, i, A.epoch[i], 7) & 3); }
+    const m = moveAxis(world, A, i, 1, -X.fall, rooms, log, stats);
+    if (m !== -X.fall) A.hold[i] = HOLD;
+  } else {
+    let down = A.down[i], head = A.heading[i];
+    if (s === HOLD){
+      const e = steerAlong(P.leash, A, i, down);
+      if (e >= 0) head = e;
+      // Pushes along the face only: never into it or off it.
+      for (let a = 0; a < 3; a++) if (a !== down >> 1 && push[a]) moveAxis(world, A, i, a, push[a], rooms, log, stats);
+    }
+    const want = sgn6(head) * X.crawl, m = moveAxis(world, A, i, head >> 1, want, rooms, log, stats);
+    let pressed = true;
+    if (m !== want){
+      // Something ahead: climb it, or turn along its foot.
+      if (mix(P.seed, i, t, 11) & 3){ const was = down; down = head; head = was ^ 1; pressed = false; }
+      else head = 2 * (3 - (down >> 1) - (head >> 1)) + (mix(P.seed, i, t, 12) & 1);
+      A.hold[i] = HOLD;
+    }
+    if (pressed){
+      const pw = sgn6(down) * X.press, q = moveAxis(world, A, i, down >> 1, pw, rooms, log, stats);
+      if (q !== pw) A.hold[i] = HOLD;
+      else if (s === HOLD && m === want){ const was = down; down = head ^ 1; head = was; A.hold[i] = ROUND; }
+      else A.hold[i] = FALL;
+    }
+    A.down[i] = down; A.heading[i] = head;
+  }
+  A.vel[p3] = A.pos[p3] - from0; A.vel[p3 + 1] = A.pos[p3 + 1] - from1; A.vel[p3 + 2] = A.pos[p3 + 2] - from2;
+}
+
+/* ---- the vehicle -------------------------------------------------------------------
+   Asked for 2026-11-19, on the ground (the user's pick): it drives under
+   gravity on whatever floor it lands on, steering by a heading, one of 16
+   (HEADINGS: cos and sin × 256, rounded, written out so every engine has the
+   same integers; never Math.cos in a tick). A tick:
+
+     steer    a new goal heading each epoch (1.5–5 s), within three steps of
+              the one it has (a hash), so it drives in long gentle curves; the
+              eye, past the leash on x or z, makes the goal the heading toward
+              it, and inside the personal space the one away. It turns one
+              step toward its goal every `turnEvery` ticks (22.5° a 15th of a
+              second at 4), the short way round;
+     speed    eases toward `cruise` by `accel` a tick, half that in a sharp turn
+              (more than two steps off its goal);
+     gravity  `gravity` a tick, swept; a fall cut short lands it (hold = 1);
+     drive    the heading times the speed, x then z, swept. A move cut short
+              on the ground tries a step: `step` voxels up, if that's clear
+              and it can then go on at all, as the walker steps a stair; else
+              it's blocked. After driving on the ground it snaps down up to
+              `step` voxels, so it rolls down stairs instead of hopping;
+     blocked  it backs off: its speed reversed at half, a goal about the
+              opposite way, and `backoff` ticks of ignoring the eye (`calm`),
+              or the leash would drive it straight back into the wall.
+
+   On the ground means contact, exactly, as an explorer's HOLD: the test holds
+   every grounded tick to 1/256 more down hitting. Pushes act on x and z only,
+   in the drive. In a universe it drives off one world onto the next across
+   the plane: every ground is at one height, so the border is flat. */
+export const HEADINGS = Object.freeze([256, 0, 237, 98, 181, 181, 98, 237, 0, 256, -98, 237, -181, 181, -237, 98,
+                                       -256, 0, -237, -98, -181, -181, -98, -237, 0, -256, 98, -237, 181, -181, 237, -98]);
+export const VEHICLE = Object.freeze({ cruise: 128, accel: 4, gravity: 12, fall: 1024, step: 1, turnEvery: 4, spanMin: 90, spanMask: 255, backoff: 90 });
+// The heading nearest the direction (x, z), in any units: the largest dot product, the first on a tie.
+export function headingTo(x, z){
+  let best = -Infinity, h = 0;
+  for (let k = 0; k < 16; k++){ const d = HEADINGS[2 * k] * x + HEADINGS[2 * k + 1] * z; if (d > best){ best = d; h = k; } }
+  return h;
+}
+// The eye's say in a vehicle's goal, or −1: away inside the space, toward it past the leash.
+export function steerTo(L, A, i){
+  if (!L) return -1;
+  const c = centreOf(A, i, CENTRE), dx = L.at[0] - c[0], dz = L.at[2] - c[2];
+  if (L.inner > 0 && gapTo(A, i, L.at) < L.inner * ONE) return dx || dz ? headingTo(-dx, -dz) : -1;
+  return Math.max(Math.abs(dx), Math.abs(dz)) > L.radius * ONE ? headingTo(dx, dz) : -1;
+}
+function vehicleStep(world, A, i, P, V, t, push, rooms, log, stats){
+  const p3 = 3 * i, from0 = A.pos[p3], from2 = A.pos[p3 + 2];
+  if (t >= A.until[i]){
+    A.epoch[i]++;
+    A.until[i] = t + V.spanMin + (mix(P.seed, i, A.epoch[i], 1) & V.spanMask);
+    A.goal[i] = (A.heading[i] + mix(P.seed, i, A.epoch[i], 7) % 7 - 3) & 15;
+  }
+  if (t >= A.calm[i]){ const g = steerTo(P.leash, A, i); if (g >= 0) A.goal[i] = g; }
+  const off = ((A.goal[i] - A.heading[i] + 8) & 15) - 8;
+  if (off && (t + i) % V.turnEvery === 0) A.heading[i] = (A.heading[i] + Math.sign(off)) & 15;
+  const target = Math.abs(off) > 2 ? V.cruise >> 1 : V.cruise;
+  A.speed[i] += Math.max(-V.accel, Math.min(V.accel, target - A.speed[i]));
+  // Gravity.
+  let vy = Math.max(-V.fall, A.vel[p3 + 1] - V.gravity), ground = 0;
+  const my = moveAxis(world, A, i, 1, vy, rooms, log, stats);
+  if (my !== vy){ if (vy < 0) ground = 1; vy = 0; }
+  // The drive, x then z.
+  const h = A.heading[i], sp = A.speed[i], up = V.step * ONE;
+  let blocked = false, drove = false;
+  for (let a = 0; a < 3; a += 2){
+    const d = Math.trunc(HEADINGS[2 * h + (a >> 1)] * sp / ONE) + push[a];
+    if (!d) continue;
+    const m = moveAxis(world, A, i, a, d, rooms, log, stats);
+    if (m !== 0) drove = true;
+    if (m === d) continue;
+    // A step: clear above, and from up there, room to go on at all.
+    let stepped = false;
+    if (ground && !sweptHits(world, A, i, 1, up, rooms, stats)){
+      A.pos[p3 + 1] += up;
+      const ahead = !sweptHits(world, A, i, a, Math.sign(d), rooms, stats);
+      A.pos[p3 + 1] -= up;
+      if (ahead){
+        moveAxis(world, A, i, 1, up, rooms, log, stats);
+        moveAxis(world, A, i, a, d - m, rooms, log, stats);
+        stepped = drove = true;
+      }
+    }
+    if (!stepped) blocked = true;
+  }
+  if (ground && drove){
+    const s = moveAxis(world, A, i, 1, -up, rooms, log, stats);
+    if (s === -up) ground = 0;                       // nothing within a step: off an edge, falling
+  }
+  if (blocked){
+    A.speed[i] = -(A.speed[i] >> 1);
+    A.goal[i] = (A.heading[i] + 8 + mix(P.seed, i, t, 13) % 5 - 2) & 15;
+    A.calm[i] = t + V.backoff;
+  }
+  A.hold[i] = ground;
+  A.vel[p3] = A.pos[p3] - from0; A.vel[p3 + 1] = vy; A.vel[p3 + 2] = A.pos[p3 + 2] - from2;
+}
+
+/* ---- the rolling origin -------------------------------------------------------------
+   The endless lattice moves its coordinates by whole cells when it re-centres
+   (universe-log step 5), and everything the page holds moves with them: d in
+   whole voxels, onto the positions, last tick's and the rooms. Nothing an
+   actor decides depends on where it is, only on what's round it, so a
+   population shifted with its world ticks to the shifted bytes (the test). */
+export function shiftActors(A, d){
+  for (let i = 0; i < A.N; i++){
+    for (let a = 0; a < 3; a++){ A.pos[3 * i + a] += d[a] * ONE; A.old[3 * i + a] += d[a] * ONE; }
+    const o = 6 * i;
+    if (A.room[o] <= A.room[o + 3]) for (let a = 0; a < 3; a++){ A.room[o + a] += d[a]; A.room[o + 3 + a] += d[a]; }
+  }
 }
 
 /* Regathering: the leash's backstop. The leash pulls at vmax at most, 90

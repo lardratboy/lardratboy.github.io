@@ -209,6 +209,7 @@
   <label>seams <select id="seams"><option value="1">open sides + tail</option><option value="0">off (cracks)</option></select></label>
   <label>cut <select id="freeze"><option value="0">follows the eye</option><option value="1">frozen</option></select></label>
   <label>actors <select id="actors"><option value="0">none</option><option>10</option><option>100</option><option>300</option><option>1000</option></select>
+    <select id="actorKinds" title="what they do: fly, crawl along surfaces, or drive on the ground"><option value="fliers">fliers</option><option value="explorers">explorers</option><option value="vehicles">vehicles</option><option value="mixed">mixed</option></select>
     <button id="actorsForward" title="advance the actors 10 seconds at once">fast forward 10 s</button></label>
 </div>
 <div id="hud" hidden></div>
@@ -342,8 +343,8 @@ import { attrRGB, attrOf8 } from './attr-core.js';
 import { readPad, pickPad, PAD, BUTTON } from './pad-core.js';
 import { createOcclusion, nearEye, nearRadius, hiddenByTiles, OCCLUSION } from './occlusion-core.js';
 import { SHAPES, fieldOf, crustOf, CRUST } from './experiments/shapes.mjs';
-import { dagWorld, createActors, spawnNear, tickFliers, advanceFliers, regather, restHits, rescue, diffBox, trapped, mix as actorMix, FLIER, ONE as ACTOR_ONE, MAX_D as ACTOR_MAX_D } from './actor-core.js';
-import { actorBody, bodyRecords, makeBody, turnMap, turnedBox } from './body-core.js';
+import { dagWorld, createActors, spawnNear, tickActors, regather, restHits, restBox, rescue, diffBox, trapped, shiftActors, mix as actorMix, FLIER, KIND, KINDS as ACTOR_KINDS, ONE as ACTOR_ONE, MAX_D as ACTOR_MAX_D } from './actor-core.js';
+import { actorBody, bodyRecords, makeBody, turnMap, turnedBox, poseOf, quatOf, matOfQuat, slerp } from './body-core.js';
 import { sliceCore, rowsOf, automatonOf, AXIS_NAMES } from './testbed-rows.js';
 import { scatterDesc, groundOf, scatterGround, rotateOcc, unturn, PROPER } from './scatter-core.js';
 import { buildScatterInWorkers, buildKitInWorkers, ornamentsKept, isAbort } from './scatter-build.js';
@@ -2453,8 +2454,9 @@ function installEndless(E, win, fresh){
   if (walk.on) try { walkWorld(); } catch { setWalk(true); }
 }
 /* Move every position the page holds by d, whole voxels: the eye, the last eye the cut
-   was made at, the walker and its eye, and the orbit camera's note that it last moved
-   the camera (camKey has the eye in it). */
+   was made at, the walker and its eye, the orbit camera's note that it last moved
+   the camera (camKey has the eye in it), and the actors (actor-core's shiftActors:
+   positions, last tick's, rooms; actors-log step 4). */
 function shiftOrigin(d){
   const ours = orbitCam.seen === camKey();
   for (let a = 0; a < 3; a++){
@@ -2462,6 +2464,7 @@ function shiftOrigin(d){
     if (walk.w) walk.w.p[a] += d[a];
     if (walk.eye) walk.eye[a] += d[a];
   }
+  if (actors.A && actors.of === W) shiftActors(actors.A, d);
   if (ours) orbitCam.seen = camKey();
 }
 function endlessTick(){
@@ -4376,6 +4379,8 @@ function bindControls(){
   $('actors').value = String(actors.n);
   if ($('actors').value !== String(actors.n)){ const o = document.createElement('option'); o.textContent = String(actors.n); $('actors').append(o); $('actors').value = o.textContent; }
   $('actors').addEventListener('change', () => setActors(+$('actors').value));
+  $('actorKinds').value = actors.kinds;
+  $('actorKinds').addEventListener('change', () => setActorKinds($('actorKinds').value));
   $('actorsForward').addEventListener('click', e => { e.currentTarget.blur(); forwardActors(600); });
 }
 /* A new path only changes which kind each chunk wants: the chunks of the
@@ -4497,14 +4502,40 @@ function setBuilding(text, fraction, fresh = false){
    bounded by the raster's depth, so a flier hides ray content behind it and
    ray content in front of it overwrites it, like any raster surface. With
    no actors the pass doesn't run at all: the frame is today's, call for call
-   (actorSelftest holds it byte for byte). */
+   (actorSelftest holds it byte for byte).
+
+   **Kinds (step 4, asked for 2026-11-19)**: the kinds control (?kinds=) makes
+   every slot a flier, an explorer (crawls along any surface, actor-core's
+   explorerStep) or a vehicle (drives on the ground, vehicleStep), or a third
+   of each ("mixed", slot i's kind i % 3). Bodies are the same specimens;
+   only the behaviour, and the pose it's drawn in, change. A flier keeps its
+   slot's turn; an explorer is drawn feet on its face and front the way it
+   crawls, a vehicle upright facing its heading (body-core's poseOf), on top
+   of the slot's turn, eased on screen toward the core's pose (`easePoses`),
+   since the core turns at once.
+
+   **Across worlds (step 4)**: in a universe the world is universe-core's
+   universeWorld, every instance asked in its own world's frame, as the
+   walker's is: so a flier flies, an explorer crawls and a vehicle drives off
+   one world onto the next with nothing at the border. In the endless lattice
+   the population lives as long as the lattice (W is one object), and
+   shiftOrigin moves it with everything else when the origin rolls; a world
+   landing where a park was can put rock where an actor is, so the actors
+   within the cubes that are new are rescued, as after an edit. The HUD
+   counts the worlds that hold one and how often one has crossed between
+   instances (`whereActors`). */
 const TICK_MS = 1000 / 60, LEASH = 48, SPACE = 16, ACTORS_MAX = 4096;
+const ACTOR_MODES = ['fliers', 'explorers', 'vehicles', 'mixed'];
 const actors = {
   n: Math.max(0, Math.min(ACTORS_MAX, Math.floor(+params.get('actors') || 0))), seed: 1,
-  A: null, of: null, world: null, acc: 0, alpha: 1, bodies: [],
+  kinds: ACTOR_MODES.includes(params.get('kinds')) ? params.get('kinds') : 'fliers',
+  A: null, of: null, world: null, worldOf: null, worldOffset: null, acc: 0, alpha: 1, bodies: [], poses: null,
   alive: 0, tickMs: 0, probes: 0, regathered: 0, rescued: 0, rescueMs: 0, forwardMs: 0, note: '',
+  where: null, whereAt: null, crossed: 0, inWorlds: 0, byKind: [0, 0, 0], placed: [0, 0, 0],
   stats: { probes: 0, roomSaves: 0, roomFinds: 0 },
 };
+// Slot i's kind: the control's, or a third of each when mixed.
+const kindOfSlot = i => actors.kinds === 'mixed' ? i % 3 : ACTOR_MODES.indexOf(actors.kinds);
 const BODY_VS = `#version 300 es
 precision highp float;
 precision highp int;
@@ -4577,12 +4608,50 @@ function setActors(n){
   if (actors.n) q.set('actors', actors.n); else q.delete('actors');
   history.replaceState(null, '', '?' + q);
 }
+// A new mix is a new population, spawned round the eye on the next tick.
+function setActorKinds(mode){
+  actors.kinds = ACTOR_MODES.includes(mode) ? mode : 'fliers';
+  actors.A = null; actors.of = null; actors.forwardMs = 0;
+  $('actorKinds').value = actors.kinds;
+  const q = new URLSearchParams(location.search);
+  if (actors.kinds !== 'fliers') q.set('kinds', actors.kinds); else q.delete('kinds');
+  history.replaceState(null, '', '?' + q);
+}
+/* An instance named as the endless lattice can't renumber it: its world and its
+   corner in absolute voxels (a window's coordinates plus its offset). */
+const instanceName = (x, off) => `${x.world}@${x.at[0] + off[0]},${x.at[1] + off[1]},${x.at[2] + off[2]}`;
+/* What a new window changed, in its own coordinates: the box round every instance
+   cube it has that the last one hadn't (a world landed where a park was), or null. */
+function universeChange(was, wasOff, now, nowOff){
+  const old = new Set(was.instances.map(x => instanceName(x, wasOff))), lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const x of now.instances){
+    if (old.has(instanceName(x, nowOff))) continue;
+    for (let a = 0; a < 3; a++){ lo[a] = Math.min(lo[a], x.cube.lo[a]); hi[a] = Math.max(hi[a], x.cube.hi[a]); }
+  }
+  return lo[0] <= hi[0] ? { lo, hi } : null;
+}
 /* The world an actor moves in: the log's root on an edited world, else the
    shown one. When the root moves under a population (a click, an undo), the
-   new world rescues anyone the change trapped. */
+   new world rescues anyone the change trapped. In a universe, universeWorld,
+   made again when the universe is (by the universe, not W: the endless lattice
+   swaps its universe under one W), rescuing within whatever the new one added. */
 function actorWorld(){
+  if (W.universe){
+    if (actors.worldOf !== W.universe){
+      const wasU = actors.worldOf, wasOff = actors.worldOffset, off = W.endless ? W.endless.win.offset.slice() : [0, 0, 0];
+      actors.world = universeWorld(W.universe, W.side);
+      actors.worldOf = W.universe; actors.worldOffset = off;
+      if (wasU && actors.A && actors.of === W){
+        const t0 = performance.now(), changed = universeChange(wasU, wasOff, W.universe, off);
+        if (changed) actors.rescued += rescue(actors.world, actors.A, actorParams(), { changed }).length;
+        actors.rescueMs = performance.now() - t0;
+      }
+    }
+    return actors.world;
+  }
   const root = W.edit ? W.edit.log.root : W.root, was = actors.world;
-  if (!was || was.store !== W.store || was.root !== root){
+  if (!was || actors.worldOf || was.store !== W.store || was.root !== root){
+    actors.worldOf = null;
     actors.world = dagWorld(W.store, root, W.D);
     if (was && was.store === W.store && actors.A && actors.of === W){
       const t0 = performance.now(), changed = diffBox(W.store, was.root, root, W.D);
@@ -4598,28 +4667,85 @@ const bodyOfSlot = i => actorBody(actors.seed, i);
 // Every spawn: at the slot's body's box, within LEASH of `at`, never in rock or a sealed pocket,
 // and outside the eye's personal space when there's room.
 const spawnSlot = (world, A, i, at) => spawnNear(world, A, i, actors.bodies[i].size, actors.seed, at, LEASH, 32, FLIER.trap, actorLeash());
-// The population for this world: made on the first tick after a world or N
-// changes, spawned within LEASH of the eye. Slots with nowhere to go (the eye
-// in rock, or outside the world) stay dead until the regather finds a place.
+// A population for a world: each slot's kind, then its spawn within LEASH of `at`. The page's and its twin's.
+function makePopulation(world, n, at){
+  const A = createActors(n);
+  for (let i = 0; i < n; i++){ A.kind[i] = kindOfSlot(i); spawnSlot(world, A, i, at); }
+  return A;
+}
+// The population for this world: made on the first tick after a world, N or
+// the mix changes, spawned within LEASH of the eye. Slots with nowhere to go
+// (the eye in rock, or outside the world) stay dead until the regather finds a
+// place. universeWorld refuses a universe it can't hold: then the note says why.
 function ensureActors(){
   if (actors.A && actors.of === W) return actors.A;
   actors.note = '';
-  // Actors moving between worlds come after the universe works (universekit Q9).
-  if (W.universe){ actors.note = 'no actors in a universe yet'; actors.A = null; return null; }
   if (W.D > ACTOR_MAX_D){ actors.note = `no actors past D = ${ACTOR_MAX_D}`; actors.A = null; return null; }
   actors.bodies = Array.from({ length: actors.n }, (_, i) => bodyOfSlot(i));
-  actors.world = null;
-  const world = actorWorld(), A = createActors(actors.n), at = eyeVoxel();
-  for (let i = 0; i < A.N; i++) spawnSlot(world, A, i, at);
-  actors.A = A; actors.of = W; actors.acc = 0; actors.alpha = 1;
-  return A;
+  actors.world = null; actors.worldOf = null; actors.worldOffset = null;
+  let world;
+  try { world = actorWorld(); } catch (e){ actors.note = `no actors in this universe: ${e.message}`; actors.A = null; return null; }
+  actors.A = makePopulation(world, actors.n, eyeVoxel()); actors.of = W; actors.acc = 0; actors.alpha = 1;
+  actors.poses = null; actors.where = null; actors.whereAt = null; actors.crossed = 0; actors.inWorlds = 0;
+  return actors.A;
 }
 const actorLeash = () => ({ at: cam.eye.map(v => Math.round(v * ACTOR_ONE)), radius: LEASH, shift: 4, max: 256, inner: SPACE, innerShift: 2, innerMax: 192 });
 const actorParams = () => ({ ...FLIER, seed: actors.seed, leash: actorLeash() });
 function tickActorsOnce(){
   const A = actors.A, world = actorWorld();
-  tickFliers(world, A, actorParams(), { stats: actors.stats });
-  if (A.t % 30 === 0) actors.regathered += regather(world, A, actors.seed, eyeVoxel(), LEASH, 16 * LEASH, 8, FLIER.trap, actorLeash());
+  tickActors(world, A, actorParams(), { stats: actors.stats });
+  if (A.t % 30 === 0){
+    actors.regathered += regather(world, A, actors.seed, eyeVoxel(), LEASH, 16 * LEASH, 8, FLIER.trap, actorLeash());
+    if (W.universe) whereActors();
+  }
+}
+/* In a universe, twice a second: which instance each actor is in (the one whose
+   cube holds the middle of its box's floor, as the HUD's "you are in" asks of the
+   eye), how many worlds hold one, and how many times one has gone from one
+   instance to another. Instances by instanceName, so a window renumbering them
+   isn't a crossing, and a move of 128 voxels or more between looks isn't either:
+   that's a regather or a rescue, not a crossing. */
+function whereActors(){
+  const A = actors.A, u = W.universe, off = W.endless ? W.endless.win.offset : [0, 0, 0];
+  if (!actors.where || actors.where.length !== A.N){ actors.where = new Array(A.N).fill(null); actors.whereAt = new Float64Array(3 * A.N); }
+  const held = new Set();
+  for (let i = 0; i < A.N; i++){
+    if (!A.alive[i]) continue;
+    const [lo, hi] = restBox(A, i), at = [(lo[0] + hi[0]) >> 1, lo[1], (lo[2] + hi[2]) >> 1], j = instanceAt(u, at);
+    if (j < 0) continue;
+    const x = u.instances[j], name = instanceName(x, off), abs = at.map((v, a) => v + off[a]);
+    held.add(x.world);
+    const near = [0, 1, 2].every(a => Math.abs(abs[a] - actors.whereAt[3 * i + a]) < 128);
+    if (actors.where[i] !== null && actors.where[i] !== name && near) actors.crossed++;
+    actors.where[i] = name;
+    for (let a = 0; a < 3; a++) actors.whereAt[3 * i + a] = abs[a];
+  }
+  actors.inWorlds = held.size;
+}
+// The HUD's mix: how many of each kind, and how many of those are on something.
+function actorKindsLine(){
+  const [f, e, v] = actors.byKind, [, pe, pv] = actors.placed, out = [];
+  if (f) out.push(`${f} flying`);
+  if (e) out.push(`${e} exploring, ${pe} on a surface`);
+  if (v) out.push(`${v} driving, ${pv} on the ground`);
+  return out.join(', ') || actors.kinds;
+}
+/* Each actor's pose as drawn, a quaternion a slot: eased toward its kind's pose
+   (body-core's poseOf) by a frame's share, a time constant of 50 ms, the shorter
+   way. A flier's is never asked; an explorer's waits while it falls, since a
+   falling explorer has no face. Drawing only: the core turned at once. */
+function easePoses(dt){
+  const A = actors.A;
+  if (!actors.poses || actors.poses.length !== 4 * A.N){ actors.poses = new Float64Array(4 * A.N); for (let i = 0; i < A.N; i++) actors.poses[4 * i] = 1; actors.posed = new Uint8Array(A.N); }
+  const k = 1 - Math.exp(-dt / 50);
+  for (let i = 0; i < A.N; i++){
+    const kind = A.kind[i];
+    if (!A.alive[i] || kind === KIND.flier || (kind === KIND.explorer && A.hold[i] === 0)) continue;
+    const want = quatOf(poseOf(kind, A.heading[i], A.down[i])), q = actors.poses.subarray(4 * i, 4 * i + 4);
+    // The first pose is taken at once: a vehicle spawned facing west doesn't swing round from east.
+    q.set(actors.posed[i] ? slerp(q, want, k) : want);
+    actors.posed[i] = 1;
+  }
 }
 function stepActors(dt){
   if (!actors.n || !W || !ensureActors()) return;
@@ -4630,9 +4756,13 @@ function stepActors(dt){
   for (; actors.acc >= TICK_MS && k < 4; k++){ tickActorsOnce(); actors.acc -= TICK_MS; }
   if (actors.acc >= TICK_MS) actors.acc = TICK_MS;
   actors.alpha = actors.acc / TICK_MS;
+  easePoses(dt);
   if (k){
     const A = actors.A;
     actors.alive = A.alive.reduce((a, v) => a + v, 0);
+    // Of each kind, how many: alive, and on something (an explorer holding a face, a vehicle on the ground).
+    actors.byKind = [0, 0, 0]; actors.placed = [0, 0, 0];
+    for (let i = 0; i < A.N; i++) if (A.alive[i]){ actors.byKind[A.kind[i]]++; actors.placed[A.kind[i]] += A.kind[i] === KIND.explorer ? +(A.hold[i] === 2) : A.hold[i]; }
     actors.tickMs = actors.tickMs * 0.9 + (performance.now() - t0) / k * 0.1;
     actors.probes = actors.probes * 0.9 + s.probes / k / Math.max(1, actors.alive) * 0.1;
   }
@@ -4644,6 +4774,7 @@ function forwardActors(n){
   for (let k = 0; k < n; k++) tickActorsOnce();
   actors.forwardMs = performance.now() - t0;
   actors.alpha = 1;
+  if (actors.poses) actors.posed.fill(0);           // ten seconds on: every pose taken at once
 }
 // Actor i's box's low corner as drawn, between last tick and this one, in voxels.
 const drawnLo = (A, i, t) => [0, 1, 2].map(a => { const o = A.old[3 * i + a]; return (o + (A.pos[3 * i + a] - o) * t) / ACTOR_ONE; });
@@ -4688,9 +4819,18 @@ function drawActors(M, planes, T, w, h, colorMode){
     const side = Math.max(A.size[3 * i], A.size[3 * i + 1], A.size[3 * i + 2]);
     if (!boxVisible(planes, lo, side)) continue;
     const b = actors.bodies[i], g = bodyVAO(b.body), { M: R, o } = turnMap(b.e, b.body.R);
-    for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) TURN_GL[3 * c + r] = R[3 * r + c];     // GL is column major
-    gl.uniformMatrix3fv(BODY_U.uTurn, false, TURN_GL);
-    gl.uniform3f(BODY_U.uShift, o[0] - b.off[0] + lo[0], o[1] - b.off[1] + lo[1], o[2] - b.off[2] + lo[2]);
+    if (A.kind[i] === KIND.flier || !actors.poses){
+      for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) TURN_GL[3 * c + r] = R[3 * r + c];     // GL is column major
+      gl.uniformMatrix3fv(BODY_U.uTurn, false, TURN_GL);
+      gl.uniform3f(BODY_U.uShift, o[0] - b.off[0] + lo[0], o[1] - b.off[1] + lo[1], o[2] - b.off[2] + lo[2]);
+    } else {
+      // The pose Q about the box's centre c, on top of the turn: x ↦ Q·(R·x + o − off − c) + c + lo.
+      const Q = matOfQuat(actors.poses.subarray(4 * i, 4 * i + 4)), c = [0, 1, 2].map(a => A.size[3 * i + a] / 2), v = [0, 1, 2].map(a => o[a] - b.off[a] - c[a]);
+      for (let r = 0; r < 3; r++) for (let col = 0; col < 3; col++) TURN_GL[3 * col + r] = Q[3 * r] * R[col] + Q[3 * r + 1] * R[3 + col] + Q[3 * r + 2] * R[6 + col];
+      gl.uniformMatrix3fv(BODY_U.uTurn, false, TURN_GL);
+      const sh = [0, 1, 2].map(r => Q[3 * r] * v[0] + Q[3 * r + 1] * v[1] + Q[3 * r + 2] * v[2] + c[r] + lo[r]);
+      gl.uniform3f(BODY_U.uShift, sh[0], sh[1], sh[2]);
+    }
     gl.bindVertexArray(g.vao);
     gl.drawElementsInstanced(gl.TRIANGLES, CUBE_TRIS, gl.UNSIGNED_BYTE, 0, g.n);
     n++;
@@ -5096,7 +5236,8 @@ function hud(){
     `<span class="sec">gpu</span> ${timerExt ? `raster ${Number.isFinite(timers.raster) ? timers.raster.toFixed(2) : '–'} ms  ray ${Number.isFinite(timers.ray) ? timers.ray.toFixed(2) : '–'} ms` +
       (state.ssao ? `  ssao ${Number.isFinite(timers.ssao) ? timers.ssao.toFixed(2) : '–'} ms` : '') : 'no timer extension'}` +
       (state.ssao ? `  <span class="sec">ssao</span> ${state.ssao.slices} slices × ${state.ssao.steps} steps, R = ${state.ssao.radius}, ${state.ssao.scale === 2 ? 'half' : 'full'} resolution` : '') + '\n' +
-    (actors.n ? `<span class="sec">actors</span> ${actors.alive} of ${actors.n} alive, ${view.actors} drawn  tick ${actors.tickMs.toFixed(2)} ms, ${actors.probes.toFixed(2)} probes an actor, ` +
+    (actors.n ? `<span class="sec">actors</span> ${actors.alive} of ${actors.n} alive (${actorKindsLine()}), ${view.actors} drawn  tick ${actors.tickMs.toFixed(2)} ms, ${actors.probes.toFixed(2)} probes an actor, ` +
+      `${W.universe && actors.A ? `in ${actors.inWorlds} world${actors.inWorlds === 1 ? '' : 's'}, ${actors.crossed} crossings between instances, ` : ''}` +
       `t = ${actors.A ? actors.A.t : 0}${actors.regathered ? `, ${actors.regathered} regathered` : ''}${actors.rescued ? `, ${actors.rescued} rescued (last ${actors.rescueMs.toFixed(1)} ms)` : ''}${actors.forwardMs ? `  fast forward 10 s: ${actors.forwardMs.toFixed(0)} ms` : ''}` +
       `${actors.note ? `  <span class="warn">${actors.note}</span>` : ''}\n` : '') +
     `<span class="sec">frame</span> ${frameMs.toFixed(1)} ms rAF interval  cut ${S.stats.selectMs.toFixed(2)}  cover ${S.stats.coverMs.toFixed(2)}  upload ${(S.stats.lastUpload / 1024).toFixed(0)} KB` +
@@ -5122,7 +5263,8 @@ function hud(){
     ray: { path: state.path, density: state.density, switching, pages: ray.pageCount, bricks: ray.brickPool.size, uploads: ray.uploads, tree: ray.treeNodes,
            heapWords: ray.heapAlloc.used, heapFull: ray.heapFull },
     gpuMs: { raster: timers.raster, ray: timers.ray },
-    actors: { n: actors.n, alive: actors.alive, t: actors.A ? actors.A.t : 0, tickMs: actors.tickMs, probes: actors.probes, drawn: view.actors, regathered: actors.regathered, rescued: actors.rescued } };
+    actors: { n: actors.n, kinds: actors.kinds, alive: actors.alive, byKind: actors.byKind.slice(), placed: actors.placed.slice(), t: actors.A ? actors.A.t : 0, tickMs: actors.tickMs, probes: actors.probes, drawn: view.actors,
+              regathered: actors.regathered, rescued: actors.rescued, inWorlds: actors.inWorlds, crossed: actors.crossed, note: actors.note } };
 }
 
 /* The fps corner: frames counted over half a second, not 1000 / frameMs. frameMs clamps
@@ -5702,6 +5844,30 @@ window.endlessSelftest = async function endlessSelftest(opts = {}){
       if (E.recentres - r0 < 4) err(`the flight re-centred ${E.recentres - r0} times`);
       await settle('after the flight', true); }
 
+    // ---- actors through a re-centre (actors-log step 4) ----
+    // A mixed crowd, then the origin rolled under it by a cell (endlessTick, with no tick
+    // between): every actor's absolute place, its position plus the window's offset, is
+    // what it was, last tick's too. Then 120 frames tick in the new window, never in rock.
+    // The frame loop is held (auto), so the selftest ticks them itself, once a frame.
+    { setActorKinds('mixed'); setActors(60);
+      for (let f = 0; f < 30; f++){ await pump(1, 'actors'); stepActors(TICK_MS); }
+      const A = actors.A;
+      if (!A) err(`no actors in the endless lattice: ${actors.note}`);
+      else {
+        const absOf = arr => Array.from(arr, (v, j) => v + W.endless.win.offset[j % 3] * ACTOR_ONE);
+        const pos = absOf(A.pos), old = absOf(A.old), r0 = E.recentres;
+        cam.eye[0] += C; endlessTick();
+        if (E.recentres === r0) err('actors: a cell\'s jump didn\'t re-centre');
+        const p2 = absOf(A.pos), o2 = absOf(A.old);
+        if (p2.some((v, j) => v !== pos[j]) || o2.some((v, j) => v !== old[j])) err('actors: the origin rolled and the actors moved with it');
+        let rock = 0;
+        for (let f = 0; f < 120; f++){ await pump(1, 'actors after'); stepActors(TICK_MS); const w = actorWorld(); for (let i = 0; i < A.N; i++) if (A.alive[i] && restHits(w, A, i)) rock++; }
+        report.actors = { recentred: E.recentres - r0, rock, alive: actors.alive, byKind: actors.byKind.slice(), inWorlds: actors.inWorlds, crossed: actors.crossed, rescued: actors.rescued };
+        if (rock) err(`actors: ${rock} actor-ticks in rock after the re-centre`);
+        if (actors.alive < 54) err(`actors: only ${actors.alive} of 60 alive in the endless lattice`);
+      }
+      setActors(0); setActorKinds('fliers'); }
+
     // ---- a frame unchanged by the origin ----
     { // A built cell, the eye over it 30 voxels inside its +x neighbour's margin, looking down.
       const c = E.win.cells.find(x => x.built && Math.abs(x.i - E.win.centre[0]) <= 1 && Math.abs(x.j - E.win.centre[1]) <= 1) ?? E.win.cells[0];
@@ -6141,7 +6307,40 @@ window.universeSelftest = async function universeSelftest(opts = {}){
           if (was.length !== 3 || was[1] !== 'city:1' || !/^flat:/.test(was[0]) || was[2] !== was[0]) err(`the walk onto city:1 went through ${was}`);
         } }
       setWalk(false);
-      setActors(4); if (ensureActors() || actors.A || !/universe/.test(actors.note)) err('actors came into a universe'); setActors(0);
+      /* Actors across worlds (actors-log step 4): a mixed crowd of 60 round the eye at the
+         walk's corridor, the eye drifting from flat ground into city:1, 300 voxels in 20 s.
+         Every tick no box at rest in the universe's rock, the page's population the bytes
+         of one the core ticks alone beside it, and some of them crossing between instances.
+         (That universeWorld answers as the same instances baked is Node's, in
+         universe-core.test.js; here it's the page's wiring.) */
+      { const city = u.instances.find(x => x.world === 'city:1'), z = report.demo.crossing?.z ?? -1, Y = pl.Y, x0 = city.cube.lo[0] - 60;
+        const hashOf = A => { let h = A.t; for (const arr of [A.alive, A.pos, A.vel, A.kind, A.hold, A.heading, A.down, A.goal, A.speed]) for (let i = 0; i < arr.length; i++) h = actorMix(h, arr[i]); return h; };
+        if (z < 0) err('no corridor for the actors');
+        else {
+          setActorKinds('mixed'); setActors(60);
+          cam.eye = [x0 + 0.5, Y + 12, z + 0.5]; cam.yaw = Math.PI / 2; cam.pitch = -0.3;
+          stepActors(TICK_MS);
+          const A = actors.A;
+          if (!A) err(`no actors in the universe: ${actors.note}`);
+          else {
+            const world = actorWorld(), twin = makePopulation(world, 60, eyeVoxel());
+            tickActors(world, twin, actorParams());
+            let rock = 0;
+            for (let k = 0; k < 1200; k++){
+              cam.eye[0] += 0.25;
+              stepActors(TICK_MS);
+              tickActors(world, twin, actorParams());
+              if (twin.t % 30 === 0) regather(world, twin, actors.seed, eyeVoxel(), LEASH, 16 * LEASH, 8, FLIER.trap, actorLeash());
+              for (let i = 0; i < A.N; i++) if (A.alive[i] && restHits(world, A, i)) rock++;
+            }
+            const r = report.demo.actors = { rock, twin: hashOf(twin) === hashOf(A), alive: actors.alive, byKind: actors.byKind.slice(), placed: actors.placed.slice(), crossed: actors.crossed, inWorlds: actors.inWorlds, at: whereInUniverse()?.world ?? null };
+            if (rock) err(`actors in the universe: ${rock} actor-ticks at rest in rock`);
+            if (!r.twin) err('actors in the universe: the page\'s aren\'t the core\'s bytes');
+            if (r.alive < 54) err(`actors in the universe: only ${r.alive} of 60 alive`);
+            if (r.crossed < 10 || r.inWorlds < 2) err(`actors in the universe: ${r.crossed} crossings, in ${r.inWorlds} worlds`);
+          }
+          setActors(0); setActorKinds('fliers');
+        } }
       fillShelf();
       if (!$('fileExport').disabled || !$('shelfAdd').disabled) err('a universe can be exported or shelved');
       // "To the universe": a dungeon and a sphere on the shelf, then in it.
@@ -7515,18 +7714,40 @@ function mulberry(seed){ let s = seed >>> 0; return () => { s = (s + 0x6d2b79f5)
      trapped   a block placed over one flier, and another sealed in a hollow room of
                26 blocks: after the next tick both are alive, clear of rock and not
                sealed, and the room's one is outside it. Then every block is undone
+     kinds     (step 4) explorers, vehicles and a mixed crowd in turn: 120 ticks with
+               no box in rock, most of them on something by the end, the frame they
+               leave the one before them, byte for byte, and the twin's bytes after a
+               fast forward, as the fliers'
+     poses     the lopsided body as an explorer in all 24 quarter-turn poses and a
+               vehicle at the four quarter headings, against rotateOcc of the turn the
+               pose makes of the slot's, as the turns are
    It ticks by hand, with the frame loop held (auto), so nothing moves between. */
 window.actorSelftest = async function actorSelftest({ n = 100 } = {}){
-  const report = { paths: {} }, saved = { n: actors.n, path: state.path, auto };
+  const report = { paths: {}, kinds: {} }, saved = { n: actors.n, path: state.path, auto, kinds: actors.kinds, eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch };
   const settle = async () => {
     const end = performance.now() + 120000;
     for (let f = 0; performance.now() < end; f++){ frame({ draw: false }); if (f > 2 && isConverged()) return true; await sleep(16); }
     return false;
   };
   const diff = (a, b) => { let k = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) k++; return k; };
-  const hashOf = A => { let h = A.t; for (const arr of [A.alive, A.size, A.pos, A.vel, A.epoch, A.until]) for (let i = 0; i < arr.length; i++) h = actorMix(h, arr[i]); return h; };
+  const hashOf = A => { let h = A.t; for (const arr of [A.alive, A.size, A.pos, A.vel, A.epoch, A.until, A.kind, A.hold, A.heading, A.down, A.goal, A.speed, A.calm]) for (let i = 0; i < arr.length; i++) h = actorMix(h, arr[i]); return h; };
+  // A population ticked by the core alone beside the page's: the first tick, then 600 with the eye still.
+  const twinOf = () => {
+    setActors(n);
+    stepActors(TICK_MS);
+    const world = actorWorld(), at = eyeVoxel(), twin = makePopulation(world, n, at);
+    tickActors(world, twin, actorParams());
+    if (twin.t % 30 === 0) regather(world, twin, actors.seed, at, LEASH, 16 * LEASH, 8, FLIER.trap, actorLeash());
+    forwardActors(600);
+    for (let k = 0; k < 600; k++){
+      tickActors(world, twin, actorParams());
+      if (twin.t % 30 === 0) regather(world, twin, actors.seed, at, LEASH, 16 * LEASH, 8, FLIER.trap, actorLeash());
+    }
+    return hashOf(twin) === hashOf(actors.A);
+  };
   try {
     auto = false;
+    setActorKinds('fliers');
     for (const path of ['off', '0']){
       setPath(path);
       const r = report.paths[path] = { converged: await settle() };
@@ -7548,18 +7769,7 @@ window.actorSelftest = async function actorSelftest({ n = 100 } = {}){
     }
     // The leash and the twin: 600 ticks with the eye still, then where they are.
     setPath(saved.path);
-    setActors(n);
-    stepActors(TICK_MS);
-    const twin = createActors(n), world = actorWorld(), at = eyeVoxel();
-    for (let i = 0; i < n; i++) spawnNear(world, twin, i, actorBody(actors.seed, i).size, actors.seed, at, LEASH, 32, FLIER.trap, actorLeash());
-    tickFliers(world, twin, actorParams());
-    if (twin.t % 30 === 0) regather(world, twin, actors.seed, at, LEASH, 16 * LEASH, 8, FLIER.trap, actorLeash());
-    forwardActors(600);
-    for (let k = 0; k < 600; k++){
-      tickFliers(world, twin, actorParams());
-      if (twin.t % 30 === 0) regather(world, twin, actors.seed, at, LEASH, 16 * LEASH, 8, FLIER.trap, actorLeash());
-    }
-    report.twin = hashOf(twin) === hashOf(actors.A);
+    report.twin = twinOf();
     const A = actors.A;
     let near = 0;
     for (let i = 0; i < n; i++) if (A.alive[i] && [0, 1, 2].every(a => Math.abs(A.pos[3 * i + a] / ACTOR_ONE + A.size[3 * i + a] / 2 - cam.eye[a]) < LEASH + 24)) near++;
@@ -7574,9 +7784,45 @@ window.actorSelftest = async function actorSelftest({ n = 100 } = {}){
     // Where the eye's ray enters a cube of 4 centred 8 along it: 8 − 2 / max |f|.
     report.nearFlier = { dist, want: 8 - 2 / Math.max(...f.map(Math.abs)), clear: view.clear, near: view.near };
     report.turns = turnProbe(A);
+    report.poses = poseProbe(A);
     actors.bodies[0] = slot0;
     report.trapped = trapProbe(n);
+    // The kinds: each mix in turn, raster only, the eye 40 over the middle of the block's top
+    // (clay=12,64,block: 64 across at the world's centre, nothing under it), where ground kinds
+    // spawn on it (actor-core's drop rule). A vehicle drives off its edge in a few seconds and
+    // falls, as it should, so "on something" is the most there were at once.
+    setPath('off');
+    cam.eye = [W.side / 2 + 0.5, W.side / 2 + 72, W.side / 2 + 0.5]; cam.yaw = 0.6; cam.pitch = -0.9;
+    setActors(0); report.kindsConverged = await settle();
+    for (const mode of ['explorers', 'vehicles', 'mixed']){
+      setActorKinds(mode);
+      setActors(0);
+      const before = renderPixels(160, 120, 8);
+      setActors(n);
+      let rock = 0;
+      const most = [0, 0, 0];
+      for (let k = 0; k < 120; k++){
+        stepActors(TICK_MS);
+        const B = actors.A, w = actorWorld();
+        for (let i = 0; i < B.N; i++) if (B.alive[i] && restHits(w, B, i)) rock++;
+        for (let c = 0; c < 3; c++) most[c] = Math.max(most[c], actors.placed[c]);
+      }
+      // The drawn poses: how many of those with one (not fliers, not falling) are within a few degrees of the core's.
+      let posed = 0, near = 0;
+      { const B = actors.A;
+        for (let i = 0; i < B.N; i++){
+          if (!B.alive[i] || B.kind[i] === KIND.flier || (B.kind[i] === KIND.explorer && B.hold[i] === 0)) continue;
+          const q = quatOf(poseOf(B.kind[i], B.heading[i], B.down[i])), p = actors.poses.subarray(4 * i, 4 * i + 4);
+          posed++; if (Math.abs(q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3] * p[3]) > 0.995) near++;
+        } }
+      const withThem = renderPixels(160, 120, 8), r = report.kinds[mode] = { rock, alive: actors.alive, byKind: actors.byKind.slice(), placed: most, drawn: view.actors, posed, posedNear: near };
+      setActors(0);
+      r.differsWith = diff(before, withThem); r.differsAfter = diff(before, renderPixels(160, 120, 8));
+      r.twin = twinOf();
+    }
   } finally {
+    cam.eye = saved.eye; cam.yaw = saved.yaw; cam.pitch = saved.pitch;
+    setActorKinds(saved.kinds);
     setActors(saved.n);
     setPath(saved.path);
     auto = saved.auto;
@@ -7594,8 +7840,7 @@ window.actorSelftest = async function actorSelftest({ n = 100 } = {}){
    cast's own answer changes from a neighbour's are a silhouette, where the
    pixel centre is a graze: counted, not failed. */
 function turnProbe(A){
-  const w = 161, h = 121, R = 4, occ = new Uint8Array(R ** 3);
-  for (const v of [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [0, 1, 0], [0, 2, 0], [0, 0, 1]]) occ[v[0] + R * (v[1] + R * v[2])] = 1;
+  const w = 161, h = 121, R = 4, occ = LOPSIDED(R);
   const body = makeBody(occ, R), f = fwd(), out = { turns: 0, covered: 0, bad: 0, edge: 0, first: [] };
   A.alive[0] = 0;
   const bare = renderDistances(w, h, 'raster'), basis = rayBasis(w / h);
@@ -7605,44 +7850,93 @@ function turnProbe(A){
     actors.bodies[0] = { k: -1, e, body, size, off };
     for (let a = 0; a < 3; a++){ A.size[a] = size[a]; A.pos[a] = A.old[a] = Math.round((cam.eye[a] + 12 * f[a] - size[a] / 2) * ACTOR_ONE); }
     actors.alpha = 1;
-    const got = renderDistances(w, h, 'raster'), rot = rotateOcc(occ, R, e), base = [0, 1, 2].map(a => A.pos[a] / ACTOR_ONE - off[a] - cam.eye[a]);
-    const boxes = [];
-    for (let z = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) if (rot[x + R * (y + R * z)]) boxes.push([x + base[0], y + base[1], z + base[2]]);
-    const cast = new Float64Array(w * h).fill(-1);
-    for (let i = 0; i < w * h; i++){
-      const px = i % w, py = (i / w) | 0, nx = (px + 0.5) / w * 2 - 1, ny = (py + 0.5) / h * 2 - 1;
-      let d = basis.fwd.map((v, a) => v + nx * basis.rightT[a] + ny * basis.upT[a]);
-      const len = Math.hypot(...d); d = d.map(v => v / len);
-      let best = Infinity;
-      for (const b of boxes){
-        let t0 = 0, t1 = Infinity;
-        for (let a = 0; a < 3 && t0 <= t1; a++){
-          if (d[a] === 0){ if (b[a] > 0 || b[a] + 1 < 0) t0 = Infinity; continue; }
-          const ta = b[a] / d[a], tb = (b[a] + 1) / d[a];
-          t0 = Math.max(t0, Math.min(ta, tb)); t1 = Math.min(t1, Math.max(ta, tb));
-        }
-        if (t0 <= t1 && t0 < best) best = t0;
-      }
-      if (best < Infinity && (bare[i] < 0 || best < bare[i])) cast[i] = best;
-    }
-    for (let i = 0; i < w * h; i++){
-      const hit = cast[i] >= 0;
-      if (hit) out.covered++;
-      const ok = hit ? got[i] >= 0 && Math.abs(got[i] - cast[i]) < 0.02 : got[i] === bare[i];
-      if (ok) continue;
-      const px = i % w, py = (i / w) | 0;
-      const edge = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => {
-        const x = px + dx, y = py + dy;
-        if (x < 0 || y < 0 || x >= w || y >= h) return false;
-        const j = x + w * y;
-        return (cast[j] >= 0) !== hit || (hit && Math.abs(cast[j] - cast[i]) > 0.5);
-      });
-      if (edge){ out.edge++; continue; }
-      out.bad++;
-      if (out.first.length < 4) out.first.push({ e, px: [px, py], got: got[i], cast: cast[i], bare: bare[i] });
-    }
+    const got = renderDistances(w, h, 'raster'), base = [0, 1, 2].map(a => A.pos[a] / ACTOR_ONE - off[a] - cam.eye[a]);
+    compareCast(got, bodyCast(rotateOcc(occ, R, e), R, base, bare, basis, w, h), bare, w, h, out, { e });
     out.turns++;
   }
+  return out;
+}
+// The lopsided body: arms of 4, 3 and 2 voxels from one corner of R³, so no turn looks like another.
+const LOPSIDED = R => { const occ = new Uint8Array(R ** 3); for (const v of [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [0, 1, 0], [0, 2, 0], [0, 0, 1]]) occ[v[0] + R * (v[1] + R * v[2])] = 1; return occ; };
+/* A CPU cast of an occupancy (already turned) whose box's corner is at `base`, eye-relative:
+   each pixel's distance to its first voxel, or −1 where it misses or the frame without
+   it (`bare`) is nearer. In float64. */
+function bodyCast(rot, R, base, bare, basis, w, h){
+  const boxes = [];
+  for (let z = 0; z < R; z++) for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) if (rot[x + R * (y + R * z)]) boxes.push([x + base[0], y + base[1], z + base[2]]);
+  const cast = new Float64Array(w * h).fill(-1);
+  for (let i = 0; i < w * h; i++){
+    const px = i % w, py = (i / w) | 0, nx = (px + 0.5) / w * 2 - 1, ny = (py + 0.5) / h * 2 - 1;
+    let d = basis.fwd.map((v, a) => v + nx * basis.rightT[a] + ny * basis.upT[a]);
+    const len = Math.hypot(...d); d = d.map(v => v / len);
+    let best = Infinity;
+    for (const b of boxes){
+      let t0 = 0, t1 = Infinity;
+      for (let a = 0; a < 3 && t0 <= t1; a++){
+        if (d[a] === 0){ if (b[a] > 0 || b[a] + 1 < 0) t0 = Infinity; continue; }
+        const ta = b[a] / d[a], tb = (b[a] + 1) / d[a];
+        t0 = Math.max(t0, Math.min(ta, tb)); t1 = Math.min(t1, Math.max(ta, tb));
+      }
+      if (t0 <= t1 && t0 < best) best = t0;
+    }
+    if (best < Infinity && (bare[i] < 0 || best < bare[i])) cast[i] = best;
+  }
+  return cast;
+}
+/* The frame's distances against a cast: a pixel the cast hits must show its distance, one
+   it misses the bare frame's, byte for byte. A pixel whose cast differs from a neighbour's
+   (a silhouette, where its centre grazes an edge) is counted, not failed. */
+function compareCast(got, cast, bare, w, h, out, tag){
+  for (let i = 0; i < w * h; i++){
+    const hit = cast[i] >= 0;
+    if (hit) out.covered++;
+    const ok = hit ? got[i] >= 0 && Math.abs(got[i] - cast[i]) < 0.02 : got[i] === bare[i];
+    if (ok) continue;
+    const px = i % w, py = (i / w) | 0;
+    const edge = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => {
+      const x = px + dx, y = py + dy;
+      if (x < 0 || y < 0 || x >= w || y >= h) return false;
+      const j = x + w * y;
+      return (cast[j] >= 0) !== hit || (hit && Math.abs(cast[j] - cast[i]) > 0.5);
+    });
+    if (edge){ out.edge++; continue; }
+    out.bad++;
+    if (out.first.length < 4) out.first.push({ ...tag, px: [px, py], got: got[i], cast: cast[i], bare: bare[i] });
+  }
+}
+/* The poses' probe (step 4): actor 0, the lopsided body on a turn of its own (PROPER[7]),
+   as an explorer in all 24 quarter-turn poses (six faces held, four ways along each) and
+   a vehicle at the four quarter headings, 12 voxels ahead, its box the body's R³ cube.
+   A quarter-turn pose on top of a turn is a turn, e′ (the one whose turnMap is the pose
+   times the turn), so the oracle is turnProbe's: rotateOcc by e′, cast in float64. The
+   pose is set as eased all the way (the slot's quaternion), so this holds the draw,
+   not the easing. */
+function poseProbe(A){
+  const w = 161, h = 121, R = 4, occ = LOPSIDED(R), e0 = PROPER[7], body = makeBody(occ, R), f = fwd();
+  if (!actors.poses) easePoses(0);
+  const out = { poses: 0, covered: 0, bad: 0, edge: 0, first: [], noTurn: 0 };
+  const T0 = turnMap(e0, R).M, saved = { kind: A.kind[0], hold: A.hold[0], heading: A.heading[0], down: A.down[0] };
+  A.alive[0] = 0;
+  const bare = renderDistances(w, h, 'raster'), basis = rayBasis(w / h);
+  A.alive[0] = 1;
+  actors.bodies[0] = { k: -1, e: e0, body, size: [R, R, R], off: [0, 0, 0] };
+  for (let a = 0; a < 3; a++){ A.size[a] = R; A.pos[a] = A.old[a] = Math.round((cam.eye[a] + 12 * f[a] - R / 2) * ACTOR_ONE); }
+  actors.alpha = 1;
+  const cases = [];
+  for (let down = 0; down < 6; down++) for (let k = 0; k < 4; k++) cases.push([KIND.explorer, 2 * (((down >> 1) + 1 + (k >> 1)) % 3) + (k & 1), down]);
+  for (const hd of [0, 4, 8, 12]) cases.push([KIND.vehicle, hd, 3]);
+  for (const [kind, heading, down] of cases){
+    A.kind[0] = kind; A.heading[0] = heading; A.down[0] = down; A.hold[0] = 2;
+    const Q = poseOf(kind, heading, down);
+    actors.poses.set(quatOf(Q), 0); actors.posed[0] = 1;
+    const QT = [0, 1, 2].flatMap(r => [0, 1, 2].map(c => Math.round(Q[3 * r] * T0[c] + Q[3 * r + 1] * T0[3 + c] + Q[3 * r + 2] * T0[6 + c])));
+    const e1 = PROPER.find(e => turnMap(e, R).M.every((v, j) => v === QT[j]));
+    if (e1 === undefined){ out.noTurn++; continue; }
+    const got = renderDistances(w, h, 'raster'), base = [0, 1, 2].map(a => A.pos[a] / ACTOR_ONE - cam.eye[a]);
+    compareCast(got, bodyCast(rotateOcc(occ, R, e1), R, base, bare, basis, w, h), bare, w, h, out, { kind, heading, down });
+    out.poses++;
+  }
+  A.kind[0] = saved.kind; A.hold[0] = saved.hold; A.heading[0] = saved.heading; A.down[0] = saved.down;
   return out;
 }
 /* The trapped probe, on a world with edits (clay): see actorSelftest. Blocks go
