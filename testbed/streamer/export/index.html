@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vdag viewer and glb export</title>
+<!--
+  A world file's viewer and its exporter to glTF binary (docs/export.md,
+  asked for 2026-11-20). Open a .vdag (drop it anywhere, or pick it), turn it
+  about, pick a lod, save a .glb.
+
+  Every decision is export-core.js's, run in export-worker.js, one worker a
+  file and settings; this page moves the file, draws the table and the view,
+  and writes the .glb from the quads it was sent (writeGlb is a few ms). The
+  view draws vertexArrays(mesh), which is what writeGlb writes, through the
+  same node transform less its scale: what you see is the file, colours
+  linear in the buffer and made sRGB in the shader, as a glTF viewer would.
+
+  The camera is camera-core.js's, the stream viewer's mouse: left drag
+  orbits, right drag (or shift and left) pans, the middle drag and the wheel
+  dolly, pushing through what they reach. F frames the model again.
+
+  Serve the repo root (npm run serve) and open /export/: the core imports
+  ../dag-core.js and its neighbours.
+-->
+<style>
+  :root{ --bg:#07070a; --panel:#101016; --line:rgba(255,255,255,.09); --text:#a8a8ba; --dim:#62627a; --hi:#d8d8e6; --accent:#7a8ad0; --warn:#d08a5a; --bad:#d06a6a; }
+  [hidden]{ display:none !important; }
+  html,body{ margin:0; height:100%; background:var(--bg); color:var(--text); font:12px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  body{ display:flex; flex-direction:row; overflow:hidden; }
+  #view{ position:relative; flex:1; min-width:0; }
+  #gl{ display:block; width:100%; height:100%; touch-action:none; cursor:grab; outline:none; }
+  #gl:active{ cursor:grabbing; }
+  #empty{ position:absolute; inset:16px; display:flex; align-items:center; justify-content:center; text-align:center; border:1px dashed rgba(255,255,255,.22); border-radius:8px; color:var(--dim); pointer-events:none; }
+  #empty b{ color:var(--hi); font-weight:normal; }
+  body.over #empty, body.over #view{ background:rgba(122,138,208,.06); }
+  body.over #empty{ border-color:var(--accent); color:var(--hi); }
+  #keys{ position:absolute; left:10px; bottom:8px; color:var(--dim); font-size:11px; pointer-events:none; }
+  aside{ width:360px; flex:none; overflow-y:auto; background:var(--panel); border-left:1px solid var(--line); padding:14px 14px 40px; box-sizing:border-box; }
+  h1{ font-size:14px; font-weight:normal; color:var(--hi); margin:0 0 2px; letter-spacing:.04em; }
+  p.lede{ margin:0 0 12px; color:var(--dim); }
+  a{ color:var(--accent); }
+  h2{ font-size:11px; font-weight:normal; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; margin:16px 0 6px; }
+  button, select{ background:#16161f; color:var(--hi); font:inherit; border:1px solid rgba(255,255,255,.16); border-radius:4px; padding:3px 10px; cursor:pointer; }
+  button:hover{ border-color:rgba(255,255,255,.35); }
+  button:disabled{ opacity:.4; cursor:default; }
+  button.main{ border-color:var(--accent); }
+  .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0; }
+  .row .label{ color:var(--dim); min-width:6.5em; }
+  input[type=checkbox]{ accent-color:var(--accent); vertical-align:-2px; }
+  #facts{ white-space:pre-wrap; overflow-wrap:anywhere; }
+  #facts .name{ color:var(--hi); }
+  .warn{ color:var(--warn); }
+  .bad{ color:var(--bad); }
+  table{ border-collapse:collapse; width:100%; font-size:11px; }
+  th{ color:var(--dim); font-weight:normal; text-align:right; padding:2px 4px; border-bottom:1px solid var(--line); }
+  td{ text-align:right; padding:3px 4px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th:first-child, td:first-child{ text-align:left; }
+  tr.lod{ cursor:pointer; }
+  tr.lod:hover td{ background:rgba(255,255,255,.03); }
+  tr.lod.shown td{ background:rgba(122,138,208,.14); color:var(--hi); }
+  tr.lod.off{ cursor:default; color:var(--dim); }
+  td.note{ text-align:left; color:var(--dim); white-space:normal; }
+  #status{ margin-top:10px; min-height:1.5em; color:var(--dim); }
+  #size{ color:var(--hi); }
+  footer{ margin-top:18px; color:var(--dim); font-size:11px; }
+  @media (max-width:760px){
+    body{ flex-direction:column; overflow:auto; }
+    #view{ flex:none; height:60vh; }
+    aside{ width:auto; border-left:none; border-top:1px solid var(--line); overflow:visible; }
+  }
+</style>
+</head>
+<body>
+<div id="view">
+  <canvas id="gl" tabindex="0"></canvas>
+  <div id="empty"><div><b>Drop a .vdag file here</b><br>or choose one in the panel. Nothing leaves this machine.</div></div>
+  <div id="keys">drag orbits · right drag pans · wheel dollies · F frames</div>
+</div>
+<aside>
+  <h1>vdag → glb</h1>
+  <p class="lede">A world file's surface at one lod, as the <a href="../stream-viewer.html">stream viewer</a> draws it, saved as a glTF binary for Blender, a game engine or any glTF viewer. Files come from the viewer's file → export, or from <a href="../convert/">glb, ply → vdag</a>.</p>
+
+  <div class="row"><button id="pick" type="button" class="main">open .vdag…</button><input id="files" type="file" accept=".vdag" hidden></div>
+
+  <div id="worldRow" class="row" hidden><span class="label">world</span><select id="world"></select></div>
+  <div id="facts"></div>
+
+  <h2>Surface</h2>
+  <div class="row"><span class="label">lod rule</span>
+    <select id="rule">
+      <option value="shadow">shadow (the viewer's)</option>
+      <option value="any">any (a cell with a voxel in it)</option>
+      <option value="adaptive">adaptive</option>
+      <option value="majority">majority (half full)</option>
+    </select>
+  </div>
+  <div class="row"><span class="label">colour</span><label><input id="colour" type="checkbox" checked> the world's, as vertex colours</label></div>
+  <div class="row"><span class="label">faces</span><label><input id="merge" type="checkbox"> merged into rectangles of one colour (smaller, not watertight)</label></div>
+  <div class="row"><span class="label">at most</span>
+    <select id="limit">
+      <option value="250000">250,000 quads (≈ 38 MB)</option>
+      <option value="1000000">1 million quads (≈ 150 MB)</option>
+      <option value="4000000">4 million quads (≈ 600 MB)</option>
+    </select>
+  </div>
+
+  <h2>Levels of detail</h2>
+  <table>
+    <thead><tr><th>lod</th><th>across</th><th>quads</th><th>faces</th><th>.glb</th><th>ms</th></tr></thead>
+    <tbody id="lods"></tbody>
+  </table>
+
+  <h2>Save</h2>
+  <div class="row"><span class="label">a voxel is</span>
+    <select id="voxel">
+      <option value="0.001">1 mm</option>
+      <option value="0.01">1 cm</option>
+      <option value="0.1">10 cm</option>
+      <option value="1">1 m</option>
+    </select>
+  </div>
+  <div class="row"><span class="label">the model</span><span id="size">–</span></div>
+  <div class="row"><button id="save" type="button" class="main" disabled>save .glb</button></div>
+  <div id="status"></div>
+
+  <footer>Y is up. The model is centred in x and z and stands on y = 0. A lod is cells of 2<sup>lod</sup> voxels; the finest the limit allows is shown as it's made. Settings are kept in this browser.</footer>
+</aside>
+
+<script type="module">
+import { slugOf, writeGlb, vertexArrays, placementOf, binBytesOf, coarsestLod, finestLod, GREY } from './export-core.js';
+import { CAMERA, basisOf, forwardOf, modeOf, orbit, pan, dolly, wheelLog, addPending, easeStep } from '../camera-core.js';
+
+const $ = id => document.getElementById(id);
+const fmt = n => n.toLocaleString('en-US'), mb = n => n < 1e6 ? `${fmt(Math.ceil(n / 1e3))} KB` : `${(n / 1e6).toFixed(1)} MB`;
+const esc = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const metres = m => m >= 1000 ? `${(m / 1000).toPrecision(3)} km` : m >= 1 ? `${m.toPrecision(3)} m` : m >= 0.01 ? `${(m * 100).toPrecision(3)} cm` : `${(m * 1000).toPrecision(3)} mm`;
+
+/* ---- settings, remembered per browser ---------------------------------------------- */
+const KEY = 'vdag-to-glb';
+let saved = {};
+try { saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') ?? {}; } catch {}
+const choose = (sel, v) => { if (v != null && [...sel.options].some(o => o.value === String(v))) sel.value = String(v); };
+choose($('rule'), saved.rule); choose($('limit'), saved.limit ?? 1000000); choose($('voxel'), saved.voxel ?? 0.01);
+if (typeof saved.colour === 'boolean') $('colour').checked = saved.colour;
+if (typeof saved.merge === 'boolean') $('merge').checked = saved.merge;
+const settings = () => ({ rule: $('rule').value, colour: $('colour').checked, merge: $('merge').checked, maxQuads: +$('limit').value, voxel: +$('voxel').value });
+const remember = () => { try { localStorage.setItem(KEY, JSON.stringify({ rule: $('rule').value, colour: $('colour').checked, merge: $('merge').checked, limit: +$('limit').value, voxel: +$('voxel').value })); } catch {} };
+// 32,768 chunks is about a minute of jobs; past it a lod is reported over whatever its quads.
+const MAX_CHUNKS = 32768;
+
+/* ---- the file, its worker, the lods ------------------------------------------------- */
+const S = { file: null, world: 0, worlds: null, worker: null, running: false, error: null, meshes: new Map(), over: null, building: null, pick: null, shown: null, phase: null };
+
+function start(){
+  S.worker?.terminate();
+  Object.assign(S, { worker: null, running: false, error: null, meshes: new Map(), over: null, building: null, pick: null, shown: null, phase: null });
+  show(null);
+  if (!S.file){ draw(); return; }
+  const s = settings(), w = S.worker = new Worker(new URL('./export-worker.js', import.meta.url), { type: 'module' });
+  S.running = true;
+  w.onmessage = ({ data }) => {
+    if (w !== S.worker) return;
+    if (data.phase) S.phase = data.phase;
+    if (data.worlds){ S.worlds = data.worlds; S.phase = null; worldList(); }
+    if (data.building) S.building = data.building;
+    if (data.mesh){ S.meshes.set(data.mesh.lod, data.mesh); S.building = null; if (S.pick == null) show(data.mesh.lod); }
+    if (data.over){ S.over = data.over; S.building = null; }
+    if (data.done || data.error){ S.running = false; S.building = null; S.error = data.error ?? null; w.terminate(); }
+    draw();
+  };
+  w.onerror = e => { e.preventDefault(); if (w !== S.worker) return; Object.assign(S, { running: false, error: e.message || 'the worker failed (out of memory?)' }); draw(); };
+  w.postMessage({ file: S.file, world: S.world, rule: s.rule, colour: s.colour, merge: s.merge, maxQuads: s.maxQuads, maxChunks: MAX_CHUNKS });
+  draw();
+}
+function open(file){
+  if (!/\.vdag$/i.test(file.name)){ say(`not a .vdag: ${file.name}`, 'bad'); return; }
+  Object.assign(S, { file, world: 0, worlds: null });
+  framed = false;
+  start();
+}
+const world = () => S.worlds?.[S.world] ?? null;
+const nameOf = () => world()?.name || S.file?.name.replace(/\.vdag$/i, '') || 'world';
+function fileName(lod){
+  let slug = slugOf(nameOf());
+  if (!/-d\d+$/.test(slug)) slug += `-d${world().D}`;
+  return `${slug}-lod${lod}.glb`;
+}
+function worldList(){
+  const sel = $('world');
+  sel.replaceChildren(...S.worlds.map((w, i) => { const o = document.createElement('option'); o.value = i; const name = w.name || 'untitled'; o.textContent = `${i + 1}. ${name}${/\(D = \d+\)/.test(name) ? '' : ` (D = ${w.D})`}`; return o; }));
+  sel.value = String(S.world);
+  $('worldRow').hidden = S.worlds.length < 2;
+}
+const COLOUR_NOTE = {
+  same: ['its named colour field'], unchecked: ['its named colour field (not checked against the file)'],
+  changed: ['its colour field, which this code now colours differently from the code that wrote the file', 'warn'],
+  unknown: ['a colour field this page can\'t make, so grey', 'warn'], none: ['no colour, so grey'],
+};
+function colourNote(w){
+  if (w.colourStatus === 'baked') return [`baked colours, ${w.bits} bits a channel (drawn at six, as the viewer draws them)`];
+  return COLOUR_NOTE[w.colourStatus] ?? [w.colourStatus];
+}
+
+/* ---- the panel -------------------------------------------------------------------------- */
+function say(text, cls = ''){ $('status').className = cls; $('status').textContent = text; }
+function draw(){
+  $('empty').hidden = !!S.file;
+  const w = world();
+  if (!S.file) $('facts').innerHTML = '';
+  else if (!w) $('facts').innerHTML = `<span class="name">${esc(S.file.name)}</span>\n${mb(S.file.size)} · reading…`;
+  else {
+    const [note, cls] = colourNote(w);
+    $('facts').innerHTML = `<span class="name">${esc(w.name || S.file.name)}</span>\n${esc(S.file.name)}, ${mb(S.file.size)}\nD = ${w.D}, a ${fmt(2 ** w.D)}³ world\n${fmt(w.voxels)} voxels in ${fmt(w.nodes)} nodes\ncolour: <span class="${cls ?? ''}">${esc(note)}</span>`;
+  }
+  const rows = [], s = settings();
+  if (w){
+    for (let lod = coarsestLod(w.D); lod >= finestLod(w.D); lod--){
+      const m = S.meshes.get(lod), across = fmt(2 ** (w.D - lod));
+      if (m){
+        const cls = `lod${S.shown === lod ? ' shown' : ''}`;
+        rows.push(`<tr class="${cls}" data-lod="${lod}"><td>${lod}</td><td>${across}</td><td>${fmt(m.quads)}</td><td>${fmt(m.faces)}</td><td>${mb(binBytesOf(m.quads, m.coloured))}</td><td>${fmt(Math.round(m.ms))}</td></tr>`);
+      } else if (S.building?.lod === lod){
+        const pc = S.building.total ? ` ${Math.floor(100 * S.building.done / S.building.total)}%` : '';
+        rows.push(`<tr class="lod off"><td>${lod}</td><td>${across}</td><td class="note" colspan="4">making${pc}…</td></tr>`);
+      } else if (S.over && lod <= S.over.lod){
+        const why = S.over.over === 'chunks' ? `over ${fmt(MAX_CHUNKS)} chunks` : `over ${fmt(s.maxQuads)} quads`;
+        rows.push(`<tr class="lod off"><td>${lod}</td><td>${across}</td><td class="note" colspan="4">${lod === S.over.lod ? why : 'finer still'}</td></tr>`);
+      } else if (S.running) rows.push(`<tr class="lod off"><td>${lod}</td><td>${across}</td><td class="note" colspan="4">waiting</td></tr>`);
+    }
+  }
+  $('lods').innerHTML = rows.join('');
+  const m = S.meshes.get(S.shown);
+  if (m && m.quads){
+    const sz = placementOf(m, s.voxel).size;
+    $('size').textContent = `${metres(sz[0])} × ${metres(sz[1])} × ${metres(sz[2])}`;
+    $('save').disabled = false; $('save').textContent = `save ${fileName(m.lod)}`;
+  } else {
+    $('size').textContent = m ? 'nothing shows at this lod' : '–';
+    $('save').disabled = true; $('save').textContent = 'save .glb';
+  }
+  if (S.error) say(`failed: ${S.error}`, 'bad');
+  else if (S.phase) say(`${S.phase.text}…`);
+  else if (S.running) say(S.building ? `making lod ${S.building.lod}…` : 'working…');
+  else if (S.file && w) say(S.meshes.size ? `${S.meshes.size} ${S.meshes.size === 1 ? 'lod' : 'lods'} made. Pick one to see it and save it.` : 'nothing to show: the world is empty', S.meshes.size ? '' : 'warn');
+  else say('');
+}
+$('lods').addEventListener('click', e => {
+  const tr = e.target.closest('tr[data-lod]');
+  if (!tr) return;
+  S.pick = +tr.dataset.lod; show(S.pick); draw();
+});
+$('world').addEventListener('change', () => { S.world = +$('world').value; framed = false; start(); });
+for (const id of ['rule', 'colour', 'merge', 'limit']) $(id).addEventListener('change', () => { remember(); if (S.file) start(); });
+$('voxel').addEventListener('change', () => { remember(); draw(); });
+
+function glbOf(lod){
+  const m = S.meshes.get(lod), s = settings();
+  return writeGlb(m, { name: nameOf(), voxel: s.voxel, extras: { source: S.file.name } });
+}
+$('save').addEventListener('click', () => {
+  const m = S.meshes.get(S.shown);
+  if (!m?.quads) return;
+  const t = performance.now(), bytes = glbOf(m.lod), url = URL.createObjectURL(new Blob([bytes], { type: 'model/gltf-binary' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = fileName(m.lod); a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  say(`saved ${fileName(m.lod)}, ${mb(bytes.length)}, written in ${fmt(Math.round(performance.now() - t))} ms`);
+});
+
+/* ---- input: the picker, and drops anywhere ---------------------------------------------- */
+const input = $('files');
+$('pick').onclick = () => input.click();
+input.onchange = () => { if (input.files[0]) open(input.files[0]); input.value = ''; };
+let depth = 0;
+const hasFiles = e => [...(e.dataTransfer?.types ?? [])].includes('Files');
+addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); depth++; document.body.classList.add('over'); });
+addEventListener('dragleave', e => { if (!hasFiles(e)) return; if (--depth <= 0){ depth = 0; document.body.classList.remove('over'); } });
+addEventListener('dragover', e => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+addEventListener('drop', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); depth = 0; document.body.classList.remove('over');
+  const f = [...e.dataTransfer.files].find(f => /\.vdag$/i.test(f.name)) ?? e.dataTransfer.files[0];
+  if (f) open(f);
+});
+
+/* ---- the view ----------------------------------------------------------------------------
+   Positions are cells; the shader makes them voxels (uCell = 2^lod) less the
+   content box's centre in voxels, so the numbers stay small whatever D is,
+   and the camera lives in that frame. A lod change keeps the camera: voxels
+   are the same voxels at every lod. Light is worked in linear and the result
+   made sRGB, since COLOR_0 is linear. */
+const canvas = $('gl'), gl = canvas.getContext('webgl2', { antialias: true, preserveDrawingBuffer: true });
+const VS = `#version 300 es
+in vec3 aPos; in vec3 aNormal; in vec4 aColour;
+uniform mat4 uViewProj; uniform float uCell; uniform vec3 uCentre;
+out vec3 vN; out vec3 vC;
+void main(){ vN = aNormal; vC = aColour.rgb; gl_Position = uViewProj * vec4(aPos * uCell - uCentre, 1.0); }`;
+const FS = `#version 300 es
+precision highp float;
+in vec3 vN; in vec3 vC; out vec4 o;
+vec3 toSrgb(vec3 c){ return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c)); }
+void main(){
+  vec3 n = normalize(vN);
+  float key = max(dot(n, normalize(vec3(0.45, 0.8, 0.35))), 0.0), fill = max(dot(n, normalize(vec3(-0.6, 0.25, -0.45))), 0.0);
+  vec3 lin = vC * (0.18 + 0.12 * (0.5 + 0.5 * n.y) + 0.85 * key + 0.25 * fill);
+  o = vec4(toSrgb(lin), 1.0);
+}`;
+let prog = null, U = null, buffers = [], vao = null, count = 0, indexType = 0, cell = 1, centre = [0, 0, 0], extent = 1;
+if (gl){
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+  gl.bindAttribLocation(prog, 0, 'aPos'); gl.bindAttribLocation(prog, 1, 'aNormal'); gl.bindAttribLocation(prog, 2, 'aColour');
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  U = { viewProj: gl.getUniformLocation(prog, 'uViewProj'), cell: gl.getUniformLocation(prog, 'uCell'), centre: gl.getUniformLocation(prog, 'uCentre') };
+} else say('this browser has no WebGL2: files open and save, but nothing is drawn', 'warn');
+
+let framed = false;
+function show(lod){
+  S.shown = lod;
+  if (!gl) return;
+  for (const b of buffers) gl.deleteBuffer(b);
+  if (vao) gl.deleteVertexArray(vao);
+  buffers = []; vao = null; count = 0;
+  const m = lod == null ? null : S.meshes.get(lod);
+  if (!m?.quads){ dirty = true; return; }
+  const va = vertexArrays(m);
+  vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  const attr = (loc, data, size, type, norm) => {
+    const b = gl.createBuffer(); buffers.push(b);
+    gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, type, norm, 0, 0);
+  };
+  attr(0, va.positions, 3, gl.FLOAT, false);
+  attr(1, va.normals, 3, gl.FLOAT, false);
+  if (va.colours) attr(2, va.colours, 4, gl.UNSIGNED_SHORT, true);
+  else { gl.disableVertexAttribArray(2); gl.vertexAttrib4f(2, GREY, GREY, GREY, 1); }
+  const ib = gl.createBuffer(); buffers.push(ib);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, va.indices, gl.STATIC_DRAW);
+  gl.bindVertexArray(null);
+  count = va.indices.length; indexType = va.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT;
+  cell = 2 ** m.lod;
+  // The first lod of a file sets the frame; a finer one keeps it (the box differs by under a cell).
+  if (!framed){
+    const b = m.box.map(v => v * cell);
+    centre = [(b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2];
+    extent = Math.hypot(b[3] - b[0], b[4] - b[1], b[5] - b[2]) / 2 || 1;
+    frame(); framed = true;
+  }
+  dirty = true;
+}
+
+let cam = { eye: [0, 0, -3], yaw: 0, pitch: 0 }, radius = 3, pending = 0, drag = null, dirty = true;
+function frame(){
+  const yaw = 0.7 + Math.PI, pitch = -0.45, f = forwardOf(yaw, pitch);
+  // The narrower half-angle of the two, so the model's ball fits either way.
+  radius = 1.15 * extent / Math.sin(Math.atan(Math.tan(CAMERA.half) * Math.min(1, aspect())));
+  cam = { eye: [0, 1, 2].map(a => -radius * f[a]), yaw, pitch };
+  pending = 0; dirty = true;
+}
+const aspect = () => canvas.width / Math.max(1, canvas.height);
+const threshold = () => Math.max(cell, extent * 0.01);
+function viewProj(){
+  const { f, r, u } = basisOf(cam.yaw, cam.pitch), e = cam.eye, dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const d = Math.hypot(...e), far = d + 2 * extent, near = Math.max(far / 20000, (d - extent) * 0.8);
+  const t = 1 / Math.tan(CAMERA.half), A = aspect();
+  const V = [r[0], u[0], -f[0], 0, r[1], u[1], -f[1], 0, r[2], u[2], -f[2], 0, -dot(r, e), -dot(u, e), dot(f, e), 1];
+  const P = [t / A, 0, 0, 0, 0, t, 0, 0, 0, 0, (far + near) / (near - far), -1, 0, 0, 2 * far * near / (near - far), 0];
+  const M = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let rr = 0; rr < 4; rr++){ let s = 0; for (let k = 0; k < 4; k++) s += P[4 * k + rr] * V[4 * c + k]; M[4 * c + rr] = s; }
+  return M;
+}
+function render(){
+  if (!gl) return;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0.027, 0.027, 0.04, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (!count) return;
+  gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); gl.frontFace(gl.CCW);
+  gl.useProgram(prog);
+  gl.uniformMatrix4fv(U.viewProj, false, viewProj()); gl.uniform1f(U.cell, cell); gl.uniform3fv(U.centre, centre);
+  gl.bindVertexArray(vao); gl.drawElements(gl.TRIANGLES, count, indexType, 0); gl.bindVertexArray(null);
+}
+function resize(){
+  const r = canvas.getBoundingClientRect(), dpr = Math.min(2, devicePixelRatio || 1), w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; dirty = true; }
+}
+new ResizeObserver(resize).observe(canvas);
+let lastT = performance.now();
+function tick(t){
+  const dt = Math.min(100, t - lastT); lastT = t;
+  if (pending){ const s = easeStep(pending, dt); pending -= s; const d = dolly(cam, radius, s, { threshold: threshold(), maxRadius: 40 * extent }); radius = d.radius; cam = { eye: d.eye, yaw: d.yaw, pitch: d.pitch }; dirty = true; }
+  if (dirty){ dirty = false; render(); }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('pointerdown', e => {
+  const mode = modeOf(e.button, e.shiftKey);
+  if (!mode) return;
+  e.preventDefault(); canvas.focus(); canvas.setPointerCapture(e.pointerId);
+  drag = { id: e.pointerId, mode, x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener('pointermove', e => {
+  if (!drag || e.pointerId !== drag.id) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y, h = canvas.clientHeight;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.mode === 'orbit') cam = orbit(cam, radius, dx, dy, h);
+  else if (drag.mode === 'pan') cam = pan(cam, radius, dx, dy, h);
+  else { const d = dolly(cam, radius, dy * CAMERA.drag, { threshold: threshold(), maxRadius: 40 * extent }); radius = d.radius; cam = { eye: d.eye, yaw: d.yaw, pitch: d.pitch }; }
+  dirty = true;
+});
+const release = e => { if (drag && e.pointerId === drag.id) drag = null; };
+canvas.addEventListener('pointerup', release); canvas.addEventListener('pointercancel', release);
+canvas.addEventListener('wheel', e => { e.preventDefault(); pending = addPending(pending, wheelLog(e.deltaY, e.deltaMode, innerHeight)); }, { passive: false });
+addEventListener('keydown', e => {
+  if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLInputElement || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'f' || e.key === 'F'){ frame(); e.preventDefault(); }
+});
+
+draw();
+
+// For the console and test/browser/export.test.js: the page's state as data.
+window.__export = {
+  state: () => ({ file: S.file?.name ?? null, world: S.world, worlds: S.worlds, running: S.running, error: S.error, shown: S.shown, over: S.over && { lod: S.over.lod, over: S.over.over },
+                  lods: [...S.meshes.values()].map(m => ({ lod: m.lod, quads: m.quads, faces: m.faces, chunks: m.chunks, coloured: m.coloured, merged: m.merged, lodRule: m.lodRule })),
+                  save: $('save').disabled ? null : $('save').textContent, size: $('size').textContent, status: $('status').textContent, drawn: count }),
+  glb: lod => { const b = glbOf(lod ?? S.shown); let s = ''; for (let o = 0; o < b.length; o += 32768) s += String.fromCharCode(...b.subarray(o, o + 32768)); return btoa(s); },
+  idle: () => !S.running,
+  // Pixels that aren't the background, after a frame drawn now.
+  lit: () => { if (!gl) return 0; render(); const w = canvas.width, h = canvas.height, px = new Uint8Array(4 * w * h); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px); let n = 0; for (let i = 0; i < px.length; i += 4) n += px[i] > 12 || px[i + 1] > 12 || px[i + 2] > 16; return n; },
+  camera: () => ({ ...cam, radius }),
+};
+</script>
+</body>
+</html>
