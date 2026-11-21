@@ -204,7 +204,8 @@
   </div>
   <label>detail <input id="detail" type="range" min="1" max="4" step="0.25"> <span id="detailV"></span></label>
   <label>max chunks <select id="max"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option></select></label>
-  <label>lod rule <select id="rule"><option value="shadow">shadow (lod ≥ 1)</option><option value="any">any</option><option value="adaptive">adaptive (lod ≥ 1)</option></select></label>
+  <label>lod rule <select id="rule"><option value="shadow">shadow (lod ≥ 1)</option><option value="any">any</option><option value="adaptive">adaptive (lod ≥ 1)</option><option value="locked">locked (one lod everywhere)</option></select></label>
+  <label id="lockCtl" hidden>locked at lod <input id="lock" type="range" min="0" max="14" step="1"> <span id="lockV"></span></label>
   <label>colour <select id="color"><option value="8">attribute (step 6)</option><option value="0">lod</option><option value="1">pose (8³ brick)</option>
     <option value="2">chunk</option><option value="3">gamut</option><option value="4">plain</option><option value="6">path (raster / ray)</option></select></label>
   <label>cache <select id="cache"><option value="256">256 MB</option><option value="64">64 MB</option><option value="16">16 MB</option><option value="0">tiny (1 byte)</option></select></label>
@@ -268,6 +269,7 @@ drop .vdag files anywhere to open them</pre></section>
 ?hud=1 opens with the panels   ?wire=1 with the wireframe   ?walk=1 walking
 ?quiet draws once converged   ?selftest runs streamSelftest()
 ?ray=off|density|0..6 (raster only by default)   ?rule=shadow|any|adaptive (shadow by default)
+?rule=locked&amp;lock=0..14   every chunk at one lod (shadow's cells)
 ?density=0.27,0.025   ?stencil=0   ?raymiss=discard   ?bench   raySelftest()
 ?ssao=1 (or slices,steps,scale,radius)   ?ssaoshow=1   ?ssaobench
 ?occlusion=queries|depth (off by default)   occlusionSelftest()</pre></section>
@@ -1484,7 +1486,12 @@ const state = {
   // (docs/lodacne.md: 14.5% of the opaque columns at lod 3 on a hollow
   // asset). ?rule=adaptive brings that back, and older benches ran under
   // it, so add it to compare with them. Anything else reads as the default.
-  rule: ['any', 'adaptive', 'shadow'].includes(params.get('rule')) ? params.get('rule') : 'shadow',
+  rule: ['any', 'adaptive', 'shadow', 'locked'].includes(params.get('rule')) ? params.get('rule') : 'shadow',
+  /* `locked` (asked for 2026-11-20: "a way to force the lod to a specific lod
+     everywhere in the viewer ... a slider"): the cut splits every chunk down to
+     `lock` and no further, wherever it is (stream-core §1, LOCKED), within max
+     chunks; the cells are shadow's (cellRule). ?lock=, 2 when the link has none. */
+  lock: Math.max(0, Math.min(20, Math.round(+(params.get('lock') ?? 2)) || 0)),
   color: +(params.get('color') ?? 8),
   cache: +(params.get('cache') ?? 256),
   seams: params.get('seams') !== '0',
@@ -1591,13 +1598,18 @@ const pathLabel = path => path === 'density' ? `by density > ${densityText()}` :
    the centre of viewProj's projection (half-height over tan of the half
    field of view), and the pixel count, which caps a footprint. */
 const viewportOptions = (w, h) => ({ pxPerRadian: h / (2 * Math.tan(0.45)), screenPixels: w * h });
+/* The rule a chunk's cells are drawn by, and the cut's lock: `locked` is a cut,
+   not a rule for cells, and draws shadow's, so moving between shadow and locked
+   keeps every chunk already made (setOptions, no reload). */
+const cellRule = rule => rule === 'locked' ? 'shadow' : rule;
+const lockOf = () => state.rule === 'locked' ? state.lock : null;
 const streamer = createStreamer({ install, dispose, detail: state.detail, maxChunks: state.max,
   // An edit opens: the workers get its nodes and colour ops first, on the port
   // its jobs will use (stream-core §4b). `gens` says which clicks this edit shows,
   // for the latency numbers.
   publish: ({ gen }) => { const E = W?.edit; if (!E) return; E.gens.set(gen, E.serial); pool.tail(E.tailer()); },
   cacheBytes: cacheBytes(state.cache), cacheMax: state.cache ? DEFAULTS.cacheMax : 1,
-  lodRuleOf: lod => lod === 0 ? 'any' : state.rule, ...pathOptions(state.path),
+  lodRuleOf: lod => lod === 0 ? 'any' : cellRule(state.rule), lock: lockOf(), ...pathOptions(state.path),
   ...viewportOptions(Math.round(innerWidth * Math.min(devicePixelRatio || 1, 2)), Math.round(innerHeight * Math.min(devicePixelRatio || 1, 2))) });
 const pool = new StreamPool(streamer, { workerCount });
 pool.start();
@@ -4401,7 +4413,24 @@ function saveView(){
   // The endless lattice's eye is in its window's coordinates: a link holds it absolute (step 5).
   q.set('eye', absoluteEye().map(v => Math.round(v)).join(','));
   q.set('yaw', cam.yaw.toFixed(3)); q.set('pitch', cam.pitch.toFixed(3));
+  // The lod rule when it isn't the default, and the lock when locked.
+  if (state.rule === 'shadow') q.delete('rule'); else q.set('rule', state.rule);
+  if (state.rule === 'locked') q.set('lock', String(state.lock)); else q.delete('lock');
   history.replaceState(null, '', '?' + q);
+}
+/* The lock's slider: shown with `locked`, its top the world's top lod (each
+   world's in a universe, the largest), the value said beside it. */
+function lockTop(){
+  if (!W) return 14;
+  if (W.universe) return Math.max(0, ...[...W.worlds.values()].map(w => w.D - 6));
+  return Math.max(0, W.D - 6);
+}
+function showLock(){
+  $('lockCtl').hidden = state.rule !== 'locked';
+  const top = lockTop();
+  if (+$('lock').max !== top) $('lock').max = String(top);
+  $('lock').value = String(state.lock);
+  $('lockV').textContent = state.lock > top ? `${state.lock} (the top, ${top})` : String(state.lock);
 }
 function bindControls(){
   showPanels();
@@ -4416,7 +4445,7 @@ function bindControls(){
   $('walkToggle').addEventListener('click', e => { e.currentTarget.blur(); setWalk(!walk.on); });
   $('walkToggle').classList.toggle('on', walk.on); $('walkToggle').textContent = walk.on ? 'fly (C)' : 'walk (C)';
   $('detail').value = state.detail; $('detailV').textContent = state.detail;
-  $('max').value = String(state.max); $('rule').value = state.rule; $('color').value = String(state.color);
+  $('max').value = String(state.max); $('rule').value = state.rule; $('color').value = String(state.color); showLock();
   $('cache').value = String(state.cache); $('seams').value = state.seams ? '1' : '0';
   $('ray').value = state.path;
   $('ray').addEventListener('change', () => setPath($('ray').value));
@@ -4442,7 +4471,12 @@ function bindControls(){
   });
   $('detail').addEventListener('input', () => { state.detail = +$('detail').value; $('detailV').textContent = state.detail; streamer.setOptions({ detail: state.detail }); dirty = true; });
   $('max').addEventListener('change', () => { state.max = +$('max').value; streamer.setOptions({ maxChunks: state.max }); dirty = true; });
-  $('rule').addEventListener('change', () => { state.rule = $('rule').value; loadWorld(false); });
+  $('rule').addEventListener('change', () => {
+    const was = cellRule(state.rule);
+    state.rule = $('rule').value; showLock(); streamer.setOptions({ lock: lockOf() }); saveView();
+    if (cellRule(state.rule) !== was) loadWorld(false); else dirty = true;
+  });
+  $('lock').addEventListener('input', () => { state.lock = +$('lock').value; showLock(); streamer.setOptions({ lock: lockOf() }); saveView(); dirty = true; });
   $('color').addEventListener('change', () => { state.color = +$('color').value; autoColour = null; });
   $('cache').addEventListener('change', () => {
     state.cache = +$('cache').value;
@@ -5274,6 +5308,7 @@ function universeLine(){
 function hud(){
   if (!W){ if (building.text) $('hud').textContent = building.text; return; }
   const S = streamer.S, sel = streamer.sel, fr = streamer.frame;
+  if (+$('lock').max !== lockTop()) showLock();
   const byLod = {};
   if (sel) for (const l of sel.leaves) byLod[l.lod] = (byLod[l.lod] || 0) + 1;
   const lods = Object.keys(byLod).sort((a, b) => a - b).map(l => `${l}:${byLod[l]}`).join(' ');
@@ -5298,7 +5333,7 @@ function hud(){
     (W.kit ? `<span class="sec">kit</span> ${W.kit.desc.libs.length ? `libraries ${W.kit.desc.libs.join(', ')}` : 'no libraries'}, ${W.kit.desc.ornaments} ornaments, ${W.kit.desc.ground ? 'ground and gravity' : 'floating'}, ` +
       `colour in level-${W.kit.desc.colourLevel} frames: ${k(W.voxels)} voxels, ${W.classes ? `${W.classes.toLocaleString()} Oh classes, ` : ''}${k(W.kit.dropped)} nodes pruned, a real store in ${W.kit.realMs.toFixed(1)} ms\n` : '') +
     `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}${walk.on && walk.w ? `  <span class="sec">walk</span> ${walk.w.ground ? 'on the ground' : walk.w.climbing ? 'climbing' : 'in the air'}${walk.holes ? `, ${walk.holes} secret door halves` : ''}` : ''}\n` +
-    `<span class="sec">cut</span> ${sel ? sel.leaves.length : 0} leaves + ${sel ? sel.nodes.size - sel.leaves.length : 0} split  (lod ${lods})${sel && sel.capped ? `  <span class="warn">capped ${sel.capped}</span>` : ''}\n` +
+    `<span class="sec">cut</span> ${sel ? sel.leaves.length : 0} leaves + ${sel ? sel.nodes.size - sel.leaves.length : 0} split  (lod ${lods})${S.cfg.lock != null ? `  locked at ${S.cfg.lock}` : ''}${sel && sel.capped ? `  <span class="warn">capped ${sel.capped}</span>` : ''}\n` +
     `<span class="sec">resident</span> ${S.cache.size} chunks, ${mb(S.cacheBytes)}  missing ${missing}${state.cache ? '' : '  <span class="warn">tiny cache</span>'}\n` +
     `<span class="sec">drawn</span> <b>${view.drawn}</b> chunks (${fr.draw.length} in cover, ${view.culled} culled)  <b>${k(view.instances)}</b> cubes  ${fr.draw.filter(d => d.open).length} with open sides\n` +
     `<span class="sec">occlusion</span> ` + (occlusion ? `${state.occlusion === 'depth' ? 'depth readback' : 'queries'}: <b>${view.occluded}</b> chunks skipped as hidden (<b>${k(view.occludedCubes)}</b> cubes), ` +
@@ -5337,8 +5372,8 @@ function hud(){
       universe: W.universe ? { worlds: W.worlds.size, instances: W.universe.instances.length, Y: W.plane?.Y ?? null, at: whereInUniverse(), inView: view.inView ? view.inView.size : 0,
                                worldsInView: view.inView ? new Set([...view.inView].map(i => W.universe.instances[i].world)).size : 0 } : null },
     edit: window.__edit.state(), eye: cam.eye.slice(), view: { ...view }, gpu: { ...gpu },
-    cut: sel ? { leaves: sel.leaves.length, nodes: sel.nodes.size, capped: sel.capped } : null,
-    resident: S.cache.size, cacheBytes: S.cacheBytes, missing, drawn: fr.draw.length, holes: fr.holes.length,
+    cut: sel ? { leaves: sel.leaves.length, nodes: sel.nodes.size, capped: sel.capped, lock: S.cfg.lock, lods: [...new Set(sel.leaves.map(l => l.lod))].sort((a, b) => a - b) } : null,
+    resident: S.cache.size, cacheBytes: S.cacheBytes, missing, drawn: fr.draw.length, holes: fr.holes.length, revision: S.revision,
     pending: S.pending.size, mode: pool.mode, stats: { ...S.stats },
     occlusion: { mode: state.occlusion, ...(occlusion ? { ...occlusion.occ.stats, inFlight: occlusion.inFlight } : {}) },
     ray: { path: state.path, density: state.density, switching, pages: ray.pageCount, bricks: ray.brickPool.size, uploads: ray.uploads, tree: ray.treeNodes,
@@ -5420,6 +5455,16 @@ function invariants(phase, report, { noHoles, oneRoot = false }){
   // With a still, settled eye, on every frame: no frame mixes two roots, as
   // frameChecker's oneRoot. editSelftest asks for it.
   if (oneRoot) for (const d of fr.draw) if (!streamer.current(d.key) && (S.failures.get(d.key) || 0) < 2) bad(`${d.key} drawn out of date, the frame mixes roots`);
+  /* A locked cut (stream-core §1, LOCKED), as frameChecker's checkLocked: every
+     leaf of a tree at lod min(lock, its top), coarser only where that tree's cut
+     was capped. */
+  if (S.cfg.lock != null && streamer.sel){
+    const sel = streamer.sel, trees = W.universe ? sel.trees.map(t => ({ sel: t.sel, top: t.world.top })) : [{ sel, top: sel.world.top }];
+    for (const t of trees){
+      const want = Math.min(S.cfg.lock, t.top);
+      for (const c of t.sel.leaves) if (c.lod < want || (!t.sel.capped && c.lod !== want)) { bad(`${c.key} at lod ${c.lod}, locked at ${want}${t.sel.capped ? ' (capped)' : ''}`); break; }
+    }
+  }
   for (const d of fr.draw){
     const e = S.cache.get(d.key);
     if (!e) bad(`${d.key} drawn, not resident`);

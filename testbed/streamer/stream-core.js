@@ -103,8 +103,18 @@ export function boxDistance(eye, c){
    So c is < K·S/2 + S/2 away, yet as a leaf it is ≥ K·S away: that needs
    K < 1. (I first wrote √3 here, which is the bound for boxes that touch
    at a corner; the test found it slack. Seams only meet across faces.)
-   The seam tail relies on it (chunk-core.js, stream-plan.md decision 11). */
-export function selectChunks(world, eye, { detail = 2, maxChunks = 1024, minLod = 0 } = {}){
+   The seam tail relies on it (chunk-core.js, stream-plan.md decision 11).
+
+   LOCKED (asked for 2026-11-20: "a way to force the lod to a specific lod
+   everywhere in the viewer"): with `lock` a lod, a chunk is split while its
+   lod is above it, wherever it is, and never below it, so every leaf is at
+   lod min(lock, top). Splits still go nearest first (dist / size) and the cap
+   still refuses the farthest, so a lock finer than maxChunks can hold leaves
+   the far chunks coarser (`capped` counts them). A null lock is the cut
+   above. Face neighbours are one lod: the same one. `splitsAt` is the rule. */
+export const splitsAt = (c, { detail, minLod = 0, lock = null }) => lock == null ? c.lod > minLod && c.dist < detail * c.size : c.lod > lock;
+export function selectChunks(world, eye, { detail = 2, maxChunks = 1024, minLod = 0, lock = null } = {}){
+  const rule = { detail, minLod, lock };
   const nodes = new Map(), leaves = [];
   const sel = { world, eye: [eye[0], eye[1], eye[2]], detail, nodes, leaves, leafKeys: new Set(), root: null, capped: 0 };
   if (world.root === EMPTY) return sel;
@@ -138,7 +148,7 @@ export function selectChunks(world, eye, { detail = 2, maxChunks = 1024, minLod 
   while (heap.length){
     const c = pop();
     nodes.set(c.key, c);
-    if (c.lod > minLod && c.dist < detail * c.size){
+    if (splitsAt(c, rule)){
       const kids = childrenOf(world, c);
       if (count - 1 + kids.length <= maxChunks){
         c.kids = kids; count += kids.length - 1;
@@ -249,7 +259,8 @@ export function coverOf(sel, has){
    is listed with the nearer tree's distance (in universe voxels, `dist` and
    `size` scaled by 2^scale, so `dist / size` is still the rank). */
 export const forestKey = (world, key) => world + '/' + key;
-export function selectForest(universe, eye, { detail = 2, maxChunks = 1024, minLod = 0 } = {}){
+export function selectForest(universe, eye, { detail = 2, maxChunks = 1024, minLod = 0, lock = null } = {}){
+  const forestRule = { detail, minLod, lock };
   const fsel = { universe, eye: [eye[0], eye[1], eye[2]], detail, trees: [], nodes: new Map(), leaves: [], leafKeys: new Set(), capped: 0 };
   const heap = [], rank = c => c.dist / c.size;
   const push = c => {
@@ -289,7 +300,7 @@ export function selectForest(universe, eye, { detail = 2, maxChunks = 1024, minL
   while (heap.length){
     const c = pop(), { sel, world, eye: local } = c.tree;
     sel.nodes.set(c.key, c);
-    if (c.lod > minLod && c.dist < detail * c.size){
+    if (splitsAt(c, forestRule)){
       const kids = childrenOf(world, c);
       if (count - 1 + kids.length <= maxChunks){
         c.kids = kids; count += kids.length - 1;
@@ -565,6 +576,8 @@ export function createPaint(D){
    wrong. */
 export const DEFAULTS = {
   detail: 2, maxChunks: 1024, minLod: 0,
+  // A lod every chunk of the cut is split down to and no further (selectChunks), or null.
+  lock: null,
   // false: want only the cut's leaves, the first version's rule, kept so
   // experiments/stream.mjs can show what it costs (docs/stream-log.md §3).
   splitsResident: true,
