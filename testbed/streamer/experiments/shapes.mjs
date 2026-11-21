@@ -174,8 +174,15 @@ export const SHAPES = [
    The experiments' corpus (SHAPES) stays solid to the floor: only the stream
    viewer's terrain and hills worlds and the scatter's ground (scatter-core's
    groundOf, since 2026-11-13) are crusts, CRUST deep. */
-// How deep a heightfield world's crust is, in voxels: the terrain, the hills, the scatter's ground.
-export const CRUST = 8;
+/* How deep a heightfield world's crust is, in voxels: the terrain, the hills,
+   the scatter's and the math world's ground. 2 since 2026-11-20 (the user:
+   "nobody can dig on these worlds and the numbers are just hiding the real
+   voxel count for objects, the hills just dominate the counts"); 8 from
+   commit 5730d19, 64 the day before. 2 is still closed: no column stands
+   more than 2 above a neighbour on either shape at any depth (the hills
+   step 1 at most, the terrain 2; scatter-core.test.js holds it at D = 9 to
+   12), so no slit opens into the hollow under the crust. */
+export const CRUST = 2;
 export function crustOf(shape, D, depth){
   if (!shape.height) throw new Error(`crustOf: ${shape.name} isn't a heightfield`);
   // A shape with a `height` is y ≤ height(x, z), the same expression as its

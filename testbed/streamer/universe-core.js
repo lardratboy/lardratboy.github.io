@@ -198,12 +198,12 @@ export function universeHoles(u, holesOf){
 /* ---- the plane (§4) ------------------------------------------------------------
    Flat ground is clay's (flatDesc: clayDesc({ D: k, lump: 0, ground: true,
    depth: FLAT_DEPTH })), a slab under its cube's centre plane, so its datum is
-   2^(k − 1). It's FLAT_DEPTH = 8 deep, the hills' CRUST (shapes.mjs), so the
+   2^(k − 1). It's FLAT_DEPTH = 2 deep (8 until 2026-11-20), the hills' CRUST (shapes.mjs), so the
    checkerboard between worlds is as thick as the hills beside it (asked for
    2026-11-19; it was clay's 64 before). Clay's smallest world is D = 8, so the
    smallest flat tile is 256, and every world on the plane sits on a 256 grid
    (`unit`). The test holds flatGround to clayVoxel and FLAT_DEPTH to CRUST. */
-export const FLAT_MIN_D = 8, FLAT_UNIT = 2 ** FLAT_MIN_D, FLAT_DEPTH = 8;
+export const FLAT_MIN_D = 8, FLAT_UNIT = 2 ** FLAT_MIN_D, FLAT_DEPTH = 2;
 export const flatDesc = k => clayDesc({ D: k, lump: 0, ground: true, depth: FLAT_DEPTH });
 export const flatGround = k => 2 ** (k - 1);
 export const flatKey = k => 'flat:' + k;

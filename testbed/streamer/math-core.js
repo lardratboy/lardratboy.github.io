@@ -61,7 +61,9 @@
    black). `repeat` k = 1 spreads one gamut over the object's cube; k > 1
    repeats it k times along each axis, a sawtooth, the kit's cyclic gamut
    with the object's cube as the frame: k = 2 is a gamut per unit cube of
-   the object's frame (asked for 2026-11-20).
+   the object's frame (asked for 2026-11-20). The default is k = 1, one
+   plain gamut an object (the user, 2026-11-20: "gamut with 0 repeats, the
+   user can choose the other afterwards if they wish"); it was 2 at first.
    ===================================================================== */
 import { createStore, pruneWorld } from './dag-core.js';
 import { hash32 } from './specimen-core.js';
@@ -75,7 +77,7 @@ export const MATH_LIMITS = { D: [8, 12], R: [32, 128], seed: [1, 0xffff], repeat
    each side at most, so the field reads as objects with room between, not
    a crowd (the scatter's 64 in 128 is half full; this is two thirds at
    most and about two fifths on average). D = 11 holds 100. */
-export const MATH_DEFAULTS = { seed: 1, D: 11, pitch: 192, rMin: 32, rMax: 128, margin: 4, ground: 'hills', repeat: 2 };
+export const MATH_DEFAULTS = { seed: 1, D: 11, pitch: 192, rMin: 32, rMax: 128, margin: 4, ground: 'hills', repeat: 1 };
 export const YAW_STEPS = 4096, STEP = 0.45, TABLE_WORDS = 7;
 export const SHELL = R => Math.max(1.1, R / 44);
 export const TUBE_MIN = 1.2;

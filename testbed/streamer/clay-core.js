@@ -39,7 +39,7 @@ export const CLAY_DEFAULTS = { D: 20, lump: 256, shape: 'ball', ground: false };
    smallest world (D = 8) has 128 under the plane, so the slab always fits. */
 export const GROUND_DEPTH = 64;
 /* `depth` (asked for 2026-11-19): the slab another depth. The universes' flat ground
-   (universe-core's flatDesc) is 8, the hills' CRUST, so the green checkerboard between
+   (universe-core's flatDesc) is 2 (8 until 2026-11-20), the hills' CRUST, so the green checkerboard between
    worlds is a crust as the hills beside it are. It's left out of the descriptor at
    GROUND_DEPTH, so every clay descriptor written before it (files, links, vdag's golden
    hashes) is the same object, and one read from a file without it is 64 deep. The page's

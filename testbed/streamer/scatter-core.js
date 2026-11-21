@@ -142,7 +142,8 @@ export function scatterLayout(desc){
    (inside is monotone in y), so a guess from the height and a step or two
    either way finds it. -1: no ground in this column.
 
-   The voxels (`field`) are a crust CRUST deep under that surface (8 since
+   The voxels (`field`) are a crust CRUST deep under that surface (2 since
+   2026-11-20, so the hills stop swamping the objects' voxel counts; 8 from
    commit 5730d19; 64 the day before), as the stream viewer's hills and
    terrain are (shapes.mjs's crustOf), not solid to the floor (asked
    2026-11-13: the hills under the specimens were 35–47% of the world's
