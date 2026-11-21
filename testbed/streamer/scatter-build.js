@@ -4,8 +4,10 @@
    same merge (scatter-core's moreUntil, pickUnique, assignCells,
    mergePart; lattice-core's nextRange, pickCells, mergePart), with the
    work spread over scatter-worker.js threads:
-     - for the scatter world, one worker builds the ground while the
-       others run pass A over contiguous ranges of recipes;
+     - for the scatter world, one worker starts on the ground's column
+       parts while the others run pass A over contiguous ranges of
+       recipes, and they join it once their pass B is done (the ground
+       was one worker's whole job until 2026-11-20);
      - pass B sends each recipe back to the worker that built it, which
        still holds its occupancy;
      - one more worker, the assembler, takes each part straight from the
@@ -47,15 +49,24 @@
    kit from all of them. A new seed, libraries, ground or share builds
    no ornaments at all.
 
+   The math world (math-core.js, docs/math-world.md) is the scatter's
+   shape without pass A: every worker drains one queue, the ground's column
+   parts and then the cells one at a time (the biggest first; until
+   2026-11-20 one worker built the ground and the rest dealt the cells by
+   math-core's dealCells: the biggest first, to
+   whoever has the least R³ so far), every part straight to the assembler,
+   merged ground first, then the cells in order).
+
    Without workers (or if one fails) it falls back to buildScatter,
    buildLattice or buildCaves on the main thread, which is the same world,
    much slower.
    A cancelled build never falls back. */
 import { storeView } from './dag-core.js';
-import { scatterLayout, pickUnique, moreUntil, assignCells, buildScatter } from './scatter-core.js';
+import { scatterLayout, pickUnique, moreUntil, assignCells, buildScatter, groundParts } from './scatter-core.js';
 import * as lattice from './lattice-core.js';
 import * as caves from './cave-core.js';
 import { buildKit, ornamentRanges } from './kit-core.js';
+import * as math from './math-core.js';
 
 const abortError = () => new DOMException('the build was superseded', 'AbortError');
 export const isAbort = e => e && e.name === 'AbortError';
@@ -98,8 +109,8 @@ function assembled(r){
 }
 
 export async function buildScatterInWorkers(desc, { workers = 4, onPhase = () => {}, signal = null } = {}){
-  const isLattice = desc.kind === 'lattice', isCaves = desc.kind === 'caves';
-  const fallback = () => isCaves ? cavesOnMainThread(desc)
+  const isLattice = desc.kind === 'lattice', isCaves = desc.kind === 'caves', isMath = desc.kind === 'math';
+  const fallback = () => isCaves ? cavesOnMainThread(desc) : isMath ? math.buildMath(desc, { onPhase })
     : isLattice ? lattice.buildLattice(desc, { onPhase }) : buildScatter(desc, { onPhase });
   if (signal?.aborted) throw abortError();
   if (!workers) return { ...fallback(), threads: 0 };
@@ -117,6 +128,7 @@ export async function buildScatterInWorkers(desc, { workers = 4, onPhase = () =>
     await wait(Promise.all([...pool, asm].map(p => p.ready)));
     await wait(Promise.all(pool.map(p => connect(asm, p))));
     return isCaves ? await cavesInWorkers(desc, pool, asm, { t0, wait, onPhase })
+      : isMath ? await mathInWorkers(desc, pool, asm, { t0, wait, onPhase })
       : isLattice ? await latticeInWorkers(desc, pool, asm, { t0, wait, onPhase })
       : await scatterInWorkers(desc, pool, asm, { t0, wait, onPhase });
   } catch (e){
@@ -129,10 +141,25 @@ export async function buildScatterInWorkers(desc, { workers = 4, onPhase = () =>
   }
 }
 
+/* The ground in column parts (scatter-core's groundParts; docs/math-world.md
+   §8 Q5, 2026-11-20): a queue that any worker drains, a part at a time, each
+   part to the assembler tagged 'g<i>' and merged first, in order. Built
+   whole on one worker it was the long pole at D = 12, the scatter's and the
+   math world's both. */
+function groundQueue(desc){
+  const { jobs } = groundParts(desc), tags = jobs.map((_, i) => 'g' + i);
+  let next = 0, done = 0;
+  const drain = async (w, tick = () => {}) => {
+    while (next < jobs.length){ const i = next++; await w.ask({ type: 'ground-part', desc, job: jobs[i], tag: tags[i] }); done++; tick(); }
+  };
+  return { tags, drain, count: jobs.length, done: () => done };
+}
+
 async function scatterInWorkers(desc, pool, asm, { t0, wait, onPhase }){
-  const layout = scatterLayout(desc), N = layout.cells.length, [groundW, ...builders] = pool;
+  const layout = scatterLayout(desc), N = layout.cells.length, [groundW, ...builders] = pool, ground = groundQueue(desc);
   onPhase(`ground and ${N} specimens on ${builders.length} threads`, 0);
-  const groundP = groundW.ask({ type: 'ground', desc, tag: 'ground' });
+  // The first worker starts on the ground; the builders join it once pass B is done.
+  const groundP = ground.drain(groundW);
   // Pass A: contiguous ranges, one per builder; who built what, for pass B.
   const prints = [], owner = [];
   let picked = [];
@@ -155,18 +182,42 @@ async function scatterInWorkers(desc, pool, asm, { t0, wait, onPhase }){
   // ground's keys are merged first.
   const jobs = assignCells(layout, picked);
   onPhase('placing', 0.7);
-  await wait(asm.ask({ type: 'assemble', desc, order: ['ground', ...builders.map((_, k) => k)], prints }));
+  await wait(asm.ask({ type: 'assemble', desc, order: [...ground.tags, ...builders.map((_, k) => k)], prints }));
   const placedBy = builders.map(() => 0), tickB = () => {
     const d = placedBy.reduce((a, b) => a + b, 0);
     onPhase(`placed ${d} of ${N}`, 0.7 + 0.25 * d / N);
   };
   await wait(Promise.all([groundP, ...builders.map((b, k) => b.ask({ type: 'place', desc, jobs: jobs.filter(j => owner[j.n] === k), tag: k }, [],
-                                                                   d => { placedBy[k] = d; tickB(); }))]));
+                                                                   d => { placedBy[k] = d; tickB(); }).then(() => ground.drain(b)))]));
   const tB = performance.now();
   onPhase('grafting and pruning', 0.95);
   const r = await wait(asm.ask({ type: 'finish' }));
   return { ...assembled(r), D: desc.D, layout, prints, picked, skipped: picked[N - 1] + 1 - N,
            threads: pool.length - 1, ms: { passA: tA - t0, passB: tB - tA, assemble: r.ms, total: performance.now() - t0 } };
+}
+
+/* The math world: one queue for every worker, the ground's column parts
+   first, then each object alone, biggest first (one at R = 128 is 15–800
+   ms, math-sketch.mjs), so the last ones are the small ones. The assembler
+   merges the ground's parts, then the cells in cell order, whoever built
+   them. Until 2026-11-20 the ground was one worker's while the others
+   placed their shares (dealCells), and at D = 12 it was most of the wait. */
+async function mathInWorkers(desc, pool, asm, { t0, wait, onPhase }){
+  const layout = math.mathLayout(desc), N = layout.cells.length, ground = groundQueue(desc);
+  const cells = layout.cells.map((c, i) => i).sort((a, b) => layout.cells[b].R - layout.cells[a].R || a - b);
+  onPhase(`ground and ${N} objects on ${pool.length} threads`, 0);
+  await wait(asm.ask({ type: 'assemble', desc, order: [...ground.tags, ...layout.cells.map((c, i) => i)] }));
+  let next = 0, placed = 0;
+  const tick = () => onPhase(`ground ${ground.done()} of ${ground.count} parts, placed ${placed} of ${N} objects`, 0.95 * (ground.done() + placed) / (ground.count + N));
+  await wait(Promise.all(pool.map(async w => {
+    await ground.drain(w, tick);
+    while (next < N){ const c = cells[next++]; await w.ask({ type: 'place', desc, jobs: math.cellJobs(layout, [c]), tag: c }); placed++; tick(); }
+  })));
+  const tB = performance.now();
+  onPhase('grafting and pruning', 0.95);
+  const r = await wait(asm.ask({ type: 'finish' }));
+  return { ...assembled(r), D: desc.D, layout, threads: pool.length,
+           ms: { place: tB - t0, assemble: r.ms, total: performance.now() - t0 } };
 }
 
 /* The lattice: pass A as the scatter's (random axes only), then pass B on

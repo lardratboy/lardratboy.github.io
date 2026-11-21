@@ -35,6 +35,10 @@
                                   descriptor (~10–90 ms; floor plans are
                                   made as they're first read). No table: a
                                   D = 12 city is 20 million tiles
+     { kind: 'math', …, table }   the math world's (math-core.js,
+                                  mathColour): the hills' colour, and in
+                                  each object's box the gamut of its own
+                                  frame, once or `repeat` times an axis
      { kind: 'baked', skin, words, bits }
                                   an imported asset's own colours
                                   (baked-core.js, createBaked): data, not a
@@ -68,6 +72,7 @@ import { caveColour } from './cave-core.js';
 import { clayColour } from './clay-core.js';
 import { dungeonColour } from './dungeon-core.js';
 import { cityColour } from './city-core.js';
+import { mathColour } from './math-core.js';
 import { createBaked } from './baked-core.js';
 
 const TAU = 2 * Math.PI;
@@ -113,5 +118,6 @@ export function colourOf(desc, world = null){
   if (desc.kind === 'clay') return clayColour(desc, rgb8);
   if (desc.kind === 'dungeon') return dungeonColour(desc, rgb8);
   if (desc.kind === 'city') return cityColour(desc, rgb8);
+  if (desc.kind === 'math') return mathColour(desc, rgb8);
   throw new Error(`colourOf: unknown kind '${desc.kind}'`);
 }

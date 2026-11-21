@@ -40,7 +40,7 @@
    coordinates centred in the box: w[i] = ±v[PERM[e >> 3][i]], minus
    where bit i of e is set.
    ===================================================================== */
-import { createStore, pruneWorld } from './dag-core.js';
+import { createStore, pruneWorld, EMPTY } from './dag-core.js';
 import { createSpecimenCore, sampleRecipe, binaryLevels, hash32 } from './specimen-core.js';
 import { SHAPES, fieldOf, colourFieldOf, crustOf, CRUST } from './experiments/shapes.mjs';
 
@@ -162,6 +162,48 @@ export function groundOf(desc){
   };
   const crust = shape.height ? crustOf(shape, desc.D, CRUST) : shape;
   return { shape, crust, top, field: fieldOf(crust, desc.D) };
+}
+
+/* ---- the ground in column parts --------------------------------------------
+   docs/math-world.md §8 question 5, answered 2026-11-20 ("sounds worth
+   doing", for the scatter and the math world both): built whole, the
+   hills' crust was one worker's job while the rest placed the objects, and
+   the longest one at D = 12 (5.2 s of the scatter's build on one thread,
+   9.5 s of the math world's). Cut as the caves are: columns of level-L
+   blocks, L = D − 3, so 64 columns of 8 blocks, each column a part built
+   by fromField over the same field moved to its corner, the empty blocks
+   (the air over the crust, the hollow under it) left out. The parts are
+   grafted into an empty world at level L; hash-consing makes that the
+   whole build's root, id for id in one store (scatter-core.test.js holds
+   it at every depth it builds, and against a dense crust). */
+export const groundPartLevel = desc => desc.D - 3;
+export function groundParts(desc){
+  const L = groundPartLevel(desc), n = 2 ** (desc.D - L), jobs = [];
+  for (let z = 0; z < n; z++) for (let x = 0; x < n; x++) jobs.push({ px: x, pz: z });
+  return { L, jobs };
+}
+export function buildGroundPart(desc, job, store = createStore(), ground = groundOf(desc)){
+  const L = groundPartLevel(desc), blocks = [], field = ground.field;
+  for (let py = 0; py < 2 ** (desc.D - L); py++){
+    const { root } = store.fromField(L, (k, x, y, z) => field(k, x + (job.px << (L - k)), y + (py << (L - k)), z + (job.pz << (L - k))));
+    if (root !== EMPTY) blocks.push({ x: job.px, y: py, z: job.pz, node: root });
+  }
+  return { store, blocks };
+}
+// A part from another store (its snapshot's keys) into this one's list of ground blocks.
+export function mergeGroundPart(store, blocks, part){
+  const map = store.importKeys(part.keys);
+  for (const b of part.blocks) blocks.push({ x: b.x, y: b.y, z: b.z, node: map[b.node] });
+}
+export const assembleGround = (store, desc, blocks) => store.graft(EMPTY, desc.D, groundPartLevel(desc), blocks);
+// The parts' way on one thread, for the tests: each part in a store of its own, merged in order.
+export function groundInParts(desc, store = createStore(), ground = groundOf(desc)){
+  const blocks = [];
+  for (const job of groundParts(desc).jobs){
+    const part = buildGroundPart(desc, job, createStore(), ground);
+    mergeGroundPart(store, blocks, { keys: part.store.snapshot().keys, blocks: part.blocks });
+  }
+  return { store, root: assembleGround(store, desc, blocks) };
 }
 
 /* The ground's datum for a universe (docs/universe-plan.md §4, question 5,

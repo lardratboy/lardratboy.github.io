@@ -54,6 +54,8 @@
   #ctl input#kitLibs{ width:96px; }
   #kitInfo{ color:#4e4e5e; white-space:pre-wrap; }
   #kitInfo .warn{ color:#d08a5a; }
+  #mathCtl{ border-left:2px solid rgba(255,255,255,.08); padding-left:8px; margin:4px 0; }
+  #mathInfo{ color:#4e4e5e; white-space:pre-wrap; max-width:320px; }
   /* The build toast (docs/lattice3d-plan.md): what is being built, and how
      far along, while the old world keeps drawing. */
   #toast{ position:fixed; left:50%; top:10px; transform:translateX(-50%); min-width:300px; max-width:70vw;
@@ -181,6 +183,11 @@
   <div id="cityCtl" hidden>
     <div id="cityInfo"></div>
   </div>
+  <div id="mathCtl" hidden>
+    <label>colour <select id="mathRepeat"><option value="1">one gamut over each object's cube</option><option value="2">a gamut per unit cube (cyclic ×2)</option><option value="4">cyclic ×4</option></select></label>
+    <label>sizes <select id="mathSizes"><option value="32,128">32 to 128</option><option value="32,64">32 to 64</option><option value="64,128">64 to 128</option><option value="128,128">all 128</option></select></label>
+    <div id="mathInfo"></div>
+  </div>
   <div id="clayCtl" hidden>
     <label>lump <select id="clayLump"></select></label>
     <label>shape <select id="clayShape"><option value="ball">a ball</option><option value="block">a block</option></select></label>
@@ -256,6 +263,7 @@ drop .vdag files anywhere to open them</pre></section>
 ?world=clay&amp;clay=D,lump,shape,ground   (lump 0: flat ground, or empty without ground)
 ?world=dungeon:&lt;seed&gt;&amp;dungeon=D,floors
 ?world=city:&lt;seed&gt;&amp;depth=9..13
+?world=math:&lt;seed&gt;&amp;depth=9..12&amp;math=repeat,rMin,rMax   (repeat 1, 2 or 4)
 ?world=universe:&lt;seed&gt;   kits, cities and the scatter on one plane   ?tint=0 no tint far off
 ?hud=1 opens with the panels   ?wire=1 with the wireframe   ?walk=1 walking
 ?quiet draws once converged   ?selftest runs streamSelftest()
@@ -352,6 +360,7 @@ import { latticeDesc, latticeFromParam, latticeParam, budgetOf, maxCube, stackOf
 import { kitDesc, kitFromParam, kitParam, sideOf, buildKit, kitGround, KIT_LIMITS } from './kit-core.js';
 import { caveDesc } from './cave-core.js';
 import { clayDesc, clayFromParam, clayParam, buildClay, clayPlace, CLAY_LIMITS, CLAY_DEFAULTS, GROUND_DEPTH } from './clay-core.js';
+import { mathDesc, mathFromParam, mathParam, mathInfo, MATH_FAMILIES, MATH_SHAPES, MATH_DEFAULTS, TABLE_WORDS as TABLE_WORDS_MATH } from './math-core.js';
 import { dungeonDesc, dungeonFromParam, dungeonParam, dungeonPlan, buildDungeon, dungeonGround, planFromTable, secretDoors, DUNGEON_LIMITS, CELL as DUNGEON_CELL } from './dungeon-core.js';
 import { buildCity, cityPlan, cityDesc, cityGround, TYPE_NAMES as CITY_TYPES, TOWER_NAMES as CITY_TOWERS, DISTRICT_NAMES as CITY_DISTRICTS } from './city-core.js';
 import { createUniverse, planeOf, flatGround, flatKey, flatDesc, toLocal, dirToLocal, boxToUniverse, turnMatrix, instanceAt, demoUniverse, tintOf, tintAt, universeWorld, universeHoles,
@@ -1554,6 +1563,14 @@ state.dungeon = (() => {
   try { return params.has('dungeon') ? dungeonFromParam(params.get('dungeon'), seed) : dungeonDesc({ seed }); }
   catch (e){ console.warn('?dungeon refused:', e.message); return dungeonDesc({ seed }); }
 })();
+/* The math world (docs/math-world.md): the seed is the world id's and the depth the
+   depth menu's, as the scatter's; ?math=repeat,rMin,rMax holds the rest. */
+state.math = (() => {
+  // The link's depth is the math world's only when the link names it (a row's is 4 to 8).
+  const here = /^math:\d+$/.test(state.world), seed = here ? +state.world.slice(5) || 1 : 1, D = here && state.depth ? state.depth : MATH_DEFAULTS.D;
+  try { return params.has('math') ? mathFromParam(params.get('math'), seed, D) : mathDesc({ seed, D }); }
+  catch (e){ console.warn('?math refused:', e.message); return mathDesc({ seed, D }); }
+})();
 const workerCount = params.has('workers') ? +params.get('workers') : Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
 // The lattice's build threads: short-lived, so up to 8 (a 128³ lattice is
 // ~3 min of work on one thread; docs/lattice3d-log.md §5). ?workers sets both.
@@ -1621,6 +1638,7 @@ const catalogue = () => {
   out.push({ id: isCaves(state.world) ? state.world : 'caves:1', label: 'caves under mountains (water, lava)', group: 'natural' });
   out.push({ id: 'dungeon:' + state.dungeon.seed, label: 'dungeon: floors of rooms, halls and stairs', group: 'built (wave function collapse)' });
   out.push({ id: isCity(state.world) ? state.world : 'city:1', label: 'city: districts, towers, rooms to walk into, parks', group: 'built (districts and lots)' });
+  out.push({ id: isMath(state.world) ? state.world : 'math:1', label: 'math: famous surfaces and solids on hills', group: 'mathematics' });
   out.push({ id: 'clay', label: 'clay, flat ground or empty', group: 'to sculpt' });
   out.push({ id: isUniverse(state.world) ? state.world : 'universe:1', label: `universe: kits, cities and the scatter on one plane${state.uniFiles.length ? ` (+${state.uniFiles.length} from the shelf)` : ''}`, group: 'universe' });
   out.push({ id: isEndless(state.world) ? state.world : 'endless:1', label: `endless: districts of worlds, built as you fly${state.uniFiles.length ? ` (+${state.uniFiles.length} from the shelf)` : ''}`, group: 'universe' });
@@ -1762,6 +1780,7 @@ const isRow = id => id.startsWith('row:'), isScatter = id => id.startsWith('scat
 const isKit = id => id.startsWith('kit:'), isCaves = id => /^caves:\d+$/.test(id), isClay = id => id === 'clay';
 const isDungeon = id => /^dungeon:\d+$/.test(id);
 const isCity = id => /^city:\d+$/.test(id);
+const isMath = id => /^math:\d+$/.test(id);
 const isUniverse = id => /^universe:\d+$/.test(id);
 // The endless lattice (universe-plan step 5): a universe too, so everything a universe refuses it refuses.
 const isEndless = id => /^endless:\d+$/.test(id);
@@ -1782,7 +1801,7 @@ function fileWhyNot(e){
   if (e.colour.kind === 'baked') return 'a world with baked colour can\'t take worlds yet: the scene\'s colour needs a parent with a named one';
   return null;
 }
-const takesWorlds = id => isKit(id) || isShape(id) || isRow(id) || isScatter(id) || isLattice(id) || isCaves(id) || isDungeon(id) || isCity(id) || (isFile(id) && !fileWhyNot(shelfEntry(id)));
+const takesWorlds = id => isKit(id) || isShape(id) || isRow(id) || isScatter(id) || isMath(id) || isLattice(id) || isCaves(id) || isDungeon(id) || isCity(id) || (isFile(id) && !fileWhyNot(shelfEntry(id)));
 // The kit: 12, 14 and 16 as planned (decision 7), 10, small enough for the self-test,
 // and 8 and 6 (asked for 2026-11-14): at 6 the world is one 64³ assembly of parts, one chunk.
 const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: `L=${L} (${(4 ** L).toLocaleString()}³)` }))
@@ -1796,6 +1815,8 @@ const depthChoices = id => isRow(id) ? [4, 5, 6, 7, 8].map(L => ({ v: L, label: 
   // the eye as float32 voxels (docs/clay-log.md §3). ?clay= asks for more.
   : isClay(id) ? [12, 14, 16, 18, 20].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }))
   : isScatter(id) ? [9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${((2 ** D / 128) ** 2).toLocaleString()} specimens)` }))
+  // The math world: cells of 192, so D = 12 holds 441 objects (~30 s of work, a few s over the workers).
+  : isMath(id) ? [9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(Math.floor(2 ** D / MATH_DEFAULTS.pitch) ** 2).toLocaleString()} objects)` }))
   : [8, 9, 10, 11, 12].map(D => ({ v: D, label: `D=${D} (${(2 ** D).toLocaleString()}³)` }));
 function fillDepth(){
   fillSeed();
@@ -1806,6 +1827,7 @@ function fillDepth(){
   $('clayCtl').hidden = !isClay(state.world);
   $('dungeonCtl').hidden = !isDungeon(state.world);
   $('cityCtl').hidden = !isCity(state.world);
+  $('mathCtl').hidden = !isMath(state.world);
   // The world tool is every named world's with a real store (takesWorlds), and clay's,
   // which has blocks too (onelog-plan Q1).
   $('editL').hidden = !isClay(state.world) && !takesWorlds(state.world);
@@ -1826,8 +1848,32 @@ function fillDepth(){
     sel.value = String(state.depth); fillClay(); return;
   }
   if (state.depth === null || !depthChoices(state.world).some(c => c.v === state.depth))
-    state.depth = isRow(state.world) ? 8 : isScatter(state.world) || isCaves(state.world) ? 12 : isCity(state.world) ? 11 : (state.world === 'shape:gyroid' ? 9 : 10);
+    state.depth = isRow(state.world) ? 8 : isScatter(state.world) || isCaves(state.world) ? 12 : isCity(state.world) || isMath(state.world) ? 11 : (state.world === 'shape:gyroid' ? 9 : 10);
   sel.value = String(state.depth);
+  if (isMath(state.world)) fillMath();
+}
+
+/* ---- the math world's panel (docs/math-world.md) ---------------------------------
+   The colour (one gamut over each object's cube, or the kit's cyclic gamut two or
+   four times an axis) and the sizes. A new colour keeps the world (buildWorld reuses
+   the last build when only the colour changed); new sizes build again. Both keep the
+   eye. The info says what was built: objects by family. */
+function fillMath(){
+  const d = state.math;
+  $('mathRepeat').value = String(d.repeat);
+  $('mathSizes').value = `${d.rMin},${d.rMax}`;
+  showMath();
+}
+function showMath(){
+  const b = W?.math, i = b && mathInfo(b.layout);
+  $('mathInfo').textContent = i ? `${i.objects.toLocaleString()} objects of ${i.shapes} shapes (of ${MATH_SHAPES.length}), R ${i.rLo} to ${i.rHi}: ` +
+    MATH_FAMILIES.map((f, k) => i.byFamily[k] ? `${i.byFamily[k]} ${f}` : null).filter(Boolean).join(', ') +
+    `\n${b.blocks.toLocaleString()} blocks, ${W.nodes.toLocaleString()} nodes, ${b.threads ? `${b.threads} threads` : 'main thread'}${b.reused ? ', the last build recoloured' : ''}` : '';
+}
+function bindMath(){
+  const go = over => { state.math = mathDesc({ ...state.math, ...over }); fillMath(); loadWorld('keep').catch(e => console.error('math build failed', e)); };
+  $('mathRepeat').addEventListener('change', () => go({ repeat: +$('mathRepeat').value }));
+  $('mathSizes').addEventListener('change', () => { const [rMin, rMax] = $('mathSizes').value.split(',').map(Number); go({ rMin, rMax }); });
 }
 
 /* ---- the lattice's controls (docs/lattice3d-plan.md) ---------------------
@@ -2007,7 +2053,7 @@ function showCity(){
    leave it in rock). Seeds wrap within 1…65,535, kitDesc's and
    latticeDesc's range. */
 const SEED_MAX = 0xffff, SEED_DEBOUNCE = 250;
-const isSeeded = id => isScatter(id) || isLattice(id) || isKit(id) || isCaves(id) || isDungeon(id) || isCity(id) || isUniverse(id) || isEndless(id);
+const isSeeded = id => isScatter(id) || isMath(id) || isLattice(id) || isKit(id) || isCaves(id) || isDungeon(id) || isCity(id) || isUniverse(id) || isEndless(id);
 const seedOf = id => +id.slice(id.indexOf(':') + 1) || 1;
 const wrapSeed = s => ((Math.round(s) - 1) % SEED_MAX + SEED_MAX) % SEED_MAX + 1;
 const randomSeed = () => 1 + Math.floor(Math.random() * SEED_MAX);
@@ -2068,7 +2114,8 @@ function sourceOf(){
   if (isFile(state.world)) return shelfEntry(state.world)?.source ?? null;
   return { world: state.world, depth: isLattice(state.world) || isKit(state.world) || isClay(state.world) || isDungeon(state.world) || isUniverse(state.world) || isEndless(state.world) ? null : state.depth,
            lattice: isLattice(state.world) ? latticeParam(state.lattice) : null, kit: isKit(state.world) ? kitParam(state.kit) : null,
-           clay: isClay(state.world) ? clayParam(state.clay) : null, dungeon: isDungeon(state.world) ? dungeonParam(state.dungeon) : null };
+           clay: isClay(state.world) ? clayParam(state.clay) : null, dungeon: isDungeon(state.world) ? dungeonParam(state.dungeon) : null,
+           math: isMath(state.world) ? mathParam(state.math) : null };
 }
 const colourNote = status => ({
   same: 'colour as written',
@@ -2501,6 +2548,7 @@ async function buildWorld(signal, gen){
   if (isUniverse(state.world)) return buildUniverse(signal, gen);
   if (isEndless(state.world)) return buildEndless();
   const t0 = performance.now();
+  let math = null;
   let store = createStore(), root, D, label, colour, scatter = null, lattice = null, kit = null, caves = null, clay = null, dungeon = null, city = null, classes = null, file = null, shaped = false;
   // The keys a scene log starts from (a world that takes worlds), and why a world takes none.
   // `lazy`: a view made real when B is first pressed (step 5).
@@ -2545,6 +2593,24 @@ async function buildWorld(signal, gen){
     label = `scatter: ${scatter.layout.cells.length.toLocaleString()} specimens on hills`;
     lazy = true;
     colour = { kind: 'scatter', ...desc, table: scatter.table };
+  } else if (isMath(state.world)){
+    /* The math world (docs/math-world.md): built in workers as the scatter is, the
+       ground on one and the objects dealt round the rest. No poses, as the scatter.
+       The colour (`repeat`) isn't in the voxels, so a new colour on the same build
+       reuses it: only the snapshot's descriptor changes. */
+    const desc = mathDesc({ ...state.math, seed: seedOf(state.world), D: state.depth }), key = JSON.stringify({ ...desc, repeat: 0 });
+    state.math = desc;
+    const last = W?.math && W.math.key === key && !W.edit ? W.math : null;
+    math = last ? { ...last, reused: true } : await buildScatterInWorkers(desc, { workers: buildThreads, signal,
+      onPhase: (t, f) => setBuilding(`building the math world, D=${desc.D} … ${t}`, f) });
+    math.key = key; math.desc = desc;
+    if (!last) math.groundTop = groundOf(desc).top;
+    // A reused build's store is its own read-only view of the workers' keys, as
+    // it was; a world made real at B (W.edit) is never reused, so nothing grew it.
+    ({ store, root, D } = math);
+    label = `math: ${math.layout.cells.length.toLocaleString()} surfaces and solids on hills`;
+    lazy = true;
+    colour = { ...desc, table: math.table };
   } else if (isLattice(state.world)){
     // No poses either, as the scatter world (the lattice reaches 2M nodes).
     const desc = state.lattice, budget = budgetOf(desc);
@@ -2644,7 +2710,7 @@ async function buildWorld(signal, gen){
   // phase text would sit there meanwhile): say so, and let it paint.
   // (buildMs stops before that frame's wait.)
   const tBuilt = performance.now();
-  if (scatter || lattice || caves || file){
+  if (scatter || lattice || caves || math || file){
     setBuilding(`${building.text.replace(/ … .*$/, '')} … preparing ${store.size.toLocaleString()} nodes for the chunk workers`, 1);
     await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
     if (gen !== buildGen) return false;
@@ -2656,12 +2722,12 @@ async function buildWorld(signal, gen){
   // A file of a world that skips them skips them too.
   // Clay skips them for what's coming: createClasses is the slowest thing in an
   // edit's path, for one debug colour mode (realtimecsg.md §4.2).
-  const poseless = scatter || lattice || caves || clay || dungeon || city || (file && ['scatter', 'lattice', 'caves', 'clay', 'dungeon', 'city'].includes(file.colour?.kind));
+  const poseless = scatter || lattice || caves || math || clay || dungeon || city || (file && ['scatter', 'lattice', 'caves', 'clay', 'dungeon', 'city', 'math'].includes(file.colour?.kind));
   if (!poseless && store.size <= CLASSES_MAX) classes = createClasses(store, OH48);
   const snap = worldSnapshot(store, root, D, { counts, classes, colour });
   const t2 = performance.now(), toolWas = W?.edit?.kind;
   W = { id: state.world, label, store, root, D, side: 2 ** D, top: Math.max(0, D - 6), nodes: store.size, voxels: counts.of(root), counts,
-        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, lattice, kit, caves, clay, dungeon, city, file, colour, source: sourceOf(), classes: classes ? classes.size : null,
+        buildMs: tBuilt - t0, prepMs: t2 - t1, scatter, math, lattice, kit, caves, clay, dungeon, city, file, colour, source: sourceOf(), classes: classes ? classes.size : null,
         // Made with the snapshot, as a tailer starts from what the snapshot holds.
         // Every editable world has one log (docs/onelog-plan.md step 3) and a real store,
         // here, with an interner. Clay takes blocks and worlds, with Tab between (plan
@@ -2688,6 +2754,7 @@ async function buildWorld(signal, gen){
   if (clay) showClay();
   if (dungeon) showDungeon();
   if (city) showCity();
+  if (math) showMath();
   fillShelf();
   // A box is of the world it was opened in. And edit mode doesn't stick to a world that
   // can't be edited, or to one that opens in the other tool: a new world is a new
@@ -2724,6 +2791,16 @@ function defaultView(){
   }
   // A couple of specimen heights over the ground, near one edge, looking across the field.
   if (W.scatter){ const x = 0.5 * s, z = 0.03 * s; return { eye: [x, W.scatter.groundTop(x, z) + 160, z], yaw: 0, pitch: -0.16 }; }
+  /* The math world: looking at the first row's second object (its box's centre, from
+     its table row) from in front of it and above, with the field behind it. A view
+     along the field over the hills had the horizon at the centre of the screen. */
+  if (W.math){
+    const { table, layout } = W.math, c = Math.min(1, layout.perAxis - 1), o = TABLE_WORDS_MATH * c, R = table[o + 1];
+    const t = [table[o + 3] + R / 2, table[o + 4] + R / 2, table[o + 5] + R / 2], yaw = 0.3, pitch = -0.32, d = 2.2 * R + 40;
+    const f = [Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), Math.cos(pitch) * Math.cos(yaw)], eye = t.map((v, a) => v - d * f[a]);
+    eye[1] = Math.max(eye[1], W.math.groundTop(eye[0], eye[2]) + 24);
+    return { eye, yaw, pitch };
+  }
   // Outside the lattice's low corner, above it, looking at its centre
   // (the lattice can be much smaller than the world's cube).
   if (W.lattice){
@@ -4319,7 +4396,7 @@ function saveView(){
   const q = new URLSearchParams(location.search);
   // A shelf world's link is what it was built from: a link can't hold the file.
   const src = sourceOf();
-  for (const [k, v] of [['world', src?.world], ['depth', src?.depth], ['lattice', src?.lattice], ['kit', src?.kit], ['clay', src?.clay], ['dungeon', src?.dungeon]])
+  for (const [k, v] of [['world', src?.world], ['depth', src?.depth], ['lattice', src?.lattice], ['kit', src?.kit], ['clay', src?.clay], ['dungeon', src?.dungeon], ['math', src?.math]])
     if (v == null) q.delete(k); else q.set(k, v);
   // The endless lattice's eye is in its window's coordinates: a link holds it absolute (step 5).
   q.set('eye', absoluteEye().map(v => Math.round(v)).join(','));
@@ -4350,7 +4427,7 @@ function bindControls(){
     pickWorld(id);
   });
   bindRowPicker();
-  bindLattice(); bindKit(); bindClay(); bindDungeon(); bindSeed(); bindFiles();
+  bindLattice(); bindKit(); bindClay(); bindDungeon(); bindMath(); bindSeed(); bindFiles();
   $('editToggle').addEventListener('click', e => { e.currentTarget.blur(); setEditMode(!edit.on); });
   $('placeWorld').addEventListener('change', e => { setEntry(e.currentTarget.value); e.currentTarget.blur(); });
   $('depth').addEventListener('change', () => {
@@ -5206,6 +5283,8 @@ function hud(){
     `<b>${esc(W.label)}</b>${isSeeded(W.id) ? `  seed ${seedOf(W.id)}` : ''}  D=${W.D} (${W.side.toLocaleString()}³)  ${k(W.nodes)} nodes, built ${W.buildMs.toFixed(0)} + ${W.prepMs.toFixed(0)} ms\n` +
     (W.scatter ? `<span class="sec">scatter</span> ${W.scatter.layout.cells.length.toLocaleString()} unique specimens (${W.scatter.skipped} recipes skipped as repeats), ` +
       `${W.scatter.blocks.toLocaleString()} blocks, ${k(W.scatter.dropped || 0)} nodes pruned, ${W.scatter.threads ? `${W.scatter.threads} threads` : '<span class="warn">main thread</span>'}\n` : '') +
+    (W.math ? `<span class="sec">math</span> ${W.math.layout.cells.length.toLocaleString()} objects, R ${W.math.desc.rMin}–${W.math.desc.rMax}, colour ${W.math.desc.repeat === 1 ? 'one gamut an object' : `cyclic ×${W.math.desc.repeat}`}, ` +
+      `${W.math.blocks.toLocaleString()} blocks, ${k(W.math.dropped || 0)} nodes pruned, ${W.math.threads ? `${W.math.threads} threads` : '<span class="warn">main thread</span>'}\n` : '') +
     (W.lattice ? `<span class="sec">lattice</span> R=${W.lattice.desc.R} (${stackOf(W.lattice.desc.R).map(l => l.radix).join('·')}), ${W.lattice.desc.n.join('×')}, gap ${W.lattice.desc.gap}${W.lattice.desc.align ? ' (pitch aligned)' : ''}, ` +
       `${W.lattice.desc.axes}${W.lattice.desc.rotate ? ', turned' : ''}: ` +
       (W.lattice.desc.axes === 'traits' ? `${W.lattice.layout.cells.length.toLocaleString()} trait cells (not fingerprinted)` :
@@ -5246,6 +5325,8 @@ function hud(){
       `median of ${W.edit.samples.length}: ${medianOf(W.edit.samples.map(x => x.ms)).toFixed(0)} ms` : '') +
     (benchHud.status || benchHud.text ? `\n<span class="bench">${benchHud.status || benchHud.text}</span>` : '');
   window.__stream = { state: { ...state }, world: { id: W.id, D: W.D, nodes: W.nodes, buildMs: W.buildMs,
+      math: W.math ? { objects: W.math.layout.cells.length, blocks: W.math.blocks, threads: W.math.threads, fellBack: W.math.fellBack || null,
+                       reused: !!W.math.reused, repeat: W.math.desc.repeat, ms: W.math.ms } : null,
       scatter: W.scatter ? { specimens: W.scatter.layout.cells.length, skipped: W.scatter.skipped, blocks: W.scatter.blocks,
                              threads: W.scatter.threads, fellBack: W.scatter.fellBack || null, ms: W.scatter.ms } : null,
       lattice: W.lattice ? { param: latticeParam(W.lattice.desc), specimens: W.lattice.layout.cells.length, unique: W.lattice.unique, repeats: W.lattice.repeats,
@@ -5472,6 +5553,20 @@ window.streamSelftest = async function streamSelftest(opts = {}){
   await run('switch to scatter', { until: isConverged });
   report.scatter = { specimens: W.scatter.layout.cells.length, skipped: W.scatter.skipped, threads: W.scatter.threads,
                      fellBack: W.scatter.fellBack || null, nodes: W.nodes, voxels: W.voxels, buildMs: Math.round(W.buildMs) };
+  // 4b. The math world (docs/math-world.md): built in the same workers, then
+  // recoloured, which keeps the build (only the snapshot's colour changes).
+  const savedMath = state.math;
+  state.world = 'math:1'; state.depth = 9; state.math = mathDesc({ D: 9 }); fillWorlds(); fillDepth();
+  await loadWorld(true);
+  await run('switch to math', { until: isConverged });
+  report.math = { objects: W.math.layout.cells.length, threads: W.math.threads, fellBack: W.math.fellBack || null, nodes: W.nodes, voxels: W.voxels,
+                  ctlShown: !$('mathCtl').hidden, said: $('mathInfo').textContent, buildMs: Math.round(W.buildMs), url: new URLSearchParams(location.search).get('math') };
+  { const root = W.root, store = W.store;
+    $('mathRepeat').value = '1'; $('mathRepeat').dispatchEvent(new Event('change'));
+    for (let i = 0; i < 400 && !(W.math?.desc.repeat === 1); i++) await sleep(25);
+    await run('math recoloured', { until: isConverged });
+    report.math.recolour = { reused: !!W.math.reused, sameRoot: W.root === root, sameStore: W.store === store, repeat: W.colour.repeat }; }
+  state.math = savedMath;
   // 5. The lattice world (docs/lattice3d-plan.md): one build superseded by
   // the next, as dragging its controls does, then the second streamed.
   const savedLattice = state.lattice;
@@ -5949,7 +6044,10 @@ window.endlessSelftest = async function endlessSelftest(opts = {}){
             if (a !== fresh(lo, hi) && !n++) err(`walking: the walker's world says ${a} at ${lo}, the universe on screen ${!a}`);
           }
           report.walk_probe = { solid };
-          if (solid < 400) err(`walking: only ${solid} of 4,000 probes solid`); }
+          // A floor, so the probes are known to meet the worlds: 400 until the math world
+          // joined the lattice (2026-11-20), when endless:1's window became another and 315
+          // of its probes were solid.
+          if (solid < 200) err(`walking: only ${solid} of 4,000 probes solid`); }
         report.walk = { row, frames, recentres: W.endless.recentres - r0, at: last };
         if (W.endless.recentres - r0 < 1) err('the walk crossed no re-centre');
         if (!last || last[0] < goal) err(`the walk stopped at ${last}, short of ${goal}`);
@@ -7518,6 +7616,8 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       { world: 'dungeon:1', dungeon: dungeonDesc({ D: 9, floors: 3, seed: 1 }), pin: [8656926, 1210] },   // the second round's tiles (dungeon-log §10); 8632838 and 1015 before
       // The city's colour is its descriptor alone: the reader's colourOf rebuilds the plan (docs/city-log.md).
       { world: 'city:1', depth: 9, pin: [5423681, 3525] },
+      // The math world's colour is its descriptor and its table (TBLE), like the scatter's (docs/math-world.md).
+      { world: 'math:1', depth: 9, math: mathDesc({ D: 9 }), pin: [2857437, 21109] },
       { world: 'shape:sphere', depth: 8 },
       { world: 'row:146', depth: 6 },
     ];
@@ -7528,6 +7628,7 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       if (c.lattice) state.lattice = c.lattice;
       if (c.clay) state.clay = c.clay;
       if (c.dungeon) state.dungeon = c.dungeon;
+      if (c.math) state.math = c.math;
       fillWorlds(); fillDepth();
       await loadWorld(true);
       // The nodes the root reaches, which is what a file holds: clay's store keeps
@@ -8933,6 +9034,11 @@ window.toolSelftest = async function toolSelftest(){
       setEditMode(false);
       const c = report.caves = await open('caves:1', 10);
       await dropDown(c);
+      setEditMode(false);
+      // The math world (docs/math-world.md): a view of the workers' keys, as the scatter.
+      state.math = mathDesc({ D: 9 });
+      const m = report.math = await open('math:1', 9);
+      await dropDown(m);
       setEditMode(false);
       await open('scatter:1', 9);
       setEditMode(false);

@@ -334,7 +334,7 @@ export function demoUniverse(seed = 1, files = []){
    0 and 1, where a world is seen close and its own colours are what matter,
    then 0.15 a lod to 0.45. */
 export const TINT_FROM = 2, TINT_MAX = 0.45;
-const TINT_KIND = { kit: [0.95, 0.55, 0.25], city: [0.3, 0.55, 0.95], scatter: [0.35, 0.85, 0.4], flat: [0.6, 0.6, 0.6], file: [0.75, 0.45, 0.9], dungeon: [0.85, 0.3, 0.3] };
+const TINT_KIND = { kit: [0.95, 0.55, 0.25], city: [0.3, 0.55, 0.95], scatter: [0.35, 0.85, 0.4], flat: [0.6, 0.6, 0.6], file: [0.75, 0.45, 0.9], dungeon: [0.85, 0.3, 0.3], math: [0.3, 0.85, 0.85] };
 export function tintOf(key){
   const kind = key.slice(0, key.indexOf(':')), base = TINT_KIND[kind] ?? TINT_KIND.file;
   let h = 0;
@@ -355,7 +355,7 @@ export const tintAt = lod => lod < TINT_FROM ? 0 : Math.min(TINT_MAX, 0.15 * (lo
    DISTRICTS, from a slow field: a jittered grid of district centres, one every
    DISTRICT cells each way, each cell in the district of the nearest centre (integer
    squared distances, ties by hash, so every engine agrees). A district has a kind
-   (kits, cities, dungeons, the scatter, a park, the shelf's files) and a base seed;
+   (kits, cities, dungeons, the scatter, the math world, a park, the shelf's files) and a base seed;
    its cells draw their worlds from a POOL of a few seeds around the base, so a
    district repeats its worlds, turned about y, and instancing earns its keep: a
    world built once is drawn by every cell that names it. One cell in ten is a park.
@@ -397,28 +397,34 @@ export const ENDLESS_KINDS = [
   { kind: 'city', weight: 6, D: 9, pool: 2 },
   { kind: 'dungeon', weight: 3, D: 9, pool: 2, floors: 3 },
   { kind: 'scatter', weight: 2, D: 9, pool: 1 },
+  /* The math world (math-core.js, asked for 2026-11-20: docs/math-world.md §8
+     question 6), at D = 9: four objects on the scatter's hills, so the same
+     datum. 0.4–0.6 s to build in Node; any seed, two a district. */
+  { kind: 'math', weight: 2, D: 9, pool: 2 },
   { kind: 'park', weight: 1 },
   { kind: 'file', weight: 4 },
 ];
 const SEEDS = 0xffff, SCATTER_SEEDS = 3;
+// The kinds that bring a ground of their own (each needs its datum in endlessOf's `grounds`).
+export const GROUNDED = ['kit', 'city', 'dungeon', 'scatter', 'math'];
 const wrapSeed = s => (s - 1) % SEEDS + 1;
 const hash3 = (a, b, c) => hash(hash(a, b), c);
 
 /* The lattice: seed, the plane's Y, and what its cells draw from.
      grounds  each kind's datum, from its own core (kitGround, cityGround,
-              dungeonGround, scatterGround at D = 9, which is the same for
-              every seed: the hills are a fixed shape)
+              dungeonGround, scatterGround and mathGround at D = 9, which
+              are the same for every seed: the hills are a fixed shape)
      files    the shelf's worlds it may draw too: [{ key, world: { store,
               root, D } }]; one wider than a cell is left out */
 export function endlessOf(seed, { grounds, files = [] } = {}){
   if (ENDLESS.district > 5) throw new RangeError('endless: districtOf searches the squares round a cell\'s own, which is enough only for districts of 5 cells or fewer');
   if (!Number.isInteger(seed) || seed < 1 || seed > SEEDS) throw new RangeError(`endless: seed ${seed} is outside 1…${SEEDS}`);
   const C = ENDLESS.cell, fit = files.filter(f => 2 ** f.world.D <= C);
-  for (const k of ['kit', 'city', 'dungeon', 'scatter'])
+  for (const k of GROUNDED)
     if (!Number.isInteger(grounds?.[k]) || grounds[k] < 0) throw new RangeError(`endless: no datum for the ${k}`);
   // The highest any cell's ground could stand: the kit's at ×2 too, and each file's content bottom.
   let Y = flatGround(ENDLESS.flatK);
-  for (const k of ['kit', 'city', 'dungeon', 'scatter']) Y = Math.max(Y, grounds[k]);
+  for (const k of GROUNDED) Y = Math.max(Y, grounds[k]);
   Y = Math.max(Y, 2 * grounds.kit);
   for (const f of fit){ const b = worldBox(f.world); if (b) Y = Math.max(Y, Math.floor(b.lo[1])); }
   const kinds = ENDLESS_KINDS.filter(k => k.kind !== 'file' || fit.length);
