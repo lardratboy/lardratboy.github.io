@@ -1,0 +1,1041 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vdag explorer</title>
+<!--
+  A world file's DAG, chunks and colour field in 3D (docs/explore.md, asked
+  for 2026-11-21: "draw the graphs in 3D and show lines showing how things
+  reference"). Open .vdag files (pick several, or drop them anywhere); each
+  is a world drawn as one scene:
+
+    - the world below, its cells at one lod as cubes, a cube of side 2 at
+      the origin;
+    - its DAG hanging above it, one layer a level with the root on top: a
+      node is a dot, a reference (a child slot) a line from the parent down
+      to the child, so a node many parents share is a dot many lines meet;
+    - lines from a picked node down to every place it occurs in the world,
+      from a picked cell up through the nodes on its path to the root, and
+      from a picked chunk to the seven nodes its job reads (the stamp).
+
+  Every number is explore-core.js's (held to brute forces in
+  test/explore-core.test.js); the file is read and the colour field asked in
+  explore-worker.js, one worker a world. This page lays out, draws and
+  picks. Node positions live in a float texture, so a reference is two ids
+  (8 bytes) and a change of layout uploads one texture.
+
+  The camera is camera-core.js's: left drag orbits, right drag (or shift and
+  left) pans, the wheel dollies. A click picks: the nearest dot within a few
+  pixels, else the first cell the ray meets. F frames, Esc lets go.
+
+  Serve the repo root (npm run serve) and open /explore/.
+-->
+<style>
+  :root{ --bg:#07070a; --panel:#101016; --line:rgba(255,255,255,.09); --text:#a8a8ba; --dim:#62627a; --hi:#d8d8e6; --accent:#7a8ad0; --warn:#d08a5a; --bad:#d06a6a; }
+  [hidden]{ display:none !important; }
+  html,body{ margin:0; height:100%; background:var(--bg); color:var(--text); font:12px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  body{ display:flex; flex-direction:row; overflow:hidden; }
+  #view{ position:relative; flex:1; min-width:0; }
+  #gl{ display:block; width:100%; height:100%; touch-action:none; cursor:crosshair; outline:none; }
+  #empty{ position:absolute; inset:16px; display:flex; align-items:center; justify-content:center; text-align:center; border:1px dashed rgba(255,255,255,.22); border-radius:8px; color:var(--dim); pointer-events:none; }
+  #empty b{ color:var(--hi); font-weight:normal; }
+  body.over #empty, body.over #view{ background:rgba(122,138,208,.06); }
+  body.over #empty{ border-color:var(--accent); color:var(--hi); }
+  #keys{ position:absolute; left:10px; bottom:8px; color:var(--dim); font-size:11px; pointer-events:none; }
+  #legend{ position:absolute; left:10px; top:8px; color:var(--dim); font-size:11px; pointer-events:none; white-space:pre; }
+  aside{ width:380px; flex:none; overflow-y:auto; background:var(--panel); border-left:1px solid var(--line); padding:14px 14px 40px; box-sizing:border-box; }
+  h1{ font-size:14px; font-weight:normal; color:var(--hi); margin:0 0 2px; letter-spacing:.04em; }
+  p.lede{ margin:0 0 12px; color:var(--dim); }
+  a{ color:var(--accent); }
+  h2{ font-size:11px; font-weight:normal; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; margin:16px 0 6px; }
+  button, select{ background:#16161f; color:var(--hi); font:inherit; border:1px solid rgba(255,255,255,.16); border-radius:4px; padding:3px 10px; cursor:pointer; }
+  button:hover{ border-color:rgba(255,255,255,.35); }
+  button:disabled{ opacity:.4; cursor:default; }
+  button.main{ border-color:var(--accent); }
+  button.id{ padding:0 5px; margin:1px 2px 1px 0; font-size:11px; }
+  .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0; }
+  .row .label{ color:var(--dim); min-width:6.5em; }
+  input[type=checkbox], input[type=range]{ accent-color:var(--accent); vertical-align:-2px; }
+  input[type=range]{ width:150px; }
+  #files-list{ margin:6px 0; }
+  #files-list div{ display:flex; gap:6px; align-items:baseline; padding:2px 4px; border-radius:3px; cursor:pointer; }
+  #files-list div:hover{ background:rgba(255,255,255,.03); }
+  #files-list div.on{ background:rgba(122,138,208,.14); color:var(--hi); }
+  #files-list .size{ color:var(--dim); margin-left:auto; }
+  #files-list .x{ color:var(--dim); padding:0 4px; }
+  #facts{ white-space:pre-wrap; overflow-wrap:anywhere; }
+  #facts .name, #sel .name{ color:var(--hi); }
+  #sel{ overflow-wrap:anywhere; }
+  #sel .k{ color:var(--dim); }
+  .warn{ color:var(--warn); }
+  .bad{ color:var(--bad); }
+  .sw{ display:inline-block; width:12px; height:12px; border-radius:2px; vertical-align:-2px; margin-right:2px; border:1px solid rgba(255,255,255,.1); }
+  table{ border-collapse:collapse; width:100%; font-size:11px; }
+  th{ color:var(--dim); font-weight:normal; text-align:right; padding:2px 4px; border-bottom:1px solid var(--line); }
+  td{ text-align:right; padding:2px 4px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th:first-child, td:first-child{ text-align:left; }
+  tr.lvl{ cursor:pointer; }
+  tr.lvl:hover td{ background:rgba(255,255,255,.03); }
+  tr.lvl.in td{ color:var(--hi); }
+  tr.lvl.lo td{ background:rgba(122,138,208,.14); }
+  #status{ margin-top:10px; min-height:1.5em; color:var(--dim); }
+  footer{ margin-top:18px; color:var(--dim); font-size:11px; }
+  @media (max-width:760px){
+    body{ flex-direction:column; overflow:auto; }
+    #view{ flex:none; height:60vh; }
+    aside{ width:auto; border-left:none; border-top:1px solid var(--line); overflow:visible; }
+  }
+</style>
+</head>
+<body>
+<div id="view">
+  <canvas id="gl" tabindex="0"></canvas>
+  <div id="empty"><div><b>Drop .vdag files here</b><br>or choose them in the panel. Nothing leaves this machine.</div></div>
+  <div id="legend"></div>
+  <div id="keys">drag orbits · right drag pans · wheel dollies · click picks · F frames · Esc lets go</div>
+</div>
+<aside>
+  <h1>vdag explorer</h1>
+  <p class="lede">A world file's DAG drawn above the world it describes: every node a dot, every reference a line down to the child it names. Pick a node to see where it occurs, a cell to see its path to the root, a chunk to see the nodes its job reads. Files come from the <a href="../stream-viewer.html">stream viewer</a>'s file → export, or <a href="../convert/">glb, ply → vdag</a>.</p>
+
+  <div class="row"><button id="pick" type="button" class="main">open .vdag…</button><input id="files" type="file" accept=".vdag" multiple hidden></div>
+  <div id="files-list"></div>
+  <div id="worldRow" class="row" hidden><span class="label">world</span><select id="world"></select></div>
+  <div id="facts"></div>
+
+  <h2>Show</h2>
+  <div class="row">
+    <label><input id="showGraph" type="checkbox" checked> graph</label>
+    <label><input id="showRefs" type="checkbox" checked> references</label>
+    <label><input id="showWorld" type="checkbox" checked> world</label>
+    <label><input id="showChunks" type="checkbox"> chunks</label>
+    <label><input id="showOrder" type="checkbox"> Morton order</label>
+  </div>
+
+  <h2>Graph</h2>
+  <div class="row"><span class="label">layout</span>
+    <select id="layout">
+      <option value="place">over its first place</option>
+      <option value="grid">a grid a level</option>
+    </select>
+  </div>
+  <div class="row"><span class="label">levels</span><input id="lo" type="range" min="0" max="1" value="0"><span id="loLabel"></span></div>
+  <div class="row"><span class="label">colour by</span>
+    <select id="nodeColour">
+      <option value="identity">the node (as its cells and chunks)</option>
+      <option value="level">level</option>
+      <option value="refs">refs (slots naming it)</option>
+      <option value="parents">parents</option>
+      <option value="places">places (in its level)</option>
+      <option value="voxels">voxels (in its level)</option>
+      <option value="class">Oh class</option>
+      <option value="field">colour field at its first place</option>
+    </select>
+  </div>
+  <div class="row"><span class="label">size by</span>
+    <select id="nodeSize">
+      <option value="refs">refs</option>
+      <option value="places">places (in its level)</option>
+      <option value="fixed">nothing</option>
+    </select>
+  </div>
+  <div class="row"><span class="label">references</span><input id="edgeAlpha" type="range" min="1" max="100" value="20"></div>
+
+  <h2>World</h2>
+  <div class="row"><span class="label">lod</span><select id="lod"></select></div>
+  <div class="row"><span class="label">colour by</span>
+    <select id="cellColour">
+      <option value="field">its colour field (gamut if none)</option>
+      <option value="gamut">gamut (place as colour)</option>
+      <option value="identity">the cell's node</option>
+      <option value="places">its node's places</option>
+      <option value="refs">its node's refs</option>
+    </select>
+  </div>
+
+  <h2>Chunks</h2>
+  <div class="row"><span class="label">chunk lod</span><select id="chunkLod"></select></div>
+  <div class="row"><span class="label">copies</span><label><input id="copies" type="checkbox" checked> a line from each chunk to the first holding its node</label></div>
+  <div class="row"><span class="label">job's rule</span>
+    <select id="rule">
+      <option value="shadow">shadow (the viewer's)</option>
+      <option value="any">any</option>
+      <option value="adaptive">adaptive</option>
+    </select>
+  </div>
+
+  <h2>Selection</h2>
+  <div id="sel"><span class="k">nothing picked: click a dot or a cell</span></div>
+
+  <h2>Levels</h2>
+  <table>
+    <thead><tr><th>level</th><th>across</th><th>nodes</th><th>cells</th><th>cells a node</th><th>refs</th><th>classes</th></tr></thead>
+    <tbody id="levels"></tbody>
+  </table>
+  <div id="status"></div>
+
+  <footer>Y is up. A level-k node is a block of 2<sup>k</sup> voxels a side; its cells are where it occurs. "Cells a node" is how much the level shares: every cell a node of its own would be 1. A click on a level's row makes it the lowest level drawn. Settings are kept in this browser.</footer>
+</aside>
+
+<script type="module">
+import { storeView, EMPTY, FIRST_NODE } from '../dag-core.js';
+import { CHUNK_LEVELS, cellOf, maskOf, mortonXYZ } from '../chunk-core.js';
+import { CAMERA, basisOf, forwardOf, modeOf, orbit, pan, dolly, wheelLog, addPending, easeStep } from '../camera-core.js';
+import { GRAPH_BASE, GRAPH_HEIGHT, GRAPH_BUDGET, CELL_BUDGET, CHUNK_BUDGET, MAX_SIDE, PLACE_LIST,
+         graphRange, layoutOf, edgesOf, relativesOf, placesOf, pathTo, rayCell, chunksAt, stampWith,
+         identity, heat, logScale, levelColour } from './explore-core.js';
+
+const $ = id => document.getElementById(id);
+const fmt = n => Math.round(n).toLocaleString('en-US');
+const big = n => n < 1e15 ? fmt(n) : n.toExponential(3);
+const mb = n => n < 1e6 ? `${fmt(Math.ceil(n / 1e3))} KB` : `${(n / 1e6).toFixed(1)} MB`;
+const esc = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const rgbCss = ([r, g, b]) => `rgb(${r},${g},${b})`;
+const word8 = w => [w & 255, w >> 8 & 255, w >> 16 & 255];
+const word6 = w => [(w >>> 2 & 63) * 255 / 63, (w >>> 10 & 63) * 255 / 63, (w >>> 18 & 63) * 255 / 63].map(Math.round);
+
+/* ---- settings, remembered per browser ---------------------------------------------- */
+const KEY = 'vdag-explore';
+const CONTROLS = ['showGraph', 'showRefs', 'showWorld', 'showChunks', 'showOrder', 'layout', 'nodeColour', 'nodeSize', 'edgeAlpha', 'cellColour', 'copies', 'rule'];
+let saved = {};
+try { saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') ?? {}; } catch {}
+for (const id of CONTROLS){
+  const c = $(id), v = saved[id];
+  if (v == null) continue;
+  if (c.type === 'checkbox') c.checked = !!v;
+  else if (c.tagName === 'SELECT'){ if ([...c.options].some(o => o.value === String(v))) c.value = String(v); }
+  else c.value = String(v);
+}
+const remember = () => { try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(CONTROLS.map(id => [id, $(id).type === 'checkbox' ? $(id).checked : $(id).value])))); } catch {} };
+const on = id => $(id).checked;
+
+/* ---- files, the worker, the world --------------------------------------------------- */
+const S = { files: [], current: -1, world: 0, worlds: null, worker: null, rq: 0, pending: new Map(), phase: null, error: null,
+            A: null, keys: null, view: null, lo: 0, edges: null, cells: null, chunks: null, sel: null, job: null, nodeField: null, busy: 0 };
+
+function addFiles(list){
+  const fresh = [...list].filter(f => /\.vdag$/i.test(f.name));
+  if (!fresh.length){ say(`not a .vdag: ${[...list].map(f => f.name).join(', ')}`, 'bad'); return; }
+  S.files.push(...fresh);
+  openFile(S.files.length - fresh.length, 0);
+}
+function openFile(i, world){
+  S.worker?.terminate();
+  for (const p of S.pending.values()) p.reject(new Error('superseded'));
+  Object.assign(S, { current: i, world, worlds: world ? S.worlds : null, worker: null, pending: new Map(), phase: null, error: null,
+                     A: null, keys: null, view: null, edges: null, cells: null, chunks: null, sel: null, job: null, nodeField: null, busy: 0 });
+  clearScene();
+  fileList();
+  if (i < 0 || !S.files[i]){ draw(); return; }
+  const w = S.worker = new Worker(new URL('./explore-worker.js', import.meta.url), { type: 'module' });
+  w.onmessage = ({ data }) => {
+    if (w !== S.worker) return;
+    if (data.phase) S.phase = data.phase;
+    if (data.progress) S.phase = { text: `${data.progress.text}, ${Math.floor(100 * data.progress.done / Math.max(1, data.progress.total))}%` };
+    if (data.worlds){ S.worlds = data.worlds; worldList(); }
+    if (data.analysis){ S.phase = null; ready(data.analysis); }
+    if (data.rq != null && S.pending.has(data.rq)){
+      const p = S.pending.get(data.rq); S.pending.delete(data.rq); S.busy--;
+      if (!S.busy) S.phase = null;
+      if (data.error) p.reject(new Error(data.error)); else p.resolve(data);
+    } else if (data.error && data.rq == null){ S.error = data.error; }
+    draw();
+  };
+  w.onerror = e => { e.preventDefault(); if (w === S.worker){ S.error = e.message || 'the worker failed (out of memory?)'; draw(); } };
+  w.postMessage({ open: { file: S.files[i], world } });
+  draw();
+}
+// A question for the worker; the answer, or a rejection if the world changes first.
+function ask(kind, payload){
+  const rq = ++S.rq, w = S.worker;
+  S.busy++;
+  return new Promise((resolve, reject) => { S.pending.set(rq, { resolve, reject }); w.postMessage({ rq, [kind]: payload }); });
+}
+const quiet = p => p.catch(e => { if (e.message !== 'superseded'){ S.error = e.message; draw(); } });
+
+function fileList(){
+  $('files-list').innerHTML = S.files.map((f, i) => `<div data-file="${i}" class="${i === S.current ? 'on' : ''}"><span>${esc(f.name)}</span><span class="size">${mb(f.size)}</span><span class="x" data-remove="${i}" title="remove">×</span></div>`).join('');
+}
+$('files-list').addEventListener('click', e => {
+  const x = e.target.closest('[data-remove]');
+  if (x){
+    const i = +x.dataset.remove;
+    S.files.splice(i, 1);
+    if (i === S.current) openFile(S.files.length ? Math.min(i, S.files.length - 1) : -1, 0);
+    else { if (i < S.current) S.current--; fileList(); }
+    return;
+  }
+  const d = e.target.closest('[data-file]');
+  if (d && +d.dataset.file !== S.current) openFile(+d.dataset.file, 0);
+});
+function worldList(){
+  const sel = $('world');
+  sel.replaceChildren(...S.worlds.map((w, i) => { const o = document.createElement('option'); o.value = i; const name = w.name || 'untitled'; o.textContent = `${i + 1}. ${name}${/\(D = \d+\)/.test(name) ? '' : ` (D = ${w.D})`}`; return o; }));
+  sel.value = String(S.world);
+  $('worldRow').hidden = S.worlds.length < 2;
+}
+$('world').addEventListener('change', () => openFile(S.current, +$('world').value));
+
+/* The analysis is in: the menus, the graph, the first cells. */
+function ready(a){
+  const A = S.A = a;
+  S.keys = a.keys; S.view = storeView({ keys: a.keys });
+  const D = A.D;
+  // The world's lods: those the walk and the bitset allow; the default the finest of a million cells.
+  const lods = [];
+  for (let k = 0; k <= D; k++) if (2 ** (D - k) <= MAX_SIDE && A.levelCells[k] <= CELL_BUDGET) lods.push(k);
+  $('lod').replaceChildren(...lods.map(k => option(k, `${k} · ${fmt(2 ** (D - k))} across · ${big(A.levelCells[k])} cells`)));
+  $('lod').value = String(lods.find(k => A.levelCells[k] <= 1e6) ?? lods.at(-1));
+  const clods = [];
+  // Past D − 6 every lod is one chunk, the root.
+  for (let k = 0; k <= Math.max(0, D - CHUNK_LEVELS); k++) if (A.levelCells[Math.min(D, k + CHUNK_LEVELS)] <= CHUNK_BUDGET) clods.push(k);
+  $('chunkLod').replaceChildren(...clods.map(k => option(k, `${k} · ${fmt(A.levelCells[Math.min(D, k + CHUNK_LEVELS)])} chunks`)));
+  $('chunkLod').value = String(clods.find(k => k >= D - 9) ?? clods.at(-1) ?? 0);
+  $('lo').max = String(D);
+  S.lo = graphRange(A).lo;
+  $('lo').value = String(S.lo);
+  allocTextures();
+  graph();
+  chunks();
+  framed = false;
+  quiet(cells());
+}
+const option = (v, text) => { const o = document.createElement('option'); o.value = String(v); o.textContent = text; return o; };
+
+/* ---- the graph -----------------------------------------------------------------------------
+   The levels drawn are [lo, D]. Past four times the budget a range is refused:
+   the slider stops at the lowest level that fits it. */
+const rangeOf = lo => { let n = 0, e = 0; for (let k = lo; k <= S.A.D; k++){ n += S.A.levelNodes[k]; if (k > lo) e += S.A.levelEdges[k]; } return { n, e }; };
+const fits = lo => { const { n, e } = rangeOf(lo); return n <= 4 * GRAPH_BUDGET.nodes && e <= 4 * GRAPH_BUDGET.edges; };
+function setLo(lo){
+  while (lo < S.A.D && !fits(lo)) lo++;
+  S.lo = lo; $('lo').value = String(lo);
+  graph();
+  if (S.sel) select(S.sel);
+}
+function graph(){
+  const A = S.A;
+  if (!A || !gl) return;
+  const pos = layoutOf(A, { mode: $('layout').value, lo: S.lo, hi: A.D });
+  S.pos = pos;
+  upload(tex.pos, pos, 4);
+  S.edges = edgesOf(A, S.keys, S.lo, A.D);
+  const ids = A.order.subarray(A.levelStart[S.lo], A.levelStart[A.D + 1]);
+  S.shownIds = ids;
+  setInstances(vaos.node, [{ loc: 0, data: ids, size: 1, type: gl.UNSIGNED_INT, int: true }]);
+  setInstances(vaos.edge, [{ loc: 0, data: S.edges.pairs, size: 2, type: gl.UNSIGNED_INT, int: true },
+                           { loc: 1, data: S.edges.slots, size: 1, type: gl.UNSIGNED_BYTE, int: true }]);
+  S.nodeField = null;
+  colourNodes();
+  if (!S.sel) upload(tex.flag, new Uint8Array(A.top), 1);
+  dirty = true;
+}
+/* Every node's colour and size (alpha) for the texture. Places and voxels
+   are scaled within their level (a level's cells grow 8× a level down),
+   refs and parents over the whole graph. */
+function colourNodes(){
+  const A = S.A, mode = $('nodeColour').value, sizeBy = $('nodeSize').value, out = new Uint8Array(4 * A.top);
+  const lvMax = (arr, k) => {
+    let m = 1;
+    for (let i = A.levelStart[k]; i < A.levelStart[k + 1]; i++) m = Math.max(m, arr[A.order[i]]);
+    return m;
+  };
+  let rMax = 1, pMax = 1;
+  for (let i = 0; i < A.order.length; i++){ const id = A.order[i]; rMax = Math.max(rMax, A.refs[id]); pMax = Math.max(pMax, A.parents[id]); }
+  if (mode === 'field' && A.field && !S.nodeField){
+    const ids = S.shownIds.slice();
+    quiet(ask('nodeColours', { ids }).then(d => { const m = new Uint32Array(A.top); d.nodeColours.ids.forEach((id, i) => m[id] = d.nodeColours.words[i]); S.nodeField = m; colourNodes(); }));
+  }
+  for (let k = S.lo; k <= A.D; k++){
+    const placeMax = lvMax(A.places, k), voxMax = lvMax(A.voxels, k);
+    for (let i = A.levelStart[k]; i < A.levelStart[k + 1]; i++){
+      const id = A.order[i];
+      let c;
+      if (mode === 'level') c = levelColour(k, A.D);
+      else if (mode === 'refs') c = heat(logScale(A.refs[id], rMax));
+      else if (mode === 'parents') c = heat(logScale(A.parents[id], pMax));
+      else if (mode === 'places') c = heat(logScale(A.places[id], placeMax));
+      else if (mode === 'voxels') c = heat(logScale(A.voxels[id], voxMax));
+      else if (mode === 'class') c = A.cls ? identity(A.cls[id] + 7919) : [90, 90, 110];
+      else if (mode === 'field') c = S.nodeField ? word8(S.nodeField[id]) : A.field ? [60, 60, 70] : [90, 90, 110];
+      else c = identity(id);
+      const size = sizeBy === 'refs' ? logScale(A.refs[id], rMax) : sizeBy === 'places' ? logScale(A.places[id], placeMax) : 0.3;
+      out.set(c, 4 * id); out[4 * id + 3] = Math.round(255 * size);
+    }
+  }
+  upload(tex.col, out, 4);
+  dirty = true;
+}
+
+/* ---- the world's cells -------------------------------------------------------------------- */
+async function cells(){
+  const lod = +$('lod').value;
+  if (!S.A) return;
+  const d = await ask('cells', { lod });
+  if (+$('lod').value !== lod) return;
+  S.cells = d.cells;
+  colourCells();
+  setInstances(vaos.order, [{ loc: 0, data: S.cells.morton, size: 1, type: gl.UNSIGNED_INT, int: true, divisor: 0 }]);
+  if (S.sel?.kind === 'cell') select(null);
+  dirty = true; draw();
+}
+function colourCells(){
+  const c = S.cells, A = S.A, mode = $('cellColour').value, out = new Uint8Array(4 * c.shown), s = c.side;
+  let pMax = 1, rMax = 1;
+  for (let i = 0; i < c.shown; i++){ pMax = Math.max(pMax, A.places[c.ids[i]]); rMax = Math.max(rMax, A.refs[c.ids[i]]); }
+  const field = mode === 'field' && c.words;
+  for (let i = 0; i < c.shown; i++){
+    const p = c.xyz[i];
+    let rgb;
+    if (field) rgb = word6(c.words[i]);
+    else if (mode === 'identity') rgb = identity(c.ids[i]);
+    else if (mode === 'places') rgb = heat(logScale(A.places[c.ids[i]], pMax));
+    else if (mode === 'refs') rgb = heat(logScale(A.refs[c.ids[i]], rMax));
+    else rgb = [(p & 1023) + 0.5, (p >> 10 & 1023) + 0.5, (p >> 20) + 0.5].map(v => Math.round(255 * v / s));
+    out.set(rgb, 4 * i); out[4 * i + 3] = 255;
+  }
+  setInstances(vaos.cube, [{ loc: 0, data: c.xyz, size: 1, type: gl.UNSIGNED_INT, int: true },
+                           { loc: 1, data: out, size: 4, type: gl.UNSIGNED_BYTE, norm: true }]);
+  S.cellsDrawn = c.shown;
+  dirty = true;
+}
+
+/* ---- chunks ------------------------------------------------------------------------------------ */
+function chunks(){
+  const A = S.A;
+  if (!A) return;
+  const lod = +$('chunkLod').value, ch = S.chunks = chunksAt(A, S.keys, lod);
+  if (S.sel?.chunk && S.sel.chunk.lod !== lod){ S.sel.chunk = null; S.job = null; }
+  boxesAndLines();
+}
+const sceneOf = v => -1 + 2 * v / 2 ** S.A.D;
+// A chunk's box in the scene: [x, y, z, side].
+function chunkBox(lod, cx, cy, cz){
+  const span = 2 ** Math.min(S.A.D, lod + CHUNK_LEVELS);
+  return [sceneOf(cx * span), sceneOf(cy * span), sceneOf(cz * span), 2 * span / 2 ** S.A.D];
+}
+
+/* ---- picking ----------------------------------------------------------------------------------- */
+function select(sel){
+  S.sel = sel; S.job = null;
+  const A = S.A;
+  if (!A) return;
+  const flags = new Uint8Array(A.top);
+  if (sel?.kind === 'node'){
+    const R = relativesOf(A, S.keys, sel.id);
+    flags.set(R.flags);
+    sel.children = R.children; sel.parents = R.parents;
+    sel.places = placesOf(A, S.keys, sel.id, PLACE_LIST);
+    sel.words = null;
+    if (A.field){
+      const list = sel.places.list.slice(0, 3 * 32);
+      quiet(ask('placeColours', { id: sel.id, list }).then(d => { if (S.sel === sel){ sel.words = d.placeColours.words; draw(); } }));
+    }
+  } else if (sel?.kind === 'cell'){
+    sel.path = pathTo(S.keys, A.root, A.D, sel.lod, sel.x, sel.y, sel.z);
+    for (const id of sel.path) flags[id] |= 8;
+    flags[sel.id] = 1;
+  }
+  upload(tex.flag, flags, 1);
+  S.selOn = !!sel;
+  boxesAndLines();
+  draw();
+}
+function selectNode(id){ select({ kind: 'node', id }); }
+/* A cell, and when chunks are shown, the chunk holding it at the chunk lod. */
+function selectCell(hit, lod){
+  const sel = { kind: 'cell', lod, x: hit.x, y: hit.y, z: hit.z, id: hit.id };
+  if (on('showChunks')){
+    const clod = +$('chunkLod').value, D = S.A.D, span = 2 ** Math.min(D, clod + CHUNK_LEVELS) / 2 ** lod;
+    const cx = Math.floor(hit.x / span), cy = Math.floor(hit.y / span), cz = Math.floor(hit.z / span);
+    sel.chunk = { lod: clod, cx, cy, cz, stamp: stampWith(S.view, S.A.root, D, clod, cx, cy, cz) };
+  }
+  select(sel);
+}
+async function runJob(){
+  const c = S.sel?.chunk;
+  if (!c) return;
+  const sel = S.sel, d = await ask('job', { lod: c.lod, cx: c.cx, cy: c.cy, cz: c.cz, rule: $('rule').value });
+  if (S.sel !== sel) return;
+  const j = S.job = d.job, n = j.count, xyz = new Uint32Array(n), masks = new Uint8Array(n), col = new Uint8Array(4 * n);
+  for (let i = 0; i < n; i++){
+    const r = j.records[i], [x, y, z] = mortonXYZ(cellOf(r));
+    xyz[i] = x | y << 10 | z << 20; masks[i] = maskOf(r);
+    col.set(j.attrs ? word6(j.attrs[i]) : identity(c.stamp[0].id), 4 * i); col[4 * i + 3] = 255;
+  }
+  setInstances(vaos.job, [{ loc: 0, data: xyz, size: 1, type: gl.UNSIGNED_INT, int: true },
+                          { loc: 1, data: col, size: 4, type: gl.UNSIGNED_BYTE, norm: true },
+                          { loc: 2, data: masks, size: 1, type: gl.UNSIGNED_BYTE, int: true }]);
+  dirty = true; draw();
+}
+
+/* Boxes and lines: chunks and copies, a node's places and the links down to
+   them, a cell's path, a chunk's stamp. Rebuilt on any change of them. */
+function boxesAndLines(){
+  const A = S.A;
+  if (!A || !gl) return;
+  const boxes = [], lines = [];
+  const box = (b, rgb, a = 255) => boxes.push([b, [...rgb, a]]);
+  const line = (p, q, rgb, a = 200, rgb2 = rgb, a2 = a) => lines.push([p, [...rgb, a]], [q, [...rgb2, a2]]);
+  const graphAt = id => S.pos && S.pos[4 * id + 3] && on('showGraph') ? [S.pos[4 * id], S.pos[4 * id + 1], S.pos[4 * id + 2]] : null;
+  const centre = b => [b[0] + b[3] / 2, b[1] + b[3] / 2, b[2] + b[3] / 2];
+  const ch = S.chunks;
+  if (on('showChunks') && ch && !ch.over){
+    for (let i = 0; i < ch.total; i++){
+      const [cx, cy, cz, id] = ch.list.subarray(4 * i, 4 * i + 4), b = chunkBox(ch.lod, cx, cy, cz), first = ch.first[i];
+      box(b, identity(id), 150);
+      if (on('copies') && first !== i){
+        const [fx, fy, fz] = ch.list.subarray(4 * first, 4 * first + 3);
+        line(centre(b), centre(chunkBox(ch.lod, fx, fy, fz)), identity(id), 170);
+      }
+    }
+  }
+  const sel = S.sel;
+  if (sel?.kind === 'node'){
+    const k = A.level[sel.id], size = 2 * 2 ** k / 2 ** A.D, from = graphAt(sel.id), L = sel.places.list;
+    for (let i = 0; i < L.length / 3; i++){
+      const b = [sceneOf(L[3 * i]), sceneOf(L[3 * i + 1]), sceneOf(L[3 * i + 2]), size];
+      box(b, [255, 236, 140]);
+      if (from) line(from, centre(b), [255, 236, 140], 220, [255, 236, 140], 90);
+    }
+  } else if (sel?.kind === 'cell'){
+    const s = 2 * 2 ** sel.lod / 2 ** A.D, b = [-1 + sel.x * s, -1 + sel.y * s, -1 + sel.z * s, s];
+    box(b, [255, 255, 255]);
+    const pts = sel.path.map(graphAt).filter(Boolean);
+    for (let i = 1; i < pts.length; i++) line(pts[i - 1], pts[i], [255, 255, 255], 255);
+    if (pts.length) line(pts.at(-1), centre(b), [255, 255, 255], 255, [255, 255, 255], 120);
+    if (sel.chunk){
+      const { lod, stamp } = sel.chunk, own = chunkBox(lod, ...stamp[0].at), side = 2 ** (A.D - Math.min(A.D, lod + CHUNK_LEVELS));
+      stamp.forEach((st, f) => {
+        if (st.at.some(v => v < 0 || v >= side)) return;
+        const b = chunkBox(lod, ...st.at), rgb = st.id === EMPTY ? [80, 80, 96] : identity(st.id);
+        box(f ? b.map((v, i) => i < 3 ? v + b[3] * 0.04 : v * 0.92) : b, f ? rgb : [255, 255, 255]);
+        const g = graphAt(st.id);
+        if (g) line(centre(f ? b : own), g, rgb, f ? 200 : 255);
+      });
+    }
+  }
+  const bf = new Float32Array(4 * boxes.length), bc = new Uint8Array(4 * boxes.length);
+  boxes.forEach(([b, c], i) => { bf.set(b, 4 * i); bc.set(c, 4 * i); });
+  setInstances(vaos.box, [{ loc: 0, data: bf, size: 4, type: gl.FLOAT }, { loc: 1, data: bc, size: 4, type: gl.UNSIGNED_BYTE, norm: true }]);
+  const lf = new Float32Array(3 * lines.length), lc = new Uint8Array(4 * lines.length);
+  lines.forEach(([p, c], i) => { lf.set(p, 3 * i); lc.set(c, 4 * i); });
+  setInstances(vaos.line, [{ loc: 0, data: lf, size: 3, type: gl.FLOAT, divisor: 0 }, { loc: 1, data: lc, size: 4, type: gl.UNSIGNED_BYTE, norm: true, divisor: 0 }]);
+  S.boxCount = boxes.length; S.lineCount = lines.length;
+  dirty = true;
+}
+
+/* ---- the panel ------------------------------------------------------------------------------------ */
+function say(text, cls = ''){ $('status').className = cls; $('status').textContent = text; }
+const idButton = id => `<button class="id" type="button" data-node="${id}" style="border-color:${rgbCss(identity(id))}">#${id}</button>`;
+const COLOUR_NOTE = { same: 'its named colour field', unchecked: 'its named colour field (not checked against the file)',
+  changed: 'its colour field, which this code now colours differently from the code that wrote the file', unknown: 'a colour field this page can\'t make', none: 'none' };
+function draw(){
+  $('empty').hidden = S.current >= 0;
+  const f = S.files[S.current], A = S.A, w = S.worlds?.[S.world];
+  if (!f) $('facts').innerHTML = '';
+  else if (!A) $('facts').innerHTML = `<span class="name">${esc(w?.name || f.name)}</span>\n${mb(f.size)} · reading…`;
+  else {
+    const colour = A.colourStatus === 'baked' ? `baked, ${A.bits} bits a channel` : COLOUR_NOTE[A.colourStatus] ?? A.colourStatus;
+    $('facts').innerHTML = `<span class="name">${esc(w?.name || f.name)}</span>\n${esc(f.name)}, ${mb(f.size)}\nD = ${A.D}, a ${fmt(2 ** A.D)}³ world\n${big(A.voxels[A.root] ?? 0)} voxels in ${fmt(A.nodes)} nodes (FULL included)\ncolour: <span class="${A.field ? '' : 'warn'}">${esc(colour)}${A.fieldError ? `: ${esc(A.fieldError)}` : ''}</span>`;
+  }
+  // The levels.
+  if (A){
+    const rows = [];
+    for (let k = A.D; k >= 0; k--){
+      const cls = `lvl${k >= S.lo ? ' in' : ''}${k === S.lo ? ' lo' : ''}`, n = A.levelNodes[k];
+      rows.push(`<tr class="${cls}" data-level="${k}"><td>${k}</td><td>${fmt(2 ** (A.D - k))}</td><td>${fmt(n)}</td><td>${big(A.levelCells[k])}</td><td>${n ? (A.levelCells[k] / n).toPrecision(3) : '–'}</td><td>${big(A.levelRefs[k])}</td><td>${A.levelClasses ? fmt(A.levelClasses[k]) : '–'}</td></tr>`);
+    }
+    $('levels').innerHTML = rows.join('');
+    const { n, e } = rangeOf(S.lo);
+    $('loLabel').textContent = `${S.lo}–${A.D}: ${fmt(n)} nodes, ${fmt(e)} refs`;
+  } else { $('levels').innerHTML = ''; $('loLabel').textContent = ''; }
+  $('sel').innerHTML = selHtml();
+  $('legend').textContent = legend();
+  if (S.error) say(`failed: ${S.error}`, 'bad');
+  else if (S.phase) say(`${S.phase.text}…`);
+  else if (f && !A) say('reading…');
+  else if (S.busy) say('working…');
+  else if (A) say(`analysed in ${fmt(A.ms)} ms${A.cls ? '' : ' (classes skipped: over a million nodes)'}; ${S.cells ? `${fmt(S.cells.shown)} of ${fmt(S.cells.total)} cells on the surface drawn at lod ${S.cells.lod}` : ''}`);
+  else say('');
+}
+function legend(){
+  const A = S.A;
+  if (!A) return '';
+  const lines = [];
+  if (on('showGraph')) lines.push(`graph: levels ${S.lo}–${A.D}, ${fmt(S.shownIds?.length ?? 0)} nodes, ${fmt(S.edges?.count ?? 0)} references`);
+  if (on('showWorld') && S.cells) lines.push(`world: lod ${S.cells.lod}, ${fmt(S.cells.shown)} cubes`);
+  if (on('showChunks') && S.chunks) lines.push(S.chunks.over ? `chunks: over ${fmt(CHUNK_BUDGET)} at lod ${S.chunks.lod}` : `chunks: lod ${S.chunks.lod}, ${fmt(S.chunks.total)} chunks of ${fmt(S.chunks.distinct)} nodes`);
+  return lines.join('\n');
+}
+function selHtml(){
+  const sel = S.sel, A = S.A;
+  if (!sel || !A) return '<span class="k">nothing picked: click a dot or a cell</span>';
+  if (sel.kind === 'node'){
+    const id = sel.id, k = A.level[id], P = sel.places;
+    const kids = sel.children.map(c => `<span class="k">${c.octants.join(',')}</span>→${idButton(c.id)}`).join(' ');
+    const parents = sel.parents.slice(0, 32).map(idButton).join('') + (sel.parents.length > 32 ? ` <span class="k">and ${fmt(sel.parents.length - 32)} more</span>` : '');
+    const sw = sel.words ? [...sel.words].map(w => `<span class="sw" style="background:${rgbCss(word8(w))}"></span>`).join('') : A.field ? '<span class="k">asking…</span>' : '<span class="k">no colour field</span>';
+    return `<span class="name">node #${id}</span> ${idButton(id)}<br>`
+      + `<span class="k">level</span> ${k}, a ${fmt(2 ** k)}³ block · <span class="k">voxels</span> ${big(A.voxels[id])}<br>`
+      + `<span class="k">places</span> ${big(P.total)}${P.total > P.list.length / 3 ? ` (the first ${fmt(P.list.length / 3)} boxed)` : ''} · <span class="k">refs</span> ${fmt(A.refs[id])} from ${fmt(A.parents[id])} parents<br>`
+      + `<span class="k">first place</span> (${A.px[id]}, ${A.py[id]}, ${A.pz[id]})${A.cls ? ` · <span class="k">class</span> ${A.cls[id]}` : ''}<br>`
+      + (id >= FIRST_NODE ? `<span class="k">children (octants→node)</span><br>${kids || '<span class="k">none</span>'}<br>` : '<span class="k">FULL: a solid voxel, no children</span><br>')
+      + `<span class="k">parents</span><br>${parents || '<span class="k">none: the root</span>'}<br>`
+      + `<span class="k">its colour at its first ${fmt(Math.min(32, P.list.length / 3))} places</span><br>${sw}`;
+  }
+  const path = sel.path.map((id, i) => `<span class="k">${A.D - i}</span>${idButton(id)}`).join(' ');
+  let out = `<span class="name">cell (${sel.x}, ${sel.y}, ${sel.z}) at lod ${sel.lod}</span><br><span class="k">its node</span> ${idButton(sel.id)} <span class="k">places</span> ${big(A.places[sel.id])}<br>`
+    + `<span class="k">its path from the root (level, node)</span><br>${path}<br>`;
+  if (sel.chunk){
+    const c = sel.chunk, id = c.stamp[0].id, L = Math.min(A.D, c.lod + CHUNK_LEVELS);
+    out += `<br><span class="name">chunk (${c.cx}, ${c.cy}, ${c.cz}) at lod ${c.lod}</span><br><span class="k">its node</span> ${idButton(id)}, level ${L} · <span class="k">copies</span> ${big(A.places[id])}<br>`
+      + `<span class="k">the stamp (the nodes its job reads: it, +x −x +y −y +z −z)</span><br>${c.stamp.map(s => s.id === EMPTY ? '<span class="k">∅</span> ' : idButton(s.id)).join('')}<br>`
+      + `<button id="job" type="button">${S.job ? 'run its job again' : 'run its job'}</button>`;
+    if (S.job){
+      const j = S.job;
+      out += `<br><span class="k">${esc(j.lodRule)}</span>: ${fmt(j.count)} records (${fmt(j.quads)} faces), ${fmt(j.borderCount)} in the seam tail, ${fmt(j.occupied)} cells kept, ${fmt(j.buried)} buried; ${mb(j.bytes)}${j.attrs ? ' + words' : ''}, ${j.ms.toFixed(1)} ms`;
+    }
+  }
+  return out;
+}
+$('sel').addEventListener('click', e => {
+  const b = e.target.closest('[data-node]');
+  if (b){ selectNode(+b.dataset.node); return; }
+  if (e.target.id === 'job') quiet(runJob());
+});
+$('levels').addEventListener('click', e => { const tr = e.target.closest('tr[data-level]'); if (tr && S.A){ setLo(+tr.dataset.level); draw(); } });
+$('lo').addEventListener('input', () => { if (S.A){ setLo(+$('lo').value); draw(); } });
+$('layout').addEventListener('change', () => { remember(); if (S.A){ graph(); boxesAndLines(); } });
+for (const id of ['nodeColour', 'nodeSize']) $(id).addEventListener('change', () => { remember(); if (S.A) colourNodes(); });
+$('edgeAlpha').addEventListener('input', () => { remember(); dirty = true; });
+$('lod').addEventListener('change', () => quiet(cells()));
+$('cellColour').addEventListener('change', () => { remember(); if (S.cells) colourCells(); });
+$('chunkLod').addEventListener('change', () => { chunks(); draw(); });
+$('rule').addEventListener('change', () => { remember(); if (S.job) quiet(runJob()); });
+for (const id of ['showGraph', 'showRefs', 'showWorld', 'showChunks', 'showOrder', 'copies'])
+  $(id).addEventListener('change', () => { remember(); boxesAndLines(); draw(); });
+
+/* ---- input: the picker, and drops anywhere ---------------------------------------------------- */
+const input = $('files');
+$('pick').onclick = () => input.click();
+input.onchange = () => { if (input.files.length) addFiles(input.files); input.value = ''; };
+let depth = 0;
+const hasFiles = e => [...(e.dataTransfer?.types ?? [])].includes('Files');
+addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); depth++; document.body.classList.add('over'); });
+addEventListener('dragleave', e => { if (!hasFiles(e)) return; if (--depth <= 0){ depth = 0; document.body.classList.remove('over'); } });
+addEventListener('dragover', e => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+addEventListener('drop', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); depth = 0; document.body.classList.remove('over');
+  if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+});
+
+/* ---- the GPU ---------------------------------------------------------------------------------------
+   Five programs: nodes (a dot an instance, its place, colour and flags read
+   from textures by id), references (a line an instance, the two ids it
+   joins), cubes (36 vertices an instance, a face dropped where the mask
+   says: the world's cells, all six faces, and a job's records, their own),
+   boxes (12 lines an instance) and plain lines (links, and the Morton
+   order through the cells). */
+const canvas = $('gl'), gl = canvas.getContext('webgl2', { antialias: true, preserveDrawingBuffer: true });
+const TEXW = 2048;
+const HEAD = `#version 300 es
+precision highp float; precision highp int; precision highp usampler2D;
+uniform mat4 uVP;
+ivec2 texOf(uint id){ return ivec2(int(id & 2047u), int(id >> 11u)); }
+`;
+const NODE_VS = HEAD + `
+layout(location = 0) in uint aId;
+uniform highp sampler2D uPos; uniform sampler2D uCol; uniform usampler2D uFlag;
+uniform vec2 uPx; uniform float uSize; uniform int uSel;
+out vec3 vC; out vec2 vQ; out float vDim;
+const vec2 Q[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
+void main(){
+  vec4 p = texelFetch(uPos, texOf(aId), 0);
+  if (p.w == 0.0){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  vec4 c = texelFetch(uCol, texOf(aId), 0);
+  uint f = texelFetch(uFlag, texOf(aId), 0).r;
+  float s = uSize * (0.6 + 1.6 * c.a);
+  vDim = 1.0; vC = c.rgb;
+  if (uSel == 1){
+    if ((f & 1u) != 0u){ s = max(s, uSize) * 2.4; vC = vec3(1.0); }
+    else if ((f & 6u) != 0u) s = s * 1.5;
+    else if (f == 0u) vDim = 0.22;
+  }
+  vec4 clip = uVP * vec4(p.xyz, 1.0);
+  vQ = Q[gl_VertexID];
+  clip.xy += vQ * s * uPx * clip.w;
+  gl_Position = clip;
+}`;
+const NODE_FS = `#version 300 es
+precision highp float;
+in vec3 vC; in vec2 vQ; in float vDim; out vec4 o;
+void main(){
+  float r = dot(vQ, vQ);
+  if (r > 1.0) discard;
+  o = vec4(vC * vDim * (1.0 - 0.35 * r), 1.0);
+}`;
+const EDGE_VS = HEAD + `
+layout(location = 0) in uvec2 aPair; layout(location = 1) in uint aSlots;
+uniform highp sampler2D uPos; uniform sampler2D uCol; uniform usampler2D uFlag;
+uniform float uAlpha; uniform int uSel;
+out vec3 vC;
+void main(){
+  vec4 pa = texelFetch(uPos, texOf(aPair.x), 0), pb = texelFetch(uPos, texOf(aPair.y), 0);
+  if (pa.w == 0.0 || pb.w == 0.0){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  uint id = gl_VertexID == 0 ? aPair.x : aPair.y;
+  vec3 c = texelFetch(uCol, texOf(id), 0).rgb;
+  float a = uAlpha * (0.7 + 0.3 * float(aSlots));
+  if (uSel == 1){
+    uint fa = texelFetch(uFlag, texOf(aPair.x), 0).r, fb = texelFetch(uFlag, texOf(aPair.y), 0).r;
+    // To a child, from a parent; then the rest of what it reaches and what reaches it.
+    bool hot = ((fa & 1u) != 0u && (fb & 4u) != 0u) || ((fa & 2u) != 0u && (fb & 1u) != 0u);
+    bool sub = ((fa & 17u) != 0u && (fb & 16u) != 0u) || ((fa & 8u) != 0u && (fb & 9u) != 0u);
+    a = hot ? 1.0 : sub ? 0.55 : a * 0.1;
+    if (hot || sub) c = mix(c, vec3(1.0), hot ? 0.6 : 0.25);
+  }
+  gl_Position = uVP * vec4(gl_VertexID == 0 ? pa.xyz : pb.xyz, 1.0);
+  vC = c * a;
+}`;
+const ADD_FS = `#version 300 es
+precision highp float;
+in vec3 vC; out vec4 o;
+void main(){ o = vec4(vC, 1.0); }`;
+// Faces +x −x +y −y +z −z (a record's mask bits), each two triangles wound outward.
+const CUBE_VS = HEAD + `
+layout(location = 0) in uint aCell; layout(location = 1) in vec4 aCol; layout(location = 2) in uint aMask;
+uniform vec3 uOrigin; uniform float uCell; uniform int uHide; uniform vec3 uHideLo; uniform vec3 uHideHi;
+out vec3 vC; flat out int vF;
+const vec3 C[24] = vec3[24](
+  vec3(1,0,0), vec3(1,1,0), vec3(1,1,1), vec3(1,0,1),
+  vec3(0,0,0), vec3(0,0,1), vec3(0,1,1), vec3(0,1,0),
+  vec3(0,1,0), vec3(0,1,1), vec3(1,1,1), vec3(1,1,0),
+  vec3(0,0,0), vec3(1,0,0), vec3(1,0,1), vec3(0,0,1),
+  vec3(0,0,1), vec3(1,0,1), vec3(1,1,1), vec3(0,1,1),
+  vec3(0,0,0), vec3(0,1,0), vec3(1,1,0), vec3(1,0,0));
+const int I[6] = int[6](0, 1, 2, 0, 2, 3);
+void main(){
+  int f = gl_VertexID / 6, k = I[gl_VertexID % 6];
+  vec3 lo = uOrigin + vec3(float(aCell & 1023u), float((aCell >> 10u) & 1023u), float(aCell >> 20u)) * uCell, mid = lo + 0.5 * uCell;
+  bool gone = ((aMask >> uint(f)) & 1u) == 0u || (uHide == 1 && all(greaterThan(mid, uHideLo)) && all(lessThan(mid, uHideHi)));
+  if (gone){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  gl_Position = uVP * vec4(lo + C[4 * f + k] * uCell, 1.0);
+  vC = aCol.rgb; vF = f;
+}`;
+const CUBE_FS = `#version 300 es
+precision highp float;
+in vec3 vC; flat in int vF; out vec4 o;
+const float L[6] = float[6](0.78, 0.62, 1.0, 0.45, 0.88, 0.7);
+void main(){ o = vec4(vC * L[vF], 1.0); }`;
+const BOX_VS = HEAD + `
+layout(location = 0) in vec4 aBox; layout(location = 1) in vec4 aCol;
+out vec4 vC;
+const int E[24] = int[24](0,1, 2,3, 4,5, 6,7, 0,2, 1,3, 4,6, 5,7, 0,4, 1,5, 2,6, 3,7);
+void main(){
+  int c = E[gl_VertexID];
+  gl_Position = uVP * vec4(aBox.xyz + vec3(c & 1, (c >> 1) & 1, (c >> 2) & 1) * aBox.w, 1.0);
+  vC = aCol;
+}`;
+const LINE_VS = HEAD + `
+layout(location = 0) in vec3 aP; layout(location = 1) in vec4 aCol;
+out vec4 vC;
+void main(){ gl_Position = uVP * vec4(aP, 1.0); vC = aCol; }`;
+const ORDER_VS = HEAD + `
+layout(location = 0) in uint aCell;
+uniform vec3 uOrigin; uniform float uCell; uniform float uCount;
+out vec4 vC;
+vec3 hue(float h){ return clamp(abs(mod(h * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0); }
+void main(){
+  vec3 p = uOrigin + (vec3(float(aCell & 1023u), float((aCell >> 10u) & 1023u), float(aCell >> 20u)) + 0.5) * uCell;
+  gl_Position = uVP * vec4(p, 1.0);
+  vC = vec4(hue(0.8 * float(gl_VertexID) / max(1.0, uCount)), 0.85);
+}`;
+const ALPHA_FS = `#version 300 es
+precision highp float;
+in vec4 vC; out vec4 o;
+void main(){ o = vC; }`;
+
+const P = {}, vaos = {}, tex = {}, buffers = new Map();
+let texH = 1;
+if (gl){
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  const program = (vs, fs, names) => {
+    const p = gl.createProgram();
+    gl.attachShader(p, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    return { p, U: Object.fromEntries(['uVP', ...names].map(n => [n, gl.getUniformLocation(p, n)])) };
+  };
+  P.node = program(NODE_VS, NODE_FS, ['uPos', 'uCol', 'uFlag', 'uPx', 'uSize', 'uSel']);
+  P.edge = program(EDGE_VS, ADD_FS, ['uPos', 'uCol', 'uFlag', 'uAlpha', 'uSel']);
+  P.cube = program(CUBE_VS, CUBE_FS, ['uOrigin', 'uCell', 'uHide', 'uHideLo', 'uHideHi']);
+  P.box = program(BOX_VS, ALPHA_FS, []);
+  P.line = program(LINE_VS, ALPHA_FS, []);
+  P.order = program(ORDER_VS, ALPHA_FS, ['uOrigin', 'uCell', 'uCount']);
+  for (const k of ['node', 'edge', 'cube', 'job', 'box', 'line', 'order']) vaos[k] = { vao: gl.createVertexArray(), count: 0 };
+} else say('this browser has no WebGL2: files open and their numbers show, but nothing is drawn', 'warn');
+
+/* A VAO's buffers, one an attribute, replaced whole. Integer attributes go
+   through vertexAttribIPointer; `divisor` 1 (the default) is per instance. */
+function setInstances(v, attrs){
+  if (!gl) return;
+  gl.bindVertexArray(v.vao);
+  let count = Infinity;
+  for (const a of attrs){
+    const key = `${[...Object.keys(vaos)].find(k => vaos[k] === v)}:${a.loc}`;
+    let b = buffers.get(key);
+    if (!b){ b = gl.createBuffer(); buffers.set(key, b); }
+    gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, a.data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(a.loc);
+    if (a.int) gl.vertexAttribIPointer(a.loc, a.size, a.type, 0, 0);
+    else gl.vertexAttribPointer(a.loc, a.size, a.type, !!a.norm, 0, 0);
+    gl.vertexAttribDivisor(a.loc, a.divisor ?? 1);
+    count = Math.min(count, a.data.length / a.size);
+  }
+  gl.bindVertexArray(null);
+  v.count = count === Infinity ? 0 : count;
+}
+function allocTextures(){
+  if (!gl) return;
+  for (const t of Object.values(tex)) gl.deleteTexture(t.t);
+  texH = Math.max(1, Math.ceil(S.A.top / TEXW));
+  const make = (internal, format, type, channels, ctor) => {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internal, TEXW, texH, 0, format, type, new ctor(channels * TEXW * texH));
+    return { t, format, type, channels, ctor };
+  };
+  tex.pos = make(gl.RGBA32F, gl.RGBA, gl.FLOAT, 4, Float32Array);
+  tex.col = make(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, 4, Uint8Array);
+  tex.flag = make(gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE, 1, Uint8Array);
+}
+// An id-indexed array into its texture, padded to the texture's size.
+function upload(t, data, channels){
+  if (!gl || !t) return;
+  const full = new t.ctor(channels * TEXW * texH);
+  full.set(data.subarray ? data.subarray(0, full.length) : data);
+  gl.bindTexture(gl.TEXTURE_2D, t.t);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TEXW, texH, t.format, t.type, full);
+  dirty = true;
+}
+function clearScene(){
+  for (const v of Object.values(vaos)) v.count = 0;
+  S.pos = null; S.shownIds = null; S.selOn = false;
+  dirty = true;
+}
+
+/* ---- the camera --------------------------------------------------------------------------------------
+   The scene's ball: the world alone, or the world and the graph above it. */
+let cam = { eye: [0, 0, -3], yaw: 0, pitch: 0 }, radius = 3, pending = 0, drag = null, dirty = true, framed = false;
+const scene = () => on('showGraph') && S.A ? { c: [0, (GRAPH_BASE + GRAPH_HEIGHT - 1) / 2, 0], r: Math.hypot(1.2, (GRAPH_BASE + GRAPH_HEIGHT + 1) / 2, 1.2) } : { c: [0, 0, 0], r: Math.sqrt(3) };
+const aspect = () => canvas.width / Math.max(1, canvas.height);
+function frame(){
+  const { c, r } = scene(), yaw = 0.7 + Math.PI, pitch = -0.3, f = forwardOf(yaw, pitch);
+  radius = 1.08 * r / Math.sin(Math.atan(Math.tan(CAMERA.half) * Math.min(1, aspect())));
+  cam = { eye: [0, 1, 2].map(a => c[a] - radius * f[a]), yaw, pitch };
+  pending = 0; framed = true; dirty = true;
+}
+function viewProj(){
+  const { f, r, u } = basisOf(cam.yaw, cam.pitch), e = cam.eye, dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const near = Math.max(1e-4, radius * 1e-3), far = radius + 30, t = 1 / Math.tan(CAMERA.half), A = aspect();
+  const V = [r[0], u[0], -f[0], 0, r[1], u[1], -f[1], 0, r[2], u[2], -f[2], 0, -dot(r, e), -dot(u, e), dot(f, e), 1];
+  const Pm = [t / A, 0, 0, 0, 0, t, 0, 0, 0, 0, (far + near) / (near - far), -1, 0, 0, 2 * far * near / (near - far), 0];
+  const M = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let rr = 0; rr < 4; rr++){ let s = 0; for (let k = 0; k < 4; k++) s += Pm[4 * k + rr] * V[4 * c + k]; M[4 * c + rr] = s; }
+  return M;
+}
+// A point in the scene to CSS pixels on the canvas (and its depth), or null behind the eye.
+function screenOf(p, M = viewProj()){
+  const x = M[0] * p[0] + M[4] * p[1] + M[8] * p[2] + M[12], y = M[1] * p[0] + M[5] * p[1] + M[9] * p[2] + M[13], w = M[3] * p[0] + M[7] * p[1] + M[11] * p[2] + M[15];
+  if (w <= 0) return null;
+  return [(x / w + 1) / 2 * canvas.clientWidth, (1 - y / w) / 2 * canvas.clientHeight, w];
+}
+// The ray through a CSS pixel: the eye and a direction, in the scene.
+function rayAt(px, py){
+  const { f, r, u } = basisOf(cam.yaw, cam.pitch), t = Math.tan(CAMERA.half);
+  const nx = (2 * px / canvas.clientWidth - 1) * t * aspect(), ny = (1 - 2 * py / canvas.clientHeight) * t;
+  return { o: cam.eye.slice(), d: [0, 1, 2].map(a => f[a] + r[a] * nx + u[a] * ny) };
+}
+/* A click: the nearest shown dot within PICK_PX (the nearer of two equally
+   near), else the first cell the ray meets at the shown lod. */
+const PICK_PX = 9;
+function pickAt(px, py){
+  const A = S.A;
+  if (!A) return null;
+  if (on('showGraph') && S.shownIds){
+    const M = viewProj();
+    let best = -1, bd = PICK_PX * PICK_PX, bw = Infinity;
+    for (let i = 0; i < S.shownIds.length; i++){
+      const id = S.shownIds[i], s = screenOf([S.pos[4 * id], S.pos[4 * id + 1], S.pos[4 * id + 2]], M);
+      if (!s) continue;
+      const d = (s[0] - px) ** 2 + (s[1] - py) ** 2;
+      if (d < bd || (d === bd && s[2] < bw)){ bd = d; bw = s[2]; best = id; }
+    }
+    if (best >= 0) return { kind: 'node', id: best };
+  }
+  if (on('showWorld') && S.cells){
+    const { o, d } = rayAt(px, py), s = S.cells.side, half = s / 2;
+    const hit = rayCell(S.view, A.root, A.D, S.cells.lod, o.map(v => (v + 1) * half), d.map(v => v * half));
+    if (hit) return { kind: 'cell', hit, lod: S.cells.lod };
+  }
+  return null;
+}
+function pick(px, py){
+  const p = pickAt(px, py);
+  if (!p) return;
+  if (p.kind === 'node') selectNode(p.id); else selectCell(p.hit, p.lod);
+}
+
+/* ---- the frame ----------------------------------------------------------------------------------------- */
+let drawn = {};
+function render(){
+  drawn = { nodes: 0, edges: 0, cubes: 0, job: 0, boxes: 0, lines: 0, order: 0 };
+  if (!gl) return;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0.027, 0.027, 0.04, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (!S.A) return;
+  const VP = viewProj(), D = S.A.D;
+  gl.enable(gl.DEPTH_TEST); gl.depthMask(true); gl.disable(gl.BLEND);
+  const use = (p) => { gl.useProgram(p.p); gl.uniformMatrix4fv(p.U.uVP, false, VP); return p.U; };
+  const textures = U => {
+    [[tex.pos, U.uPos], [tex.col, U.uCol], [tex.flag, U.uFlag]].forEach(([t, loc], i) => { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t.t); gl.uniform1i(loc, i); });
+  };
+  // The world's cubes, and a job's records in place of the cubes in its chunk.
+  gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); gl.frontFace(gl.CCW);
+  const job = S.job && S.sel?.chunk ? S.job : null;
+  if (on('showWorld') && vaos.cube.count){
+    const U = use(P.cube), s = S.cells.side;
+    gl.uniform3f(U.uOrigin, -1, -1, -1); gl.uniform1f(U.uCell, 2 / s);
+    gl.uniform1i(U.uHide, job ? 1 : 0);
+    if (job){ const b = chunkBox(job.lod, ...job.chunk); gl.uniform3f(U.uHideLo, b[0], b[1], b[2]); gl.uniform3f(U.uHideHi, b[0] + b[3], b[1] + b[3], b[2] + b[3]); }
+    // The mask is no array here: its generic value, all six faces (context state, so set at each draw).
+    gl.bindVertexArray(vaos.cube.vao); gl.vertexAttribI4ui(2, 63, 0, 0, 0);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, vaos.cube.count);
+    drawn.cubes = vaos.cube.count;
+  }
+  if (job && vaos.job.count){
+    const U = use(P.cube), o = job.origin;
+    gl.uniform3f(U.uOrigin, -1 + 2 * o[0] / 2 ** D, -1 + 2 * o[1] / 2 ** D, -1 + 2 * o[2] / 2 ** D); gl.uniform1f(U.uCell, 2 * job.cellSize / 2 ** D); gl.uniform1i(U.uHide, 0);
+    gl.bindVertexArray(vaos.job.vao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, vaos.job.count);
+    drawn.job = vaos.job.count;
+  }
+  gl.disable(gl.CULL_FACE);
+  if (on('showGraph') && vaos.node.count){
+    const U = use(P.node);
+    textures(U);
+    gl.uniform2f(U.uPx, 2 / canvas.width, 2 / canvas.height); gl.uniform1f(U.uSize, 2.2 * Math.min(2, devicePixelRatio || 1)); gl.uniform1i(U.uSel, S.selOn ? 1 : 0);
+    gl.bindVertexArray(vaos.node.vao); gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, vaos.node.count);
+    drawn.nodes = vaos.node.count;
+  }
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  if (vaos.box.count){ use(P.box); gl.bindVertexArray(vaos.box.vao); gl.drawArraysInstanced(gl.LINES, 0, 24, vaos.box.count); drawn.boxes = vaos.box.count; }
+  if (vaos.line.count){ use(P.line); gl.bindVertexArray(vaos.line.vao); gl.drawArrays(gl.LINES, 0, vaos.line.count); drawn.lines = vaos.line.count / 2; }
+  // The order runs through the cells, so it's drawn through them.
+  if (on('showOrder') && vaos.order.count){
+    gl.disable(gl.DEPTH_TEST);
+    const U = use(P.order);
+    gl.uniform3f(U.uOrigin, -1, -1, -1); gl.uniform1f(U.uCell, 2 / S.cells.side); gl.uniform1f(U.uCount, vaos.order.count);
+    gl.bindVertexArray(vaos.order.vao); gl.drawArrays(gl.LINE_STRIP, 0, vaos.order.count);
+    drawn.order = vaos.order.count;
+    gl.enable(gl.DEPTH_TEST);
+  }
+  // References last, added on, depth-tested and not written, so the world hides those behind it.
+  if (on('showGraph') && on('showRefs') && vaos.edge.count){
+    // Added on, so a dense graph whitens: the slider's share scaled down past 30,000 lines.
+    const U = use(P.edge), a = +$('edgeAlpha').value / 100, dense = Math.min(1, Math.sqrt(30000 / Math.max(1, vaos.edge.count)));
+    textures(U);
+    gl.uniform1f(U.uAlpha, 0.8 * a * a * dense); gl.uniform1i(U.uSel, S.selOn ? 1 : 0);
+    gl.depthMask(false); gl.blendFunc(gl.ONE, gl.ONE);
+    gl.bindVertexArray(vaos.edge.vao); gl.drawArraysInstanced(gl.LINES, 0, 2, vaos.edge.count);
+    drawn.edges = vaos.edge.count;
+    gl.depthMask(true);
+  }
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(null);
+}
+function resize(){
+  const r = canvas.getBoundingClientRect(), dpr = Math.min(2, devicePixelRatio || 1), w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; dirty = true; }
+}
+new ResizeObserver(resize).observe(canvas);
+let lastT = performance.now();
+function tick(t){
+  const dt = Math.min(100, t - lastT); lastT = t;
+  if (S.A && !framed) frame();
+  if (pending){ const s = easeStep(pending, dt); pending -= s; const d = dolly(cam, radius, s, { threshold: 0.05, maxRadius: 60 }); radius = d.radius; cam = { eye: d.eye, yaw: d.yaw, pitch: d.pitch }; dirty = true; }
+  if (dirty){ dirty = false; render(); }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('pointerdown', e => {
+  const mode = modeOf(e.button, e.shiftKey);
+  if (!mode) return;
+  e.preventDefault(); canvas.focus(); canvas.setPointerCapture(e.pointerId);
+  drag = { id: e.pointerId, mode, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, button: e.button };
+});
+canvas.addEventListener('pointermove', e => {
+  if (!drag || e.pointerId !== drag.id) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y, h = canvas.clientHeight;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.mode === 'orbit') cam = orbit(cam, radius, dx, dy, h);
+  else if (drag.mode === 'pan') cam = pan(cam, radius, dx, dy, h);
+  else { const d = dolly(cam, radius, dy * CAMERA.drag, { threshold: 0.05, maxRadius: 60 }); radius = d.radius; cam = { eye: d.eye, yaw: d.yaw, pitch: d.pitch }; }
+  dirty = true;
+});
+// A press and release within a few pixels with the left button is a click: a pick.
+const release = e => {
+  if (!drag || e.pointerId !== drag.id) return;
+  const click = drag.button === 0 && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 4 && e.type === 'pointerup';
+  drag = null;
+  if (click){ const r = canvas.getBoundingClientRect(); pick(e.clientX - r.left, e.clientY - r.top); }
+};
+canvas.addEventListener('pointerup', release); canvas.addEventListener('pointercancel', release);
+canvas.addEventListener('wheel', e => { e.preventDefault(); pending = addPending(pending, wheelLog(e.deltaY, e.deltaMode, innerHeight)); }, { passive: false });
+addEventListener('keydown', e => {
+  if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLInputElement || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'f' || e.key === 'F'){ frame(); e.preventDefault(); }
+  if (e.key === 'Escape' && S.sel){ select(null); e.preventDefault(); }
+});
+
+draw();
+
+// For the console and test/browser/explore.test.js: the page's state as data.
+window.__explore = {
+  state: () => {
+    const A = S.A, sel = S.sel;
+    return {
+      files: S.files.map(f => f.name), current: S.current, world: S.world, worlds: S.worlds, error: S.error,
+      D: A?.D ?? null, root: A?.root ?? null, nodes: A?.nodes ?? null, field: A?.field ?? null, colourStatus: A?.colourStatus ?? null,
+      levels: A && { nodes: [...A.levelNodes], cells: [...A.levelCells], edges: [...A.levelEdges], refs: [...A.levelRefs], classes: A.levelClasses && [...A.levelClasses] },
+      graph: A && { lo: S.lo, layout: $('layout').value, nodes: S.shownIds?.length ?? 0, edges: S.edges?.count ?? 0 },
+      cells: S.cells && { lod: S.cells.lod, total: S.cells.total, shown: S.cells.shown, words: !!S.cells.words },
+      chunks: S.chunks && { lod: S.chunks.lod, total: S.chunks.total, distinct: S.chunks.distinct, over: S.chunks.over },
+      sel: !sel ? null : sel.kind === 'node'
+        ? { kind: 'node', id: sel.id, places: sel.places.total, boxed: sel.places.list.length / 3, parents: sel.parents, children: sel.children, words: sel.words && [...sel.words] }
+        : { kind: 'cell', lod: sel.lod, x: sel.x, y: sel.y, z: sel.z, id: sel.id, path: sel.path, chunk: sel.chunk && { lod: sel.chunk.lod, at: [sel.chunk.cx, sel.chunk.cy, sel.chunk.cz], stamp: sel.chunk.stamp.map(s => s.id) } },
+      job: S.job && { count: S.job.count, quads: S.job.quads, borderCount: S.job.borderCount, occupied: S.job.occupied, lodRule: S.job.lodRule, words: S.job.attrs ? [...S.job.attrs] : null },
+      boxes: S.boxCount ?? 0, lines: (S.lineCount ?? 0) / 2,
+      drawn: (render(), drawn), status: $('status').textContent,
+    };
+  },
+  idle: () => !!S.A && !S.busy && !!S.cells,
+  // A node's colour from the field at its first place (rgb8), once asked for.
+  nodeField: id => S.nodeField ? S.nodeField[id] : null,
+  // A node's dot in CSS pixels on the canvas, for a real click.
+  screenOf: id => S.pos && S.pos[4 * id + 3] ? screenOf([S.pos[4 * id], S.pos[4 * id + 1], S.pos[4 * id + 2]]) : null,
+  canvasBox: () => { const r = canvas.getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; },
+  // The ray a click at (px, py) makes, in the cells of the shown lod (what pick hands rayCell).
+  cellRay: (px, py) => { const { o, d } = rayAt(px, py), half = S.cells.side / 2; return { o: o.map(v => (v + 1) * half), d: d.map(v => v * half), lod: S.cells.lod }; },
+  camera: () => ({ ...cam, radius }),
+  frame,
+  // Pixels that aren't the background, after a frame drawn now.
+  lit: () => { if (!gl) return 0; render(); const w = canvas.width, h = canvas.height, px = new Uint8Array(4 * w * h); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px); let n = 0; for (let i = 0; i < px.length; i += 4) n += px[i] > 12 || px[i + 1] > 12 || px[i + 2] > 16; return n; },
+};
+</script>
+</body>
+</html>
