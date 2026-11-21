@@ -27,7 +27,13 @@
 
   The camera is camera-core.js's: left drag orbits, right drag (or shift and
   left) pans, the wheel dollies. A click picks: the nearest dot within a few
-  pixels, else the first cell the ray meets. F frames, Esc lets go.
+  pixels, else the first cell the ray meets. F frames, Esc lets go. Holding
+  Ctrl shows what's under the pointer, the pick a click would make.
+
+  Since the answers (docs/explore.md §8, 2026-11-21): the class graph, one
+  dot an Oh class with each reference coloured by its pose, the 48 in a
+  table (Q2); the colour pyramid, the world at each lod in its words
+  squashed under its layer of dots (Q4); the Ctrl-held tooltip (Q5).
 
   Serve the repo root (npm run serve) and open /explore/.
 -->
@@ -79,6 +85,14 @@
   tr.lvl:hover td{ background:rgba(255,255,255,.03); }
   tr.lvl.in td{ color:var(--hi); }
   tr.lvl.lo td{ background:rgba(122,138,208,.14); }
+  #tip{ position:absolute; pointer-events:none; background:rgba(16,16,22,.94); border:1px solid rgba(255,255,255,.18); border-radius:4px; padding:5px 8px; color:var(--hi); font-size:11px; line-height:1.45; white-space:nowrap; z-index:2; }
+  #tip .k{ color:var(--dim); }
+  table.poses td{ padding:1px; text-align:center; border:none; }
+  table.poses th{ border:none; padding:1px 4px 1px 0; }
+  .pz{ display:inline-block; width:30px; height:15px; line-height:15px; border-radius:2px; font-size:9px; color:#0a0a10; cursor:default; }
+  .pz.mirror{ color:#eee; }
+  .pz.off{ opacity:.22; }
+  .pz.hot{ outline:2px solid #fff; }
   #status{ margin-top:10px; min-height:1.5em; color:var(--dim); }
   footer{ margin-top:18px; color:var(--dim); font-size:11px; }
   @media (max-width:760px){
@@ -93,7 +107,8 @@
   <canvas id="gl" tabindex="0"></canvas>
   <div id="empty"><div><b>Drop .vdag files here</b><br>or choose them in the panel. Nothing leaves this machine.</div></div>
   <div id="legend"></div>
-  <div id="keys">drag orbits · right drag pans · wheel dollies · click picks · F frames · Esc lets go</div>
+  <div id="tip" hidden></div>
+  <div id="keys">drag orbits · right drag pans · wheel dollies · click picks · Ctrl shows what's under the pointer · F frames · Esc lets go</div>
 </div>
 <aside>
   <h1>vdag explorer</h1>
@@ -111,6 +126,7 @@
     <label><input id="showWorld" type="checkbox" checked> world</label>
     <label><input id="showChunks" type="checkbox"> chunks</label>
     <label><input id="showOrder" type="checkbox"> Morton order</label>
+    <label><input id="showPyramid" type="checkbox"> colour pyramid</label>
   </div>
 
   <h2>Graph</h2>
@@ -118,8 +134,11 @@
     <select id="layout">
       <option value="place">over its first place</option>
       <option value="grid">a grid a level</option>
+      <option value="class">classes: a dot a class, over its first place</option>
+      <option value="classgrid">classes: a grid a level</option>
     </select>
   </div>
+  <div id="classNote" class="row warn" hidden></div>
   <div class="row"><span class="label">levels</span><input id="lo" type="range" min="0" max="1" value="0"><span id="loLabel"></span></div>
   <div class="row"><span class="label">colour by</span>
     <select id="nodeColour">
@@ -130,6 +149,7 @@
       <option value="places">places (in its level)</option>
       <option value="voxels">voxels (in its level)</option>
       <option value="class">Oh class</option>
+      <option value="members">turned copies (its class's members)</option>
       <option value="field">colour field at its first place</option>
     </select>
   </div>
@@ -165,6 +185,11 @@
     </select>
   </div>
 
+  <div id="posesBox" hidden>
+  <h2>Poses (Oh, 48)</h2>
+  <div id="poses"></div>
+  </div>
+
   <h2>Selection</h2>
   <div id="sel"><span class="k">nothing picked: click a dot or a cell</span></div>
 
@@ -175,7 +200,7 @@
   </table>
   <div id="status"></div>
 
-  <footer>Y is up. A level-k node is a block of 2<sup>k</sup> voxels a side; its cells are where it occurs. "Cells a node" is how much the level shares: every cell a node of its own would be 1. A click on a level's row makes it the lowest level drawn. Settings are kept in this browser.</footer>
+  <footer>The class graph is SSVDAG's: a class is a node and its 48 turned and mirrored copies, one dot, and a reference is a child class and the pose that turns that class's representative (its first member here) into the child, the least such pose. Its lines are coloured by pose (the table), the identity white, mirrors darker. The colour pyramid is the world at each lod of the graph's levels, in the words the viewer draws, squashed under that level's dots. Y is up. A level-k node is a block of 2<sup>k</sup> voxels a side; its cells are where it occurs. "Cells a node" is how much the level shares: every cell a node of its own would be 1. A click on a level's row makes it the lowest level drawn. Settings are kept in this browser.</footer>
 </aside>
 
 <script type="module">
@@ -184,7 +209,8 @@ import { CHUNK_LEVELS, cellOf, maskOf, mortonXYZ } from '../chunk-core.js';
 import { CAMERA, basisOf, forwardOf, modeOf, orbit, pan, dolly, wheelLog, addPending, easeStep } from '../camera-core.js';
 import { GRAPH_BASE, GRAPH_HEIGHT, GRAPH_BUDGET, CELL_BUDGET, CHUNK_BUDGET, MAX_SIDE, PLACE_LIST,
          graphRange, layoutOf, edgesOf, relativesOf, placesOf, pathTo, rayCell, chunksAt, stampWith,
-         identity, heat, logScale, levelColour } from './explore-core.js';
+         classGraph, classEdgesOf, classRelativesOf, classPlacesOf, poseName, poseDet, poseColour,
+         cellIndex, pyramidLods, layerOf, identity, heat, logScale, levelColour } from './explore-core.js';
 
 const $ = id => document.getElementById(id);
 const fmt = n => Math.round(n).toLocaleString('en-US');
@@ -197,7 +223,7 @@ const word6 = w => [(w >>> 2 & 63) * 255 / 63, (w >>> 10 & 63) * 255 / 63, (w >>
 
 /* ---- settings, remembered per browser ---------------------------------------------- */
 const KEY = 'vdag-explore';
-const CONTROLS = ['showGraph', 'showRefs', 'showWorld', 'showChunks', 'showOrder', 'layout', 'nodeColour', 'nodeSize', 'edgeAlpha', 'cellColour', 'copies', 'rule'];
+const CONTROLS = ['showGraph', 'showRefs', 'showWorld', 'showChunks', 'showOrder', 'showPyramid', 'layout', 'nodeColour', 'nodeSize', 'edgeAlpha', 'cellColour', 'copies', 'rule'];
 let saved = {};
 try { saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') ?? {}; } catch {}
 for (const id of CONTROLS){
@@ -212,7 +238,8 @@ const on = id => $(id).checked;
 
 /* ---- files, the worker, the world --------------------------------------------------- */
 const S = { files: [], current: -1, world: 0, worlds: null, worker: null, rq: 0, pending: new Map(), phase: null, error: null,
-            A: null, keys: null, view: null, lo: 0, edges: null, cells: null, chunks: null, sel: null, job: null, nodeField: null, busy: 0 };
+            A: null, keys: null, view: null, lo: 0, edges: null, cells: null, chunks: null, sel: null, job: null, nodeField: null, busy: 0,
+            G: null, pyr: null, pyrToken: null };
 
 function addFiles(list){
   const fresh = [...list].filter(f => /\.vdag$/i.test(f.name));
@@ -224,7 +251,8 @@ function openFile(i, world){
   S.worker?.terminate();
   for (const p of S.pending.values()) p.reject(new Error('superseded'));
   Object.assign(S, { current: i, world, worlds: world ? S.worlds : null, worker: null, pending: new Map(), phase: null, error: null,
-                     A: null, keys: null, view: null, edges: null, cells: null, chunks: null, sel: null, job: null, nodeField: null, busy: 0 });
+                     A: null, keys: null, view: null, edges: null, cells: null, chunks: null, sel: null, job: null, nodeField: null, busy: 0,
+                     G: null, pyr: null, pyrToken: null });
   clearScene();
   fileList();
   if (i < 0 || !S.files[i]){ draw(); return; }
@@ -295,11 +323,14 @@ function ready(a){
   $('lo').max = String(D);
   S.lo = graphRange(A).lo;
   $('lo').value = String(S.lo);
+  // The class graph is cheap once the classes are in (a pass over the nodes): its members colour either graph.
+  S.G = classGraph(A);
   allocTextures();
   graph();
   chunks();
   framed = false;
   quiet(cells());
+  quiet(pyramid());
 }
 const option = (v, text) => { const o = document.createElement('option'); o.value = String(v); o.textContent = text; return o; };
 
@@ -313,19 +344,27 @@ function setLo(lo){
   S.lo = lo; $('lo').value = String(lo);
   graph();
   if (S.sel) select(S.sel);
+  quiet(pyramid());
 }
+/* The class graph (§8 Q2) when the layout asks for it and the world has
+   classes (createClasses stops at a million nodes): a dot a class, at its
+   first member's id, so the textures stay indexed by node. */
+const classMode = () => !!(S.G && $('layout').value.startsWith('class'));
 function graph(){
   const A = S.A;
   if (!A || !gl) return;
-  const pos = layoutOf(A, { mode: $('layout').value, lo: S.lo, hi: A.D });
+  const G = classMode() ? S.G : null, layout = $('layout').value;
+  const pos = layoutOf(A, { mode: layout.endsWith('grid') ? 'grid' : 'place', lo: S.lo, hi: A.D, only: G?.isRep ?? null });
   S.pos = pos;
   upload(tex.pos, pos, 4);
-  S.edges = edgesOf(A, S.keys, S.lo, A.D);
-  const ids = A.order.subarray(A.levelStart[S.lo], A.levelStart[A.D + 1]);
+  let ids = A.order.subarray(A.levelStart[S.lo], A.levelStart[A.D + 1]);
+  if (G){ ids = ids.filter(id => G.isRep[id]); S.edges = classEdgesOf(A, G, S.lo, A.D); }
+  else { S.edges = edgesOf(A, S.keys, S.lo, A.D); S.edges.poses = new Uint8Array(S.edges.count); }
   S.shownIds = ids;
   setInstances(vaos.node, [{ loc: 0, data: ids, size: 1, type: gl.UNSIGNED_INT, int: true }]);
   setInstances(vaos.edge, [{ loc: 0, data: S.edges.pairs, size: 2, type: gl.UNSIGNED_INT, int: true },
-                           { loc: 1, data: S.edges.slots, size: 1, type: gl.UNSIGNED_BYTE, int: true }]);
+                           { loc: 1, data: S.edges.slots, size: 1, type: gl.UNSIGNED_BYTE, int: true },
+                           { loc: 2, data: S.edges.poses, size: 1, type: gl.UNSIGNED_BYTE, int: true }]);
   S.nodeField = null;
   colourNodes();
   if (!S.sel) upload(tex.flag, new Uint8Array(A.top), 1);
@@ -336,33 +375,35 @@ function graph(){
    refs and parents over the whole graph. */
 function colourNodes(){
   const A = S.A, mode = $('nodeColour').value, sizeBy = $('nodeSize').value, out = new Uint8Array(4 * A.top);
-  const lvMax = (arr, k) => {
-    let m = 1;
-    for (let i = A.levelStart[k]; i < A.levelStart[k + 1]; i++) m = Math.max(m, arr[A.order[i]]);
-    return m;
-  };
+  // A class's numbers in the class graph, a node's otherwise.
+  const G = classMode() ? S.G : null, ids = S.shownIds;
+  const refsOf = G ? id => G.refs[A.cls[id]] : id => A.refs[id], parentsOf = G ? id => G.parents[A.cls[id]] : id => A.parents[id];
+  const placesOfId = G ? id => G.places[A.cls[id]] : id => A.places[id], membersOf = id => S.G ? S.G.members[A.cls[id]] : 1;
+  const placeMaxAt = new Float64Array(A.D + 1).fill(1), voxMaxAt = new Float64Array(A.D + 1).fill(1);
   let rMax = 1, pMax = 1;
-  for (let i = 0; i < A.order.length; i++){ const id = A.order[i]; rMax = Math.max(rMax, A.refs[id]); pMax = Math.max(pMax, A.parents[id]); }
+  for (const id of ids){
+    const k = A.level[id];
+    rMax = Math.max(rMax, refsOf(id)); pMax = Math.max(pMax, parentsOf(id));
+    placeMaxAt[k] = Math.max(placeMaxAt[k], placesOfId(id)); voxMaxAt[k] = Math.max(voxMaxAt[k], A.voxels[id]);
+  }
   if (mode === 'field' && A.field && !S.nodeField){
     const ids = S.shownIds.slice();
     quiet(ask('nodeColours', { ids }).then(d => { const m = new Uint32Array(A.top); d.nodeColours.ids.forEach((id, i) => m[id] = d.nodeColours.words[i]); S.nodeField = m; colourNodes(); }));
   }
-  for (let k = S.lo; k <= A.D; k++){
-    const placeMax = lvMax(A.places, k), voxMax = lvMax(A.voxels, k);
-    for (let i = A.levelStart[k]; i < A.levelStart[k + 1]; i++){
-      const id = A.order[i];
-      let c;
-      if (mode === 'level') c = levelColour(k, A.D);
-      else if (mode === 'refs') c = heat(logScale(A.refs[id], rMax));
-      else if (mode === 'parents') c = heat(logScale(A.parents[id], pMax));
-      else if (mode === 'places') c = heat(logScale(A.places[id], placeMax));
-      else if (mode === 'voxels') c = heat(logScale(A.voxels[id], voxMax));
-      else if (mode === 'class') c = A.cls ? identity(A.cls[id] + 7919) : [90, 90, 110];
-      else if (mode === 'field') c = S.nodeField ? word8(S.nodeField[id]) : A.field ? [60, 60, 70] : [90, 90, 110];
-      else c = identity(id);
-      const size = sizeBy === 'refs' ? logScale(A.refs[id], rMax) : sizeBy === 'places' ? logScale(A.places[id], placeMax) : 0.3;
-      out.set(c, 4 * id); out[4 * id + 3] = Math.round(255 * size);
-    }
+  for (const id of ids){
+    const k = A.level[id];
+    let c;
+    if (mode === 'level') c = levelColour(k, A.D);
+    else if (mode === 'refs') c = heat(logScale(refsOf(id), rMax));
+    else if (mode === 'parents') c = heat(logScale(parentsOf(id), pMax));
+    else if (mode === 'places') c = heat(logScale(placesOfId(id), placeMaxAt[k]));
+    else if (mode === 'voxels') c = heat(logScale(A.voxels[id], voxMaxAt[k]));
+    else if (mode === 'class') c = A.cls ? identity(A.cls[id] + 7919) : [90, 90, 110];
+    else if (mode === 'members') c = A.cls ? heat(logScale(membersOf(id), 48)) : [90, 90, 110];
+    else if (mode === 'field') c = S.nodeField ? word8(S.nodeField[id]) : A.field ? [60, 60, 70] : [90, 90, 110];
+    else c = identity(id);
+    const size = sizeBy === 'refs' ? logScale(refsOf(id), rMax) : sizeBy === 'places' ? logScale(placesOfId(id), placeMaxAt[k]) : 0.3;
+    out.set(c, 4 * id); out[4 * id + 3] = Math.round(255 * size);
   }
   upload(tex.col, out, 4);
   dirty = true;
@@ -381,7 +422,44 @@ async function cells(){
   dirty = true; draw();
 }
 function colourCells(){
-  const c = S.cells, A = S.A, mode = $('cellColour').value, out = new Uint8Array(4 * c.shown), s = c.side;
+  const c = S.cells;
+  setInstances(vaos.cube, [{ loc: 0, data: c.xyz, size: 1, type: gl.UNSIGNED_INT, int: true },
+                           { loc: 1, data: cellColours(c), size: 4, type: gl.UNSIGNED_BYTE, norm: true }]);
+  S.cellsDrawn = c.shown;
+  dirty = true;
+}
+/* The colour pyramid (§8 Q4): the world's surface cells at each lod of the
+   graph's levels (explore-core's pyramidLods), coloured as the world is, each
+   drawn squashed under its level's dots (layerOf). Asked of the worker a lod
+   at a time; a later ask (a new range, the box unticked) drops this one. */
+async function pyramid(){
+  const A = S.A, token = S.pyrToken = {};
+  S.pyr = null;
+  for (const k of Object.keys(vaos)) if (k.startsWith('pyr')) vaos[k].count = 0;
+  dirty = true;
+  if (!A || !on('showPyramid')) return;
+  const layers = [];
+  for (const lod of pyramidLods(A, S.lo)){
+    const d = await ask('cells', { lod });
+    if (S.pyrToken !== token) return;
+    layers.push(d.cells);
+  }
+  S.pyr = { lo: S.lo, layers };
+  colourPyramid();
+  draw();
+}
+function colourPyramid(){
+  if (!S.pyr) return;
+  S.pyr.layers.forEach((c, i) => {
+    const v = vaos[`pyr${i}`] ??= { vao: gl.createVertexArray(), count: 0 };
+    setInstances(v, [{ loc: 0, data: c.xyz, size: 1, type: gl.UNSIGNED_INT, int: true },
+                     { loc: 1, data: cellColours(c), size: 4, type: gl.UNSIGNED_BYTE, norm: true }]);
+  });
+  dirty = true;
+}
+// A list of cells' colours, as the world menu says.
+function cellColours(c){
+  const A = S.A, mode = $('cellColour').value, out = new Uint8Array(4 * c.shown), s = c.side;
   let pMax = 1, rMax = 1;
   for (let i = 0; i < c.shown; i++){ pMax = Math.max(pMax, A.places[c.ids[i]]); rMax = Math.max(rMax, A.refs[c.ids[i]]); }
   const field = mode === 'field' && c.words;
@@ -395,10 +473,7 @@ function colourCells(){
     else rgb = [(p & 1023) + 0.5, (p >> 10 & 1023) + 0.5, (p >> 20) + 0.5].map(v => Math.round(255 * v / s));
     out.set(rgb, 4 * i); out[4 * i + 3] = 255;
   }
-  setInstances(vaos.cube, [{ loc: 0, data: c.xyz, size: 1, type: gl.UNSIGNED_INT, int: true },
-                           { loc: 1, data: out, size: 4, type: gl.UNSIGNED_BYTE, norm: true }]);
-  S.cellsDrawn = c.shown;
-  dirty = true;
+  return out;
 }
 
 /* ---- chunks ------------------------------------------------------------------------------------ */
@@ -432,6 +507,12 @@ function select(sel){
       const list = sel.places.list.slice(0, 3 * 32);
       quiet(ask('placeColours', { id: sel.id, list }).then(d => { if (S.sel === sel){ sel.words = d.placeColours.words; draw(); } }));
     }
+  } else if (sel?.kind === 'class'){
+    const R = classRelativesOf(A, S.G, sel.cls);
+    flags.set(R.flags);
+    sel.children = R.children; sel.parents = R.parents;
+    sel.members = [...S.G.memberIds.subarray(S.G.memberStart[sel.cls], S.G.memberStart[sel.cls + 1])];
+    sel.places = classPlacesOf(A, S.keys, S.G, sel.cls, PLACE_LIST);
   } else if (sel?.kind === 'cell'){
     sel.path = pathTo(S.keys, A.root, A.D, sel.lod, sel.x, sel.y, sel.z);
     for (const id of sel.path) flags[id] |= 8;
@@ -443,10 +524,12 @@ function select(sel){
   draw();
 }
 function selectNode(id){ select({ kind: 'node', id }); }
-/* A cell, and when chunks are shown, the chunk holding it at the chunk lod. */
-function selectCell(hit, lod){
-  const sel = { kind: 'cell', lod, x: hit.x, y: hit.y, z: hit.z, id: hit.id };
-  if (on('showChunks')){
+function selectClass(cls){ select({ kind: 'class', cls }); }
+/* A cell, and when chunks are shown, the chunk holding it at the chunk lod
+   (a world cell's: a pyramid layer's cell is in `layer`, its own lod). */
+function selectCell(hit, lod, layer = false){
+  const sel = { kind: 'cell', lod, x: hit.x, y: hit.y, z: hit.z, id: hit.id, layer };
+  if (on('showChunks') && !layer){
     const clod = +$('chunkLod').value, D = S.A.D, span = 2 ** Math.min(D, clod + CHUNK_LEVELS) / 2 ** lod;
     const cx = Math.floor(hit.x / span), cy = Math.floor(hit.y / span), cz = Math.floor(hit.z / span);
     sel.chunk = { lod: clod, cx, cy, cz, stamp: stampWith(S.view, S.A.root, D, clod, cx, cy, cz) };
@@ -476,10 +559,11 @@ function boxesAndLines(){
   const A = S.A;
   if (!A || !gl) return;
   const boxes = [], lines = [];
-  const box = (b, rgb, a = 255) => boxes.push([b, [...rgb, a]]);
+  // A box is its low corner and three sides; a cube [x, y, z, side] stands for itself.
+  const box = (b, rgb, a = 255) => boxes.push([b.length === 4 ? [b[0], b[1], b[2], b[3], b[3], b[3]] : b, [...rgb, a]]);
   const line = (p, q, rgb, a = 200, rgb2 = rgb, a2 = a) => lines.push([p, [...rgb, a]], [q, [...rgb2, a2]]);
   const graphAt = id => S.pos && S.pos[4 * id + 3] && on('showGraph') ? [S.pos[4 * id], S.pos[4 * id + 1], S.pos[4 * id + 2]] : null;
-  const centre = b => [b[0] + b[3] / 2, b[1] + b[3] / 2, b[2] + b[3] / 2];
+  const centre = b => b.length === 4 ? [b[0] + b[3] / 2, b[1] + b[3] / 2, b[2] + b[3] / 2] : [b[0] + b[3] / 2, b[1] + b[4] / 2, b[2] + b[5] / 2];
   const ch = S.chunks;
   if (on('showChunks') && ch && !ch.over){
     for (let i = 0; i < ch.total; i++){
@@ -499,8 +583,18 @@ function boxesAndLines(){
       box(b, [255, 236, 140]);
       if (from) line(from, centre(b), [255, 236, 140], 220, [255, 236, 140], 90);
     }
+  } else if (sel?.kind === 'class'){
+    // Its members' places, each box in the pose that member sits in (the rep's own is white).
+    const k = A.level[S.G.rep[sel.cls]], size = 2 * 2 ** k / 2 ** A.D, from = graphAt(S.G.rep[sel.cls]), L = sel.places.list;
+    for (let i = 0; i < L.length / 3; i++){
+      const b = [sceneOf(L[3 * i]), sceneOf(L[3 * i + 1]), sceneOf(L[3 * i + 2]), size], rgb = poseColour(A.pose[sel.places.who[i]]);
+      box(b, rgb);
+      if (from) line(from, centre(b), rgb, 220, rgb, 90);
+    }
   } else if (sel?.kind === 'cell'){
-    const s = 2 * 2 ** sel.lod / 2 ** A.D, b = [-1 + sel.x * s, -1 + sel.y * s, -1 + sel.z * s, s];
+    const s = 2 * 2 ** sel.lod / 2 ** A.D, cube = [-1 + sel.x * s, -1 + sel.y * s, -1 + sel.z * s, s];
+    let b = cube;
+    if (sel.layer){ const [sc, off] = layerOf(sel.lod, S.lo, A.D); b = [cube[0], cube[1] * sc + off, cube[2], s, s * sc, s]; }
     box(b, [255, 255, 255]);
     const pts = sel.path.map(graphAt).filter(Boolean);
     for (let i = 1; i < pts.length; i++) line(pts[i - 1], pts[i], [255, 255, 255], 255);
@@ -516,9 +610,11 @@ function boxesAndLines(){
       });
     }
   }
-  const bf = new Float32Array(4 * boxes.length), bc = new Uint8Array(4 * boxes.length);
-  boxes.forEach(([b, c], i) => { bf.set(b, 4 * i); bc.set(c, 4 * i); });
-  setInstances(vaos.box, [{ loc: 0, data: bf, size: 4, type: gl.FLOAT }, { loc: 1, data: bc, size: 4, type: gl.UNSIGNED_BYTE, norm: true }]);
+  const bf = new Float32Array(6 * boxes.length), bc = new Uint8Array(4 * boxes.length);
+  boxes.forEach(([b, c], i) => { bf.set(b, 6 * i); bc.set(c, 4 * i); });
+  setInstances(vaos.box, [{ loc: 0, data: bf.filter((_, j) => j % 6 < 3), size: 3, type: gl.FLOAT },
+                          { loc: 2, data: bf.filter((_, j) => j % 6 >= 3), size: 3, type: gl.FLOAT },
+                          { loc: 1, data: bc, size: 4, type: gl.UNSIGNED_BYTE, norm: true }]);
   const lf = new Float32Array(3 * lines.length), lc = new Uint8Array(4 * lines.length);
   lines.forEach(([p, c], i) => { lf.set(p, 3 * i); lc.set(c, 4 * i); });
   setInstances(vaos.line, [{ loc: 0, data: lf, size: 3, type: gl.FLOAT, divisor: 0 }, { loc: 1, data: lc, size: 4, type: gl.UNSIGNED_BYTE, norm: true, divisor: 0 }]);
@@ -529,6 +625,27 @@ function boxesAndLines(){
 /* ---- the panel ------------------------------------------------------------------------------------ */
 function say(text, cls = ''){ $('status').className = cls; $('status').textContent = text; }
 const idButton = id => `<button class="id" type="button" data-node="${id}" style="border-color:${rgbCss(identity(id))}">#${id}</button>`;
+const clsButton = c => `<button class="id" type="button" data-cls="${c}" style="border-color:${rgbCss(identity(c + 7919))}">class ${c}</button>`;
+const poseChip = e => `<span class="pz${poseDet(e) < 0 ? ' mirror' : ''}" style="background:${rgbCss(poseColour(e))}" title="pose ${e}: (x,y,z) → (${poseName(e)}), ${poseDet(e) > 0 ? 'a rotation' : 'a mirror'}">${e}</span>`;
+/* The 48 poses, a row a permutation and a column a sign pattern, each with
+   how many of the class graph's slots carry it; a picked class's own (its
+   children's labels, its members' poses) outlined. */
+function posesHtml(){
+  const G = S.G, sel = S.sel, hot = new Set();
+  if (sel?.kind === 'class'){ for (const c of sel.children) hot.add(c.pose); for (const m of sel.members) hot.add(S.A.pose[m]); }
+  const signs = s => [0, 1, 2].map(i => s >> i & 1 ? '−' : '+').join('');
+  let h = `<table class="poses"><tr><th></th>${[...Array(8).keys()].map(s => `<th>${signs(s)}</th>`).join('')}</tr>`;
+  for (let p = 0; p < 6; p++){
+    h += `<tr><th>${poseName(8 * p).replace(/,/g, '')}</th>`;
+    for (let sg = 0; sg < 8; sg++){
+      const e = 8 * p + sg, n = G.poseCount[e];
+      h += `<td>${poseChip(e).replace('class="pz', `class="pz${n ? '' : ' off'}${hot.has(e) ? ' hot' : ''}`)}</td>`;
+    }
+    h += '</tr>';
+  }
+  const used = G.poseCount.filter(n => n).length, total = G.poseCount.reduce((a, b) => a + b, 0);
+  return h + `</table><span class="k">${used} of the 48 label the class graph's ${fmt(total)} slots (${fmt(G.poseCount[0])} the identity). The column is which of the turned frame's axes are negated; hover a pose for where it sends (x, y, z).</span>`;
+}
 const COLOUR_NOTE = { same: 'its named colour field', unchecked: 'its named colour field (not checked against the file)',
   changed: 'its colour field, which this code now colours differently from the code that wrote the file', unknown: 'a colour field this page can\'t make', none: 'none' };
 function draw(){
@@ -549,9 +666,14 @@ function draw(){
     }
     $('levels').innerHTML = rows.join('');
     const { n, e } = rangeOf(S.lo);
-    $('loLabel').textContent = `${S.lo}–${A.D}: ${fmt(n)} nodes, ${fmt(e)} refs`;
+    $('loLabel').textContent = classMode() ? `${S.lo}–${A.D}: ${fmt(S.shownIds?.length ?? 0)} classes, ${fmt(S.edges?.count ?? 0)} refs (${fmt(n)} nodes)` : `${S.lo}–${A.D}: ${fmt(n)} nodes, ${fmt(e)} refs`;
   } else { $('levels').innerHTML = ''; $('loLabel').textContent = ''; }
   $('sel').innerHTML = selHtml();
+  const wantClass = A && $('layout').value.startsWith('class');
+  $('classNote').hidden = !(wantClass && !S.G);
+  $('classNote').textContent = wantClass && !S.G ? `no classes: they're worked out to a million nodes, and this world has ${fmt(A.top - 2)}; the node graph is shown` : '';
+  $('posesBox').hidden = !classMode();
+  if (classMode()) $('poses').innerHTML = posesHtml();
   $('legend').textContent = legend();
   if (S.error) say(`failed: ${S.error}`, 'bad');
   else if (S.phase) say(`${S.phase.text}…`);
@@ -564,7 +686,8 @@ function legend(){
   const A = S.A;
   if (!A) return '';
   const lines = [];
-  if (on('showGraph')) lines.push(`graph: levels ${S.lo}–${A.D}, ${fmt(S.shownIds?.length ?? 0)} nodes, ${fmt(S.edges?.count ?? 0)} references`);
+  if (on('showGraph')) lines.push(`graph: levels ${S.lo}–${A.D}, ${fmt(S.shownIds?.length ?? 0)} ${classMode() ? 'classes' : 'nodes'}, ${fmt(S.edges?.count ?? 0)} references${classMode() ? ', coloured by pose' : ''}`);
+  if (on('showPyramid')) lines.push(S.pyr ? `pyramid: lods ${S.pyr.layers.map(c => c.lod).join(', ')}, ${fmt(S.pyr.layers.reduce((n, c) => n + c.shown, 0))} cubes` : 'pyramid: asking…');
   if (on('showWorld') && S.cells) lines.push(`world: lod ${S.cells.lod}, ${fmt(S.cells.shown)} cubes`);
   if (on('showChunks') && S.chunks) lines.push(S.chunks.over ? `chunks: over ${fmt(CHUNK_BUDGET)} at lod ${S.chunks.lod}` : `chunks: lod ${S.chunks.lod}, ${fmt(S.chunks.total)} chunks of ${fmt(S.chunks.distinct)} nodes`);
   return lines.join('\n');
@@ -580,13 +703,25 @@ function selHtml(){
     return `<span class="name">node #${id}</span> ${idButton(id)}<br>`
       + `<span class="k">level</span> ${k}, a ${fmt(2 ** k)}³ block · <span class="k">voxels</span> ${big(A.voxels[id])}<br>`
       + `<span class="k">places</span> ${big(P.total)}${P.total > P.list.length / 3 ? ` (the first ${fmt(P.list.length / 3)} boxed)` : ''} · <span class="k">refs</span> ${fmt(A.refs[id])} from ${fmt(A.parents[id])} parents<br>`
-      + `<span class="k">first place</span> (${A.px[id]}, ${A.py[id]}, ${A.pz[id]})${A.cls ? ` · <span class="k">class</span> ${A.cls[id]}` : ''}<br>`
+      + `<span class="k">first place</span> (${A.px[id]}, ${A.py[id]}, ${A.pz[id]})${A.cls ? ` · <span class="k">class</span> ${A.cls[id]} ${poseChip(A.pose[id])} <span class="k">(${poseName(A.pose[id])}) of its rep, ${S.G.members[A.cls[id]]} turned copies here</span>` : ''}<br>`
       + (id >= FIRST_NODE ? `<span class="k">children (octants→node)</span><br>${kids || '<span class="k">none</span>'}<br>` : '<span class="k">FULL: a solid voxel, no children</span><br>')
       + `<span class="k">parents</span><br>${parents || '<span class="k">none: the root</span>'}<br>`
       + `<span class="k">its colour at its first ${fmt(Math.min(32, P.list.length / 3))} places</span><br>${sw}`;
   }
+  if (sel.kind === 'class'){
+    const c = sel.cls, G = S.G, rep = G.rep[c], k = A.level[rep], P = sel.places;
+    const kids = sel.children.map(x => `<span class="k">${x.octant}→</span>${clsButton(x.cls)}${poseChip(x.pose)}`).join(' ');
+    const parents = sel.parents.slice(0, 32).map(id => clsButton(A.cls[id])).join('') + (sel.parents.length > 32 ? ` <span class="k">and ${fmt(sel.parents.length - 32)} more</span>` : '');
+    const members = sel.members.map(m => `${idButton(m)}${poseChip(A.pose[m])}`).join(' ');
+    return `<span class="name">class ${c}</span> ${clsButton(c)}<br>`
+      + `<span class="k">level</span> ${k}, a ${fmt(2 ** k)}³ block · <span class="k">voxels</span> ${big(A.voxels[rep])} · <span class="k">stabilizer</span> ${A.stab[c]} of 48 (so ${48 / A.stab[c]} distinct copies)<br>`
+      + `<span class="k">places</span> ${big(P.total)}${P.total > P.list.length / 3 ? ` (the first ${fmt(P.list.length / 3)} boxed)` : ''}, each box its copy's pose · <span class="k">refs</span> ${fmt(G.refs[c])} from ${fmt(G.parents[c])} classes<br>`
+      + `<span class="k">its copies in this world (node, pose of the rep)</span><br>${members}<br>`
+      + (k > 0 ? `<span class="k">children, in the rep's frame (octant→class, pose)</span><br>${kids || '<span class="k">none</span>'}<br>` : '<span class="k">FULL: a solid voxel, no children</span><br>')
+      + `<span class="k">parent classes</span><br>${parents || '<span class="k">none: the root</span>'}`;
+  }
   const path = sel.path.map((id, i) => `<span class="k">${A.D - i}</span>${idButton(id)}`).join(' ');
-  let out = `<span class="name">cell (${sel.x}, ${sel.y}, ${sel.z}) at lod ${sel.lod}</span><br><span class="k">its node</span> ${idButton(sel.id)} <span class="k">places</span> ${big(A.places[sel.id])}<br>`
+  let out = `<span class="name">cell (${sel.x}, ${sel.y}, ${sel.z}) at lod ${sel.lod}${sel.layer ? ', in the pyramid' : ''}</span><br><span class="k">its node</span> ${idButton(sel.id)} <span class="k">places</span> ${big(A.places[sel.id])}<br>`
     + `<span class="k">its path from the root (level, node)</span><br>${path}<br>`;
   if (sel.chunk){
     const c = sel.chunk, id = c.stamp[0].id, L = Math.min(A.D, c.lod + CHUNK_LEVELS);
@@ -603,15 +738,25 @@ function selHtml(){
 $('sel').addEventListener('click', e => {
   const b = e.target.closest('[data-node]');
   if (b){ selectNode(+b.dataset.node); return; }
+  const c = e.target.closest('[data-cls]');
+  if (c){ selectClass(+c.dataset.cls); return; }
   if (e.target.id === 'job') quiet(runJob());
 });
 $('levels').addEventListener('click', e => { const tr = e.target.closest('tr[data-level]'); if (tr && S.A){ setLo(+tr.dataset.level); draw(); } });
 $('lo').addEventListener('input', () => { if (S.A){ setLo(+$('lo').value); draw(); } });
-$('layout').addEventListener('change', () => { remember(); if (S.A){ graph(); boxesAndLines(); } });
+// A class picked means nothing in the node graph, nor a node in the class graph's references.
+$('layout').addEventListener('change', () => {
+  remember();
+  if (!S.A) return;
+  graph();
+  if (S.sel && (S.sel.kind === 'class' || (S.sel.kind === 'node' && classMode()))) select(null); else if (S.sel) select(S.sel);
+  boxesAndLines(); draw();
+});
 for (const id of ['nodeColour', 'nodeSize']) $(id).addEventListener('change', () => { remember(); if (S.A) colourNodes(); });
 $('edgeAlpha').addEventListener('input', () => { remember(); dirty = true; });
 $('lod').addEventListener('change', () => quiet(cells()));
-$('cellColour').addEventListener('change', () => { remember(); if (S.cells) colourCells(); });
+$('cellColour').addEventListener('change', () => { remember(); if (S.cells) colourCells(); colourPyramid(); });
+$('showPyramid').addEventListener('change', () => { remember(); if (S.sel?.layer) select(null); quiet(pyramid()); draw(); });
 $('chunkLod').addEventListener('change', () => { chunks(); draw(); });
 $('rule').addEventListener('change', () => { remember(); if (S.job) quiet(runJob()); });
 for (const id of ['showGraph', 'showRefs', 'showWorld', 'showChunks', 'showOrder', 'copies'])
@@ -677,16 +822,17 @@ void main(){
   if (r > 1.0) discard;
   o = vec4(vC * vDim * (1.0 - 0.35 * r), 1.0);
 }`;
+// In the class graph a reference is its pose's colour (explore-core's poseColour).
 const EDGE_VS = HEAD + `
-layout(location = 0) in uvec2 aPair; layout(location = 1) in uint aSlots;
+layout(location = 0) in uvec2 aPair; layout(location = 1) in uint aSlots; layout(location = 2) in uint aPose;
 uniform highp sampler2D uPos; uniform sampler2D uCol; uniform usampler2D uFlag;
-uniform float uAlpha; uniform int uSel;
+uniform float uAlpha; uniform int uSel; uniform int uPoseMode; uniform vec3 uPoses[48];
 out vec3 vC;
 void main(){
   vec4 pa = texelFetch(uPos, texOf(aPair.x), 0), pb = texelFetch(uPos, texOf(aPair.y), 0);
   if (pa.w == 0.0 || pb.w == 0.0){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   uint id = gl_VertexID == 0 ? aPair.x : aPair.y;
-  vec3 c = texelFetch(uCol, texOf(id), 0).rgb;
+  vec3 c = uPoseMode == 1 ? uPoses[aPose] : texelFetch(uCol, texOf(id), 0).rgb;
   float a = uAlpha * (0.7 + 0.3 * float(aSlots));
   if (uSel == 1){
     uint fa = texelFetch(uFlag, texOf(aPair.x), 0).r, fb = texelFetch(uFlag, texOf(aPair.y), 0).r;
@@ -707,6 +853,7 @@ void main(){ o = vec4(vC, 1.0); }`;
 const CUBE_VS = HEAD + `
 layout(location = 0) in uint aCell; layout(location = 1) in vec4 aCol; layout(location = 2) in uint aMask;
 uniform vec3 uOrigin; uniform float uCell; uniform int uHide; uniform vec3 uHideLo; uniform vec3 uHideHi;
+uniform vec2 uY;   // y' = y·scale + offset: a pyramid layer's squash, (1, 0) for the world
 out vec3 vC; flat out int vF;
 const vec3 C[24] = vec3[24](
   vec3(1,0,0), vec3(1,1,0), vec3(1,1,1), vec3(1,0,1),
@@ -721,7 +868,8 @@ void main(){
   vec3 lo = uOrigin + vec3(float(aCell & 1023u), float((aCell >> 10u) & 1023u), float(aCell >> 20u)) * uCell, mid = lo + 0.5 * uCell;
   bool gone = ((aMask >> uint(f)) & 1u) == 0u || (uHide == 1 && all(greaterThan(mid, uHideLo)) && all(lessThan(mid, uHideHi)));
   if (gone){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-  gl_Position = uVP * vec4(lo + C[4 * f + k] * uCell, 1.0);
+  vec3 q = lo + C[4 * f + k] * uCell;
+  gl_Position = uVP * vec4(q.x, q.y * uY.x + uY.y, q.z, 1.0);
   vC = aCol.rgb; vF = f;
 }`;
 const CUBE_FS = `#version 300 es
@@ -730,12 +878,12 @@ in vec3 vC; flat in int vF; out vec4 o;
 const float L[6] = float[6](0.78, 0.62, 1.0, 0.45, 0.88, 0.7);
 void main(){ o = vec4(vC * L[vF], 1.0); }`;
 const BOX_VS = HEAD + `
-layout(location = 0) in vec4 aBox; layout(location = 1) in vec4 aCol;
+layout(location = 0) in vec3 aLo; layout(location = 1) in vec4 aCol; layout(location = 2) in vec3 aSize;
 out vec4 vC;
 const int E[24] = int[24](0,1, 2,3, 4,5, 6,7, 0,2, 1,3, 4,6, 5,7, 0,4, 1,5, 2,6, 3,7);
 void main(){
   int c = E[gl_VertexID];
-  gl_Position = uVP * vec4(aBox.xyz + vec3(c & 1, (c >> 1) & 1, (c >> 2) & 1) * aBox.w, 1.0);
+  gl_Position = uVP * vec4(aLo + vec3(c & 1, (c >> 1) & 1, (c >> 2) & 1) * aSize, 1.0);
   vC = aCol;
 }`;
 const LINE_VS = HEAD + `
@@ -758,6 +906,8 @@ in vec4 vC; out vec4 o;
 void main(){ o = vC; }`;
 
 const P = {}, vaos = {}, tex = {}, buffers = new Map();
+const POSE_RGB = new Float32Array(144);
+for (let e = 0; e < 48; e++) POSE_RGB.set(poseColour(e).map(v => v / 255), 3 * e);
 let texH = 1;
 if (gl){
   const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
@@ -768,8 +918,8 @@ if (gl){
     return { p, U: Object.fromEntries(['uVP', ...names].map(n => [n, gl.getUniformLocation(p, n)])) };
   };
   P.node = program(NODE_VS, NODE_FS, ['uPos', 'uCol', 'uFlag', 'uPx', 'uSize', 'uSel']);
-  P.edge = program(EDGE_VS, ADD_FS, ['uPos', 'uCol', 'uFlag', 'uAlpha', 'uSel']);
-  P.cube = program(CUBE_VS, CUBE_FS, ['uOrigin', 'uCell', 'uHide', 'uHideLo', 'uHideHi']);
+  P.edge = program(EDGE_VS, ADD_FS, ['uPos', 'uCol', 'uFlag', 'uAlpha', 'uSel', 'uPoseMode', 'uPoses']);
+  P.cube = program(CUBE_VS, CUBE_FS, ['uOrigin', 'uCell', 'uHide', 'uHideLo', 'uHideHi', 'uY']);
   P.box = program(BOX_VS, ALPHA_FS, []);
   P.line = program(LINE_VS, ALPHA_FS, []);
   P.order = program(ORDER_VS, ALPHA_FS, ['uOrigin', 'uCell', 'uCount']);
@@ -830,7 +980,7 @@ function clearScene(){
 /* ---- the camera --------------------------------------------------------------------------------------
    The scene's ball: the world alone, or the world and the graph above it. */
 let cam = { eye: [0, 0, -3], yaw: 0, pitch: 0 }, radius = 3, pending = 0, drag = null, dirty = true, framed = false;
-const scene = () => on('showGraph') && S.A ? { c: [0, (GRAPH_BASE + GRAPH_HEIGHT - 1) / 2, 0], r: Math.hypot(1.2, (GRAPH_BASE + GRAPH_HEIGHT + 1) / 2, 1.2) } : { c: [0, 0, 0], r: Math.sqrt(3) };
+const scene = () => (on('showGraph') || on('showPyramid')) && S.A ? { c: [0, (GRAPH_BASE + GRAPH_HEIGHT - 1) / 2, 0], r: Math.hypot(1.2, (GRAPH_BASE + GRAPH_HEIGHT + 1) / 2, 1.2) } : { c: [0, 0, 0], r: Math.sqrt(3) };
 const aspect = () => canvas.width / Math.max(1, canvas.height);
 function frame(){
   const { c, r } = scene(), yaw = 0.7 + Math.PI, pitch = -0.3, f = forwardOf(yaw, pitch);
@@ -874,25 +1024,69 @@ function pickAt(px, py){
       const d = (s[0] - px) ** 2 + (s[1] - py) ** 2;
       if (d < bd || (d === bd && s[2] < bw)){ bd = d; bw = s[2]; best = id; }
     }
-    if (best >= 0) return { kind: 'node', id: best };
+    if (best >= 0) return classMode() ? { kind: 'class', cls: A.cls[best], id: best } : { kind: 'node', id: best };
   }
+  // The nearest of the world's cell and each pyramid layer's: a layer is the world
+  // squashed in y, so its ray is the ray unsquashed, with the same t.
+  let near = null;
+  const nearest = (hit, lod, layer) => { if (hit && (!near || hit.t < near.hit.t)) near = { kind: 'cell', hit, lod, layer }; };
+  const { o, d } = rayAt(px, py);
   if (on('showWorld') && S.cells){
-    const { o, d } = rayAt(px, py), s = S.cells.side, half = s / 2;
-    const hit = rayCell(S.view, A.root, A.D, S.cells.lod, o.map(v => (v + 1) * half), d.map(v => v * half));
-    if (hit) return { kind: 'cell', hit, lod: S.cells.lod };
+    const s = S.cells.side, half = s / 2;
+    nearest(rayCell(S.view, A.root, A.D, S.cells.lod, o.map(v => (v + 1) * half), d.map(v => v * half)), S.cells.lod, false);
   }
-  return null;
+  if (on('showPyramid') && S.pyr) for (const c of S.pyr.layers){
+    const [sc, off] = layerOf(c.lod, S.lo, A.D), h = c.side / 2;
+    nearest(rayCell(S.view, A.root, A.D, c.lod, [o[0] + 1, (o[1] - off) / sc + 1, o[2] + 1].map(v => v * h), [d[0] * h, d[1] / sc * h, d[2] * h]), c.lod, true);
+  }
+  return near;
 }
 function pick(px, py){
   const p = pickAt(px, py);
   if (!p) return;
-  if (p.kind === 'node') selectNode(p.id); else selectCell(p.hit, p.lod);
+  if (p.kind === 'class') selectClass(p.cls); else if (p.kind === 'node') selectNode(p.id); else selectCell(p.hit, p.lod, p.layer);
+}
+
+/* ---- the tooltip (§8 Q5): Ctrl held shows what a click would pick ------------------------
+   A pick every pointer move costs about 10 ms over 250,000 dots, so it waits
+   for Ctrl and runs once a frame at most. */
+let pointer = null, tipQueued = false;
+const tip = $('tip');
+function hideTip(){ tip.hidden = true; }
+function tipSoon(){
+  if (tipQueued) return;
+  tipQueued = true;
+  requestAnimationFrame(() => { tipQueued = false; showTip(); });
+}
+function showTip(){
+  const p = pointer && S.A ? pickAt(pointer.x, pointer.y) : null, html = p && tipHtml(p);
+  if (!html){ hideTip(); return; }
+  tip.innerHTML = html; tip.hidden = false;
+  const w = canvas.clientWidth, h = canvas.clientHeight, tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = `${Math.max(4, Math.min(w - tw - 4, pointer.x + 16))}px`;
+  tip.style.top = `${Math.max(4, Math.min(h - th - 4, pointer.y + 16))}px`;
+}
+function tipHtml(p){
+  const A = S.A;
+  if (p.kind === 'node'){
+    const id = p.id, k = A.level[id];
+    return `<b>node #${id}</b> <span class="k">level</span> ${k} (${fmt(2 ** k)}³)<br><span class="k">voxels</span> ${big(A.voxels[id])} · <span class="k">places</span> ${big(A.places[id])}<br><span class="k">refs</span> ${fmt(A.refs[id])} from ${fmt(A.parents[id])} parents`
+      + (A.cls ? `<br><span class="k">class</span> ${A.cls[id]}, pose ${A.pose[id]} (${poseName(A.pose[id])}) · ${S.G.members[A.cls[id]]} copies` : '');
+  }
+  if (p.kind === 'class'){
+    const c = p.cls, G = S.G, k = A.level[G.rep[c]];
+    return `<b>class ${c}</b> <span class="k">level</span> ${k} (${fmt(2 ** k)}³)<br><span class="k">copies here</span> ${G.members[c]} · <span class="k">stabilizer</span> ${A.stab[c]}<br><span class="k">places</span> ${big(G.places[c])} · <span class="k">refs</span> ${fmt(G.refs[c])} from ${fmt(G.parents[c])} classes`;
+  }
+  const { hit, lod, layer } = p, c = layer ? S.pyr.layers.find(l => l.lod === lod) : S.cells, i = cellIndex(c, hit.x, hit.y, hit.z);
+  const colour = i < 0 ? '<span class="k">inside, not on the surface</span>'
+    : c.words ? `<span class="sw" style="background:${rgbCss(word6(c.words[i]))}"></span>${word6(c.words[i]).join(', ')} <span class="k">(six bits a channel)</span>` : '<span class="k">no colour field</span>';
+  return `<b>cell (${hit.x}, ${hit.y}, ${hit.z})</b> <span class="k">at lod</span> ${lod}${layer ? ' <span class="k">(pyramid)</span>' : ''}<br><span class="k">node</span> #${hit.id} · <span class="k">places</span> ${big(A.places[hit.id])}<br>${colour}`;
 }
 
 /* ---- the frame ----------------------------------------------------------------------------------------- */
 let drawn = {};
 function render(){
-  drawn = { nodes: 0, edges: 0, cubes: 0, job: 0, boxes: 0, lines: 0, order: 0 };
+  drawn = { nodes: 0, edges: 0, cubes: 0, job: 0, boxes: 0, lines: 0, order: 0, pyramid: 0 };
   if (!gl) return;
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clearColor(0.027, 0.027, 0.04, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -908,7 +1102,7 @@ function render(){
   const job = S.job && S.sel?.chunk ? S.job : null;
   if (on('showWorld') && vaos.cube.count){
     const U = use(P.cube), s = S.cells.side;
-    gl.uniform3f(U.uOrigin, -1, -1, -1); gl.uniform1f(U.uCell, 2 / s);
+    gl.uniform3f(U.uOrigin, -1, -1, -1); gl.uniform1f(U.uCell, 2 / s); gl.uniform2f(U.uY, 1, 0);
     gl.uniform1i(U.uHide, job ? 1 : 0);
     if (job){ const b = chunkBox(job.lod, ...job.chunk); gl.uniform3f(U.uHideLo, b[0], b[1], b[2]); gl.uniform3f(U.uHideHi, b[0] + b[3], b[1] + b[3], b[2] + b[3]); }
     // The mask is no array here: its generic value, all six faces (context state, so set at each draw).
@@ -918,9 +1112,22 @@ function render(){
   }
   if (job && vaos.job.count){
     const U = use(P.cube), o = job.origin;
-    gl.uniform3f(U.uOrigin, -1 + 2 * o[0] / 2 ** D, -1 + 2 * o[1] / 2 ** D, -1 + 2 * o[2] / 2 ** D); gl.uniform1f(U.uCell, 2 * job.cellSize / 2 ** D); gl.uniform1i(U.uHide, 0);
+    gl.uniform3f(U.uOrigin, -1 + 2 * o[0] / 2 ** D, -1 + 2 * o[1] / 2 ** D, -1 + 2 * o[2] / 2 ** D); gl.uniform1f(U.uCell, 2 * job.cellSize / 2 ** D); gl.uniform1i(U.uHide, 0); gl.uniform2f(U.uY, 1, 0);
     gl.bindVertexArray(vaos.job.vao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, vaos.job.count);
     drawn.job = vaos.job.count;
+  }
+  // The pyramid's layers, each the world at its lod squashed under its level's dots.
+  if (on('showPyramid') && S.pyr){
+    const U = use(P.cube);
+    gl.uniform3f(U.uOrigin, -1, -1, -1); gl.uniform1i(U.uHide, 0);
+    S.pyr.layers.forEach((c, i) => {
+      const v = vaos[`pyr${i}`], [sc, off] = layerOf(c.lod, S.lo, D);
+      if (!v?.count) return;
+      gl.uniform1f(U.uCell, 2 / c.side); gl.uniform2f(U.uY, sc, off);
+      gl.bindVertexArray(v.vao); gl.vertexAttribI4ui(2, 63, 0, 0, 0);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, v.count);
+      drawn.pyramid += v.count;
+    });
   }
   gl.disable(gl.CULL_FACE);
   if (on('showGraph') && vaos.node.count){
@@ -945,9 +1152,11 @@ function render(){
   // References last, added on, depth-tested and not written, so the world hides those behind it.
   if (on('showGraph') && on('showRefs') && vaos.edge.count){
     // Added on, so a dense graph whitens: the slider's share scaled down past 30,000 lines.
-    const U = use(P.edge), a = +$('edgeAlpha').value / 100, dense = Math.min(1, Math.sqrt(30000 / Math.max(1, vaos.edge.count)));
+    // The class graph's lines carry their pose's colour, so they start three times as bright.
+    const U = use(P.edge), a = Math.min(1, (classMode() ? 3 : 1) * +$('edgeAlpha').value / 100), dense = Math.min(1, Math.sqrt(30000 / Math.max(1, vaos.edge.count)));
     textures(U);
     gl.uniform1f(U.uAlpha, 0.8 * a * a * dense); gl.uniform1i(U.uSel, S.selOn ? 1 : 0);
+    gl.uniform1i(U.uPoseMode, classMode() ? 1 : 0); gl.uniform3fv(U.uPoses, POSE_RGB);
     gl.depthMask(false); gl.blendFunc(gl.ONE, gl.ONE);
     gl.bindVertexArray(vaos.edge.vao); gl.drawArraysInstanced(gl.LINES, 0, 2, vaos.edge.count);
     drawn.edges = vaos.edge.count;
@@ -979,6 +1188,9 @@ canvas.addEventListener('pointerdown', e => {
   drag = { id: e.pointerId, mode, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, button: e.button };
 });
 canvas.addEventListener('pointermove', e => {
+  const r = canvas.getBoundingClientRect();
+  pointer = { x: e.clientX - r.left, y: e.clientY - r.top };
+  if (e.ctrlKey && !drag) tipSoon(); else if (!e.ctrlKey) hideTip();
   if (!drag || e.pointerId !== drag.id) return;
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y, h = canvas.clientHeight;
   drag.x = e.clientX; drag.y = e.clientY;
@@ -996,6 +1208,10 @@ const release = e => {
 };
 canvas.addEventListener('pointerup', release); canvas.addEventListener('pointercancel', release);
 canvas.addEventListener('wheel', e => { e.preventDefault(); pending = addPending(pending, wheelLog(e.deltaY, e.deltaMode, innerHeight)); }, { passive: false });
+canvas.addEventListener('pointerleave', () => { pointer = null; hideTip(); });
+addEventListener('keydown', e => { if (e.key === 'Control' && pointer) tipSoon(); });
+addEventListener('keyup', e => { if (e.key === 'Control') hideTip(); });
+addEventListener('blur', hideTip);
 addEventListener('keydown', e => {
   if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLInputElement || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === 'f' || e.key === 'F'){ frame(); e.preventDefault(); }
@@ -1013,17 +1229,26 @@ window.__explore = {
       D: A?.D ?? null, root: A?.root ?? null, nodes: A?.nodes ?? null, field: A?.field ?? null, colourStatus: A?.colourStatus ?? null,
       levels: A && { nodes: [...A.levelNodes], cells: [...A.levelCells], edges: [...A.levelEdges], refs: [...A.levelRefs], classes: A.levelClasses && [...A.levelClasses] },
       graph: A && { lo: S.lo, layout: $('layout').value, nodes: S.shownIds?.length ?? 0, edges: S.edges?.count ?? 0 },
+      classes: classMode() ? { shown: S.shownIds.length, edges: S.edges.count, poses: [...S.edges.poses] } : null,
+      pyramid: S.pyr && { lo: S.pyr.lo, lods: S.pyr.layers.map(c => c.lod), shown: S.pyr.layers.map(c => c.shown), words: S.pyr.layers.map(c => !!c.words) },
+      tip: tip.hidden ? null : tip.textContent,
       cells: S.cells && { lod: S.cells.lod, total: S.cells.total, shown: S.cells.shown, words: !!S.cells.words },
       chunks: S.chunks && { lod: S.chunks.lod, total: S.chunks.total, distinct: S.chunks.distinct, over: S.chunks.over },
       sel: !sel ? null : sel.kind === 'node'
         ? { kind: 'node', id: sel.id, places: sel.places.total, boxed: sel.places.list.length / 3, parents: sel.parents, children: sel.children, words: sel.words && [...sel.words] }
-        : { kind: 'cell', lod: sel.lod, x: sel.x, y: sel.y, z: sel.z, id: sel.id, path: sel.path, chunk: sel.chunk && { lod: sel.chunk.lod, at: [sel.chunk.cx, sel.chunk.cy, sel.chunk.cz], stamp: sel.chunk.stamp.map(s => s.id) } },
+        : sel.kind === 'class'
+        ? { kind: 'class', cls: sel.cls, members: sel.members, places: sel.places.total, boxed: sel.places.list.length / 3, who: [...sel.places.who], parents: sel.parents, children: sel.children }
+        : { kind: 'cell', lod: sel.lod, x: sel.x, y: sel.y, z: sel.z, id: sel.id, layer: sel.layer, path: sel.path, chunk: sel.chunk && { lod: sel.chunk.lod, at: [sel.chunk.cx, sel.chunk.cy, sel.chunk.cz], stamp: sel.chunk.stamp.map(s => s.id) } },
       job: S.job && { count: S.job.count, quads: S.job.quads, borderCount: S.job.borderCount, occupied: S.job.occupied, lodRule: S.job.lodRule, words: S.job.attrs ? [...S.job.attrs] : null },
       boxes: S.boxCount ?? 0, lines: (S.lineCount ?? 0) / 2,
       drawn: (render(), drawn), status: $('status').textContent,
     };
   },
-  idle: () => !!S.A && !S.busy && !!S.cells,
+  idle: () => !!S.A && !S.busy && !!S.cells && (!on('showPyramid') || !!S.pyr),
+  // The ray a click at (px, py) makes in a pyramid layer's cells (what pick hands rayCell for it).
+  layerRay: (px, py, lod) => { const { o, d } = rayAt(px, py), [sc, off] = layerOf(lod, S.lo, S.A.D), h = 2 ** (S.A.D - lod) / 2; return { o: [o[0] + 1, (o[1] - off) / sc + 1, o[2] + 1].map(v => v * h), d: [d[0] * h, d[1] / sc * h, d[2] * h] }; },
+  // A pyramid layer's cell (x, y, z) at lod: its centre in CSS pixels, for a real click.
+  layerCellOf: (lod, x, y, z) => { const s = 2 * 2 ** lod / 2 ** S.A.D, [sc, off] = layerOf(lod, S.lo, S.A.D); return screenOf([-1 + (x + 0.5) * s, (-1 + (y + 0.5) * s) * sc + off, -1 + (z + 0.5) * s]); },
   // A node's colour from the field at its first place (rgb8), once asked for.
   nodeField: id => S.nodeField ? S.nodeField[id] : null,
   // A node's dot in CSS pixels on the canvas, for a real click.
@@ -1032,6 +1257,8 @@ window.__explore = {
   // The ray a click at (px, py) makes, in the cells of the shown lod (what pick hands rayCell).
   cellRay: (px, py) => { const { o, d } = rayAt(px, py), half = S.cells.side / 2; return { o: o.map(v => (v + 1) * half), d: d.map(v => v * half), lod: S.cells.lod }; },
   camera: () => ({ ...cam, radius }),
+  // The class with the most copies at level ≥ min, for the shots script.
+  mostCopies: (min = 0) => { const G = S.G; if (!G) return null; let best = -1; for (const c of G.reps) if (S.A.level[G.rep[c]] >= min && (best < 0 || G.members[c] > G.members[best])) best = c; return best < 0 ? null : { cls: best, rep: G.rep[best], members: G.members[best] }; },
   frame,
   // Pixels that aren't the background, after a frame drawn now.
   lit: () => { if (!gl) return 0; render(); const w = canvas.width, h = canvas.height, px = new Uint8Array(4 * w * h); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px); let n = 0; for (let i = 0; i < px.length; i += 4) n += px[i] > 12 || px[i + 1] > 12 || px[i + 2] > 16; return n; },

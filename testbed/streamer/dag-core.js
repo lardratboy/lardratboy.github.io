@@ -552,6 +552,10 @@ export function createClasses(store, H){
     cls: id => { if (id >= done) throw new Error(`classes: id ${id} not classified, call update()`); return C(id); },
     pose: id => { if (id >= done) throw new Error(`classes: id ${id} not classified, call update()`); return P(id); },
     stabOrder: c => stabOrder[c],
+    // The smallest element of the coset x·Stab(rep c): the label an SSVDAG
+    // edge to class c carries when x turns the rep into the child (the
+    // explorer's class graph, docs/explore.md §8 Q2).
+    normPose: (c, x) => norm[c*48 + x],
     // |Stab(n)| = |Stab(rep)|, since the two are conjugate.
     stabOfNode: id => stabOrder[C(id)],
     get size(){ return classes.size; }

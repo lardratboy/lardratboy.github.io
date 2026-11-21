@@ -35,7 +35,7 @@
    census is: ids are children-first, so walking them down from the top sees
    every parent before its children, and walking up sees every child before
    its parents. */
-import { EMPTY, FULL, FIRST_NODE, storeView, createClasses, OH48 } from '../dag-core.js';
+import { EMPTY, FULL, FIRST_NODE, storeView, createClasses, OH48, MUL, INV, OCT, applyG } from '../dag-core.js';
 import { CHUNK_LEVELS, nodeAt } from '../chunk-core.js';
 import { stampOf, SIDES } from '../stream-core.js';
 
@@ -81,7 +81,17 @@ const childAt = (keys, id, o) => keys[(id - FIRST_NODE) * 9 + 1 + o];
      levelEdges   distinct (parent, child) pairs whose parent is at level k
      levelRefs    Σ refs into level k
      cls, levelClasses  Oh classes (createClasses, OH48), when asked and the
-                  world has at most CLASS_LIMIT nodes; null otherwise */
+                  world has at most CLASS_LIMIT nodes; null otherwise
+     pose         per id, the element that turns its class's representative
+                  into it (createClasses' pose: n = pose · rep)
+     classCount, stab, ckids, cpose  per class: its stabilizer's order, and
+                  the SSVDAG node, the representative's eight children as
+                  (class, pose) in the rep's own octants (ckids −1 for EMPTY),
+                  the pose normalized to the least of its coset, so it's the
+                  same whichever member it was read from (docs/explore.md
+                  §8 Q2). Read off a class's first member m, with t = pose(m):
+                  rep = t⁻¹·m, so rep's child at octant t⁻¹(o) is
+                  t⁻¹·pose(c)·rep(class c), c = m's child at o. */
 export function analyse(keys, root, D, { classes = true, classLimit = CLASS_LIMIT } = {}){
   const n = keys.length / 9, top = n + FIRST_NODE;
   const level = new Uint8Array(top), refs = new Uint32Array(top), parents = new Uint32Array(top);
@@ -129,20 +139,33 @@ export function analyse(keys, root, D, { classes = true, classLimit = CLASS_LIMI
   const byPlace = (a, b) => mortonLess(px[a], py[a], pz[a], px[b], py[b], pz[b]) ? -1 : 1;
   for (let k = 0; k <= D; k++) order.subarray(levelStart[k], levelStart[k + 1]).sort(byPlace);
 
-  let cls = null, levelClasses = null;
+  let cls = null, levelClasses = null, pose = null, classCount = 0, stab = null, ckids = null, cpose = null;
   if (classes && n <= classLimit){
     const C = createClasses(storeView({ keys }), OH48);
-    cls = new Int32Array(top);
+    classCount = C.size;
+    cls = new Int32Array(top); pose = new Uint8Array(top);
     levelClasses = new Uint32Array(D + 1);
-    const seen = new Set();
+    stab = new Uint8Array(classCount); ckids = new Int32Array(8 * classCount).fill(-1); cpose = new Uint8Array(8 * classCount);
+    const seen = new Uint8Array(classCount);
     for (let i = 0; i < order.length; i++){
-      const id = order[i];
-      cls[id] = C.cls(id);
-      if (!seen.has(cls[id])){ seen.add(cls[id]); levelClasses[level[id]]++; }
+      const id = order[i], c = cls[id] = C.cls(id);
+      pose[id] = C.pose(id);
+      if (seen[c]) continue;
+      seen[c] = 1; levelClasses[level[id]]++; stab[c] = C.stabOrder(c);
+      if (id < FIRST_NODE) continue;
+      const ti = INV[pose[id]], at = (id - FIRST_NODE) * 9 + 1;
+      for (let o = 0; o < 8; o++){
+        const ch = keys[at + o];
+        if (ch === EMPTY) continue;
+        const cc = C.cls(ch), o2 = OCT[ti * 8 + o];
+        ckids[8 * c + o2] = cc;
+        cpose[8 * c + o2] = C.normPose(cc, MUL[ti * 48 + C.pose(ch)]);
+      }
     }
   }
   return { D, root, top, nodes: reached, level, refs, parents, places, voxels, px, py, pz,
-           order, levelStart, levelNodes, levelCells, levelEdges, levelRefs, cls, levelClasses };
+           order, levelStart, levelNodes, levelCells, levelEdges, levelRefs, cls, levelClasses,
+           pose, classCount, stab, ckids, cpose };
 }
 
 /* The lowest level the graph can show within a budget, every level above it
@@ -168,14 +191,18 @@ export const graphY = (k, lo, hi) => GRAPH_BASE + (hi === lo ? 0.5 : (k - lo) / 
               stays local and long where it's reused far away;
      'grid'   a level's nodes on a square grid, row by row (back and forth,
               so neighbours in Morton order stay neighbours), every level the
-              same width: the top levels sparse, the bottom dense. */
-export function layoutOf(A, { mode = 'place', lo = 0, hi = A.D } = {}){
+              same width: the top levels sparse, the bottom dense.
+   `only` (a flag an id) lays out those ids alone, in the same order: the
+   class graph's representatives, one dot a class. */
+export function layoutOf(A, { mode = 'place', lo = 0, hi = A.D, only = null } = {}){
   const pos = new Float32Array(4 * A.top), S = 2 ** A.D;
   for (let k = lo; k <= hi; k++){
-    const a = A.levelStart[k], m = A.levelNodes[k], y = graphY(k, lo, hi);
+    let ids = A.order.subarray(A.levelStart[k], A.levelStart[k + 1]);
+    if (only) ids = ids.filter(id => only[id]);
+    const m = ids.length, y = graphY(k, lo, hi);
     const half = k === 0 ? 0.5 : 2 ** (k - 1), s = Math.ceil(Math.sqrt(m)), rows = Math.ceil(m / s);
     for (let i = 0; i < m; i++){
-      const id = A.order[a + i], p = 4 * id;
+      const id = ids[i], p = 4 * id;
       if (mode === 'grid'){
         const row = Math.floor(i / s), c = i % s, col = row & 1 ? s - 1 - c : c;
         pos[p] = 2 * (col + 0.5 - s / 2) / s;
@@ -257,6 +284,142 @@ export function relativesOf(A, keys, target){
     else if (anc) flags[id] |= 8;
   }
   return { flags, children, parents };
+}
+
+/* ---- the class graph (SSVDAG's) ---------------------------------------------------
+   One dot a class: the 48 turned and mirrored copies of a node are one node
+   of the labelled DAG, and each of its references carries the pose that
+   turns the child class's representative into the child (docs/explore.md
+   §8 Q2, asked for 2026-11-21). A class's dot is its first member's (first
+   in `order`: the member whose first place is the class's first place), so
+   the layouts and the textures stay indexed by node id.
+     rep[c]        the class's first member's id; isRep a flag an id
+     members[c]    how many of its members the world holds (at most 48);
+                   memberIds from memberStart[c], in order
+     places[c]     Σ its members' places
+     refs[c]       the class reps' slots that name it; parents[c] the distinct
+                   classes that do
+     reps          the class numbers in order (by level, then Morton by first
+                   place), levelStart into it a level
+     levelEdges[k] distinct (child class, pose) pairs of level-k classes:
+                   the class graph's references
+     poseCount[e]  slots labelled e, over every class */
+export function classGraph(A){
+  if (!A.cls) return null;
+  const K = A.classCount, D = A.D;
+  const rep = new Int32Array(K).fill(-1), members = new Uint8Array(K), places = new Float64Array(K);
+  const isRep = new Uint8Array(A.top), reps = [];
+  for (let i = 0; i < A.order.length; i++){
+    const id = A.order[i], c = A.cls[id];
+    members[c]++; places[c] += A.places[id];
+    if (rep[c] < 0){ rep[c] = id; isRep[id] = 1; reps.push(c); }
+  }
+  const memberStart = new Uint32Array(K + 1);
+  for (let c = 0; c < K; c++) memberStart[c + 1] = memberStart[c] + members[c];
+  const memberIds = new Uint32Array(A.order.length), fill = memberStart.slice(0, K);
+  for (let i = 0; i < A.order.length; i++){ const id = A.order[i]; memberIds[fill[A.cls[id]]++] = id; }
+  const levelStart = new Uint32Array(D + 2);
+  for (const c of reps) levelStart[A.level[rep[c]] + 1]++;
+  for (let k = 0; k <= D; k++) levelStart[k + 1] += levelStart[k];
+  const refs = new Uint32Array(K), parents = new Uint32Array(K), levelEdges = new Float64Array(D + 1), poseCount = new Float64Array(48);
+  for (const c of reps){
+    const k = A.level[rep[c]];
+    for (let o = 0; o < 8; o++){
+      const cc = A.ckids[8 * c + o];
+      if (cc < 0) continue;
+      const e = A.cpose[8 * c + o];
+      refs[cc]++; poseCount[e]++;
+      let pair = false, parent = false;
+      for (let j = 0; j < o; j++) if (A.ckids[8 * c + j] === cc){ parent = true; if (A.cpose[8 * c + j] === e) pair = true; }
+      if (!pair) levelEdges[k]++;
+      if (!parent) parents[cc]++;
+    }
+  }
+  return { K, rep, isRep, members, memberStart, memberIds, places, refs, parents, reps: Uint32Array.from(reps), levelStart, levelEdges, poseCount };
+}
+/* The class graph's references with the parent's level in (lo, hi]: one a
+   distinct (parent class, child class, pose), as two rep ids, how many of
+   the parent's octants it stands for, and the pose. */
+export function classEdgesOf(A, G, lo, hi){
+  let E = 0;
+  for (let k = lo + 1; k <= hi; k++) E += G.levelEdges[k];
+  const pairs = new Uint32Array(2 * E), slots = new Uint8Array(E), poses = new Uint8Array(E);
+  let e = 0;
+  for (let i = G.levelStart[lo + 1]; i < G.levelStart[hi + 1]; i++){
+    const c = G.reps[i];
+    for (let o = 0; o < 8; o++){
+      const cc = A.ckids[8 * c + o], p = A.cpose[8 * c + o];
+      if (cc < 0) continue;
+      let seen = false, s = 1;
+      for (let j = 0; j < o; j++) if (A.ckids[8 * c + j] === cc && A.cpose[8 * c + j] === p){ seen = true; break; }
+      if (seen) continue;
+      for (let j = o + 1; j < 8; j++) if (A.ckids[8 * c + j] === cc && A.cpose[8 * c + j] === p) s++;
+      pairs[2 * e] = G.rep[c]; pairs[2 * e + 1] = G.rep[cc]; slots[e] = s; poses[e] = p; e++;
+    }
+  }
+  return { pairs, slots, poses, count: e };
+}
+/* A class's neighbours in the class graph, as relativesOf's flags on the
+   rep ids (1 it, 2 a parent, 4 a child, 8 an ancestor, 16 a descendant),
+   its children octant by octant in its rep's frame ({ octant, cls, id, pose }),
+   and its parents' rep ids in order. A reference goes down one level, so
+   descendants come by a sweep down the levels and ancestors by one up. */
+export function classRelativesOf(A, G, target){
+  const flags = new Uint8Array(A.top), mark = new Uint8Array(G.K), children = [], parents = [];
+  flags[G.rep[target]] = 1;
+  for (let o = 0; o < 8; o++){
+    const cc = A.ckids[8 * target + o];
+    if (cc >= 0){ children.push({ octant: o, cls: cc, id: G.rep[cc], pose: A.cpose[8 * target + o] }); mark[cc] |= 4 | 16; }
+  }
+  for (let i = G.reps.length - 1; i >= 0; i--){
+    const c = G.reps[i];
+    if (!(mark[c] & 16)) continue;
+    for (let o = 0; o < 8; o++){ const cc = A.ckids[8 * c + o]; if (cc >= 0) mark[cc] |= 16; }
+  }
+  for (let i = 0; i < G.reps.length; i++){
+    const c = G.reps[i];
+    if (c === target) continue;
+    let parent = false, anc = false;
+    for (let o = 0; o < 8; o++){
+      const cc = A.ckids[8 * c + o];
+      if (cc === target) parent = true;
+      else if (cc >= 0 && mark[cc] & 8) anc = true;
+    }
+    if (parent){ mark[c] |= 2 | 8; parents.push(G.rep[c]); }
+    else if (anc) mark[c] |= 8;
+  }
+  for (const c of G.reps) if (mark[c]) flags[G.rep[c]] |= mark[c];
+  return { flags, children, parents };
+}
+/* A class's places: each member's (placesOf, so Morton order within a
+   member), members in order, `max` in all; `who` the member each place is. */
+export function classPlacesOf(A, keys, G, c, max = PLACE_LIST){
+  const n = Math.min(max, G.places[c]), list = new Uint32Array(3 * n), who = new Uint32Array(n);
+  let got = 0;
+  for (let i = G.memberStart[c]; i < G.memberStart[c + 1] && got < n; i++){
+    const m = G.memberIds[i], P = placesOf(A, keys, m, n - got);
+    list.set(P.list, 3 * got); who.fill(m, got, got + P.list.length / 3);
+    got += P.list.length / 3;
+  }
+  return { total: G.places[c], level: A.level[G.rep[c]], list, who };
+}
+
+/* ---- the 48 poses, for labels -----------------------------------------------------
+   A pose e sends (x, y, z) to applyG's signed permutation: poseName says
+   where, as the turned frame's axes ("x,−z,y"); poseDet is +1 for a
+   rotation and −1 for a mirror. poseColour: the identity white, the rest
+   a hue each, mirrors darker, so a class graph's lines read by pose. */
+const AXIS = ['x', 'y', 'z'];
+export function poseName(e){
+  return applyG([1, 2, 3], e).map(v => (v < 0 ? '−' : '') + AXIS[Math.abs(v) - 1]).join(',');
+}
+export function poseDet(e){
+  const m = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].map(v => applyG(v, e));
+  return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+}
+export function poseColour(e){
+  if (e === 0) return [235, 235, 235];
+  return hsl(((e >> 3) * 8 + (e & 7)) / 48, 0.78, poseDet(e) > 0 ? 0.62 : 0.4);
 }
 
 /* ---- places ----------------------------------------------------------------------
@@ -343,6 +506,38 @@ export function cellsAt(A, keys, lod){
 export function viewLod(A){
   for (let lod = Math.max(0, A.D - Math.log2(MAX_SIDE)); lod <= A.D; lod++) if (A.levelCells[lod] <= CELL_BUDGET) return lod;
   return A.D;
+}
+
+/* Where a cell (x, y, z) is in cellsAt's surface list, or −1: the list is in
+   Morton order, so a binary search by mortonLess (the Ctrl-held tooltip's
+   colour word). */
+export function cellIndex(c, x, y, z){
+  let lo = 0, hi = c.shown - 1;
+  while (lo <= hi){
+    const mid = (lo + hi) >> 1, p = c.xyz[mid], a = p & 1023, b = p >> 10 & 1023, d = p >> 20;
+    if (a === x && b === y && d === z) return mid;
+    if (mortonLess(a, b, d, x, y, z)) lo = mid + 1; else hi = mid - 1;
+  }
+  return -1;
+}
+
+/* ---- the colour pyramid (docs/explore.md §8 Q4) ------------------------------------------
+   The world at each lod of the graph's range, in the field's words (what a
+   coarse lod draws), each squashed into a slab under its level's layer of
+   dots, so level k's nodes sit over lod k's cells. pyramidLods: the lods in
+   [lo, D] the page can walk and draw, a layer at most PYRAMID_LAYER cells.
+   layerOf: the slab's map from the world's y ∈ [−1, 1], y' = y·scale + offset,
+   with its top a little under the layer's dots and its bottom above the
+   layer below's (and above the world's top). */
+export const PYRAMID_LAYER = 1000000;
+export function pyramidLods(A, lo, layer = PYRAMID_LAYER){
+  const out = [];
+  for (let k = lo; k <= A.D; k++) if (2 ** (A.D - k) <= MAX_SIDE && A.levelCells[k] <= layer) out.push(k);
+  return out;
+}
+export function layerOf(k, lo, hi){
+  const gap = Math.min(hi === lo ? GRAPH_HEIGHT : GRAPH_HEIGHT / (hi - lo), 0.5), h = 0.55 * gap, top = graphY(k, lo, hi) - 0.12 * gap;
+  return [h / 2, top - h / 2];
 }
 
 /* The first occupied cell at a lod along a ray, in cell coordinates
