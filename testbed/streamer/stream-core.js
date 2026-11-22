@@ -1045,6 +1045,66 @@ export function clearance(world, eye, budget = 4096){
   return { d: Infinity, exact: true };
 }
 
+/* How deep in rock the eye is: the distance to the nearest point that isn't
+   solid, an empty voxel or anywhere outside the world (2026-11-21). The
+   other side of clearance: clearance is 0 all through a solid, so the fly
+   speed it drove sat on its floor, 2 voxels a second, everywhere inside
+   one. You can't see that you're in rock (a solid's inside has no faces),
+   so the user met it as "slow zones" that only walking cured, because the
+   walker settles up out of rock. With this the fly keys' scale is the
+   distance to the surface on whichever side of it the eye is, which is
+   1-Lipschitz, so the speed never jumps.
+   The same best-first search as clearance, over the nodes with any air in
+   them: a solid node is skipped whole (the solid node of a level is eight
+   copies of the one below, so `solid` walks child 0 down, memoized per call),
+   an empty child is an answer, and the world's walls are one more answer.
+   0 when the eye is in air or outside; a lower bound when the budget runs out. */
+export function solidDepth(world, eye, budget = 4096){
+  const { store, root, D } = world, side = 2 ** D;
+  let wall = Infinity;
+  for (let a = 0; a < 3; a++) wall = Math.min(wall, eye[a], side - eye[a]);
+  if (!(wall > 0) || root === EMPTY) return { d: 0, exact: true };
+  const memo = new Map();
+  const solid = (id, k) => {
+    if (k === 0) return id !== EMPTY;
+    let s = memo.get(id);
+    if (s === undefined){
+      const c = store.child(id, 0);
+      s = c !== EMPTY;
+      for (let o = 1; s && o < 8; o++) if (store.child(id, o) !== c) s = false;
+      s = s && solid(c, k - 1);
+      memo.set(id, s);
+    }
+    return s;
+  };
+  if (solid(root, D)) return { d: wall, exact: true };
+  const box = (lo, size) => {
+    let d2 = 0;
+    for (let a = 0; a < 3; a++){ const v = eye[a], d = v < lo[a] ? lo[a] - v : v > lo[a] + size ? v - lo[a] - size : 0; d2 += d * d; }
+    return Math.sqrt(d2);
+  };
+  const heap = [{ id: root, k: D, lo: [0, 0, 0], d: 0 }];
+  const up = i => { while (i > 0){ const p = (i - 1) >> 1; if (heap[p].d <= heap[i].d) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
+  const down = i => { for (;;){ const l = 2 * i + 1, r = l + 1; let m = i;
+    if (l < heap.length && heap[l].d < heap[m].d) m = l; if (r < heap.length && heap[r].d < heap[m].d) m = r;
+    if (m === i) return; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } };
+  for (let n = 0; heap.length; n++){
+    const top = heap[0], last = heap.pop();
+    if (heap.length){ heap[0] = last; down(0); }
+    if (top.d >= wall) return { d: wall, exact: true };
+    if (top.id === EMPTY) return { d: top.d, exact: true };
+    if (n >= budget) return { d: top.d, exact: false };
+    const h = 2 ** (top.k - 1);
+    for (let o = 0; o < 8; o++){
+      const id = store.child(top.id, o);
+      if (id !== EMPTY && solid(id, top.k - 1)) continue;
+      const lo = [top.lo[0] + (o & 1) * h, top.lo[1] + (o >> 1 & 1) * h, top.lo[2] + (o >> 2) * h];
+      heap.push({ id, k: top.k - 1, lo, d: box(lo, h) }); up(heap.length - 1);
+    }
+  }
+  return { d: wall, exact: true };
+}
+
 /* ---- 4. the job ------------------------------------------------------------
    What a worker holds: a snapshot of the DAG and two arrays over its ids,
    copied once per world (decision 9). worldSnapshot builds it on the main

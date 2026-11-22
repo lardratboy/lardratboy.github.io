@@ -342,8 +342,8 @@ import { createOneLog, createOneTable, replayLog } from './log-core.js';
 import * as gizmo from './gizmo-core.js';
 import * as camera from './camera-core.js';
 import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
-import { createWorld, createStreamer, worldSnapshot, createTailer, createJobRunner, keyOf, forestKey, DEFAULTS, clearance as clearanceOf } from './stream-core.js';
-import { aimAt, aimInAir, pick, boxOf, boxEdges, reachOf, createRepeat, PALETTE, MAX_BLOCK_LEVEL, AIR_PER_SIDE, BREAK } from './edit-core.js';
+import { createWorld, createStreamer, worldSnapshot, createTailer, createJobRunner, keyOf, forestKey, DEFAULTS, clearance as clearanceOf, solidDepth } from './stream-core.js';
+import { aimAt, aimInAir, pick, leaveSolid, boxOf, boxEdges, reachOf, createRepeat, PALETTE, MAX_BLOCK_LEVEL, AIR_PER_SIDE, BREAK } from './edit-core.js';
 import { colourOf } from './colours.js';
 import { StreamPool } from './stream-pool.js';
 import { GLSL_RAY, GLSL_RAY_ATTR, TREE_TEXELS, TREE_W, BRICK_ROW } from './ray-glsl.js';
@@ -2864,6 +2864,22 @@ function mul4(A, B){
    clearance, a budgeted best-first search of the DAG; a lower bound when
    the budget runs out). */
 function clearance(){ return W?.universe ? universeClearance(cam.eye) : clearanceOf(streamer.S.world, cam.eye, 2048).d; }
+/* The other side (2026-11-21): how deep in rock the eye is, 0 in air (stream-core's
+   solidDepth). Clearance is 0 all through a solid, so the fly keys crawled at their
+   floor anywhere inside one, and a solid's inside draws nothing to say you're in it:
+   the user's "slow zones", which C twice cured because the walker settles up out of
+   rock. A universe asks the instances whose cube holds the eye (content boxes don't
+   overlap, so at most one is solid there), each in its own frame. */
+function depthHere(){
+  if (!W) return 0;
+  if (!W.universe) return solidDepth(streamer.S.world, cam.eye, 2048).d;
+  let best = 0;
+  for (const inst of W.universe.instances){
+    if ([0, 1, 2].some(a => cam.eye[a] < inst.cube.lo[a] || cam.eye[a] > inst.cube.hi[a])) continue;
+    best = Math.max(best, solidDepth(W.worlds.get(inst.world), toLocal(inst.frame, cam.eye), 2048).d * inst.frame.k);
+  }
+  return best;
+}
 /* A universe's (step 3): the nearest voxel of any instance, each asked in its own
    world's frame (the eye by toLocal, the distance back times 2^scale, which a turn
    doesn't change), nearest cube first, and stopping at the first cube farther than
@@ -2882,10 +2898,10 @@ function universeClearance(eye){
 /* The first voxel a ray meets in a universe: pick (edit-core) in every instance,
    the ray mapped into its world (toLocal, dirToLocal), so each hit's t is the
    universe's, and the nearest wins. The orbit camera's target (orbitRadius). */
-function pickUniverse(o, d){
+function pickUniverse(o, d, { tMin = 0 } = {}){
   let best = null;
   for (const inst of W.universe.instances){
-    const w = W.worlds.get(inst.world), hit = pick(w.store, w.root, w.D, toLocal(inst.frame, o), dirToLocal(inst.frame, d));
+    const w = W.worlds.get(inst.world), hit = pick(w.store, w.root, w.D, toLocal(inst.frame, o), dirToLocal(inst.frame, d), { tMin });
     if (hit && (!best || hit.t < best.t)) best = { ...hit, inst };
   }
   return best;
@@ -3015,9 +3031,28 @@ addEventListener('blur', () => keys.clear());
    The wheel was the fly speed. That's alt-wheel now, as it was in edit mode. */
 const orbitCam = { radius: null, scale: 2, seen: '', pending: 0, pointers: new Map() };
 const camKey = () => `${cam.eye[0]},${cam.eye[1]},${cam.eye[2]},${cam.yaw},${cam.pitch}`;
+/* What the middle of the view is on. From inside rock the pick hits the voxel the eye
+   is in, at t = 0 (axis −1), and the radius was its floor of half a voxel: a pan the
+   width of the screen moved the eye half a voxel, and orbits turned in place
+   (2026-11-21, docs/camera.md §7). What you see there is the first surface past the
+   rock (its own faces there point away and are culled), so the pick starts where the
+   ray leaves rock (edit-core's leaveSolid). In a universe, the instance the eye is in
+   rock in says where, in its own frame (dirToLocal keeps the universe's t). */
+function centreHit(){
+  const o = cam.eye, d = fwd();
+  if (W.universe){
+    const hit = pickUniverse(o, d);
+    if (!hit || hit.axis >= 0) return hit;
+    const w = W.worlds.get(hit.inst.world), out = leaveSolid(w.store, w.root, w.D, toLocal(hit.inst.frame, o), dirToLocal(hit.inst.frame, d)) ?? 0;
+    return pickUniverse(o, d, { tMin: out });
+  }
+  const root = W.edit ? W.edit.log.root : W.root, hit = pick(W.store, root, W.D, o, d);
+  if (!hit || hit.axis >= 0) return hit;
+  return pick(W.store, root, W.D, o, d, { tMin: leaveSolid(W.store, root, W.D, o, d) ?? 0 });
+}
 function orbitRadius(){
   if (orbitCam.radius !== null && orbitCam.seen === camKey()) return orbitCam.radius;
-  const hit = !W ? null : W.universe ? pickUniverse(cam.eye, fwd()) : pick(W.store, W.edit ? W.edit.log.root : W.root, W.D, cam.eye, fwd());
+  const hit = W ? centreHit() : null;
   orbitCam.radius = hit ? Math.max(hit.t, 0.5) : orbitCam.radius ?? Math.max(16, Math.min(4 * (W?.side ?? 1024), view.clear || 0));
   orbitCam.scale = W ? flySpeed() / cam.speedMul : 2;
   orbitCam.seen = camKey();
@@ -3040,7 +3075,10 @@ function cameraBy(mode, dx, dy){
 }
 const dollyBy = s => { if (walk.on) return; orbitRadius(); orbitCam.pending = camera.addPending(orbitCam.pending, s); };
 // The fly keys' speed, voxels a second: the world's local scale (§9.3) at alt-wheel's multiple.
-const flySpeed = () => Math.min(W.side / 3, Math.max(2, view.clear)) * cam.speedMul;
+// The scale is the distance to the surface on whichever side the eye is: the clearance in
+// air, the depth in rock (depthHere), so it's 1-Lipschitz and never jumps.
+const flyScale = () => view.clear > 0 ? view.clear : depthHere();
+const flySpeed = () => Math.min(W.side / 3, Math.max(2, flyScale())) * cam.speedMul;
 const pushThreshold = () => 0.5 * orbitCam.scale * cam.speedMul;
 // A frame of what the wheel asked for. Anything else moving the camera drops the rest.
 function cameraEase(dt){
@@ -4329,7 +4367,7 @@ function drawOutline(w, h){
 // distance at the middle of the view (an odd-sized frame, so its middle pixel's ray is fwd()).
 window.__camera = {
   state: () => ({ eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch, radius: orbitCam.radius, held: orbitCam.seen === camKey(), pending: orbitCam.pending,
-                  threshold: pushThreshold(), speed: cam.speedMul, height: innerHeight, width: innerWidth, pointers: orbitCam.pointers.size }),
+                  threshold: pushThreshold(), speed: cam.speedMul, fly: W ? flySpeed() : 0, clear: view.clear, depth: view.depth, height: innerHeight, width: innerWidth, pointers: orbitCam.pointers.size }),
   centre: (n = 65) => { const d = renderDistances(n, n, 'raster'); return d[(n * n - 1) / 2]; },
 };
 window.__edit = {
@@ -4601,6 +4639,15 @@ function setBuilding(text, fraction, fresh = false){
    than they fly, a simulated eye overlapped 78 to 111 actor-ticks in 20 s
    without it and none with it (docs/actors-log.md, step 3b). Spawns and
    rescues avoid it too when they can.
+   **Wider, and further off** (asked for 2026-11-21: "crowding the player's
+   view too often … stay within a few dozen chunks … about half a chunk
+   away"): LEASH 48 → 96, a box of 3 × 3 × 3 chunks round the eye, and
+   SPACE 16 → 32, half a chunk. The wander carries a flier to the leash's
+   face and leaves it there, so they sit near the box's edge, not spread
+   through it: with the eye still over flat ground (100 fliers, 20 s,
+   docs/actors-log.md "More room") the mean distance went from 59 voxels to 105,
+   the nearest from 17 to 34, and the share in a 0.6 rad cone ahead from 6.8%
+   to 4.2%, none of them nearer than 32 (0.6% before).
 
    **Bodies (step 3)**: slot i is a block-showroom specimen of R = 3 to 11,
    turned one of 24 ways, both from hashes of the slot (body-core's
@@ -4635,7 +4682,7 @@ function setBuilding(text, fraction, fresh = false){
    within the cubes that are new are rescued, as after an edit. The HUD
    counts the worlds that hold one and how often one has crossed between
    instances (`whereActors`). */
-const TICK_MS = 1000 / 60, LEASH = 48, SPACE = 16, ACTORS_MAX = 4096;
+const TICK_MS = 1000 / 60, LEASH = 96, SPACE = 32, ACTORS_MAX = 4096;
 const ACTOR_MODES = ['fliers', 'explorers', 'vehicles', 'mixed'];
 const actors = {
   n: Math.max(0, Math.min(ACTORS_MAX, Math.floor(+params.get('actors') || 0))), seed: 1,
@@ -4952,7 +4999,7 @@ function drawActors(M, planes, T, w, h, colorMode){
 
 /* ---- the frame ------------------------------------------------------------- */
 let dirty = true, lastEye = [NaN, NaN, NaN], lastT = performance.now(), frameMs = 16, auto = true;
-const view = { culled: 0, instances: 0, triangles: 0, rayTriangle: false, marked: 0, drawn: 0, near: 1, clear: 0, voxels: 0, actors: 0,
+const view = { culled: 0, instances: 0, triangles: 0, rayTriangle: false, marked: 0, drawn: 0, near: 1, clear: 0, depth: 0, voxels: 0, actors: 0,
                occluded: 0, occludedCubes: 0, queried: 0, nearEye: 0, occlPollMs: 0, occlRunMs: 0 };
 const LOD_COLORS = Array.from({ length: 24 }, (_, l) => {
   const h = (l * 0.137 + 0.58) % 1, c = 0.5, x = c * (1 - Math.abs((h * 6) % 2 - 1)), m = 0.32;
@@ -4969,6 +5016,7 @@ function chunkColor(d){
 function move(dt){
   if (!W) return;
   view.clear = clearance();
+  view.depth = view.clear > 0 ? 0 : depthHere();
   const p = padInput();
   if (p){
     if (p.pressed.has('RB')) setSpeed(cam.speedMul * 2);
@@ -5332,7 +5380,7 @@ function hud(){
     (W.file ? `<span class="sec">file</span> ${W.file.fileName ? esc(W.file.fileName) : 'added here'}, ${k(W.voxels)} voxels, ${colourNote(W.file.colourStatus)}\n` : '') +
     (W.kit ? `<span class="sec">kit</span> ${W.kit.desc.libs.length ? `libraries ${W.kit.desc.libs.join(', ')}` : 'no libraries'}, ${W.kit.desc.ornaments} ornaments, ${W.kit.desc.ground ? 'ground and gravity' : 'floating'}, ` +
       `colour in level-${W.kit.desc.colourLevel} frames: ${k(W.voxels)} voxels, ${W.classes ? `${W.classes.toLocaleString()} Oh classes, ` : ''}${k(W.kit.dropped)} nodes pruned, a real store in ${W.kit.realMs.toFixed(1)} ms\n` : '') +
-    `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}${walk.on && walk.w ? `  <span class="sec">walk</span> ${walk.w.ground ? 'on the ground' : walk.w.climbing ? 'climbing' : 'in the air'}${walk.holes ? `, ${walk.holes} secret door halves` : ''}` : ''}\n` +
+    `<span class="sec">eye</span> ${cam.eye.map(v => Math.round(v)).join(', ')}  clear ${k(view.clear)}${view.clear === 0 && view.depth > 0 ? ` (in rock, ${k(view.depth)} deep)` : ''}  near ${view.near.toFixed(2)}  speed ×${cam.speedMul < 1 ? cam.speedMul.toFixed(2) : cam.speedMul.toFixed(1)}${padState.id ? '  <span class="sec">pad</span> ' + padState.id.replace(/[<&]/g, '').slice(0, 32) : ''}${state.freeze ? '  <span class="warn">cut frozen</span>' : ''}${walk.on && walk.w ? `  <span class="sec">walk</span> ${walk.w.ground ? 'on the ground' : walk.w.climbing ? 'climbing' : 'in the air'}${walk.holes ? `, ${walk.holes} secret door halves` : ''}` : ''}\n` +
     `<span class="sec">cut</span> ${sel ? sel.leaves.length : 0} leaves + ${sel ? sel.nodes.size - sel.leaves.length : 0} split  (lod ${lods})${S.cfg.lock != null ? `  locked at ${S.cfg.lock}` : ''}${sel && sel.capped ? `  <span class="warn">capped ${sel.capped}</span>` : ''}\n` +
     `<span class="sec">resident</span> ${S.cache.size} chunks, ${mb(S.cacheBytes)}  missing ${missing}${state.cache ? '' : '  <span class="warn">tiny cache</span>'}\n` +
     `<span class="sec">drawn</span> <b>${view.drawn}</b> chunks (${fr.draw.length} in cover, ${view.culled} culled)  <b>${k(view.instances)}</b> cubes  ${fr.draw.filter(d => d.open).length} with open sides\n` +
@@ -6299,6 +6347,29 @@ window.universeSelftest = async function universeSelftest(opts = {}){
         const c = clearance();
         if (!(Math.abs(c - clearB[i].d) < 1e-9)) err(`${name} eye ${i}: the universe's clearance ${c}, the bake's ${clearB[i].d}`);
       }
+      // The fly speed's depth in rock (depthHere, 2026-11-21) at points of the box against the
+      // bake's solidDepth: equal where no two instances' voxels touch, as here at scale 0.
+      let inRock = 0, hitsPast = 0;
+      if (exact){
+        const saved = cam.eye.slice(), savedYaw = cam.yaw, savedPitch = cam.pitch, randD = mulberry(11), bw = createWorld(bk.store, bk.root, 8);
+        for (let j = 0; j < 2000; j++){
+          const q = [randD() * 256, randD() * 256, randD() * 256], want = solidDepth(bw, q, 1 << 20).d;
+          cam.eye = q; const got = depthHere();
+          if (want > 0) inRock++;
+          if (!(Math.abs(got - want) < 1e-9)){ err(`${name}: in rock at ${q}, the universe's depth ${got}, the bake's ${want}`); break; }
+          // And what the middle of the view is on from there (centreHit, the orbit camera's
+          // radius): in rock, the first surface past it, against the bake's pick past leaveSolid.
+          if (want > 0){
+            cam.yaw = randD() * 2 * Math.PI; cam.pitch = (randD() - 0.5) * 2;
+            const d = fwd(), past = pick(bk.store, bk.root, 8, q, d, { tMin: leaveSolid(bk.store, bk.root, 8, q, d) })?.t ?? null, mine = centreHit()?.t ?? null;
+            if (past !== null) hitsPast++;
+            if (!(mine === past || (mine !== null && past !== null && Math.abs(mine - past) < 1e-9))){ err(`${name}: in rock at ${q}, the universe's centre ${mine}, the bake's ${past}`); break; }
+          }
+        }
+        cam.eye = saved; cam.yaw = savedYaw; cam.pitch = savedPitch;
+        if (inRock < 20) err(`${name}: only ${inRock} of the depth's points in rock`);
+        if (hitsPast < 5) err(`${name}: only ${hitsPast} of them see something past the rock`);
+      }
       const out = eyes.map((_, i) => ({ words: edgesOnly(baked[i][9], inst[i][9]), shade: edgesOnly(baked[i][4], inst[i][4]), dist: distDiff(baked[i][5], inst[i][5]), lit: lit(baked[i][9]) }));
       for (const [i, r] of out.entries()){
         if (!exact && r.words.n > 0.002 * r.lit) err(`${name} eye ${i}: ${r.words.n} pixels' words differ from the bake's, of ${r.lit}`);
@@ -6309,7 +6380,7 @@ window.universeSelftest = async function universeSelftest(opts = {}){
       }
       let bad = 0;
       for (const [j, r] of rays.entries()){ const t = pickUniverse(r.o, r.d)?.t ?? null; if (!(t === pickB[j] || (t !== null && pickB[j] !== null && Math.abs(t - pickB[j]) < 1e-9))){ if (!bad++) err(`${name}: a pick from ${r.o}: the universe's t ${t}, the bake's ${pickB[j]}`); } }
-      return { eyes: out, picks: { rays: rays.length, hits: pickB.filter(t => t !== null).length, bad } };
+      return { eyes: out, picks: { rays: rays.length, hits: pickB.filter(t => t !== null).length, bad }, inRock, hitsPast };
     };
     const eyes = [[-40.5, 180.25, -60.75], [300.5, 90.25, 128.5], [128.5, -30.5, 200.25], [70.5, 60.25, 70.75]], at = [128, 100, 128];
     report.bake = await bakeCase('turned', P, eyes, at, true);
@@ -7938,7 +8009,8 @@ window.actorSelftest = async function actorSelftest({ n = 100 } = {}){
     // spawn on it (actor-core's drop rule). A vehicle drives off its edge in a few seconds and
     // falls, as it should, so "on something" is the most there were at once.
     setPath('off');
-    cam.eye = [W.side / 2 + 0.5, W.side / 2 + 72, W.side / 2 + 0.5]; cam.yaw = 0.6; cam.pitch = -0.9;
+    // 72 over the top of the test's block of 256 (stream.test.js's ACTOR_QUERY), over its middle.
+    cam.eye = [W.side / 2 + 0.5, W.side / 2 + 128 + 72, W.side / 2 + 0.5]; cam.yaw = 0.6; cam.pitch = -0.9;
     setActors(0); report.kindsConverged = await settle();
     for (const mode of ['explorers', 'vehicles', 'mixed']){
       setActorKinds(mode);

@@ -88,8 +88,10 @@ export function place(store, root, D, level, X, Y, Z, id){
    Returns { x, y, z, t, axis, normal } or null. axis is the face it came in by,
    −1 when the eye starts inside the voxel. Ties in axis go to the lowest, so an
    exact-corner entry reports x before y before z. `tMax` is the reach: a voxel
-   entered past it isn't hit. */
-export function pick(store, root, D, o, d, { tMax = Infinity, stats = null } = {}){
+   entered past it isn't hit. `tMin` (2026-11-21) starts the ray there instead:
+   only a positive length past tMin counts, and a voxel holding the ray at tMin
+   is hit at tMin with axis −1. 0, the default, is the rule above exactly. */
+export function pick(store, root, D, o, d, { tMax = Infinity, tMin = 0, stats = null } = {}){
   const ox = o[0], oy = o[1], oz = o[2], dx = d[0], dy = d[1], dz = d[2];
   if (!(Number.isFinite(ox) && Number.isFinite(oy) && Number.isFinite(oz) &&
         Number.isFinite(dx) && Number.isFinite(dy) && Number.isFinite(dz))) return null;
@@ -117,11 +119,11 @@ export function pick(store, root, D, o, d, { tMax = Infinity, stats = null } = {
       if (a > tin){ tin = a; axis = 2; }
       if (b < tout) tout = b;
     }
-    if (!(tin < tout) || tout <= 0 || tin > tMax) return false;
+    if (!(tin < tout) || tout <= tMin || tin > tMax) return false;
     visited++;
     if (k === 0){
-      if (tin < 0) axis = -1;
-      hit = { x, y, z, t: Math.max(tin, 0), axis, normal: axis < 0 ? 0 : -Math.sign(d[axis]) };
+      if (tin < tMin) axis = -1;
+      hit = { x, y, z, t: Math.max(tin, tMin), axis, normal: axis < 0 ? 0 : -Math.sign(d[axis]) };
       return true;
     }
     for (let i = 0; i < 8; i++){
@@ -133,6 +135,67 @@ export function pick(store, root, D, o, d, { tMax = Infinity, stats = null } = {
   if (root !== EMPTY) rec(root, D, 0, 0, 0);
   if (stats) stats.visited = visited;
   return hit;
+}
+
+/* Where a ray first leaves solid: the least t ≥ 0 at which it spends a positive
+   length out of rock, in an empty voxel or outside the world, by pick's rule at
+   the edges. 0 when it starts in air or outside; null with no direction.
+   For the orbit camera in rock (2026-11-21, docs/camera.md §7): from inside a
+   solid, pick hits the voxel you're in at t = 0, so the target was half a voxel
+   off and a pan the width of the screen moved the eye half a voxel. What the
+   middle of the view shows is the first surface past the rock (the rock's own
+   faces there point away and are culled), which is pick with tMin set to this.
+   The walk is pick's in ray order over the nodes holding any air: a solid node is
+   skipped whole (the solid node of a level is eight copies of the one below, so
+   `solid` walks child 0 down, memoized per call), an empty one is the answer. */
+export function leaveSolid(store, root, D, o, d){
+  const ox = o[0], oy = o[1], oz = o[2], dx = d[0], dy = d[1], dz = d[2];
+  if (!(Number.isFinite(ox) && Number.isFinite(oy) && Number.isFinite(oz) &&
+        Number.isFinite(dx) && Number.isFinite(dy) && Number.isFinite(dz))) return null;
+  if (dx === 0 && dy === 0 && dz === 0) return null;
+  const sign = (dx < 0 ? 1 : 0) | (dy < 0 ? 2 : 0) | (dz < 0 ? 4 : 0), memo = new Map();
+  const solid = (id, k) => {
+    if (id === EMPTY) return false;
+    if (k === 0) return true;
+    let s = memo.get(id);
+    if (s === undefined){
+      const c = store.child(id, 0);
+      s = c !== EMPTY;
+      for (let o = 1; s && o < 8; o++) if (store.child(id, o) !== c) s = false;
+      s = s && solid(c, k - 1);
+      memo.set(id, s);
+    }
+    return s;
+  };
+  // A node's piece of the ray, [tin, tout), or null if it holds no positive length past 0.
+  const span = (k, x, y, z) => {
+    const S = 2 ** k, lo = [x * S, y * S, z * S], oo = [ox, oy, oz], dd = [dx, dy, dz];
+    let tin = -Infinity, tout = Infinity;
+    for (let a = 0; a < 3; a++){
+      if (dd[a] === 0){ if (oo[a] < lo[a] || oo[a] >= lo[a] + S) return null; continue; }
+      const p = ((dd[a] < 0 ? lo[a] + S : lo[a]) - oo[a]) / dd[a], q = ((dd[a] < 0 ? lo[a] : lo[a] + S) - oo[a]) / dd[a];
+      if (p > tin) tin = p;
+      if (q < tout) tout = q;
+    }
+    return tin < tout && tout > 0 ? [tin, tout] : null;
+  };
+  const world = span(D, 0, 0, 0);
+  // Outside the world from the start: the ray misses it, or enters it after t = 0.
+  if (!world || world[0] > 0) return 0;
+  let out = null;
+  const rec = (id, k, x, y, z) => {
+    const sp = span(k, x, y, z);
+    if (!sp) return false;
+    if (id === EMPTY){ out = Math.max(sp[0], 0); return true; }
+    if (solid(id, k)) return false;
+    for (let i = 0; i < 8; i++){
+      const c = i ^ sign;
+      if (rec(store.child(id, c), k - 1, 2 * x + (c & 1), 2 * y + (c >> 1 & 1), 2 * z + (c >> 2))) return true;
+    }
+    return false;
+  };
+  // No air on the ray inside the world: it leaves rock where it leaves the world.
+  return rec(root, D, 0, 0, 0) ? out : world[1];
 }
 
 /* ---- which block a hit means ----------------------------------------------
