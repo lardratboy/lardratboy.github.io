@@ -1,0 +1,989 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Destroy · voxel arena</title>
+<!--
+  THE DESTRUCTION ARENA (destroy/README.md, asked for 2026-11-21: "a fun
+  voxel destruction arena/playground: loadable .vdag worlds, specimen, math
+  shapes on a thick flat plane, and you are a player with a rocket launcher
+  and a plasma cannon ... the explosions should make debris that have
+  physics and fall, and when they settle they bake into the voxels around,
+  basically mass is preserved in the world").
+
+  Every rule is a pure core: arena-core.js (the grid, the mesh's words,
+  rays, blasts, loose pieces, putting voxels back), debris-core.js (bodies,
+  their move, the bake, the burst), content-core.js (the plane, the
+  specimens, the math shapes, .vdag worlds, the layout), and walk-core.js
+  for the player (the stream viewer's walker, unchanged). This page reads
+  input, draws, plays sounds and moves the cores' results around.
+
+  THE DRAW is raw WebGL2: one instanced cube per exposed voxel, drawing of
+  each axis's two faces the one on the eye's side (the stream viewer's
+  "three faces a cube", 18 vertices an instance), decoded from three words
+  (arena-core's meshChunk: place, face mask, colour, and two bits of
+  ambient occlusion a face corner), a chunk of 32³ a buffer, rebuilt when
+  dirty within a time budget a frame. A sun shadow map (4096², orthographic
+  over the arena) is redrawn when the world changed, at most 8 times a
+  second. Debris, sparks, smoke, projectiles and the gun in hand are a
+  second instanced cube, turned and scaled per instance.
+-->
+<style>
+  :root { --ink: #f4efe6; --dim: #b9b1a4; --hot: #ff8a3d; --plasma: #63e6ff; --panel: rgba(18, 16, 14, 0.9); --line: rgba(255, 255, 255, 0.14); }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #8fb3d6; font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #cross { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; }
+  #cross::before, #cross::after { content: ""; position: absolute; background: rgba(255,255,255,0.9); box-shadow: 0 0 2px #000; }
+  #cross::before { left: 10px; top: 2px; width: 2px; height: 18px; }
+  #cross::after { top: 10px; left: 2px; height: 2px; width: 18px; }
+  #hud { position: fixed; left: 12px; top: 10px; pointer-events: none; text-shadow: 0 1px 2px #000, 0 0 6px rgba(0,0,0,0.6); font-variant-numeric: tabular-nums; }
+  #hud .big { font-size: 18px; font-weight: 700; letter-spacing: 0.02em; }
+  #hud .ok { color: #9eeb8a; } #hud .bad { color: #ff7a6b; }
+  #weapons { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; gap: 8px; pointer-events: none; }
+  .slot { padding: 6px 12px; border-radius: 8px; background: rgba(0,0,0,0.45); border: 1px solid var(--line); color: var(--dim); text-shadow: 0 1px 2px #000; }
+  .slot.on { color: var(--ink); border-color: rgba(255,255,255,0.6); background: rgba(0,0,0,0.6); }
+  .slot b { color: var(--hot); margin-right: 6px; } .slot.plasma b { color: var(--plasma); }
+  #toast { position: fixed; left: 50%; top: 14px; transform: translateX(-50%); padding: 8px 14px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); display: none; max-width: min(80vw, 640px); }
+  #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(10, 9, 8, 0.55); }
+  #overlay[hidden] { display: none; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 22px 26px; width: min(560px, calc(100vw - 32px)); box-sizing: border-box; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+  .card h1 { margin: 0 0 2px; font-size: 34px; letter-spacing: 0.12em; color: var(--hot); }
+  .card .sub { color: var(--dim); margin-bottom: 14px; }
+  .keys { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 12px 0 16px; }
+  kbd { font: 12px ui-monospace, Menlo, monospace; padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,0.1); border: 1px solid var(--line); white-space: nowrap; }
+  button { font: inherit; color: var(--ink); background: rgba(255,255,255,0.08); border: 1px solid var(--line); border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+  button:hover { background: rgba(255,255,255,0.16); }
+  button.primary { background: var(--hot); border-color: var(--hot); color: #1b120a; font-weight: 700; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #panel { position: fixed; right: 12px; top: 12px; bottom: 12px; width: min(340px, calc(100vw - 24px)); overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; box-sizing: border-box; }
+  #panel[hidden] { display: none; }
+  #panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--dim); margin: 14px 0 8px; }
+  #panel h2:first-child { margin-top: 0; }
+  #panel label { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 6px 0; }
+  #panel input[type=number], #panel select { width: 110px; font: inherit; color: var(--ink); background: rgba(255,255,255,0.08); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+  #panel input[type=range] { width: 130px; }
+  #files { margin: 6px 0; padding: 0; list-style: none; }
+  #files li { display: flex; justify-content: space-between; gap: 6px; padding: 4px 6px; border-radius: 6px; background: rgba(255,255,255,0.05); margin-bottom: 4px; word-break: break-all; }
+  #files li button { padding: 0 8px; }
+  .note { color: var(--dim); font-size: 12px; }
+  #drop { position: fixed; inset: 0; border: 4px dashed var(--hot); display: none; align-items: center; justify-content: center; font-size: 22px; background: rgba(0,0,0,0.4); pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="cross"></div>
+<div id="hud"></div>
+<div id="weapons">
+  <div class="slot" id="slot-rocket"><b>1</b>Rocket launcher</div>
+  <div class="slot plasma" id="slot-plasma"><b>2</b>Plasma cannon</div>
+</div>
+<div id="toast"></div>
+<div id="overlay">
+  <div class="card">
+    <h1>DESTROY</h1>
+    <div class="sub">A voxel arena. Everything you blast apart falls, settles and becomes the world again: not one voxel is lost.</div>
+    <div class="keys">
+      <kbd>click</kbd><span>play (locks the mouse; <kbd>Esc</kbd> lets go)</span>
+      <kbd>W A S D</kbd><span>walk · <kbd>space</kbd> jump · <kbd>shift</kbd> run, and run at a wall to climb it</span>
+      <kbd>left mouse</kbd><span>fire · <kbd>right mouse</kbd> alt fire (a big rocket / a plasma spread)</span>
+      <kbd>1</kbd> <kbd>2</kbd><span>rocket launcher, plasma cannon (or the wheel, or <kbd>Q</kbd>)</span>
+      <kbd>F</kbd><span>fly (no collision) · <kbd>T</kbd> slow motion · <kbd>M</kbd> sound</span>
+      <kbd>Tab</kbd><span>arena settings: size, plane, seed, specimens, math shapes, .vdag files</span>
+      <kbd>R</kbd><span>rebuild the arena</span>
+    </div>
+    <div class="row">
+      <button class="primary" id="play">Play</button>
+      <button id="openPanel">Arena settings</button>
+      <span class="note" id="buildNote"></span>
+    </div>
+  </div>
+</div>
+<div id="panel" hidden>
+  <h2>Arena</h2>
+  <label>Size <select id="size"><option>256</option><option>384</option><option>512</option></select></label>
+  <label>Height <select id="height"><option>128</option><option>160</option><option>192</option><option>256</option></select></label>
+  <label>Plane thickness <input type="number" id="plane" min="4" max="64"></label>
+  <label>Seed <span class="row"><input type="number" id="seed" min="1" max="65535"><button id="dice" title="a random seed">🎲</button></span></label>
+  <label>Specimens <input type="number" id="specimens" min="0" max="64"></label>
+  <label>Math shapes <input type="number" id="maths" min="0" max="24"></label>
+  <h2>.vdag worlds</h2>
+  <ul id="files"></ul>
+  <div class="row"><button id="addFile">Add .vdag…</button><span class="note">or drop files on the page</span></div>
+  <input type="file" id="fileInput" accept=".vdag" multiple hidden>
+  <div class="row" style="margin-top:12px"><button class="primary" id="build">Build arena</button><span class="note" id="panelNote"></span></div>
+  <h2>Weapons</h2>
+  <label>Rocket blast <span class="row"><input type="range" id="rocketR" min="3" max="16" step="0.5"><span id="rocketRv"></span></span></label>
+  <label>Plasma melt <span class="row"><input type="range" id="plasmaR" min="1" max="5" step="0.25"><span id="plasmaRv"></span></span></label>
+  <h2>World</h2>
+  <label>Loose pieces fall <input type="checkbox" id="loose"></label>
+  <label>Shadows <input type="checkbox" id="shadows"></label>
+  <label>Sound <input type="checkbox" id="sound"></label>
+  <label>Mouse speed <input type="range" id="sens" min="0.5" max="3" step="0.1"></label>
+  <h2>Placed</h2>
+  <div class="note" id="placed"></div>
+  <div class="row" style="margin-top:12px"><button id="closePanel">Close (Tab)</button></div>
+</div>
+<div id="drop">Drop .vdag worlds to add them to the arena</div>
+
+<script type="module">
+import { createArena, meshChunk, raycast, blast, looseAround, detach, mixCell, hash4, rgbOf, CHUNK } from './arena-core.js';
+import { createDebris, stepDebris, burst, pushBodies, makeBody, addBody, bodyInside } from './debris-core.js';
+import { arenaDesc, ARENA_DEFAULTS } from './content-core.js';
+import { WALK, createWalker, stepWalk, walkerEye, wishOf, settle } from '../walk-core.js';
+
+const $ = id => document.getElementById(id);
+const canvas = $('c');
+const gl = canvas.getContext('webgl2', { antialias: true, powerPreference: 'high-performance' });
+if (!gl) document.body.innerHTML = '<p style="padding:2em">This page needs WebGL2.</p>';
+const QS = new URLSearchParams(location.search), TEST = QS.has('test');
+
+/* ---- settings ---------------------------------------------------------------
+   The arena's descriptor and the knobs, kept in localStorage (wrapped:
+   storage can be off), and any of them in the link (?size=256&seed=3). */
+const STORE_KEY = 'destroy-settings-v1';
+const DEFAULTS = { ...ARENA_DEFAULTS, rocketR: 7, plasmaR: 2.5, loose: true, shadows: true, sound: true, sens: 1 };
+let settings = { ...DEFAULTS };
+try { if (!TEST) Object.assign(settings, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); } catch {}
+for (const k of Object.keys(DEFAULTS)) if (QS.has(k)){
+  const v = QS.get(k);
+  settings[k] = typeof DEFAULTS[k] === 'boolean' ? v !== '0' && v !== 'false' : Number(v);
+}
+const save = () => { try { if (!TEST) localStorage.setItem(STORE_KEY, JSON.stringify(settings)); } catch {} };
+
+/* ---- small linear algebra (column-major, as GL wants) ---------------------- */
+const V = {
+  add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]], sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  mul: (a, s) => [a[0] * s, a[1] * s, a[2] * s], dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  len: a => Math.hypot(a[0], a[1], a[2]), norm: a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; },
+};
+function perspective(fy, asp, n, f){ const t = 1 / Math.tan(fy / 2); return [t / asp, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) / (n - f), -1, 0, 0, 2 * f * n / (n - f), 0]; }
+function ortho(l, r, b, t, n, f){ return [2 / (r - l), 0, 0, 0, 0, 2 / (t - b), 0, 0, 0, 0, -2 / (f - n), 0, -(r + l) / (r - l), -(t + b) / (t - b), -(f + n) / (f - n), 1]; }
+function lookAt(e, c, up){
+  const f = V.norm(V.sub(c, e)), s = V.norm(V.cross(f, up)), u = V.cross(s, f);
+  return [s[0], u[0], -f[0], 0, s[1], u[1], -f[1], 0, s[2], u[2], -f[2], 0, -V.dot(s, e), -V.dot(u, e), V.dot(f, e), 1];
+}
+function mat4mul(a, b){ const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++){ let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; }
+function invert(m){
+  const [a00, a01, a02, a03, a10, a11, a12, a13, a20, a21, a22, a23, a30, a31, a32, a33] = m;
+  const b00 = a00 * a11 - a01 * a10, b01 = a00 * a12 - a02 * a10, b02 = a00 * a13 - a03 * a10, b03 = a01 * a12 - a02 * a11;
+  const b04 = a01 * a13 - a03 * a11, b05 = a02 * a13 - a03 * a12, b06 = a20 * a31 - a21 * a30, b07 = a20 * a32 - a22 * a30;
+  const b08 = a20 * a33 - a23 * a30, b09 = a21 * a32 - a22 * a31, b10 = a21 * a33 - a23 * a31, b11 = a22 * a33 - a23 * a32;
+  const d = 1 / (b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06);
+  return [(a11 * b11 - a12 * b10 + a13 * b09) * d, (a02 * b10 - a01 * b11 - a03 * b09) * d, (a31 * b05 - a32 * b04 + a33 * b03) * d, (a22 * b04 - a21 * b05 - a23 * b03) * d,
+    (a12 * b08 - a10 * b11 - a13 * b07) * d, (a00 * b11 - a02 * b08 + a03 * b07) * d, (a32 * b02 - a30 * b05 - a33 * b01) * d, (a20 * b05 - a22 * b02 + a23 * b01) * d,
+    (a10 * b10 - a11 * b08 + a13 * b06) * d, (a01 * b08 - a00 * b10 - a03 * b06) * d, (a30 * b04 - a31 * b02 + a33 * b00) * d, (a21 * b02 - a20 * b04 - a23 * b00) * d,
+    (a11 * b07 - a10 * b09 - a12 * b06) * d, (a00 * b09 - a01 * b07 + a02 * b06) * d, (a31 * b01 - a30 * b03 - a32 * b00) * d, (a20 * b03 - a21 * b01 + a22 * b00) * d];
+}
+// The six planes of a view-projection, for culling chunk boxes.
+function frustum(m){
+  const P = [];
+  for (const [i, s] of [[0, 1], [0, -1], [1, 1], [1, -1], [2, 1], [2, -1]])
+    P.push([m[3] + s * m[i], m[7] + s * m[4 + i], m[11] + s * m[8 + i], m[15] + s * m[12 + i]]);
+  return P;
+}
+const boxVisible = (P, lo, hi) => P.every(p => p[0] * (p[0] > 0 ? hi[0] : lo[0]) + p[1] * (p[1] > 0 ? hi[1] : lo[1]) + p[2] * (p[2] > 0 ? hi[2] : lo[2]) + p[3] >= 0);
+// A turn as a quaternion [w, x, y, z]: yaw about y, then pitch (fwd tilts up).
+const quatYawPitch = (yaw, pitch) => { const cy = Math.cos(yaw / 2), sy = Math.sin(yaw / 2), cp = Math.cos(-pitch / 2), sp = Math.sin(-pitch / 2); return [cy * cp, cy * sp, sy * cp, -sy * sp]; };
+
+/* ---- shaders -------------------------------------------------------------- */
+const LIGHT = `
+uniform vec3 uSun, uSunCol, uSky, uGround, uFog, uEye;
+uniform float uFogNear, uFogFar, uShadowOn, uBias;
+uniform int uLights;
+uniform vec4 uLightPos[8];
+uniform vec3 uLightCol[8];
+uniform highp sampler2DShadow uShadow;
+uniform mat4 uLightMat;
+float shadowAt(vec3 p, vec3 n){
+  vec4 q = uLightMat * vec4(p + n * 0.35, 1.0);
+  vec3 s = q.xyz / q.w * 0.5 + 0.5;
+  if (s.x < 0.0 || s.y < 0.0 || s.x > 1.0 || s.y > 1.0) return 1.0;
+  vec2 tx = 1.0 / vec2(textureSize(uShadow, 0));
+  float sum = 0.0;
+  for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) sum += texture(uShadow, vec3(s.xy + vec2(i, j) * tx, s.z - uBias));
+  return sum / 9.0;
+}
+vec3 shade(vec3 alb, vec3 p, vec3 n, float ao, vec3 emit){
+  float sh = uShadowOn > 0.5 ? shadowAt(p, n) : 1.0;
+  float ndl = max(dot(n, uSun), 0.0);
+  vec3 amb = mix(uGround, uSky, n.y * 0.5 + 0.5);
+  vec3 c = alb * (amb * (0.2 + 0.8 * ao) + uSunCol * ndl * sh * (0.6 + 0.4 * ao));
+  for (int i = 0; i < 8; i++){
+    if (i >= uLights) break;
+    vec3 L = uLightPos[i].xyz - p; float d = length(L), att = clamp(1.0 - d / uLightPos[i].w, 0.0, 1.0);
+    c += alb * uLightCol[i] * att * att * (0.3 + 0.7 * max(dot(n, L / max(d, 1e-3)), 0.0));
+  }
+  c += emit;
+  float f = smoothstep(uFogNear, uFogFar, length(p - uEye));
+  return mix(c, uFog, f);
+}
+vec3 tone(vec3 c){ return pow(vec3(1.0) - exp(-c * 1.35), vec3(1.0 / 2.2)); }
+`;
+/* The chunk cube: arena-core's words decoded (meshChunk's layout, see
+   there). uView is the eye (w = 1) or, for the shadow pass, the direction
+   toward the sun (w = 0): of each axis's two faces the one facing it is
+   drawn, and only if its mask bit says it shows. The quad's diagonal runs
+   along the brighter pair of corners, so occlusion doesn't streak. */
+const CHUNK_VS = `#version 300 es
+precision highp float; precision highp int;
+layout(location = 0) in uvec3 aI;
+uniform mat4 uVP; uniform vec3 uOrigin; uniform vec4 uView;
+out vec3 vP; flat out vec3 vN; out vec3 vAlb; out float vAO;
+void main(){
+  int vid = gl_VertexID, a = vid / 6, k = vid - a * 6;
+  uint w0 = aI.x, mask = (w0 >> 15u) & 63u;
+  vec3 c = uOrigin + vec3(float(w0 & 31u), float((w0 >> 5u) & 31u), float((w0 >> 10u) & 31u)) + 0.5;
+  float side = uView.w > 0.5 ? uView[a] - c[a] : uView[a];
+  bool pos = side >= 0.0;
+  int f = 2 * a + (pos ? 0 : 1);
+  if (((mask >> uint(f)) & 1u) == 0u){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  uint aw = f < 2 ? (aI.y >> uint(16 + 8 * f)) : (aI.z >> uint(8 * (f - 2)));
+  float a00 = float(aw & 3u), a10 = float((aw >> 2u) & 3u), a01 = float((aw >> 4u) & 3u), a11 = float((aw >> 6u) & 3u);
+  ivec2 q;
+  if (a00 + a11 >= a10 + a01) q = k == 0 ? ivec2(0, 0) : k == 1 ? ivec2(1, 0) : k == 2 ? ivec2(1, 1) : k == 3 ? ivec2(0, 0) : k == 4 ? ivec2(1, 1) : ivec2(0, 1);
+  else q = k == 0 ? ivec2(0, 0) : k == 1 ? ivec2(1, 0) : k == 2 ? ivec2(0, 1) : k == 3 ? ivec2(1, 0) : k == 4 ? ivec2(1, 1) : ivec2(0, 1);
+  vAO = (q.x == 0 ? (q.y == 0 ? a00 : a01) : (q.y == 0 ? a10 : a11)) / 3.0;
+  int u = (a + 1) % 3, v = (a + 2) % 3;
+  vec3 p = c; p[a] += pos ? 0.5 : -0.5; p[u] += float(q.x) - 0.5; p[v] += float(q.y) - 0.5;
+  vec3 n = vec3(0.0); n[a] = pos ? 1.0 : -1.0; vN = n;
+  uint col = aI.y & 32767u;
+  vec3 rgb = vec3(float(col & 31u), float((col >> 5u) & 31u), float((col >> 10u) & 31u)) / 31.0;
+  float h = fract(sin(dot(c, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+  vAlb = pow(rgb, vec3(2.2)) * (0.94 + 0.06 * h);
+  vP = p;
+  gl_Position = uVP * vec4(p, 1.0);
+}`;
+const CHUNK_FS = `#version 300 es
+precision highp float;
+in vec3 vP; flat in vec3 vN; in vec3 vAlb; in float vAO;
+out vec4 o;
+${LIGHT}
+void main(){ o = vec4(tone(shade(vAlb, vP, vN, vAO, vec3(0.0))), 1.0); }`;
+const DEPTH_FS = `#version 300 es
+precision mediump float;
+void main(){}`;
+/* The free cube: a centre, a scale on each axis, a turn [w, x, y, z] and a
+   colour (rgb, and a: glow for lit cubes and sparks, opacity for smoke).
+   uMode 0 lit and solid, 1 a glow (additive), 2 smoke (blended). */
+const CUBE_VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 aPos; layout(location = 1) in vec3 aNrm;
+layout(location = 2) in vec3 aC; layout(location = 3) in vec3 aS; layout(location = 4) in vec4 aQ; layout(location = 5) in vec4 aCol;
+uniform mat4 uVP;
+out vec3 vP; out vec3 vN; out vec4 vCol;
+vec3 rot(vec4 q, vec3 v){ vec3 u = q.yzw; return v + 2.0 * cross(u, cross(u, v) + q.x * v); }
+void main(){ vP = aC + rot(aQ, aPos * aS); vN = rot(aQ, aNrm); vCol = aCol; gl_Position = uVP * vec4(vP, 1.0); }`;
+const CUBE_FS = `#version 300 es
+precision highp float;
+in vec3 vP; in vec3 vN; in vec4 vCol;
+uniform int uMode;
+out vec4 o;
+${LIGHT}
+void main(){
+  vec3 alb = pow(vCol.rgb, vec3(2.2));
+  if (uMode == 1){ o = vec4(alb * vCol.a, 1.0); return; }
+  if (uMode == 2){ o = vec4(tone(shade(alb, vP, normalize(vN), 1.0, vec3(0.0))), vCol.a); return; }
+  o = vec4(tone(shade(alb, vP, normalize(vN), 1.0, alb * vCol.a * 4.0)), 1.0);
+}`;
+const SKY_VS = `#version 300 es
+out vec2 vUV;
+void main(){ vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0); vUV = p; gl_Position = vec4(p, 0.9999, 1.0); }`;
+const SKY_FS = `#version 300 es
+precision highp float;
+in vec2 vUV; uniform mat4 uInv; uniform vec3 uSun, uFog; out vec4 o;
+void main(){
+  vec4 a = uInv * vec4(vUV, -1.0, 1.0), b = uInv * vec4(vUV, 1.0, 1.0);
+  vec3 d = normalize(b.xyz / b.w - a.xyz / a.w);
+  vec3 zen = vec3(0.23, 0.45, 0.78), c = mix(uFog, zen, pow(clamp(d.y, 0.0, 1.0), 0.6));
+  c = mix(c, vec3(0.42, 0.40, 0.38), clamp(-d.y * 3.0, 0.0, 1.0));
+  float s = max(dot(d, uSun), 0.0);
+  c += vec3(1.0, 0.85, 0.6) * (pow(s, 600.0) * 3.0 + pow(s, 12.0) * 0.18);
+  o = vec4(pow(c, vec3(1.0 / 1.0)), 1.0);
+}`;
+
+function program(vs, fs){
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]){
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) + '\n' + src.split('\n').map((l, i) => `${i + 1}: ${l}`).join('\n'));
+    gl.attachShader(p, s);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const U = {}, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++){ const name = gl.getActiveUniform(p, i).name; U[name.replace(/\[0\]$/, '')] = gl.getUniformLocation(p, name); }
+  return { p, U };
+}
+const P = { chunk: program(CHUNK_VS, CHUNK_FS), depth: program(CHUNK_VS, DEPTH_FS), cube: program(CUBE_VS, CUBE_FS), sky: program(SKY_VS, SKY_FS) };
+
+/* ---- the light ------------------------------------------------------------- */
+const SUN = V.norm([0.42, 0.82, 0.28]);
+const LOOK = { sunCol: [2.0, 1.8, 1.55], sky: [0.40, 0.52, 0.74], ground: [0.28, 0.24, 0.20], fog: [0.62, 0.72, 0.84] };
+const SHADOW_SIZE = Math.min(4096, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+const shadow = { tex: gl.createTexture(), fb: gl.createFramebuffer(), mat: null, bias: 0, dirty: true, last: -1 };
+gl.bindTexture(gl.TEXTURE_2D, shadow.tex);
+gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, SHADOW_SIZE, SHADOW_SIZE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+gl.bindFramebuffer(gl.FRAMEBUFFER, shadow.fb);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, shadow.tex, 0);
+gl.drawBuffers([gl.NONE]); gl.readBuffer(gl.NONE);
+gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+// The sun's box round the whole arena: its eight corners in the sun's view, an ortho round them.
+function shadowMatrix(){
+  const { X, Y, Z } = A, c = [X / 2, Y / 2, Z / 2], R = Math.hypot(X, Y, Z);
+  const view = lookAt(V.add(c, V.mul(SUN, R)), c, [0, 1, 0]);
+  let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let k = 0; k < 8; k++){
+    const p = [k & 1 ? X : 0, k & 2 ? Y : 0, k & 4 ? Z : 0];
+    const q = [0, 1, 2].map(r => view[r] * p[0] + view[4 + r] * p[1] + view[8 + r] * p[2] + view[12 + r]);
+    lo = lo.map((v, i) => Math.min(v, q[i])); hi = hi.map((v, i) => Math.max(v, q[i]));
+  }
+  const near = -hi[2] - 2, far = -lo[2] + 2;
+  shadow.bias = 0.25 * 2 / (far - near);
+  return mat4mul(ortho(lo[0], hi[0], lo[1], hi[1], near, far), view);
+}
+function setLight(U, eye, lights){
+  gl.uniform3fv(U.uSun, SUN); gl.uniform3fv(U.uSunCol, LOOK.sunCol); gl.uniform3fv(U.uSky, LOOK.sky); gl.uniform3fv(U.uGround, LOOK.ground);
+  gl.uniform3fv(U.uFog, LOOK.fog); gl.uniform3fv(U.uEye, eye);
+  const far = Math.max(A.X, A.Z);
+  gl.uniform1f(U.uFogNear, far * 0.55); gl.uniform1f(U.uFogFar, far * 1.7);
+  gl.uniform1f(U.uShadowOn, settings.shadows && shadow.mat ? 1 : 0); gl.uniform1f(U.uBias, shadow.bias);
+  if (shadow.mat) gl.uniformMatrix4fv(U.uLightMat, false, shadow.mat);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, shadow.tex); gl.uniform1i(U.uShadow, 0);
+  gl.uniform1i(U.uLights, lights.length);
+  if (lights.length){
+    gl.uniform4fv(U.uLightPos, lights.flatMap(l => [l.p[0], l.p[1], l.p[2], l.r]));
+    gl.uniform3fv(U.uLightCol, lights.flatMap(l => l.c));
+  }
+}
+
+/* ---- chunk meshes ------------------------------------------------------------ */
+let A = null, D = createDebris(), total = 0;
+let meshes = [];                // a chunk's { vao, buf, count, lo, hi }, by chunk index
+let scratch = new Uint32Array(3 * 8192);
+function meshOne(c){
+  const r = meshChunk(A, c, scratch);
+  if (r.words.buffer !== scratch.buffer) scratch = new Uint32Array(r.words.buffer);
+  let m = meshes[c];
+  if (!m){
+    m = meshes[c] = { vao: gl.createVertexArray(), buf: gl.createBuffer(), count: 0, cap: 0,
+      lo: [r.cx * CHUNK, r.cy * CHUNK, r.cz * CHUNK], hi: [r.cx * CHUNK + CHUNK, r.cy * CHUNK + CHUNK, r.cz * CHUNK + CHUNK] };
+    gl.bindVertexArray(m.vao); gl.bindBuffer(gl.ARRAY_BUFFER, m.buf);
+    gl.enableVertexAttribArray(0); gl.vertexAttribIPointer(0, 3, gl.UNSIGNED_INT, 12, 0); gl.vertexAttribDivisor(0, 1);
+    gl.bindVertexArray(null);
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, m.buf);
+  if (r.count > m.cap || r.count < m.cap / 4){ m.cap = Math.max(64, Math.ceil(r.count * 1.25)); gl.bufferData(gl.ARRAY_BUFFER, m.cap * 12, gl.DYNAMIC_DRAW); }
+  if (r.count) gl.bufferSubData(gl.ARRAY_BUFFER, 0, r.words);
+  m.count = r.count;
+  shadow.dirty = true;
+}
+// Dirty chunks within `budget` ms (at least one), nearest the eye first is not worth it: blasts dirty a handful.
+function remesh(budget){
+  const t = performance.now();
+  let n = 0;
+  for (let c; (c = A.takeDirty()) >= 0;){ meshOne(c); n++; if (performance.now() - t > budget) break; }
+  return n;
+}
+function dropMeshes(){ for (const m of meshes) if (m){ gl.deleteVertexArray(m.vao); gl.deleteBuffer(m.buf); } meshes = []; }
+
+/* ---- free cubes ------------------------------------------------------------ */
+const CUBE = (() => {
+  const v = [], F = [[0, 1], [0, -1], [1, 1], [1, -1], [2, 1], [2, -1]];
+  for (const [a, s] of F){
+    const u = (a + 1) % 3, w = (a + 2) % 3, c = [[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]];
+    for (const [i, j] of (s > 0 ? c : c.map(([i, j]) => [j, i]))){
+      const p = [0, 0, 0], n = [0, 0, 0]; p[a] = s * 0.5; p[u] = i - 0.5; p[w] = j - 0.5; n[a] = s;
+      v.push(...p, ...n);
+    }
+  }
+  return new Float32Array(v);
+})();
+const FLOATS = 14;     // centre 3, scale 3, turn 4, colour 4
+function cubeBatch(){
+  const b = { vao: gl.createVertexArray(), vbo: gl.createBuffer(), ibo: gl.createBuffer(), data: new Float32Array(FLOATS * 4096), n: 0, cap: 0 };
+  gl.bindVertexArray(b.vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, b.vbo); gl.bufferData(gl.ARRAY_BUFFER, CUBE, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+  gl.bindBuffer(gl.ARRAY_BUFFER, b.ibo);
+  let off = 0;
+  for (const [loc, size] of [[2, 3], [3, 3], [4, 4], [5, 4]]){
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, gl.FLOAT, false, FLOATS * 4, off); gl.vertexAttribDivisor(loc, 1); off += size * 4;
+  }
+  gl.bindVertexArray(null);
+  b.push = (c, s, q, col) => {
+    if ((b.n + 1) * FLOATS > b.data.length){ const d = new Float32Array(b.data.length * 2); d.set(b.data); b.data = d; }
+    const o = b.n++ * FLOATS, d = b.data;
+    d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = s[0]; d[o + 4] = s[1]; d[o + 5] = s[2];
+    d[o + 6] = q[0]; d[o + 7] = q[1]; d[o + 8] = q[2]; d[o + 9] = q[3]; d[o + 10] = col[0]; d[o + 11] = col[1]; d[o + 12] = col[2]; d[o + 13] = col[3];
+  };
+  b.upload = () => {
+    gl.bindBuffer(gl.ARRAY_BUFFER, b.ibo);
+    if (b.n > b.cap){ b.cap = Math.max(1024, b.n * 2); gl.bufferData(gl.ARRAY_BUFFER, b.cap * FLOATS * 4, gl.STREAM_DRAW); }
+    if (b.n) gl.bufferSubData(gl.ARRAY_BUFFER, 0, b.data, 0, b.n * FLOATS);
+  };
+  return b;
+}
+const batches = { solid: cubeBatch(), glow: cubeBatch(), smoke: cubeBatch(), hand: cubeBatch() };
+const ID = [1, 0, 0, 0], ONE = [1, 1, 1];
+
+/* ---- the game's state ---------------------------------------------------------- */
+const WALKER = { ...WALK, speed: 15, sprint: 1.7, jump: 4.25 };
+const cam = { eye: [0, 0, 0], yaw: Math.PI, pitch: -0.08 };
+let walker = null, flying = false, timeScale = 1;
+const keys = new Set(), mouse = { left: false, right: false, locked: false };
+const WEAPONS = {
+  rocket: { name: 'Rocket launcher', cool: 0.75, altCool: 2.2, speed: 120 },
+  plasma: { name: 'Plasma cannon', cool: 0.085, altCool: 0.55, speed: 230 },
+};
+let weapon = 'rocket', cooldown = 0, recoil = 0, bob = 0;
+const projectiles = [], particles = [], lights = [];
+let shake = 0, blastSeed = 1;
+const stats = { shots: 0, blasts: 0, carved: 0, loose: 0, looseVoxels: 0 };
+
+const fwdOf = () => [Math.sin(cam.yaw) * Math.cos(cam.pitch), Math.sin(cam.pitch), Math.cos(cam.yaw) * Math.cos(cam.pitch)];
+const rightOf = () => [-Math.cos(cam.yaw), 0, Math.sin(cam.yaw)];
+const worldFn = (lo, hi) => A.boxSolid(lo, hi);
+
+/* ---- sound: synthesized, nothing to load ---------------------------------------- */
+const audio = { ctx: null, master: null, noise: null };
+function ensureAudio(){
+  if (audio.ctx || !settings.sound) return;
+  try {
+    const ctx = audio.ctx = new AudioContext(), master = audio.master = ctx.createGain();
+    master.gain.value = 0.55; master.connect(ctx.destination);
+    const n = ctx.sampleRate * 2, buf = audio.noise = ctx.createBuffer(1, n, ctx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  } catch { audio.ctx = null; }
+}
+function gainAt(p, base){ const d = p ? V.len(V.sub(p, cam.eye)) : 0; return base / (1 + d / 70); }
+function noiseBurst({ at, gain, dur, f0, f1, type = 'lowpass', q = 0.7 }){
+  const ctx = audio.ctx; if (!ctx || !settings.sound) return;
+  const t = ctx.currentTime, s = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+  s.buffer = audio.noise; s.loop = true; f.type = type; f.Q.value = q;
+  f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+  g.gain.setValueAtTime(gainAt(at, gain), t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  s.connect(f); f.connect(g); g.connect(audio.master); s.start(t, Math.random()); s.stop(t + dur + 0.05);
+}
+function tone({ at, gain, dur, f0, f1, type = 'sine' }){
+  const ctx = audio.ctx; if (!ctx || !settings.sound) return;
+  const t = ctx.currentTime, o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+  g.gain.setValueAtTime(gainAt(at, gain), t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(audio.master); o.start(t); o.stop(t + dur + 0.05);
+}
+const SFX = {
+  boom: (p, r) => { noiseBurst({ at: p, gain: 1.4, dur: 0.6 + r * 0.08, f0: 2400, f1: 90 }); tone({ at: p, gain: 0.9, dur: 0.5 + r * 0.05, f0: 90, f1: 28 }); },
+  launch: () => noiseBurst({ gain: 0.35, dur: 0.35, f0: 600, f1: 2400, type: 'bandpass', q: 0.8 }),
+  zap: () => tone({ gain: 0.09, dur: 0.11, f0: 1300 + Math.random() * 200, f1: 240, type: 'sawtooth' }),
+  sizzle: p => noiseBurst({ at: p, gain: 0.25, dur: 0.22, f0: 5200, f1: 1800, type: 'bandpass', q: 2 }),
+};
+
+/* ---- the world ------------------------------------------------------------------ */
+let builder = null, built = null, files = [];
+function toast(text, ms = 0){
+  const t = $('toast'); t.textContent = text; t.style.display = text ? 'block' : 'none';
+  clearTimeout(toast.timer); if (ms) toast.timer = setTimeout(() => { t.style.display = 'none'; }, ms);
+}
+function descOf(){ return arenaDesc({ size: settings.size, height: settings.height, plane: settings.plane, seed: settings.seed, specimens: settings.specimens, maths: settings.maths }); }
+function build(){
+  if (builder) builder.terminate();
+  const w = builder = new Worker(new URL('./build-worker.js', import.meta.url), { type: 'module' });
+  const desc = descOf();
+  toast('Building the arena…');
+  return new Promise((resolve, reject) => {
+    w.onmessage = ({ data }) => {
+      if (w !== builder) return;
+      if (data.phase) toast(`Building the arena: ${data.phase.text}…`);
+      else if (data.error){ toast(`The build failed: ${data.error}`, 8000); builder = null; w.terminate(); reject(new Error(data.error)); }
+      else if (data.built){ builder = null; w.terminate(); install(data.cells, data.built); resolve(data.built); }
+    };
+    w.onerror = e => { toast(`The build failed: ${e.message}`, 8000); reject(new Error(e.message)); };
+    w.postMessage({ desc, files: files.map(f => ({ file: f.file, world: f.world, name: f.name })) });
+  });
+}
+function install(cells, info){
+  const t = performance.now(), d = info.desc;
+  A = createArena(d.size, d.height, d.size, cells);
+  D = createDebris(); projectiles.length = 0; particles.length = 0; lights.length = 0;
+  dropMeshes();
+  remesh(Infinity);
+  total = A.count;
+  shadow.mat = shadowMatrix(); shadow.dirty = true;
+  const eye = [info.spawn[0], info.spawn[1] + WALKER.eye + 0.01, info.spawn[2]];
+  walker = createWalker(eye, WALKER); settle(walker, worldFn);
+  cam.yaw = info.yaw; cam.pitch = -0.12; cam.eye = walkerEye(walker);
+  built = { ...info, meshMs: performance.now() - t };
+  $('placed').innerHTML = info.placed.map(p => `${esc(p.name)} · ${p.voxels.toLocaleString()} voxels`).join('<br>') +
+    (info.left.length ? `<br><br>Left out: ${info.left.map(l => `${esc(l.name)} (${l.why})`).join(', ')}` : '') +
+    (info.notes.length ? `<br><br>${info.notes.map(esc).join('<br>')}` : '');
+  const msg = `${(A.count).toLocaleString()} voxels, ${info.placed.length} things on a ${d.size} × ${d.size} plane, built in ${(info.ms / 1000).toFixed(1)} s`;
+  $('buildNote').textContent = msg; $('panelNote').textContent = '';
+  toast(msg, 3500);
+}
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+/* ---- blasts ----------------------------------------------------------------------
+   A blast is arena-core's carve, debris-core's burst of what it carved,
+   then the loose pieces round it lifted out whole and dropped, then the
+   pushes (bodies, the walker: a rocket jump), then the show. Rubble is the
+   rocket's: clusters of 2³ (3³ for a big blast, so a crater of 9,000 voxels
+   is ~400 bodies, not 1,100), thrown out and up. Melt is the plasma's:
+   each voxel a drop of slag, glowing, thrown gently off the face it was
+   shot from, running downhill as it cools. */
+const SLAG = [70, 56, 50];
+function explode(c, r, kind, normal = [0, 1, 0]){
+  if (!A) return;
+  const seed = blastSeed++, plasma = kind === 'plasma';
+  const carved = blast(A, c, r, plasma ? { seed, jag: 0.15, scorch: 1.2, char: 0.25 } : { seed, jag: 0.35, scorch: 1.6, char: 0.4 });
+  const n = carved.cols.length;
+  if (plasma){
+    for (let k = 0; k < n; k++) carved.cols[k] = mixCell(carved.cols[k], SLAG[0], SLAG[1], SLAG[2], 0.5);
+    burst(D, carved, c, r, { seed, liquid: true, normal, speed: 9 + r * 2, hot: 1 });
+  } else burst(D, carved, c, r, { seed, cluster: n > 3000 ? 3 : 2, speed: 26 + r * 2.6, hot: 0.35, normal });
+  if (settings.loose){
+    for (const piece of looseAround(A, carved.box)){
+      const d = detach(A, piece), b = addBody(D, makeBody(d.offs, d.cols, d.origin, [0, 0, 0], { kind: 'piece' }));
+      stats.loose++; stats.looseVoxels += b.n;
+    }
+  }
+  pushBodies(D, c, r * 2.5, plasma ? 12 : 55);
+  if (walker && !flying){
+    const m = V.add(walker.p, [0, WALKER.height / 2, 0]), d = V.sub(m, c), l = V.len(d), reach = r * (plasma ? 1.5 : 2.4);
+    if (l < reach){
+      const k = (plasma ? 8 : 62) * (1 - l / reach), u = l > 1e-3 ? V.mul(d, 1 / l) : [0, 1, 0];
+      walker.v[0] += u[0] * k; walker.v[1] += Math.max(u[1], 0.25) * k; walker.v[2] += u[2] * k; walker.ground = false;
+    }
+  }
+  stats.blasts++; stats.carved += n;
+  // The show.
+  const dist = V.len(V.sub(c, cam.eye));
+  shake = Math.min(1.4, shake + (plasma ? 0.05 : 0.25 + r * 0.06) * Math.max(0, 1 - dist / (r * 30)));
+  if (plasma){
+    lights.push({ p: V.add(c, V.mul(normal, 1.5)), c: [0.6, 2.2, 3.2], r: r * 9, life: 0.18, max: 0.18 });
+    for (let k = 0; k < 8; k++) spark(c, normal, 14, [0.55, 0.95, 1], 0.35);
+    SFX.sizzle(c);
+  } else {
+    lights.push({ p: V.add(c, V.mul(normal, 2)), c: [5, 3, 1.4], r: r * 7, life: 0.45, max: 0.45 });
+    for (let k = 0; k < 26 + r * 3; k++) spark(c, normal, 30 + r * 3, [1, 0.62 + Math.random() * 0.3, 0.2], 0.7);
+    for (let k = 0; k < 8 + r; k++) puff(c, r, normal);
+    // The fireball: glowing cubes round the blast, swelling out along the face and burning down from white to red.
+    for (let k = 0; k < 14 + 2 * r; k++){
+      const d = V.norm([Math.random() - 0.5 + normal[0] * 0.7, Math.random() - 0.5 + normal[1] * 0.7, Math.random() - 0.5 + normal[2] * 0.7]);
+      const l = 0.25 + Math.random() * 0.3;
+      particles.push({ p: V.add(c, V.mul(d, Math.random() * r * 0.5)), v: V.mul(d, r * (2 + Math.random() * 3)), life: l, max: l, size: r * (0.25 + Math.random() * 0.3), grow: -r * 0.2, col: [1, 0.85, 0.5], kind: 'fire', g: -6 });
+    }
+    SFX.boom(c, r);
+  }
+}
+function spark(c, n, speed, col, life){
+  const d = V.norm([Math.random() - 0.5 + n[0] * 0.8, Math.random() - 0.2 + n[1] * 0.8, Math.random() - 0.5 + n[2] * 0.8]);
+  particles.push({ p: c.slice(), v: V.mul(d, speed * (0.3 + Math.random())), life: life * (0.5 + Math.random()), max: life, size: 0.35 + Math.random() * 0.3, col, kind: 'spark', g: 40 });
+}
+function puff(c, r, n = [0, 1, 0]){
+  const d = V.norm([Math.random() - 0.5 + n[0] * 0.5, Math.random() * 0.6 + 0.2 + n[1] * 0.5, Math.random() - 0.5 + n[2] * 0.5]);
+  const l = 2.5 + Math.random() * 2, g = 0.16 + Math.random() * 0.12;
+  particles.push({ p: V.add(c, V.mul(d, r * 0.5)), v: V.mul(d, 4 + Math.random() * 5), life: l, max: l, size: r * (0.2 + Math.random() * 0.25) + 0.8, grow: 2.5, col: [g, g * 0.96, g * 0.92], kind: 'smoke', g: -3 });
+}
+
+/* ---- weapons ----------------------------------------------------------------------- */
+function muzzle(){
+  const f = fwdOf(), r = rightOf(), u = V.cross(r, f);
+  return V.add(V.add(V.add(cam.eye, V.mul(f, 1.1)), V.mul(r, 0.42)), V.mul(u, -0.32));
+}
+function aimDir(from){
+  const f = fwdOf(), hit = raycast(A, cam.eye, f, 4000), target = hit ? hit.p : V.add(cam.eye, V.mul(f, 4000));
+  const d = V.sub(target, from);
+  return V.len(d) < 2.5 ? f : V.norm(d);
+}
+function fire(alt){
+  if (!A || cooldown > 0) return;
+  const W = WEAPONS[weapon], from = muzzle(), dir = aimDir(from);
+  stats.shots++; recoil = weapon === 'rocket' ? (alt ? 1 : 0.7) : 0.18;
+  if (weapon === 'rocket'){
+    projectiles.push({ kind: 'rocket', big: !!alt, p: from, v: V.mul(dir, W.speed * (alt ? 0.8 : 1)), age: 0, trail: 0 });
+    cooldown = alt ? W.altCool : W.cool;
+    SFX.launch();
+  } else {
+    const n = alt ? 7 : 1, spread = alt ? 0.06 : 0.004;
+    for (let k = 0; k < n; k++){
+      const d = V.norm([dir[0] + (Math.random() - 0.5) * spread * 2, dir[1] + (Math.random() - 0.5) * spread * 2, dir[2] + (Math.random() - 0.5) * spread * 2]);
+      projectiles.push({ kind: 'plasma', p: from.slice(), v: V.mul(d, W.speed), age: 0, trail: 0 });
+    }
+    cooldown = alt ? W.altCool : W.cool;
+    SFX.zap();
+  }
+}
+function stepProjectiles(dt){
+  for (let i = projectiles.length - 1; i >= 0; i--){
+    const pr = projectiles[i];
+    pr.age += dt;
+    const hit = raycast(A, pr.p, pr.v, dt);
+    if (hit){
+      const r = pr.kind === 'rocket' ? settings.rocketR * (pr.big ? 1.8 : 1) : settings.plasmaR;
+      explode(hit.p, r, pr.kind, hit.n);
+      projectiles.splice(i, 1);
+      continue;
+    }
+    pr.p = V.add(pr.p, V.mul(pr.v, dt));
+    if (pr.kind === 'rocket'){
+      pr.trail += dt;
+      while (pr.trail > 0.012){ pr.trail -= 0.012;
+        const l = 0.9 + Math.random() * 0.6, g = 0.55 + Math.random() * 0.2;
+        particles.push({ p: V.add(pr.p, [Math.random() * 0.4 - 0.2, Math.random() * 0.4 - 0.2, Math.random() * 0.4 - 0.2]), v: [Math.random() - 0.5, Math.random() * 1.5, Math.random() - 0.5], life: l, max: l, size: 0.6, grow: 1.6, col: [g, g, g], kind: 'smoke', g: -1 });
+      }
+    }
+    const far = pr.p[1] > A.Y * 3 || pr.p[0] < -A.X || pr.p[0] > 2 * A.X || pr.p[2] < -A.Z || pr.p[2] > 2 * A.Z;
+    if (pr.age > 6 || far) projectiles.splice(i, 1);
+  }
+}
+
+/* ---- a frame's update ------------------------------------------------------------------ */
+function update(dt){
+  if (!A) return;
+  // The player.
+  const fwdKey = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0), strafe = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+  const run = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  if (flying){
+    const f = fwdOf(), r = rightOf(), s = (run ? 120 : 40) * dt;
+    cam.eye = V.add(cam.eye, V.add(V.mul(f, fwdKey * s), V.mul(r, strafe * s)));
+    if (keys.has('Space')) cam.eye[1] += s;
+  } else if (walker){
+    const move = wishOf(cam.yaw, fwdKey, strafe);
+    stepWalk(walker, worldFn, { move, sprint: run, jump: keys.has('Space'), climb: run }, dt);
+    if (walker.p[1] < -20) settle(walker, worldFn, 400);
+    cam.eye = walkerEye(walker);
+    if (walker.ground && (fwdKey || strafe)) bob += dt * (run ? 13 : 9);
+  }
+  // Weapons.
+  cooldown = Math.max(0, cooldown - dt);
+  recoil = Math.max(0, recoil - dt * 4);
+  if (mouse.left) fire(false); else if (mouse.right) fire(true);
+  stepProjectiles(dt);
+  // Debris: the core's physics; the glow cools.
+  stepDebris(D, A, dt);
+  for (const b of D.bodies) if (b.hot > 0) b.hot = Math.max(0, b.hot - dt * (b.liquid ? 0.45 : 1.6));
+  // The show.
+  for (let i = particles.length - 1; i >= 0; i--){
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0){ particles.splice(i, 1); continue; }
+    p.v[1] -= p.g * dt;
+    const drag = p.kind === 'smoke' ? Math.exp(-1.6 * dt) : Math.exp(-0.6 * dt);
+    p.v = V.mul(p.v, drag); p.p = V.add(p.p, V.mul(p.v, dt));
+    if (p.kind === 'spark' && A.solidAt(Math.floor(p.p[0]), Math.floor(p.p[1]), Math.floor(p.p[2]))){ p.v = V.mul(p.v, -0.3); p.p = V.add(p.p, V.mul(p.v, dt * 2)); }
+  }
+  for (let i = lights.length - 1; i >= 0; i--){ lights[i].life -= dt; if (lights[i].life <= 0) lights.splice(i, 1); }
+  shake = Math.max(0, shake - dt * 2.2);
+}
+
+/* ---- the draw -------------------------------------------------------------------- */
+let viewProj = null;
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2), w = Math.floor(innerWidth * dpr), h = Math.floor(innerHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; }
+}
+function frameLights(){
+  const L = lights.map(l => ({ p: l.p, r: l.r, c: V.mul(l.c, l.life / l.max) }));
+  for (const pr of projectiles) L.push({ p: pr.p, r: pr.kind === 'rocket' ? 18 : 10, c: pr.kind === 'rocket' ? [2.2, 1.2, 0.4] : [0.4, 1.6, 2.4] });
+  L.sort((a, b) => V.len(V.sub(a.p, cam.eye)) / a.r - V.len(V.sub(b.p, cam.eye)) / b.r);
+  return L.slice(0, 8);
+}
+function drawChunks(prog, vp, view, cull){
+  gl.useProgram(prog.p);
+  gl.uniformMatrix4fv(prog.U.uVP, false, vp);
+  gl.uniform4fv(prog.U.uView, view);
+  const planes = cull ? frustum(vp) : null;
+  let instances = 0, drawn = 0;
+  for (const m of meshes){
+    if (!m || !m.count) continue;
+    if (planes && !boxVisible(planes, m.lo, m.hi)) continue;
+    gl.uniform3f(prog.U.uOrigin, m.lo[0], m.lo[1], m.lo[2]);
+    gl.bindVertexArray(m.vao);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, m.count);
+    instances += m.count; drawn++;
+  }
+  gl.bindVertexArray(null);
+  return { instances, drawn };
+}
+function drawShadow(now){
+  if (!settings.shadows || !shadow.dirty || now - shadow.last < 120) return;
+  shadow.dirty = false; shadow.last = now;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, shadow.fb);
+  gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
+  gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1.5, 3);
+  drawChunks(P.depth, shadow.mat, [SUN[0], SUN[1], SUN[2], 0], false);
+  gl.disable(gl.POLYGON_OFFSET_FILL);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+const HOT = [1, 0.55, 0.18];
+function fillBatches(){
+  const { solid, glow, smoke, hand } = batches;
+  solid.n = glow.n = smoke.n = hand.n = 0;
+  // Debris: each voxel turned about its body's middle.
+  for (const b of D.bodies){
+    const q = b.q, o = b.offs, c = [b.pos[0] + b.size[0] / 2, b.pos[1] + b.size[1] / 2, b.pos[2] + b.size[2] / 2];
+    const turned = Math.abs(q[0]) < 0.99999;
+    for (let k = 0; k < b.n; k++){
+      let l = [o[3 * k] + 0.5 - b.size[0] / 2, o[3 * k + 1] + 0.5 - b.size[1] / 2, o[3 * k + 2] + 0.5 - b.size[2] / 2];
+      if (turned){ const u = [q[1], q[2], q[3]], t = V.cross(u, V.add(V.cross(u, l), V.mul(l, q[0]))); l = V.add(l, V.mul(t, 2)); }
+      const rgb = rgbOf(b.cols[k]), h = b.hot, col = [rgb[0] / 255, rgb[1] / 255, rgb[2] / 255];
+      if (h > 0){ for (let i = 0; i < 3; i++) col[i] += (HOT[i] - col[i]) * Math.min(1, h * 1.3); }
+      solid.push([c[0] + l[0], c[1] + l[1], c[2] + l[2]], ONE, q, [col[0], col[1], col[2], h * 0.9]);
+    }
+  }
+  for (const pr of projectiles){
+    const d = V.norm(pr.v), yaw = Math.atan2(d[0], d[2]), pitch = Math.asin(Math.max(-1, Math.min(1, d[1]))), q = quatYawPitch(yaw, pitch);
+    if (pr.kind === 'rocket'){
+      const s = pr.big ? 1.5 : 1;
+      solid.push(pr.p, [0.5 * s, 0.5 * s, 1.6 * s], q, [0.3, 0.33, 0.28, 0]);
+      glow.push(V.sub(pr.p, V.mul(d, 1.0 * s)), [0.45 * s, 0.45 * s, 0.6 * s], q, [1, 0.6, 0.2, 2.5]);
+    } else glow.push(pr.p, [0.5, 0.5, 2.6], q, [0.45, 0.9, 1, 2.6]);
+  }
+  for (const p of particles){
+    const t = 1 - p.life / p.max, s = p.size + (p.grow || 0) * t;
+    if (p.kind === 'smoke') smoke.push(p.p, [s, s, s], ID, [p.col[0], p.col[1], p.col[2], 0.55 * (1 - t) * Math.min(1, t * 6)]);
+    else if (p.kind === 'fire'){ const k = 1 - t; glow.push(p.p, [s, s, s], ID, [1, 0.35 + 0.55 * k * k, 0.12 + 0.4 * k * k * k, 1.5 * k]); }
+    else glow.push(p.p, [s, s, s], ID, [p.col[0], p.col[1], p.col[2], 2.2 * (1 - t * 0.7)]);
+  }
+  // The gun in hand, in the camera's frame (x right, y up, z forward), kicked back by recoil and bobbing as you walk.
+  const f = fwdOf(), r = rightOf(), u = V.cross(r, f), q = quatYawPitch(cam.yaw, cam.pitch);
+  const kick = recoil * recoil * 0.25, by = Math.sin(bob) * 0.025, bx = Math.cos(bob * 0.5) * 0.02;
+  // Modelled at a size that read well, then drawn at GUN of it (the first try filled a quarter of the view).
+  const GUN = 0.4, at = (x, y, z) => V.add(cam.eye, V.add(V.add(V.mul(r, GUN * (x + 0.18) + bx), V.mul(u, GUN * (y - 0.1) + by)), V.mul(f, GUN * z - kick)));
+  const push = hand.push;
+  hand.push = (c, s, q, col) => push(c, V.mul(s, GUN), q, col);
+  if (weapon === 'rocket'){
+    hand.push(at(0.42, -0.34, 0.95), [0.2, 0.2, 1.1], q, [0.27, 0.33, 0.24, 0]);
+    hand.push(at(0.42, -0.34, 1.52), [0.24, 0.24, 0.08], q, [0.18, 0.18, 0.18, 0]);
+    hand.push(at(0.42, -0.47, 0.82), [0.08, 0.2, 0.1], q, [0.15, 0.13, 0.12, 0]);
+    hand.push(at(0.42, -0.23, 0.9), [0.03, 0.03, 0.5], q, [0.85, 0.42, 0.12, cooldown > 0 ? 0.1 : 0.6]);
+  } else {
+    hand.push(at(0.42, -0.35, 0.9), [0.22, 0.17, 0.75], q, [0.32, 0.32, 0.38, 0]);
+    hand.push(at(0.42, -0.35, 1.32), [0.11, 0.11, 0.18], q, [0.2, 0.2, 0.24, 0]);
+    for (let k = 0; k < 3; k++) hand.push(at(0.42, -0.35, 0.72 + k * 0.17), [0.25, 0.2, 0.05], q, [0.3, 0.75, 0.9, 0.35 + 0.25 * Math.sin(performance.now() / 90 + k)]);
+    hand.push(at(0.42, -0.5, 0.78), [0.08, 0.18, 0.1], q, [0.15, 0.15, 0.17, 0]);
+  }
+  hand.push = push;
+  for (const b of Object.values(batches)) b.upload();
+}
+function drawBatch(b, mode, vp, eye, L){
+  if (!b.n) return;
+  const { p, U } = P.cube;
+  gl.useProgram(p);
+  gl.uniformMatrix4fv(U.uVP, false, vp); gl.uniform1i(U.uMode, mode);
+  setLight(U, eye, L);
+  gl.bindVertexArray(b.vao);
+  gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, b.n);
+  gl.bindVertexArray(null);
+}
+let lastDraw = { instances: 0, drawn: 0 };
+function render(now){
+  resize();
+  if (!A){ gl.clearColor(0.56, 0.7, 0.84, 1); gl.clear(gl.COLOR_BUFFER_BIT); return; }
+  drawShadow(now);
+  const f = fwdOf(), sh = shake * shake * 0.6, eye = V.add(cam.eye, [(Math.random() - 0.5) * sh, (Math.random() - 0.5) * sh, (Math.random() - 0.5) * sh]);
+  const proj = perspective(1.25, canvas.width / canvas.height, 0.08, Math.max(A.X, A.Z) * 3);
+  viewProj = mat4mul(proj, lookAt(eye, V.add(eye, f), [0, 1, 0]));
+  const L = frameLights();
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(LOOK.fog[0], LOOK.fog[1], LOOK.fog[2], 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  // The sky.
+  gl.disable(gl.DEPTH_TEST);
+  gl.useProgram(P.sky.p);
+  gl.uniformMatrix4fv(P.sky.U.uInv, false, invert(viewProj)); gl.uniform3fv(P.sky.U.uSun, SUN); gl.uniform3fv(P.sky.U.uFog, LOOK.fog);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.disable(gl.CULL_FACE);
+  // The world.
+  gl.useProgram(P.chunk.p); setLight(P.chunk.U, eye, L);
+  lastDraw = drawChunks(P.chunk, viewProj, [eye[0], eye[1], eye[2], 1], true);
+  // Debris and the rest.
+  fillBatches();
+  gl.enable(gl.CULL_FACE);
+  drawBatch(batches.solid, 0, viewProj, eye, L);
+  gl.depthMask(false); gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); drawBatch(batches.smoke, 2, viewProj, eye, L);
+  gl.blendFunc(gl.ONE, gl.ONE); drawBatch(batches.glow, 1, viewProj, eye, L);
+  gl.disable(gl.BLEND); gl.depthMask(true);
+  // The gun, over everything.
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  drawBatch(batches.hand, 0, mat4mul(perspective(1.1, canvas.width / canvas.height, 0.02, 10), lookAt(eye, V.add(eye, f), [0, 1, 0])), eye, L);
+  gl.disable(gl.CULL_FACE);
+}
+
+/* ---- the HUD ----------------------------------------------------------------------- */
+let fps = 0, hudAt = 0;
+function hud(now){
+  if (now - hudAt < 200) return;
+  hudAt = now;
+  for (const w of ['rocket', 'plasma']) $(`slot-${w}`).classList.toggle('on', weapon === w);
+  if (!A){ $('hud').innerHTML = ''; return; }
+  const sum = A.count + D.voxels, ok = sum === total;
+  $('hud').innerHTML =
+    `<div class="big">${WEAPONS[weapon].name}</div>` +
+    `<div>mass: world ${A.count.toLocaleString()} + debris ${D.voxels.toLocaleString()} = ${sum.toLocaleString()} ` +
+    `<span class="${ok ? 'ok' : 'bad'}">${ok ? '✓ conserved' : `✗ ${(sum - total).toLocaleString()}`}</span></div>` +
+    `<div>${D.bodies.length.toLocaleString()} debris bodies in flight · ${stats.blasts} blasts · ${stats.carved.toLocaleString()} carved · ${stats.loose} pieces cut loose</div>` +
+    `<div>${fps.toFixed(0)} fps · ${lastDraw.instances.toLocaleString()} cubes in ${lastDraw.drawn} chunks${flying ? ' · flying' : ''}${timeScale < 1 ? ' · slow motion' : ''}</div>`;
+}
+
+/* ---- input --------------------------------------------------------------------------- */
+const panelOpen = () => !$('panel').hidden;
+function setPanel(on){ $('panel').hidden = !on; if (on && document.pointerLockElement) document.exitPointerLock(); syncOverlay(); }
+function syncOverlay(){ $('overlay').hidden = mouse.locked || panelOpen() || TEST; }
+function play(){ ensureAudio(); audio.ctx?.resume?.(); setPanel(false); canvas.requestPointerLock?.(); }
+document.addEventListener('pointerlockchange', () => { mouse.locked = document.pointerLockElement === canvas; if (!mouse.locked){ mouse.left = mouse.right = false; keys.clear(); } syncOverlay(); });
+canvas.addEventListener('mousedown', e => {
+  if (!mouse.locked){ if (!panelOpen()) play(); return; }
+  if (e.button === 0) mouse.left = true; if (e.button === 2) mouse.right = true;
+});
+addEventListener('mouseup', e => { if (e.button === 0) mouse.left = false; if (e.button === 2) mouse.right = false; });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('mousemove', e => {
+  if (!mouse.locked) return;
+  const k = 0.0022 * settings.sens;
+  cam.yaw -= e.movementX * k; cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch - e.movementY * k));
+});
+addEventListener('wheel', e => { if (mouse.locked) setWeapon(weapon === 'rocket' ? 'plasma' : 'rocket'); }, { passive: true });
+function setWeapon(w){ weapon = w; cooldown = Math.min(cooldown, 0.15); hudAt = 0; }
+addEventListener('keydown', e => {
+  if (e.target.closest && e.target.closest('input, select')) return;
+  if (e.code === 'Tab'){ e.preventDefault(); setPanel(!panelOpen()); return; }
+  if (!mouse.locked && !TEST) return;
+  keys.add(e.code);
+  if (e.code === 'Space') e.preventDefault();
+  if (e.code === 'Digit1') setWeapon('rocket');
+  if (e.code === 'Digit2') setWeapon('plasma');
+  if (e.code === 'KeyQ') setWeapon(weapon === 'rocket' ? 'plasma' : 'rocket');
+  if (e.code === 'KeyF'){ flying = !flying; if (!flying && walker){ walker.p = [cam.eye[0], cam.eye[1] - WALKER.eye, cam.eye[2]]; walker.v = [0, 0, 0]; walker.lift = 0; settle(walker, worldFn, 400); } }
+  if (e.code === 'KeyT') timeScale = timeScale < 1 ? 1 : 0.25;
+  if (e.code === 'KeyM'){ settings.sound = !settings.sound; $('sound').checked = settings.sound; save(); if (settings.sound) ensureAudio(); toast(settings.sound ? 'Sound on' : 'Sound off', 1200); }
+  if (e.code === 'KeyR' && !e.repeat) build().catch(() => {});
+});
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => { keys.clear(); mouse.left = mouse.right = false; });
+
+/* ---- the panel ------------------------------------------------------------------------- */
+const fields = ['size', 'height', 'plane', 'seed', 'specimens', 'maths'];
+function syncPanel(){
+  for (const k of fields) $(k).value = settings[k];
+  $('rocketR').value = settings.rocketR; $('rocketRv').textContent = settings.rocketR;
+  $('plasmaR').value = settings.plasmaR; $('plasmaRv').textContent = settings.plasmaR;
+  $('loose').checked = settings.loose; $('shadows').checked = settings.shadows; $('sound').checked = settings.sound; $('sens').value = settings.sens;
+  $('files').innerHTML = files.map((f, i) => `<li><span>${esc(f.name)}${f.worlds && f.worlds.length > 1 ? ` · world ${f.world + 1} of ${f.worlds.length}` : ''}</span><button data-drop="${i}" title="remove">×</button></li>`).join('') ||
+    '<li class="note">none: specimens and math shapes only</li>';
+}
+for (const k of fields) $(k).addEventListener('change', () => { settings[k] = Number($(k).value); save(); $('panelNote').textContent = 'Build to see it'; });
+$('dice').onclick = () => { settings.seed = 1 + Math.floor(Math.random() * 65535); $('seed').value = settings.seed; save(); build().catch(() => {}); };
+$('rocketR').oninput = () => { settings.rocketR = Number($('rocketR').value); $('rocketRv').textContent = settings.rocketR; save(); };
+$('plasmaR').oninput = () => { settings.plasmaR = Number($('plasmaR').value); $('plasmaRv').textContent = settings.plasmaR; save(); };
+$('loose').onchange = () => { settings.loose = $('loose').checked; save(); };
+$('shadows').onchange = () => { settings.shadows = $('shadows').checked; shadow.dirty = true; save(); };
+$('sound').onchange = () => { settings.sound = $('sound').checked; save(); if (settings.sound) ensureAudio(); };
+$('sens').oninput = () => { settings.sens = Number($('sens').value); save(); };
+$('build').onclick = () => build().catch(() => {});
+$('play').onclick = play;
+$('openPanel').onclick = () => setPanel(true);
+$('closePanel').onclick = () => setPanel(false);
+$('addFile').onclick = () => $('fileInput').click();
+$('fileInput').onchange = () => { addFiles([...$('fileInput').files]); $('fileInput').value = ''; };
+$('files').onclick = e => { const i = e.target.dataset?.drop; if (i !== undefined){ files.splice(Number(i), 1); syncPanel(); build().catch(() => {}); } };
+function addFiles(list){
+  const v = list.filter(f => /\.vdag$/i.test(f.name));
+  if (!v.length){ toast('Only .vdag world files go in the arena', 3000); return; }
+  for (const file of v) files.push({ file, name: file.name, world: 0 });
+  syncPanel();
+  return build().catch(() => {});
+}
+addEventListener('dragover', e => { e.preventDefault(); $('drop').style.display = 'flex'; });
+addEventListener('dragleave', e => { if (!e.relatedTarget) $('drop').style.display = 'none'; });
+addEventListener('drop', e => { e.preventDefault(); $('drop').style.display = 'none'; addFiles([...(e.dataTransfer?.files || [])]); });
+
+/* ---- the loop ------------------------------------------------------------------------- */
+let last = performance.now();
+function frame(now){
+  const raw = Math.min(0.05, Math.max(0, (now - last) / 1000)); last = now;
+  if (raw > 0) fps += (1 / raw - fps) * 0.08;
+  if (!TEST || __destroy.live) update(raw * timeScale);
+  if (A) remesh(5);
+  render(now);
+  hud(now);
+  requestAnimationFrame(frame);
+}
+
+/* ---- for the console and the test ---------------------------------------------------------
+   __destroy.selftest() builds a small arena, fires every kind of shot at
+   it by the same functions the mouse calls (explode, fire, the projectiles'
+   step), runs the world until every body has baked, and checks the mass
+   every frame, that no body is ever inside the grid, and that the GL
+   pipeline draws without an error. destroy/test/browser/destroy.test.js
+   drives it in headless Chrome. */
+const __destroy = window.__destroy = {
+  live: false,
+  get arena(){ return A; }, get debris(){ return D; }, get total(){ return total; }, get built(){ return built; }, get walker(){ return walker; }, cam, stats, settings,
+  build, explode, update, render, fire, setWeapon, addFiles, files, remesh, raycast: (o, d, t) => raycast(A, o, d, t),
+  mass: () => ({ world: A.count, debris: D.voxels, total }),
+  async selftest(opts = {}){
+    const out = { steps: 0, errors: [], frames: 0 };
+    Object.assign(settings, { size: 128, height: 96, plane: 16, seed: 3, specimens: 4, maths: 1, ...opts.desc });
+    await build();
+    out.total = total; out.placed = built.placed.length;
+    const check = () => {
+      if (A.count + D.voxels !== total) out.errors.push(`mass off by ${A.count + D.voxels - total} at step ${out.steps}`);
+      for (const b of D.bodies) if (bodyInside(A, b)){ out.errors.push(`a body inside the grid at step ${out.steps}`); break; }
+    };
+    const run = n => { for (let k = 0; k < n; k++){ update(1 / 60); remesh(Infinity); out.steps++; check(); } };
+    // Blasts on every thing placed, then through the projectiles' path: rockets and plasma at the plane and a thing.
+    for (const p of built.placed){ explode([p.at[0] + p.size[0] / 2, p.at[1] + 3, p.at[2] + p.size[2] / 2], 6, 'rocket'); run(2); }
+    out.carvedByRockets = stats.carved;
+    // Each weapon, plain and alt, from where the walker spawned, down at the plane: every
+    // projectile must meet it and blow (1 + 1 rockets, 1 + 7 bolts).
+    const blasts0 = stats.blasts;
+    for (const w of ['rocket', 'plasma']) for (const alt of [false, true]){
+      setWeapon(w); cooldown = 0; cam.yaw = built.yaw; cam.pitch = -0.5; fire(alt); run(40);
+    }
+    out.projectileBlasts = stats.blasts - blasts0;
+    if (out.projectileBlasts !== 10) out.errors.push(`${out.projectileBlasts} projectile blasts, not 10`);
+    // A rocket jump: a blast just under the walker throws it up.
+    run(60);
+    const feet = walker.p.slice();
+    explode([feet[0] + 1, feet[1] - 0.5, feet[2]], 5, 'rocket');
+    out.jump = walker.v[1];
+    if (!(walker.v[1] > 10)) out.errors.push(`a rocket under the walker gave it ${walker.v[1].toFixed(2)} up`);
+    explode([A.X / 2, settings.plane - 1, A.Z / 2], 3, 'plasma'); run(5);
+    let guard = 0;
+    while (D.bodies.length && guard++ < 1200) run(1);
+    out.left = D.bodies.length; out.shots = stats.shots; out.blasts = stats.blasts; out.carved = stats.carved; out.loose = stats.loose;
+    // The GPU's buffers are the grid's words: every chunk read back against meshChunk now.
+    let stale = 0;
+    for (let c = 0; c < A.CX * A.CY * A.CZ; c++){
+      const want = meshChunk(A, c), m = meshes[c], n = m ? m.count : 0;
+      if (n !== want.count){ stale++; continue; }
+      if (!n) continue;
+      const got = new Uint32Array(3 * n);
+      gl.bindBuffer(gl.ARRAY_BUFFER, m.buf); gl.getBufferSubData(gl.ARRAY_BUFFER, 0, got);
+      for (let k = 0; k < got.length; k++) if (got[k] !== want.words[k]){ stale++; break; }
+    }
+    if (stale) out.errors.push(`${stale} chunks drawn from stale words`);
+    for (let k = 0; k < 3; k++){ render(performance.now() + k * 200); out.frames++; }
+    const e = gl.getError(); if (e) out.errors.push(`GL error ${e}`);
+    out.instances = lastDraw.instances; out.world = A.count; out.ok = !out.errors.length && out.left === 0 && A.count === total;
+    return out;
+  },
+};
+syncPanel();
+syncOverlay();
+requestAnimationFrame(frame);
+if (!TEST) build().catch(() => {});
+else __destroy.ready = true;
+</script>
+</body>
+</html>
