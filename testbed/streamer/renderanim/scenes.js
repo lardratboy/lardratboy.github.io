@@ -397,7 +397,7 @@ export const SCENES = [
       ['lod 0 leaves (cells of 1)', counts[0], LOD[0]], ['lod 1 leaves (cells of 2)', counts[1], LOD[1]], ['lod 2 leaves (cells of 4)', counts[2], LOD[2]],
       ['chunks in the cut', sel.nodes.size, INK],
     ], { title: 'SELECTCHUNKS, NOW', alpha: fade(t, 0.5, 1.5, 20.2, 21) });
-    codeWalk(c, 'select', t, [[0, 'const c = pop();'], [6.5, 'c.dist < detail * c.size'], [9, 'childrenOf(world, c)'], [12, 'leaves.push(c);']], { alpha: fade(t, 0.5, 1.3, 20.2, 21) });
+    codeWalk(c, 'select', t, [[0, 'const c = pop();'], [6.5, 'if (splitsAt(c, rule)){'], [9, 'childrenOf(world, c)'], [12, 'leaves.push(c);']], { alpha: fade(t, 0.5, 1.3, 20.2, 21) });
   },
 },
 /* 5 ------------------------------------------------------------------------------ */
@@ -493,14 +493,17 @@ export const SCENES = [
       label3(F, g, W2S(add3(lo, [16, 16, 16])), String(o), { alpha: oa, color: ACCENT, size: 13, mono: true });
     }
     F.records(P.cells, P.forigin, 1, { hi: shown, allFaces: true, mode: 1, rankN: n });
-    // The Z-curve through the first cells.
-    const za = fade(t, 3, 4, 9, 10);
+    // The Z-curve as a trail behind the newest cell, fainter toward its tail. It
+    // was once the first 160 cells, which the walk passes a moment after t = 3
+    // (87,096 cells in 12.5 s), so the line sat still by octant 0 while the cube
+    // ran on; it lives as long as the cube now.
+    const za = fade(t, 3, 4, 14.8, 15.6);
     if (za > 0){
-      const m = Math.min(shown, 160), cells = P.F.cells;
+      const TRAIL = 160, cells = P.F.cells, i0 = Math.max(0, shown - TRAIL);
       let prev = null;
-      for (let i = 0; i < m; i++){
+      for (let i = i0; i < shown; i++){
         const p = cells[i], q = add3(P.forigin, [(p & 255) + 0.5, (p >> 8 & 255) + 0.5, (p >> 16) + 0.5]);
-        if (prev) F.seg(prev, q, [1, 0.82, 0.4, za], 1.6, { top: true });
+        if (prev) F.seg(prev, q, [1, 0.82, 0.4, za * (0.25 + 0.75 * (i - i0) / TRAIL)], 1.6, { top: true });
         prev = q;
       }
     }

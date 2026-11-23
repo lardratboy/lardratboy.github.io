@@ -49,8 +49,11 @@ export const SNIPS = {
   recShown:      { file: 'chunk-glsl.js', at: 'uint  boundaryBits(uvec3 c){', n: 6, title: 'GLSL_DECODE: the open sides' },
 };
 
-/* texts: { file: string }. Returns { file: lines[] }. */
-export const indexSources = texts => Object.fromEntries(Object.entries(texts).map(([f, s]) => [f, s.split('\n')]));
+/* texts: { file: string }, why: { file: reason it didn't load }. Returns
+   { file: lines[] }, the reasons kept under WHY for snippet's error. */
+const WHY = Symbol('why');
+export const indexSources = (texts, why = {}) =>
+  Object.assign(Object.fromEntries(Object.entries(texts).map(([f, s]) => [f, s.split('\n')])), { [WHY]: why });
 
 /* A snippet: { name, file, title, line (1-based, of its first line), lines,
    hl(sub) → index of the first line holding sub, or -1 } or { error }. */
@@ -58,7 +61,10 @@ export function snippet(src, name){
   const spec = SNIPS[name];
   if (!spec) return { error: `no snippet '${name}'` };
   const lines = src && src[spec.file];
-  if (!lines) return { error: `${spec.file} not loaded` };
+  if (!lines){
+    const reason = src && src[WHY] && src[WHY][spec.file];
+    return { error: `${spec.file} not loaded` + (reason ? `: ${reason}` : '') };
+  }
   const at = [];
   lines.forEach((l, i) => { if (l.includes(spec.at)) at.push(i); });
   if (at.length !== 1) return { error: `${spec.file}: anchor found ${at.length} times: ${spec.at}` };

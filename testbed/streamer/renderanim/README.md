@@ -11,7 +11,10 @@ and like it a single page with no build step and no dependencies:
 Serve the repo root: the page imports the cores unchanged (`../dag-core.js`,
 `../chunk-core.js`, `../stream-core.js`, `../kit-core.js`, `../colours.js`,
 `../chunk-glsl.js`, `../experiments/stream-sim.mjs`) and fetches the source
-files its code panels show.
+files its code panels show, from beside them: by `main.js`'s own URL, as the
+imports resolve, never the page's (fetched against the page, the panels all
+said "not loaded" wherever the page sat at another path). A file that won't
+load says why in its panel (the HTTP status and the path asked for).
 
 ## What's real
 

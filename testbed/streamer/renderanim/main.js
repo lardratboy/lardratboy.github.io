@@ -19,14 +19,23 @@ const paint = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0
 
 let D, R, P;
 try {
-  const texts = {};
-  const got = Promise.all(FILES.map(f => fetch('../' + f, { cache: 'no-store' }).then(r => r.ok ? r.text() : Promise.reject(new Error(f + ': ' + r.status)))
-                                                       .then(t => { texts[f] = t; })));
+  // The sources are fetched by this module's URL, as the imports are, not the
+  // page's: '../' against the page breaks wherever the page isn't served at
+  // /renderanim/ (a host serving it under another path), while the imports,
+  // resolved against the module, still load, so the film ran with every code
+  // panel saying "not loaded". Each failure keeps its reason for the panel.
+  const texts = {}, why = {};
+  const got = Promise.all(FILES.map(f => {
+    const url = new URL('../' + f, import.meta.url);
+    return fetch(url, { cache: 'no-store' })
+      .then(r => r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status} for ${url.pathname}`)))
+      .then(t => { texts[f] = t; }, e => { why[f] = e.message; console.warn(`code panels: ${f}: ${e.message}`); });
+  }));
   say('Building the kit with kit-core.js, then 37 chunk jobs with createJobRunner…');
   await paint();
   D = buildAll();
-  await got.catch(e => console.warn('code panels: ' + e.message));
-  D.src = indexSources(texts);
+  await got;
+  D.src = indexSources(texts, why);
   R = createRenderer(glCanvas);
   P = prepare(R, D);
   // Captions carry live numbers: a chapter's steps may be a function of the data.
