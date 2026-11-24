@@ -103,8 +103,13 @@ export function itemOfOcc(name, occ, R, scale, colour){
    darker, and a hashed speckle. */
 export const MATERIALS = [[170, 82, 62], [214, 186, 130], [92, 102, 118], [86, 158, 140], [204, 150, 60], [226, 222, 210], [150, 78, 46], [66, 64, 70]];
 export const SPECIMEN_R = [12, 16, 20, 24, 28, 32];
+// What specimen k will be, before it's built: its R, scale and hash. Its box is (R·scale)³ at most.
+export function specimenPlan(seed, k){
+  const h = hash4(seed, k, 3, 0x5bec);
+  return { h, R: SPECIMEN_R[h % SPECIMEN_R.length], scale: (h >>> 8) % 3 === 0 ? 2 : 1 };
+}
 export function specimenItem(seed, k){
-  const h = hash4(seed, k, 3, 0x5bec), R = SPECIMEN_R[h % SPECIMEN_R.length], scale = (h >>> 8) % 3 === 0 ? 2 : 1;
+  const { h, R, scale } = specimenPlan(seed, k);
   const occ = buildRecipe({ R, seed, axes: 'random', n: [1, 1, 1] }, k + 1);
   const m = MATERIALS[(h >>> 12) % MATERIALS.length];
   return itemOfOcc(`specimen ${k + 1} (R ${R}${scale > 1 ? ', ×2' : ''})`, occ, R, scale, (x, y, z) => {
@@ -121,10 +126,14 @@ export function mathDeck(seed){
   for (let k = a.length - 1; k > 0; k--){ const r = hash4(seed, k, 9, 0x3a7) % (k + 1), t = a[k]; a[k] = a[r]; a[r] = t; }
   return a;
 }
-export function mathItem(seed, k, rMax){
+// What math shape k will be, before it's voxelized (the slow part): its shape, R and yaw. Its box is R³ at most.
+export function mathPlan(seed, k, rMax){
   const deck = mathDeck(seed), shape = MATH_SHAPES[deck[k % deck.length]], h = hash4(seed, k, 5, 0x77);
   const [lo, hi] = sizeRange(shape, 32, Math.max(32, Math.min(128, rMax)));
-  const R = lo + (h % (hi - lo + 1)), yaw = (h >>> 10) % 4096;
+  return { shape, R: lo + (h % (hi - lo + 1)), yaw: (h >>> 10) % 4096 };
+}
+export function mathItem(seed, k, rMax){
+  const { shape, R, yaw } = mathPlan(seed, k, rMax);
   const { occ } = voxelize(shape, R, yaw);
   return itemOfOcc(`${shape.name} (R ${R})`, occ, R, 1, (x, y, z) => gamut((x + 0.5) / R, (y + 0.5) / R, (z + 0.5) / R));
 }
@@ -165,18 +174,28 @@ export function dagItem(name, world, colour, lod){
    part of the spawn's clearing, inside the arena less a margin. The first
    loaded world is tried at the middle first (loaded worlds, `first`,
    go before everything else). An item taller than
-   the room over the plane, or with no place, is left out and listed. */
-export function layoutItems(items, desc, spawn){
+   the room over the plane, or with no place, is left out and listed.
+
+   The layout places one item at a time (`createLayout`), so the arena can
+   be stamped, and shown, as each thing is made (2026-11-23: the build took
+   5 to 10 s on some machines with nothing to look at). For that the order
+   can't wait for the things: buildArena orders them by the footprint they
+   will have at most, their box before the trim (R², known from the plan
+   before the slow voxelize), not the trimmed one, which is why a seed's
+   arena moved a little that day. `layoutItems` orders made items by their
+   own footprint. Either way an item's places are hashed from its index in
+   the list, never from its turn in the order. */
+export const layoutOrder = (items, area) => items.map((_, i) => i).sort((a, b) => (items[b].first ? 1 : 0) - (items[a].first ? 1 : 0) || area(b) - area(a));
+export function createLayout(desc, spawn){
   const { size: X, height: Y, plane: T, seed } = desc, Z = X, gap = 6, margin = 4, placed = [], left = [];
-  const order = items.map((_, i) => i).sort((a, b) => (items[b].first ? 1 : 0) - (items[a].first ? 1 : 0) || items[b].sx * items[b].sz - items[a].sx * items[a].sz);
   const meets = (x0, z0, it) => {
     if (Math.hypot(Math.max(x0 - spawn[0], 0, spawn[0] - (x0 + it.sx)), Math.max(z0 - spawn[2], 0, spawn[2] - (z0 + it.sz))) < 22) return true;
     for (const p of placed) if (x0 < p.x0 + p.item.sx + gap && p.x0 < x0 + it.sx + gap && z0 < p.z0 + p.item.sz + gap && p.z0 < z0 + it.sz + gap) return true;
     return false;
   };
-  for (const i of order){
-    const it = items[i];
-    if (it.sy > Y - T - 4 || it.sx > X - 2 * margin || it.sz > Z - 2 * margin){ left.push({ name: it.name, why: 'too big for the arena' }); continue; }
+  // Item `it`, number i in the list: its placement (also kept in `placed`), or null (in `left`).
+  const place = (it, i) => {
+    if (it.sy > Y - T - 4 || it.sx > X - 2 * margin || it.sz > Z - 2 * margin){ left.push({ name: it.name, why: 'too big for the arena' }); return null; }
     const spanX = X - 2 * margin - it.sx, spanZ = Z - 2 * margin - it.sz;
     let at = null;
     if (it.first && !placed.length){ const x0 = Math.floor((X - it.sx) / 2), z0 = Math.floor((Z - it.sz) / 2); if (!meets(x0, z0, it)) at = [x0, z0]; }
@@ -184,10 +203,17 @@ export function layoutItems(items, desc, spawn){
       const x0 = margin + hash4(seed, i, t, 0xa1) % (spanX + 1), z0 = margin + hash4(seed, i, t, 0xb2) % (spanZ + 1);
       if (!meets(x0, z0, it)) at = [x0, z0];
     }
-    if (!at){ left.push({ name: it.name, why: 'no room left' }); continue; }
-    placed.push({ item: it, x0: at[0], y0: T, z0: at[1] });
-  }
-  return { placed, left };
+    if (!at){ left.push({ name: it.name, why: 'no room left' }); return null; }
+    const p = { item: it, x0: at[0], y0: T, z0: at[1] };
+    placed.push(p);
+    return p;
+  };
+  return { placed, left, place };
+}
+export function layoutItems(items, desc, spawn){
+  const L = createLayout(desc, spawn);
+  for (const i of layoutOrder(items, i => items[i].sx * items[i].sz)) L.place(items[i], i);
+  return { placed: L.placed, left: L.left };
 }
 
 export function stampItem(A, it, x0, y0, z0){
@@ -198,24 +224,46 @@ export function stampItem(A, it, x0, y0, z0){
   }
 }
 
-/* The whole arena: plane, then items (loaded worlds first, then the math
-   shapes, then the specimens), laid out and stamped, counted once. The
-   walker spawns at the middle of the near edge looking in (yaw π is −z,
-   walk-core's wishOf convention). `extra` are items made already (the
-   loaded worlds, by the worker that read the files). */
-export function buildArena(desc, extra = [], { onPhase = () => {} } = {}){
-  const d = arenaDesc(desc), A = createArena(d.size, d.height, d.size);
+/* The whole arena: plane, then items (loaded worlds first, then the rest
+   biggest first by the box each will have at most), each made, laid out
+   and stamped in turn. The walker spawns at the middle of the near edge
+   looking in (yaw π is −z, walk-core's wishOf convention). `extra` are
+   items made already (the loaded worlds, by the worker that read the
+   files). `onPlace(p, voxels)` hears each placement as it's made, before
+   the next thing is: the worker posts it, so the page stamps the arena as
+   it grows (the plane it lays itself, `fillPlane`). `grid: false` builds
+   no grid (the worker's case: the page holds the only one): `A` is null,
+   and `count` is the plane plus every placed thing's voxels either way,
+   which holds since nothing placed overlaps the plane or another thing. */
+export const spawnOf = d => [d.size / 2, d.plane, d.size - 14];
+export const SPAWN_YAW = Math.PI;
+export function buildArena(desc, extra = [], { onPhase = () => {}, onPlace = null, grid = true } = {}){
+  const d = arenaDesc(desc), A = grid ? createArena(d.size, d.height, d.size) : null;
   onPhase('the plane', 0);
-  fillPlane(A, d.plane);
-  const items = [...extra];
+  if (A) fillPlane(A, d.plane);
   const rMax = Math.min(128, d.height - d.plane - 24, Math.floor(d.size / 3));
-  for (let k = 0; k < d.maths; k++){ onPhase(`math shape ${k + 1} of ${d.maths}`, 0.1 + 0.6 * k / Math.max(1, d.maths)); items.push(mathItem(d.seed, k, rMax)); }
-  for (let k = 0; k < d.specimens; k++){ onPhase(`specimen ${k + 1} of ${d.specimens}`, 0.7 + 0.2 * k / Math.max(1, d.specimens)); items.push(specimenItem(d.seed, k)); }
-  const spawn = [d.size / 2, d.plane, d.size - 14];
-  const real = items.filter(Boolean);
-  const { placed, left } = layoutItems(real, d, spawn);
-  onPhase('stamping', 0.92);
-  for (const p of placed) stampItem(A, p.item, p.x0, p.y0, p.z0);
-  A.recount();
-  return { A, desc: d, spawn, yaw: Math.PI, placed: placed.map(p => ({ name: p.item.name, at: [p.x0, p.y0, p.z0], size: [p.item.sx, p.item.sy, p.item.sz], voxels: itemVoxels(p.item) })), left };
+  const plans = [
+    ...extra.map(it => ({ first: !!it.first, area: it.sx * it.sz, make: () => it })),
+    ...Array.from({ length: d.maths }, (_, k) => { const { shape, R } = mathPlan(d.seed, k, rMax);
+      return { area: R * R, what: `${shape.name} (R ${R})`, make: () => mathItem(d.seed, k, rMax) }; }),
+    ...Array.from({ length: d.specimens }, (_, k) => { const { R, scale } = specimenPlan(d.seed, k);
+      return { area: (R * scale) ** 2, what: `specimen ${k + 1}`, make: () => specimenItem(d.seed, k) }; }),
+  ];
+  const spawn = spawnOf(d), L = createLayout(d, spawn), order = layoutOrder(plans, i => plans[i].area), placed = [];
+  let count = d.size * d.size * d.plane;
+  for (const [n, i] of order.entries()){
+    const plan = plans[i];
+    if (plan.what) onPhase(`thing ${n + 1} of ${order.length}: ${plan.what}`, 0.05 + 0.9 * n / order.length);
+    const it = plan.make();
+    if (!it) continue;
+    const p = L.place(it, i);
+    if (!p) continue;
+    const voxels = itemVoxels(it);
+    count += voxels;
+    placed.push({ name: it.name, at: [p.x0, p.y0, p.z0], size: [it.sx, it.sy, it.sz], voxels });
+    if (A) stampItem(A, it, p.x0, p.y0, p.z0);
+    if (onPlace) onPlace(p, voxels);
+  }
+  if (A) A.recount();
+  return { A, count, desc: d, spawn, yaw: SPAWN_YAW, placed, left: L.left };
 }

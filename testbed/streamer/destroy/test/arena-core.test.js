@@ -3,7 +3,8 @@
      - pack and rgbOf over every 5-bit value; mixCell converging;
      - the count and the per-chunk counts after random edits against a
        recount by hand, and dirt: re-meshing only the dirty chunks after
-       random edits gives every chunk's words a full re-mesh gives;
+       random edits gives every chunk's words a full re-mesh gives; the
+       same after boxes written behind its back and refreshBox;
      - meshChunk's every word (place, mask, colour, the four corners of every
        face) against a dense grid read with the rule written out here;
      - raycast against a slab test on every solid cell (the nearest entry,
@@ -162,6 +163,28 @@ async function suite(M, { quick = false } = {}){
     assert.equal(A.count, m, 'the count after edits');
     assert.deepEqual(Array.from(A.chunkSolid), Array.from(per), 'per chunk');
     assert.throws(() => A.set(-1, 0, 0, 1), RangeError);
+  }
+
+  // refreshBox: boxes of cells written behind the arena's back (the page stamping a
+  // thing), on chunk borders, at the arena's edges and inside one chunk, then the
+  // count, the per-chunk counts and every chunk's mesh as above.
+  for (const seed of quick ? [6] : [6, 7]){
+    const A = sample(M, seed), rb = rng(seed * 7);
+    const meshes = Array.from({ length: A.CX * A.CY * A.CZ }, (_, c) => asMap(M.meshChunk(A, c)));
+    while (A.takeDirty() >= 0);
+    const edge = () => [0, 30, 31, 32, 33, 40][Math.floor(rb() * 6)];
+    for (let k = 0; k < (quick ? 12 : 30); k++){
+      const lo = [edge(), edge(), edge()], hi = lo.map(v => Math.min(64, v + 1 + Math.floor(rb() * (k % 3 ? 3 : 30))));
+      for (let y = lo[1]; y < hi[1]; y++) for (let z = lo[2]; z < hi[2]; z++) for (let x = lo[0]; x < hi[0]; x++)
+        A.cells[A.idx(x, y, z)] = rb() < 0.3 ? 0 : M.pack(rb() * 255, 60, 60);
+      A.refreshBox(lo, hi);
+      for (let c; (c = A.takeDirty()) >= 0;) meshes[c] = asMap(M.meshChunk(A, c));
+      for (let c = 0; c < meshes.length; c++) assert.deepEqual(meshes[c], asMap(M.meshChunk(A, c)), `refreshBox: chunk ${c} wasn't dirty`);
+      let m = 0; const per = new Int32Array(A.chunkSolid.length);
+      for (let i = 0; i < A.N; i++) if (A.cells[i]){ m++; const x = i % A.X, z = Math.floor(i / A.X) % A.Z, y = Math.floor(i / A.XZ); per[(x >> 5) + A.CX * ((z >> 5) + A.CZ * (y >> 5))]++; }
+      assert.equal(A.count, m, 'refreshBox: the count');
+      assert.deepEqual(Array.from(A.chunkSolid), Array.from(per), 'refreshBox: per chunk');
+    }
   }
 
   // The mesh, word for word.
@@ -331,6 +354,9 @@ const MUTANTS = [
   ['lower of a tie', 'if (d < bd || (d === bd && dy > by)){', 'if (d < bd || (d === bd && dy < by)){'],
   ['no drop', 'if (y > 0 && A.free(x, y - 1, z)){ y--; continue; }', ''],
   ['slides uphill', 'if (A.free(x + dx, y, z + dz) && A.free(x + dx, y - 1, z + dz)){ x += dx; z += dz; y--; moved = true; break; }', 'if (A.free(x + dx, y, z + dz)){ x += dx; z += dz; moved = true; break; }'],
+  ['refresh misses its last chunk', '.map((v, a) => Math.min(v, [X, Y, Z][a] - 1) >> CHUNK_BITS);', '.map((v, a) => (Math.min(v, [X, Y, Z][a] - 1) >> CHUNK_BITS) - (a === 0 ? 1 : 0));'],
+  ['refresh dirties no neighbour', 'for (let cx = (lo[0] - 1) >> CHUNK_BITS; cx <= hi[0] >> CHUNK_BITS; cx++)', 'for (let cx = lo[0] >> CHUNK_BITS; cx <= (hi[0] - 1) >> CHUNK_BITS; cx++)'],
+  ['refresh counts twice', 'A.count += n - chunkSolid[c]; chunkSolid[c] = n;', 'A.count += n; chunkSolid[c] = n;'],
   ['walls open', 'if (y < 0 || x < 0 || z < 0 || x >= X || z >= Z) return true;\n    if (y >= Y) return false;', 'if (y < 0) return true;\n    if (x < 0 || z < 0 || x >= X || z >= Z || y >= Y) return false;'],
 ];
 test('every mutant of arena-core is caught', async t => {

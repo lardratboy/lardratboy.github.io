@@ -45,7 +45,7 @@ plays sounds and moves results between the cores.
 | `arena-core.js` | the grid: cells, chunks, the mesh's words, rays, blasts, loose pieces, putting voxels back |
 | `debris-core.js` | bodies, their move, the bake, the burst, the push |
 | `content-core.js` | the plane, specimens, math shapes, `.vdag` worlds as items, the layout, the build |
-| `build-worker.js` | one build off the page's thread (reads the files, calls `buildArena`) |
+| `build-worker.js` | one build off the page's thread (reads the files, calls `buildArena`, posts each thing as it's placed) |
 | `index.html` | the page: WebGL2, input, weapons, effects, sound, HUD, panel |
 | `../walk-core.js` | the player, the stream viewer's walker, imported unchanged |
 
@@ -158,6 +158,34 @@ but don't cast them. Debris, projectiles, sparks, smoke, the fireball and the
 gun in hand are a second instanced cube with a turn and a scale per instance.
 The gun is drawn after a depth clear, so it never goes into a wall.
 
+### The build streams
+
+A build took 5 to 10 s on some machines, with nothing on screen until the
+end (2026-11-23). The time is the worker making things (math shapes are
+70–85% of it: `voxelize`), then the page meshing every chunk at once
+(0.25–0.65 s here, blocking). Now the arena fills in as it's made:
+
+- At once the page makes the new arena itself, lays the plane
+  (`fillPlane`) and looks over it from above the near edge.
+- The worker builds no grid. `buildArena(…, { grid: false, onPlace })` hands
+  over each thing as soon as it's placed, and the worker posts its cells
+  (transferred). The page stamps them (`stampItem`) and accounts for the box
+  (arena-core's `refreshBox`: the counts of the chunks it meets, those and
+  their neighbours dirty), and the frame re-meshes 10 ms of chunks a frame
+  while it builds (5 after).
+- `built` brings the count the page's arena must come to (the plane plus
+  every placed thing: nothing placed overlaps), and the eye glides down to
+  the walker. While it streams nothing is fired or walked, since debris
+  baked where a thing then lands would be lost to the mass.
+
+**The layout's order had to change for it.** It used to make every thing,
+then place them biggest trimmed footprint first. Placing one as soon as it's
+made needs the order before the things exist, so it's now the box each
+will have *at most*, known from the plan before the slow part (`mathPlan`'s
+R², `specimenPlan`'s (R·scale)²; the test holds every made thing inside its
+plan's box). An item's tries are still hashed from its index in the list,
+so most things land where they did, but a seed's arena moved a little.
+
 Sound is synthesized in WebAudio (filtered noise and swept oscillators), so
 there is nothing to load.
 
@@ -229,7 +257,9 @@ Blasts on the default arena's biggest specimen (a 64³ one, ~25% solid):
     by the rule written out; rays against a slab test on every solid cell
     (random, through corners, a checkerboard, the floor); the carve against
     its formula; loose pieces against a full 26-connected labelling;
-    `detach`, `nearestFree`, `settleDown`; then **25 mutants**.
+    `detach`, `nearestFree`, `settleDown`; boxes written behind the arena's
+    back and `refreshBox` (counts, per chunk, every chunk's mesh); then
+    **28 mutants**.
   - `debris-core.test.js`: a cluster landing flush and baking whole in its
     colours; a wall one thick at 150 voxels a second; barrages with the
     mass, insides and colour multiset checked every step; overtaken; the
@@ -244,16 +274,22 @@ Blasts on the default arena's biggest specimen (a 64³ one, ~25% solid):
     `fitLod`; the layout (gap, bounds, the spawn's clearing, a loaded world
     first and in the middle, too tall left out); `buildArena` (the count is
     the plane plus every placed thing, each where it says, the same seed the
-    same bytes); then **13 mutants**, written beside the file (as mutant-content-<k>.js, gitignored) and removed.
+    same bytes; streamed the page's way, with no grid in the builder, the
+    same grid, count and per-chunk counts; placed biggest planned box first,
+    each made thing inside its plan's box; a loaded world first); then
+    **16 mutants**, written beside the file (as mutant-content-<k>.js, gitignored) and removed.
 - `node --test destroy/test/browser/destroy.test.js` (~35 s, in
   `npm run test:browser`): the page's `__destroy.selftest()` (a small arena
-  built in the worker, a rocket on everything placed, both weapons plain and
+  built in the worker and streamed together on the page, which must be
+  `buildArena`'s grid cell for cell and the builder's count, a rocket on everything placed, both weapons plain and
   alt through `fire()` and the projectile step, the world run until
   everything has baked; mass every frame, no body inside, 10 projectile
   blasts, a rocket jump, every chunk's GPU buffer equal to `meshChunk`, no GL
-  error, no console error); a `.vdag` written in Node added through the real
+  error, no console error); the settings panel opened by a real Tab and
+  closed by a real click on its × (in a window short enough to scroll it,
+  scrolled to the end); a `.vdag` written in Node added through the real
   file input (placed first, the voxels Node's stamp gives, a blast in it
-  keeping the mass); then **8 page mutants**.
+  keeping the mass); then **11 page mutants**.
 - `node destroy/test/browser/shots.mjs [outdir]` (~20 s) screenshots the
   default arena into `destroy/images/`: the opening, a rocket's blast, debris
   in flight, the rubble settled, the plasma's melt, the slag.

@@ -148,6 +148,28 @@ export function createArena(X, Y, Z, cells = null){
     for (let c = 0; c < dirty.length; c++){ dirty[c] = 1; dirtyList.push(c); }
     return A;
   };
+  /* After a bulk write of `cells` inside the box [lo, hi) (the page
+     stamping a thing the builder placed, 2026-11-23): the counts of the
+     chunks the box meets, made again, and every chunk that reads a cell of
+     the box dirty (as `set`'s touch: within a cell of it). The whole grid's
+     recount would do, but it dirties every chunk, and a thing at a time
+     would re-mesh the arena dozens of times. */
+  A.refreshBox = (lo, hi) => {
+    const c0 = lo.map(v => Math.max(0, v) >> CHUNK_BITS), c1 = [hi[0] - 1, hi[1] - 1, hi[2] - 1].map((v, a) => Math.min(v, [X, Y, Z][a] - 1) >> CHUNK_BITS);
+    for (let cy = c0[1]; cy <= c1[1]; cy++) for (let cz = c0[2]; cz <= c1[2]; cz++) for (let cx = c0[0]; cx <= c1[0]; cx++){
+      let n = 0;
+      for (let y = cy << CHUNK_BITS, y1 = y + CHUNK; y < y1; y++) for (let z = cz << CHUNK_BITS, z1 = z + CHUNK; z < z1; z++){
+        const row = X * (z + Z * y) + (cx << CHUNK_BITS);
+        for (let x = 0; x < CHUNK; x++) if (cells[row + x]) n++;
+      }
+      const c = cx + CX * (cz + CZ * cy);
+      A.count += n - chunkSolid[c]; chunkSolid[c] = n;
+    }
+    for (let cy = (lo[1] - 1) >> CHUNK_BITS; cy <= hi[1] >> CHUNK_BITS; cy++)
+      for (let cz = (lo[2] - 1) >> CHUNK_BITS; cz <= hi[2] >> CHUNK_BITS; cz++)
+        for (let cx = (lo[0] - 1) >> CHUNK_BITS; cx <= hi[0] >> CHUNK_BITS; cx++) A.markDirty(cx, cy, cz);
+    return A;
+  };
   // The next dirty chunk, cleared, or -1.
   A.takeDirty = () => { while (dirtyList.length){ const c = dirtyList.shift(); if (dirty[c]){ dirty[c] = 0; return c; } } return -1; };
   if (given) A.recount();

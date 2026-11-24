@@ -2,13 +2,18 @@
    (TESTBED_GL=software for SwiftShader), by the repo's harness. The cores'
    promises are held in Node (destroy/test/*.test.js); this holds the page's
    wiring to them:
-     - __destroy.selftest(): a small arena built in the page's worker, a
+     - __destroy.selftest(): a small arena built in the page's worker and
+       streamed together on the page (the plane laid there, each thing
+       stamped as the worker places it), which must be buildArena's grid
+       cell for cell and the builder's count; then a
        rocket blast on every thing placed, then each weapon fired (plain and
        alt) through the same fire() and projectile step the mouse uses, the
        world run until every body has baked: the mass exact every frame
        (world + debris = the total at the build), no body ever inside the
        grid, nothing left in flight, frames drawn with no GL error, and no
        console error;
+     - the settings panel: Tab opens it and a real click on its × closes
+       it, in a window short enough to scroll it, scrolled to the end;
      - a .vdag world (a ball written by vdag-core in Node) added through the
        real file input: it is placed first, at the middle, with the voxels the
        Node stamp gives, and a blast in it keeps the mass.
@@ -93,6 +98,29 @@ test('a .vdag world through the file input', { skip, timeout: 240000 }, async ()
   assert.deepEqual(errors, []);
 });
 
+test('the panel: Tab opens it, a real click on its × closes it, in a short window too', { skip, timeout: 60000 }, async () => {
+  const s = browser.session, hidden = () => s.evaluate(`document.getElementById('panel').hidden`);
+  const key = async () => {
+    for (const type of ['rawKeyDown', 'keyUp']) await s.send('Input.dispatchKeyEvent', { type, key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+  };
+  for (const height of [900, 420]){
+    await s.send('Emulation.setDeviceMetricsOverride', { width: 1280, height, deviceScaleFactor: 1, mobile: false });
+    if (!(await hidden())) await key();
+    assert.equal(await hidden(), true, 'closed to start');
+    await key();
+    assert.equal(await hidden(), false, `Tab opens it (${height} tall)`);
+    // Scrolled to the end in the short window: the × must still be on screen at the top.
+    await s.evaluate(`(() => { const p = document.getElementById('panel'); p.scrollTop = p.scrollHeight; })()`);
+    const r = await s.evaluate(`(() => { const b = document.getElementById('panelX').getBoundingClientRect(), p = document.getElementById('panel'); return { x: b.x + b.width / 2, y: b.y + b.height / 2, top: b.top, panelTop: p.getBoundingClientRect().top, scrolls: p.scrollHeight > p.clientHeight }; })()`);
+    if (height === 420) assert.ok(r.scrolls, 'the short window scrolls the panel');
+    assert.ok(r.top >= r.panelTop && r.top < r.panelTop + 40, `the × at the panel's top (${r.top}, panel ${r.panelTop})`);
+    for (const type of ['mousePressed', 'mouseReleased']) await s.send('Input.dispatchMouseEvent', { type, x: r.x, y: r.y, button: 'left', clickCount: 1 });
+    assert.equal(await hidden(), true, `the × closes it (${height} tall)`);
+  }
+  await s.send('Emulation.clearDeviceMetricsOverride');
+  assert.deepEqual(errors, []);
+});
+
 const PAGE_MUTANTS = [
   ['rubble lost', '} else burst(D, carved, c, r, { seed, cluster:', '} else void (D, carved, c, r, { seed, cluster:'],
   ['melt lost', '    burst(D, carved, c, r, { seed, liquid: true,', '    void (D, carved, c, r, { seed, liquid: true,'],
@@ -102,6 +130,9 @@ const PAGE_MUTANTS = [
   ['bolts pass through', 'const hit = raycast(A, pr.p, pr.v, dt);', 'const hit = null;'],
   ['debris frozen', '  stepDebris(D, A, dt);\n', '\n'],
   ['one bolt a spread', 'const n = alt ? 7 : 1, spread', 'const n = 1, spread'],
+  ['a thing unstamped', '  stampItem(A, { name, sx, sy, sz, cells }, at[0], at[1], at[2]);\n', ''],
+  ['a thing uncounted', '  A.refreshBox(at, [at[0] + sx, at[1] + sy, at[2] + sz]);\n', ''],
+  ['no plane', '  fillPlane(A, d.plane); A.refreshBox([0, 0, 0], [d.size, d.plane, d.size]);\n', ''],
 ];
 test('every mutant of the page is caught', { skip, timeout: 600000 }, async t => {
   const src = readFileSync(join(REPO_ROOT, PAGE), 'utf8'), s = browser.session;

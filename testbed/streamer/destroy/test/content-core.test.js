@@ -12,7 +12,10 @@
        tall left out and said so;
      - buildArena: the count is the plane plus every placed thing's voxels
        (nothing overlaps), each placed item stamped where it says, and the
-       same seed gives the same cells;
+       same seed gives the same cells; streamed (no grid, the page's own
+       arena stamped and refreshed at each placement heard) the same grid,
+       count and per-chunk counts; every made thing within its plan's box;
+       a loaded world first and in the middle;
    then mutants of content-core.js's text, written beside it (it imports the
    repo's cores by relative path) and removed after. */
 import { test } from 'node:test';
@@ -169,6 +172,44 @@ async function suite(M, { quick = false } = {}){
     }
     if (b) assert.equal(createHash('sha1').update(a.A.cells).digest('hex'), createHash('sha1').update(b.A.cells).digest('hex'), 'the same seed, the same arena');
     assert.ok(a.placed.some(p => /specimen/.test(p.name)) && a.placed.some(p => /\(R \d+\)$/.test(p.name) && !/specimen/.test(p.name)), 'specimens and math shapes');
+    // Streamed (the page's road): no grid in the builder, the page's own arena with the
+    // plane laid first and each placement stamped and refreshed as it's heard, must be
+    // the built grid cell for cell, with its count and per-chunk counts.
+    {
+      const P = AC.createArena(d.size, d.height, d.size);
+      M.fillPlane(P, d.plane); P.refreshBox([0, 0, 0], [d.size, d.plane, d.size]);
+      const heard = [];
+      const s = M.buildArena(desc, [], { grid: false, onPlace: (p, voxels) => {
+        M.stampItem(P, p.item, p.x0, p.y0, p.z0);
+        P.refreshBox([p.x0, p.y0, p.z0], [p.x0 + p.item.sx, p.y0 + p.item.sy, p.z0 + p.item.sz]);
+        heard.push([p.item.name, voxels]);
+      } });
+      assert.equal(s.A, null, 'no grid');
+      assert.equal(s.count, a.A.count, 'the count without a grid');
+      assert.deepEqual(heard, a.placed.map(p => [p.name, p.voxels]), 'every placement heard, in order');
+      assert.equal(P.count, a.A.count, 'the streamed count');
+      assert.equal(createHash('sha1').update(P.cells).digest('hex'), createHash('sha1').update(a.A.cells).digest('hex'), 'the streamed grid is the built one');
+      assert.deepEqual(Array.from(P.chunkSolid), Array.from(a.A.chunkSolid), 'the streamed per-chunk counts');
+    }
+    // The order is decided before a thing is made: each made thing fits the box its plan
+    // promised (so ordering by the plan is ordering by what each can be at most).
+    {
+      const rMax = Math.min(128, d.height - d.plane - 24, Math.floor(d.size / 3));
+      for (let k = 0; k < d.maths; k++){ const { R } = M.mathPlan(d.seed, k, rMax), it = M.mathItem(d.seed, k, rMax);
+        assert.ok(it.sx <= R && it.sy <= R && it.sz <= R, `math shape ${k} within R ${R}`); }
+      for (let k = 0; k < d.specimens; k++){ const { R, scale } = M.specimenPlan(d.seed, k), it = M.specimenItem(d.seed, k);
+        assert.ok(Math.max(it.sx, it.sy, it.sz) <= R * scale, `specimen ${k} within ${R * scale}`); }
+      // Placed biggest planned box first (the box read back from the name: R, ×2 if doubled).
+      const boxes = a.placed.map(p => { const m = p.name.match(/\(R (\d+)(, ×2)?\)$/); return Number(m[1]) * (m[2] ? 2 : 1); });
+      for (let k = 1; k < boxes.length; k++) assert.ok(boxes[k] <= boxes[k - 1], `placed biggest first: ${boxes.join(' ')}`);
+    }
+    // A loaded world goes first, in the middle, ahead of bigger things.
+    {
+      const big = { name: 'loaded', sx: 30, sy: 20, sz: 30, cells: new Uint16Array(30 * 20 * 30).fill(AC.pack(1, 1, 1)), first: true };
+      const w = M.buildArena(desc, [big], { grid: false });
+      assert.equal(w.placed[0].name, 'loaded', 'loaded first');
+      assert.deepEqual([w.placed[0].at[0], w.placed[0].at[2]], [81, 81], 'in the middle');
+    }
     const c = M.buildArena({ ...desc, seed: 3 });
     assert.notEqual(createHash('sha1').update(c.A.cells).digest('hex'), createHash('sha1').update(a.A.cells).digest('hex'), 'another seed, another arena');
   }
@@ -191,7 +232,10 @@ const MUTANTS = [
   ['spawn crowded', ') < 22) return true;', ') < 2) return true;'],
   ['loaded anywhere', "(items[b].first ? 1 : 0) - (items[a].first ? 1 : 0) || ", ''],
   ['too tall kept', 'if (it.sy > Y - T - 4 || ', 'if ('],
-  ['stamped a row high', 'placed.push({ item: it, x0: at[0], y0: T, z0: at[1] });', 'placed.push({ item: it, x0: at[0], y0: T + 1, z0: at[1] });'],
+  ['the count forgets things', '    count += voxels;\n', ''],
+  ['a placement unheard', '    if (onPlace) onPlace(p, voxels);\n', ''],
+  ['ordered by index', 'order = layoutOrder(plans, i => plans[i].area)', 'order = plans.map((_, i) => i)'],
+  ['stamped a row high', 'const p = { item: it, x0: at[0], y0: T, z0: at[1] };', 'const p = { item: it, x0: at[0], y0: T + 1, z0: at[1] };'],
 ];
 test('every mutant of content-core is caught', async t => {
   const src = readFileSync(join(HERE, '..', 'content-core.js'), 'utf8');

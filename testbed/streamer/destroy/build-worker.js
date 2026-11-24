@@ -4,8 +4,10 @@
    vdag-core's readVdag, turns the chosen world into an item at the lod that
    fits the arena (content-core's fitLod and dagItem, coloured by colours.js's
    field, or the gamut where the file has none), builds the arena around
-   them (buildArena) and hands the grid back transferred, with what was
-   placed and what was left out. Every decision is content-core's; a new
+   them (buildArena) and posts each thing as it's placed (its cells
+   transferred: the page stamps them into its own arena, over the plane it
+   laid when the build began), then what was placed and left out and the
+   count the page's arena must come to. The worker holds no grid. Every decision is content-core's; a new
    build is a new worker (the page terminates a superseded one). */
 import { readVdag } from '../vdag-core.js';
 import { colourOf } from '../colours.js';
@@ -38,10 +40,14 @@ self.onmessage = async ({ data }) => {
       extra.push(item);
       if (n === 0) post({ worlds: { name, list: worlds.map(x => ({ name: x.name, D: x.D, voxels: x.voxels })) } });
     }
-    const r = buildArena(d, extra, { onPhase: phase });
-    const cells = r.A.cells;
-    post({ built: { desc: r.desc, spawn: r.spawn, yaw: r.yaw, placed: r.placed, left: r.left, notes, count: r.A.count, ms: performance.now() - t0,
-                    sources: extra.map(e => ({ name: e.name, ...e.source })) }, cells }, [cells.buffer]);
+    // No grid here: the page lays the plane itself and stamps each thing as it's
+    // posted, so the arena fills in on screen while the rest are still being made.
+    const r = buildArena(d, extra, { onPhase: phase, grid: false, onPlace: ({ item, x0, y0, z0 }, voxels) => {
+      const { name, sx, sy, sz, cells } = item;
+      post({ place: { name, sx, sy, sz, cells, at: [x0, y0, z0], voxels } }, [cells.buffer]);
+    } });
+    post({ built: { desc: r.desc, spawn: r.spawn, yaw: r.yaw, placed: r.placed, left: r.left, notes, count: r.count, ms: performance.now() - t0,
+                    sources: extra.map(e => ({ name: e.name, ...e.source })) } });
   } catch (e){
     post({ error: String(e?.message ?? e) });
   }
