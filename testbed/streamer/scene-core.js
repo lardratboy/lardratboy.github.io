@@ -30,9 +30,10 @@
                      questions (solid, room, fill) answered by the parent
                      and every child whose bounds meet the box, each in its
                      own frame. What an overlay that moves will be.
-   They share nothing but boxHits and the store's child(), so each holds the
-   other: fliers on the composite must move byte for byte as on the bake,
-   and the bake must be a dense stamp's root id.
+   They share nothing but the store's child() (the bake's walk stopped using
+   boxHits in 2026-11-24's windows), so each holds the other: fliers on the
+   composite must move byte for byte as on the bake, and the bake must be a
+   dense stamp's root id.
 
    And one way to colour a baked scene, sceneField (step 2, at the end):
    each voxel takes the latest placement solid there, asked in its own
@@ -51,10 +52,11 @@
 
    What this costs (§11.1, the knight at D = 8 in the D = 12 kit, one JS
    thread): a knight off the grid bakes in about 0.1 s, a ×4 giant in 0.5 s,
-   and an aligned repeat almost nothing, because of the place memo below.
+   and an aligned repeat almost nothing, because of the place memo below;
+   2026-11-24's windows (below) made a bake 5–13× faster than that.
    Collision through the composite is 1.3× the baked world (§11.2).
    ===================================================================== */
-import { prune, EMPTY, FULL, FIRST_NODE } from './dag-core.js';
+import { prune, EMPTY, FULL, FIRST_NODE, OCT } from './dag-core.js';
 import { dagWorld, boxHits, fillBox } from './actor-core.js';
 import { rgb8 } from './attr-core.js';
 
@@ -122,14 +124,35 @@ export function checkPlacement(p, D, needAt = true){
 }
 
 /* ---- bake -------------------------------------------------------------------
+   **In steps** (2026-11-24: a D = 12 scatter dropped on D = 20 flat ground
+   held the page for 100 s, and the browser offered to kill it). Every stage
+   of a bake is a generator here (importSteps, preparedSteps, placeSteps by
+   way of bakeSteps, and the union) that yields between pieces of work, each
+   a subtree of level STEPS.level or less (or STEPS.slice nodes of an import),
+   handing back a progress { phase, done, total }. `runSteps` runs one to the
+   end, and that's all importWorld, prepared and bakeScene are, so a bake in
+   steps *is* the bake: the same interns in the same order, the same ids. The
+   page runs a large drop's steps a few milliseconds a frame (log-core's
+   dropSteps). A step is a pause in the middle of a walk, so nothing a walk
+   holds may change under it: the store only grows (an id never changes
+   meaning), and the memos are asked before they're written, never held
+   across a step, so two bakes taking turns on one store are still right.
+
    The child's nodes in the parent's store: its own keys, pruned to what its
    root (and its skin's root, if it has baked colour) reaches, then imported.
    Memoized per (parent store, child store, root). The sketch pruned and
    imported on every bake, which was O(the child's nodes) each time a knight
    was dropped; now the tenth knight costs nothing to import. Returns
-   { root, skin }, both as the parent's ids (skin EMPTY when there's none). */
+   { root, skin }, both as the parent's ids (skin EMPTY when there's none).
+   The import is dag-core's importKeys a slice at a time (the same interns in
+   the same order): 0.4 s for the D = 12 scatter's 1.7 million nodes. */
+export const STEPS = { level: 6, slice: 2 ** 15 };
+export function runSteps(steps){
+  for (;;){ const r = steps.next(); if (r.done) return r.value; }
+}
 const importMemo = new WeakMap();
-export function importWorld(store, world){
+export function importWorld(store, world){ return runSteps(importSteps(store, world)); }
+export function* importSteps(store, world){
   let byStore = importMemo.get(store);
   if (!byStore) importMemo.set(store, byStore = new WeakMap());
   let m = byStore.get(world.store);
@@ -138,7 +161,14 @@ export function importWorld(store, world){
   const hit = m.get(key);
   if (hit) return hit;
   const { keys, map } = prune(world.store.snapshot().keys, skin === EMPTY ? [world.root] : [world.root, skin]);
-  const ids = store.importKeys(keys), out = { root: ids[map[world.root]], skin: skin === EMPTY ? EMPTY : ids[map[skin]] };
+  const n = keys.length / 9, ids = new Uint32Array(n + FIRST_NODE), ch = new Uint32Array(8), P = { phase: 'import', done: 0, total: n };
+  ids[FULL] = FULL;
+  for (let i = 0; i < n; i++){
+    for (let o = 0; o < 8; o++) ch[o] = ids[keys[9 * i + 1 + o]];
+    ids[i + FIRST_NODE] = store.intern(keys[9 * i], ch);
+    if ((i + 1) % STEPS.slice === 0){ P.done = i + 1; yield P; }
+  }
+  const out = { root: ids[map[world.root]], skin: skin === EMPTY ? EMPTY : ids[map[skin]] };
   m.set(key, out);
   return out;
 }
@@ -173,129 +203,252 @@ function coarsen(store, id, l, t, memo){
   memo.set(id, r);
   return r;
 }
-// Every voxel of node ∩ box solid (the box's part outside the node doesn't count).
-function boxFull(store, id, k, x, y, z, lo, hi){
-  const s = 2 ** k;
-  if (x >= hi[0] || y >= hi[1] || z >= hi[2] || x + s <= lo[0] || y + s <= lo[1] || z + s <= lo[2]) return true;
-  if (id === EMPTY) return false;
-  if (isSolidId(store, id)) return true;
-  const h = s / 2;
-  for (let o = 0; o < 8; o++)
-    if (!boxFull(store, store.child(id, o), k - 1, x + (o & 1) * h, y + (o >> 1 & 1) * h, z + (o >> 2) * h, lo, hi)) return false;
-  return true;
-}
-// The level-k node of T (level Dc) whose corner is P.
-function nodeAt(store, T, Dc, P, k){
-  let id = T;
-  for (let l = Dc; l > k && id >= FIRST_NODE; l--){
-    const b = l - 1;
-    id = store.child(id, (P[0] >> b & 1) | (P[1] >> b & 1) << 1 | (P[2] >> b & 1) << 2);
+/* Those two, the turn (dag-core's transform) and the union, in steps: the
+   levels above STEPS.level walked here, each subtree at or below it handed to
+   the plain function, which shares the memo, then a step. A node above it is
+   interned from the same children as the plain function would intern it
+   from, so it's the same id. `done` counts the volume finished (8^l a
+   subtree), so a stage's progress is a fraction of its cube. */
+function* scaleSteps(store, id, l, s, memo, P){
+  const low = s > 0 ? l <= STEPS.level : l <= Math.max(STEPS.level, -s);
+  if (id < FIRST_NODE || low){
+    const r = s > 0 ? lift(store, id, s, memo) : coarsen(store, id, l, -s, memo);
+    P.done += 8 ** l;
+    if (id >= FIRST_NODE) yield P;
+    return r;
   }
-  return id;
+  let r = memo.get(id);
+  if (r !== undefined){ P.done += 8 ** l; return r; }
+  const ch = new Uint32Array(8);
+  for (let o = 0; o < 8; o++) ch[o] = yield* scaleSteps(store, store.child(id, o), l - 1, s, memo, P);
+  r = store.intern(l + s, ch);
+  memo.set(id, r);
+  return r;
 }
-// The smallest node of T holding the box [lo, hi) (inside T's cube), and its corner.
-const ENC = { id: 0, k: 0, x: 0, y: 0, z: 0 };
-function enclosing(store, T, Dc, lo, hi){
-  let id = T, k = Dc, x = 0, y = 0, z = 0;
-  while (k > 0 && id >= FIRST_NODE && !isSolidId(store, id)){
-    const h = 2 ** (k - 1), c0 = x + h, c1 = y + h, c2 = z + h;
-    const o0 = lo[0] >= c0 ? 1 : hi[0] <= c0 ? 0 : -1, o1 = lo[1] >= c1 ? 1 : hi[1] <= c1 ? 0 : -1, o2 = lo[2] >= c2 ? 1 : hi[2] <= c2 ? 0 : -1;
-    if (o0 < 0 || o1 < 0 || o2 < 0) break;
-    id = store.child(id, o0 | o1 << 1 | o2 << 2);
-    x += o0 * h; y += o1 * h; z += o2 * h; k--;
+function* turnSteps(store, id, l, e, memo, P){
+  if (id < FIRST_NODE || l <= STEPS.level){
+    P.done += 8 ** l;
+    if (id < FIRST_NODE) return id;
+    const r = store.transform(id, e);
+    yield P;
+    return r;
   }
-  ENC.id = id; ENC.k = k; ENC.x = x; ENC.y = y; ENC.z = z;
-  return ENC;
+  let r = memo.get(id);
+  if (r !== undefined){ P.done += 8 ** l; return r; }
+  const ch = new Uint32Array(8);
+  for (let o = 0; o < 8; o++) ch[OCT[e * 8 + o]] = yield* turnSteps(store, store.child(id, o), l - 1, e, memo, P);
+  r = store.intern(l, ch);
+  memo.set(id, r);
+  return r;
+}
+// dag-core's union's shortcuts first (equal, either side empty or solid), as it takes them.
+function* unionSteps(store, a, b, l, P){
+  if (l <= STEPS.level || a === b || a === EMPTY || b === EMPTY || isSolidId(store, a) || isSolidId(store, b)){
+    const r = store.union(a, b), work = l <= STEPS.level && a !== b && a !== EMPTY && b !== EMPTY;
+    P.done += 8 ** l;
+    if (work) yield P;
+    return r;
+  }
+  const ch = new Uint32Array(8);
+  for (let o = 0; o < 8; o++) ch[o] = yield* unionSteps(store, store.child(a, o), store.child(b, o), l - 1, P);
+  return store.intern(l, ch);
 }
 
-/* T (level Dc, already turned and scaled, in `store`) with its corner at
-   `at`, as a level-Dp root. Top down over the parent's nodes:
-     - a node the child's cube doesn't reach is EMPTY;
-     - one that lands exactly on a child node (inside the cube, its corner a
-       multiple of its side from `at`) *is* that node, which is the whole of
-       §3.1's sharing;
-     - one the child has nothing in is EMPTY, one it fills is solid;
+/* ---- placing the child: windows ---------------------------------------------
+   T (level Dc, turned and scaled, in `store`) with its corner at `at`, as a
+   level-Dp root. Cut the child's space into level-k cells starting at `at`
+   (the cube's level-k nodes, EMPTY outside it). A parent node of level k ≤ Dc
+   meets at most eight of them, a 2 × 2 × 2 block: its **window**, with an
+   offset r, its corner less the window's in child voxels, which is
+   (−at) mod 2^k for every parent node of level k. So a parent node is a
+   function of (k, its window) alone, for one placement, and its children's
+   windows are read off the 4 × 4 × 4 grandchildren under its own: child o's
+   starts at o + (bit k − 1 of r) on each axis. At each node:
+     - r = 0 below this level: the window's first node *is* the parent node,
+       which is the whole of §3.1's sharing (an aligned copy is the child's
+       own nodes, and only the path above them is new);
+     - all eight EMPTY is EMPTY, all eight solid is solid;
      - anything else is split.
-   At level 0 every voxel is the second case, so nothing is left undecided.
+   At level 0, r is 0, so nothing is left undecided. On an axis whose r is 0
+   below a level, a window's far half there is never read: it's set EMPTY, so
+   windows that differ only in what isn't read are one key. Above Dc, a
+   parent node misses the cube (EMPTY) or is split, down to level Dc, where
+   it meets the cube's cell: its window holds T in one corner.
 
-   No "not clipped" test on the aligned case: a node aligned to its side
-   from `at`, at a level no higher than the child's, can't be cut by the
-   cube's edge, since the cube's side is a multiple of its side. The sketch
-   had the test, and its mutant was the one nothing caught.
+   This replaced a walk (2026-11-24) that asked, at every parent node, whether
+   the child had anything in the node's box and whether it filled it (boxHits
+   and boxFull, from the smallest child node holding the box), memoized on the
+   node's corner relative to the child. The same nodes, a fraction of the
+   time, since a window is eight ids and a probe was a walk: off the grid,
+   the D = 12 scatter on D = 20 flat ground 100 s → 7.5 s, the D = 10 knight
+   in the D = 14 kit 6.1 → 0.9 s, the D = 10 caves there 7.8 → 0.8 s, the
+   D = 8 knight 0.3 → 0.06 s (one thread, Node; docs/scene-log.md §6).
 
-   **The place memo.** A node's answer depends only on (T, its level, its
-   corner relative to the child), never on the parent, so it's memoized on
-   that, per store: 64 knights 256 apart cut the same nodes, and the second
-   one reads them all. Without it, 64 aligned knights took 4.5 s to bake,
-   70 ms each, all of it rebuilding what the first had made; with it, 0.2 s.
-   It grows with every distinct cut. That's harmless to correctness, since an
-   id never changes meaning, but step 5 counted it (docs/scene-log.md §5.3):
-   one knight (D = 8) off the grid in the D = 14 kit was 341,513 entries, 67%
-   of them level 0 and 24% level 1, and the D = 10 knight 5.6 million. A Map
-   holds 2^24, so the fiftieth knight, or the third large one, would have
-   thrown. Two limits, in PLACE_MEMO:
-   - **floor**: levels below it aren't memoized. A level-0 node is always
-     aligned, so its entry only ever repeated nodeAt. A level-1 entry serves
-     a copy whose offset from an earlier one is 2 mod 4 and nothing coarser,
-     which then rebuilds its level-1 nodes as an unaligned copy does. With
-     the floor at 2 the knight is 30,617 entries.
+   **The place memo.** A node's answer depends only on (k, r at k, its
+   window), never on the parent or where the copy is, so it's memoized on
+   that, per store: 64 knights 256 apart cut the same windows below level 8,
+   and the second one reads them all. Without it, 64 aligned knights took
+   4.5 s to bake, all of it rebuilding what the first had made. It grows with
+   every distinct cut. That's harmless to correctness, since an id never
+   changes meaning, but step 5 counted it (docs/scene-log.md §5.3): a Map
+   holds 2^24, and the D = 10 knight alone once made 5.6 million entries. Two
+   limits, in PLACE_MEMO:
+   - **floor**: levels below it aren't memoized. A level-1 window is eight
+     voxels' worth of lookups, cheaper to redo than to look up: with the
+     floor at 2 the memo is under half the size and the bake no slower.
    - **max**: at that size the memo is emptied, mid-bake if need be: every
-     entry is only an id that can be found again. */
+     entry is only an id that can be found again. It's asked, then written
+     after the node is made, never held across the walk below it, so an
+     emptying in the middle loses nothing but the entries. */
+const WINDOW = 12, NONE = 0xffffffff;      // a key: k, r at k on three axes, eight ids
+function createWindowMemo(){
+  let cap = 1 << 12, n = 0, keys = new Uint32Array(cap * WINDOW), vals = new Uint32Array(cap), table = new Int32Array(cap * 2).fill(-1);
+  const hash = a => {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < WINDOW; i++){ h = Math.imul(h ^ a[i], 0x01000193); h ^= h >>> 15; }
+    return h >>> 0;
+  };
+  // The table's index holding `a`, or the free one where it would go.
+  const indexOf = a => {
+    const mask = table.length - 1;
+    for (let i = hash(a) & mask; ; i = (i + 1) & mask){
+      const s = table[i];
+      if (s < 0) return i;
+      let same = true;
+      for (let k = 0, p = s * WINDOW; k < WINDOW; k++) if (keys[p + k] !== a[k]){ same = false; break; }
+      if (same) return i;
+    }
+  };
+  return {
+    get size(){ return n; },
+    get(a){ const s = table[indexOf(a)]; return s < 0 ? NONE : vals[s]; },
+    set(a, v){
+      const i = indexOf(a);
+      if (table[i] >= 0){ vals[table[i]] = v; return; }
+      if (n === cap){
+        const k2 = new Uint32Array(cap * 2 * WINDOW), v2 = new Uint32Array(cap * 2);
+        k2.set(keys); v2.set(vals); keys = k2; vals = v2; cap *= 2;
+      }
+      keys.set(a, n * WINDOW); vals[n] = v; table[i] = n++;
+      if (n * 2 > table.length){
+        table = new Int32Array(table.length * 2).fill(-1);
+        const mask = table.length - 1, a1 = new Uint32Array(WINDOW);
+        for (let s = 0; s < n; s++){
+          for (let k = 0; k < WINDOW; k++) a1[k] = keys[s * WINDOW + k];
+          let j = hash(a1) & mask;
+          while (table[j] >= 0) j = (j + 1) & mask;
+          table[j] = s;
+        }
+      }
+    },
+  };
+}
 const placeMemo = new WeakMap();
 export const PLACE_MEMO = { floor: 2, max: 2 ** 22 };
 // How many cuts the place memo holds for this store (the HUD's edit line).
 export const placeMemoSize = store => placeMemo.get(store)?.size ?? 0;
-function placeRoot(store, T, Dc, at, Dp){
-  const side = 2 ** Dc, lo = [0, 0, 0], hi = [0, 0, 0], P = [0, 0, 0];
+function memoOf(store){
   let memo = placeMemo.get(store);
-  if (!memo) placeMemo.set(store, memo = new Map());
-  const rec = (k, x, y, z) => {
-    const s = 2 ** k;
-    P[0] = x - at[0]; P[1] = y - at[1]; P[2] = z - at[2];
-    if (k < PLACE_MEMO.floor) return recNode(k, x, y, z, s);
-    const key = `${T}|${k}|${P[0]}|${P[1]}|${P[2]}`, hit = memo.get(key);
-    if (hit !== undefined) return hit;
-    const r = recNode(k, x, y, z, s);
-    if (memo.size >= PLACE_MEMO.max) memo.clear();
-    memo.set(key, r);
+  if (!memo || memo.size >= PLACE_MEMO.max) placeMemo.set(store, memo = createWindowMemo());
+  return memo;
+}
+function* placeSteps(store, T, Dc, at, Dp){
+  const side = 2 ** Dc, [r0, r1, r2] = at.map(a => ((-a % side) + side) % side);
+  // Every solid up to Dc, made now: at most Dc + 1 nodes once a store, and the
+  // walk this replaced made them as it went (isSolidId's trap).
+  const solids = Array.from({ length: Dc + 1 }, (_, k) => store.solid(k));
+  const key = new Uint32Array(WINDOW), subs = Array.from({ length: Dc + 1 }, () => new Uint32Array(8));
+  const keyOf = (k, w, m) => { key[0] = k; key[1] = r0 & m; key[2] = r1 & m; key[3] = r2 & m; key.set(w, 4); return key; };
+  // The node, if the window decides it (NONE if it has to be split). m = 2^k − 1.
+  const early = (k, w, m) => {
+    if (!((r0 & m) | (r1 & m) | (r2 & m))) return w[0];
+    const sk = solids[k];
+    let any = 0, full = true;
+    for (let i = 0; i < 8; i++){ any |= w[i]; if (w[i] !== sk) full = false; }
+    return !any ? EMPTY : full ? sk : NONE;
+  };
+  const recall = (k, w, m) => k < PLACE_MEMO.floor ? NONE : memoOf(store).get(keyOf(k, w, m));
+  const remember = (k, w, m, id) => { if (k >= PLACE_MEMO.floor) memoOf(store).set(keyOf(k, w, m), id); };
+  // Child o's window (level k − 1) from the level-k window w.
+  const windowOf = (k, w, o, sub) => {
+    const h = 2 ** (k - 1), m = h - 1;
+    const x0 = (o & 1) + ((r0 & h) ? 1 : 0), y0 = (o >> 1 & 1) + ((r1 & h) ? 1 : 0), z0 = (o >> 2) + ((r2 & h) ? 1 : 0);
+    const fx = r0 & m, fy = r1 & m, fz = r2 & m;
+    for (let s = 0; s < 8; s++){
+      const sx = s & 1, sy = s >> 1 & 1, sz = s >> 2;
+      if ((sx && !fx) || (sy && !fy) || (sz && !fz)){ sub[s] = EMPTY; continue; }
+      const jx = x0 + sx, jy = y0 + sy, jz = z0 + sz, id = w[(jx >> 1) | (jy >> 1) << 1 | (jz >> 1) << 2];
+      sub[s] = id < FIRST_NODE ? id : store.child(id, (jx & 1) | (jy & 1) << 1 | (jz & 1) << 2);
+    }
+  };
+  // A window at or below STEPS.level, in one go.
+  const shift = (k, w) => {
+    const m = 2 ** k - 1;
+    let r = early(k, w, m);
+    if (r === NONE) r = recall(k, w, m);
+    if (r !== NONE) return r;
+    const ch = new Uint32Array(8), sub = subs[k - 1];
+    for (let o = 0; o < 8; o++){ windowOf(k, w, o, sub); ch[o] = shift(k - 1, sub); }
+    r = store.intern(k, ch);
+    remember(k, w, m, r);
     return r;
   };
-  const recNode = (k, x, y, z, s) => {
-    let clipped = false;
-    for (let a = 0; a < 3; a++){
-      lo[a] = Math.max(0, P[a]); hi[a] = Math.min(side, P[a] + s);
-      if (lo[a] >= hi[a]) return EMPTY;
-      if (lo[a] !== P[a] || hi[a] !== P[a] + s) clipped = true;
+  // Above it, the same in steps (each level its own sub-window, so a frame's
+  // survives the walk below it, paused or not).
+  const P = { phase: 'place', done: 0, total: 0 };
+  function* shiftSteps(k, w){
+    if (k <= STEPS.level){ const r = shift(k, w); P.done += 8 ** k; yield P; return r; }
+    const m = 2 ** k - 1;
+    let r = early(k, w, m);
+    if (r === NONE) r = recall(k, w, m);
+    if (r !== NONE){ P.done += 8 ** k; return r; }
+    const ch = new Uint32Array(8), sub = subs[k - 1];
+    for (let o = 0; o < 8; o++){ windowOf(k, w, o, sub); ch[o] = yield* shiftSteps(k - 1, sub); }
+    r = store.intern(k, ch);
+    remember(k, w, m, r);
+    return r;
+  }
+  // The total: every level-Dc parent node meeting the cube, a whole one each.
+  P.total = 8 ** Dc;
+  for (let a = 0; a < 3; a++){
+    const lo = Math.max(0, Math.floor(at[a] / side)), hi = Math.min(2 ** (Dp - Dc) - 1, Math.floor((at[a] + side - 1) / side));
+    P.total *= Math.max(0, hi - lo + 1);
+  }
+  function* top(k, x, y, z){
+    const s = 2 ** k;
+    if (x + s <= at[0] || y + s <= at[1] || z + s <= at[2] || x >= at[0] + side || y >= at[1] + side || z >= at[2] + side) return EMPTY;
+    if (k === Dc){
+      const w = new Uint32Array(8), q0 = Math.floor((x - at[0]) / side), q1 = Math.floor((y - at[1]) / side), q2 = Math.floor((z - at[2]) / side);
+      for (let i = 0; i < 8; i++) w[i] = q0 + (i & 1) === 0 && q1 + (i >> 1 & 1) === 0 && q2 + (i >> 2) === 0 ? T : EMPTY;
+      return yield* shiftSteps(k, w);
     }
-    if (k <= Dc && P[0] % s === 0 && P[1] % s === 0 && P[2] % s === 0) return nodeAt(store, T, Dc, P, k);
-    // Both probes start at the smallest child node holding the box, not at
-    // the root: that cut the 64 unaligned knights' bake from 26 s to 16 s
-    // (the memo above took it to 6).
-    const e = enclosing(store, T, Dc, lo, hi);
-    if (!boxHits(store, e.id, e.k, e.x, e.y, e.z, lo, hi)) return EMPTY;
-    if (!clipped && boxFull(store, e.id, e.k, e.x, e.y, e.z, lo, hi)) return store.solid(k);
     const h = s / 2, ch = new Uint32Array(8);
-    for (let o = 0; o < 8; o++) ch[o] = rec(k - 1, x + (o & 1) * h, y + (o >> 1 & 1) * h, z + (o >> 2) * h);
+    for (let o = 0; o < 8; o++) ch[o] = yield* top(k - 1, x + (o & 1) * h, y + (o >> 1 & 1) * h, z + (o >> 2) * h);
     return store.intern(k, ch);
-  };
-  return rec(Dp, 0, 0, 0);
+  }
+  // A last step, so whoever runs this sees the place end at its total.
+  const out = yield* top(Dp, 0, 0, 0);
+  yield P;
+  return out;
 }
 
-/* The child, scaled and turned, in the parent's store: what placeRoot takes.
+/* The child, scaled and turned, in the parent's store: what placeSteps takes.
    Memoized per (store, imported root, scale, turn), so a repeat drop of the
    same world the same way lifts or coarsens nothing. */
 const preparedMemo = new WeakMap();
-export function prepared(store, p){
+export function prepared(store, p){ return runSteps(preparedSteps(store, p)); }
+export function* preparedSteps(store, p){
   checkPlacement(p, undefined, false);      // no `at`: the prepared child doesn't depend on it
-  const { root } = importWorld(store, p.world), D = p.world.D, s = p.scale ?? 0, e = p.turn ?? 0;
+  const { root } = yield* importSteps(store, p.world);
+  const D = p.world.D, s = p.scale ?? 0, e = p.turn ?? 0;
   let m = preparedMemo.get(store);
   if (!m) preparedMemo.set(store, m = new Map());
   const key = `${root}|${s}|${e}`, hit = m.get(key);
   if (hit) return hit;
   let id = root;
-  if (s > 0) id = lift(store, id, s, new Map());
-  if (s < 0) id = coarsen(store, id, D, -s, new Map());
-  const out = { id: store.transform(id, e), D: D + s };
+  if (s !== 0) id = yield* scaleSteps(store, id, D, s, new Map(), { phase: 'scale', done: 0, total: 8 ** D });
+  if (e !== 0) id = yield* turnSteps(store, id, D + s, e, new Map(), { phase: 'turn', done: 0, total: 8 ** (D + s) });
+  const out = { id, D: D + s };
   m.set(key, out);
   return out;
 }
@@ -303,12 +456,13 @@ export function prepared(store, p){
 /* The scene as one world: `root` (level D, in `store`, which must intern)
    with every placement unioned in, in order. Returns the new root. A
    placement that adds nothing (inside solid rock) gives the root back. */
-export function bakeScene(store, root, D, placements){
+export function bakeScene(store, root, D, placements){ return runSteps(bakeSteps(store, root, D, placements)); }
+export function* bakeSteps(store, root, D, placements){
   if (typeof store.intern !== 'function') throw new Error('bakeScene: the parent\'s store must intern (a storeView can\'t: import its keys into a createStore first)');
   for (const p of placements){
     checkPlacement(p, D);
-    const c = prepared(store, p);
-    root = store.union(root, placeRoot(store, c.id, c.D, p.at, D));
+    const c = yield* preparedSteps(store, p), placed = yield* placeSteps(store, c.id, c.D, p.at, D);
+    root = yield* unionSteps(store, root, placed, D, { phase: 'join', done: 0, total: 8 ** D });
   }
   return root;
 }

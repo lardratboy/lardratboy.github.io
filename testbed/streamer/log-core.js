@@ -33,10 +33,20 @@
    only when that op was a drop; both tools only on clay and flat ground (Q1);
    the block tool moves to the free cursor (Q3, the page's business); a
    carved knight's inside is the baked field's mean for now (Q2, nothing here).
+
+   **A drop in steps** (2026-11-24): `dropSteps` is `drop` as scene-core's
+   bakeSteps, yielding a progress { phase, done, total } between pieces of
+   the bake, so the page can bake a large child a few milliseconds a frame
+   (a D = 12 scatter on D = 20 flat ground was 100 s on one go). `drop` runs
+   it straight through. Nothing is pushed until the last step, so the log is
+   what it was until then; and since the bake starts from the root of the
+   moment, an op of any kind, an undo or a redo between its steps would make
+   it wrong: the last step throws if the log moved. The page takes no edit
+   while one bakes.
    ===================================================================== */
 import { EMPTY } from './dag-core.js';
 import { place, createBlockTable, BREAK } from './edit-core.js';
-import { bakeScene, prepared, importWorld, checkPlacement, paintOf as dropPaint, sceneField } from './scene-core.js';
+import { bakeScene, bakeSteps, preparedSteps, runSteps, importWorld, checkPlacement, paintOf as dropPaint, sceneField } from './scene-core.js';
 
 /* ---- the log ------------------------------------------------------------------
    Eight int32 words an op, so a worker takes them as a buffer and a file can
@@ -111,6 +121,17 @@ export function createOneLog(base){
     push(store, out, BLOCK, level, X, Y, Z, colour, 0, 0, paint);
     return { paint };
   }
+  function* dropSteps(store, D, p){
+    guard(store);
+    checkPlacement(p, D);
+    const was = [n, top, epoch];
+    const c = yield* preparedSteps(store, p), paint = dropPaint(store, c.id, c.D, p.at, D);
+    if (!paint.length) return null;
+    const root = yield* bakeSteps(store, roots[n], D, [p]);
+    if (n !== was[0] || top !== was[1] || epoch !== was[2]) throw new Error('one log: the log moved while a drop was baking (an op, an undo or a redo between its steps)');
+    push(store, root, DROP, register(store, p.world), p.at[0], p.at[1], p.at[2], p.turn ?? 0, p.scale ?? 0, c.id, paint);
+    return { paint };
+  }
   // Op i, decoded: what undo hands back, and what the page reads.
   function opAt(i){
     if (!(i >= 0 && i < top)) throw new RangeError(`one log: no op ${i} (${top} on the stack)`);
@@ -126,15 +147,8 @@ export function createOneLog(base){
     },
     erase: (store, D, target) => block(store, D, target, BREAK),
     /* Drop `p` ({ world, at, turn, scale }) on the current root. */
-    drop(store, D, p){
-      guard(store);
-      checkPlacement(p, D);
-      const c = prepared(store, p), paint = dropPaint(store, c.id, c.D, p.at, D);
-      if (!paint.length) return null;
-      const root = bakeScene(store, roots[n], D, [p]);
-      push(store, root, DROP, register(store, p.world), p.at[0], p.at[1], p.at[2], p.turn ?? 0, p.scale ?? 0, c.id, paint);
-      return { paint };
-    },
+    drop: (store, D, p) => runSteps(dropSteps(store, D, p)),
+    dropSteps,
     /* Undo and redo hand back the op they moved past too ({ paint, op }), so
        the page can pick a drop up into its box and leave a block undone. */
     undo(){ if (!n) return null; n--; epoch++; return { paint: paints[n], op: opAt(n) }; },
