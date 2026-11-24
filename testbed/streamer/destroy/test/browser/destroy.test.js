@@ -16,7 +16,17 @@
        it, in a window short enough to scroll it, scrolled to the end;
      - a .vdag world (a ball written by vdag-core in Node) added through the
        real file input: it is placed first, at the middle, with the voxels the
-       Node stamp gives, and a blast in it keeps the mass.
+       Node stamp gives, and a blast in it keeps the mass;
+     - saving and opening (README, "Saving an arena"): a rocket, then the
+       real Save button with the debris in flight, which must wait for every
+       body to bake before it writes; the download, caught on disk and read
+       in Node by vdag-core and file-core, is the page's grid cell for cell
+       (a hash) with the page's eye as its view; another arena built, with
+       debris flying, then the file opened through the real Open input is the
+       saved grid again with its mass and no debris, the walker where the
+       view stood, and a blast in it keeps the mass;
+       and the ball opened as the arena is Node's arenaOfWorld, cell for
+       cell. Then SAVE_MUTANTS, run through the same check.
    The selftest also holds: every projectile fired (1 + 1 rockets, 1 + 7
    bolts) meets the plane and blows; a rocket under the walker throws it up;
    and every chunk's buffer, read back from the GPU, is meshChunk's words
@@ -25,13 +35,16 @@
    each of which the selftest must catch. */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, rmSync, mkdtempSync, readFileSync } from 'node:fs';
+import { writeFileSync, rmSync, mkdtempSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { findChrome, serveStatic, launchChrome, REPO_ROOT } from '../../../test/browser/harness.js';
-import { createStore, createCounts } from '../../../dag-core.js';
+import { createStore, createCounts, storeView } from '../../../dag-core.js';
 import { writeVdag } from '../../../vdag-core.js';
 import { dagItem, fitLod, itemVoxels, arenaDesc } from '../../content-core.js';
+import { arenaOfWorld } from '../../file-core.js';
+import { readVdag } from '../../../vdag-core.js';
+import { colourOf } from '../../../colours.js';
 
 const chrome = findChrome();
 const skip = chrome ? false : 'no Chrome found (TESTBED_CHROME=/path/to/chrome to point at one, =0 to skip)';
@@ -121,6 +134,85 @@ test('the panel: Tab opens it, a real click on its × closes it, in a short wind
   assert.deepEqual(errors, []);
 });
 
+// FNV-1a of a grid's cells, written the same in the page.
+const HASH = `cells => { let h = 0x811c9dc5; for (let i = 0; i < cells.length; i++){ h = Math.imul(h ^ cells[i], 0x01000193); } return h >>> 0; }`;
+const hashOf = eval(HASH);
+async function arenaOfFile(file){
+  const { worlds: [w] } = await readVdag(new Uint8Array(readFileSync(file)), { colourOf });
+  const store = storeView({ keys: w.keys }), counts = createCounts(store);
+  let colour = null;
+  try { colour = w.colour ? colourOf(w.colour, { store, counts, D: w.D }) : null; } catch {}
+  return { w, r: arenaOfWorld({ store, counts, root: w.root, D: w.D, name: w.name }, colour) };
+}
+const settled = `(() => { for (let k = 0; k < 1500 && __destroy.debris.bodies.length; k++) __destroy.update(1 / 60); return __destroy.debris.bodies.length; })()`;
+// The save and open check, on whichever page is loaded; throws on the first thing wrong.
+async function saveAndOpen(s, ball){
+  const downloads = mkdtempSync(join(tmpdir(), 'destroy-save-'));
+  try {
+    await s.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
+    await s.evaluate(`(async () => { __destroy.files.length = 0; Object.assign(__destroy.settings, { size: 128, height: 96, plane: 16, seed: 3, specimens: 4, maths: 1 }); await __destroy.build(); })()`);
+    // A rocket into the first thing, then Save with its debris still flying.
+    const flying = await s.evaluate(`(() => { const p = __destroy.built.placed[0]; __destroy.explode([p.at[0] + p.size[0] / 2, p.at[1] + 4, p.at[2]], 7, 'rocket');
+      for (let k = 0; k < 3; k++) __destroy.update(1 / 60);
+      // The walker away from the spawn (the eye follows it), so the view tells.
+      __destroy.walker.p = [20.25, 40, 20.75]; __destroy.cam.yaw = 1; __destroy.cam.pitch = -0.4;
+      document.getElementById('saveArena').click(); return { bodies: __destroy.debris.bodies.length, saving: __destroy.saving }; })()`);
+    assert.ok(flying.bodies > 0, 'debris in flight');
+    assert.ok(flying.saving, 'the save waits');
+    await new Promise(r => setTimeout(r, 400));
+    assert.equal(readdirSync(downloads).length, 0, 'nothing saved while debris flies');
+    assert.equal(await s.evaluate(settled), 0, 'the debris baked');
+    const page = await s.evaluate(`(() => { const A = __destroy.arena; return { hash: (${HASH})(A.cells), count: A.count, total: __destroy.total, X: A.X, Y: A.Y, Z: A.Z,
+      eye: __destroy.cam.eye.slice(), yaw: __destroy.cam.yaw, pitch: __destroy.cam.pitch }; })()`);
+    assert.equal(page.count, page.total, 'the mass before the save');
+    const saved = join(downloads, 'arena-128-seed3.vdag');
+    for (let i = 0; i < 200 && !(existsSync(saved) && !readdirSync(downloads).some(f => f.endsWith('.crdownload'))); i++) await new Promise(r => setTimeout(r, 100));
+    assert.ok(existsSync(saved), `the save downloads arena-128-seed3.vdag (${readdirSync(downloads)})`);
+    const { w, r } = await arenaOfFile(saved);
+    assert.equal(w.name, 'arena 128 × 96 × 128');
+    assert.ok(r.saved, 'a saved arena');
+    assert.deepEqual([r.A.X, r.A.Y, r.A.Z], [page.X, page.Y, page.Z]);
+    assert.equal(r.A.count, page.count, 'the file holds every voxel');
+    assert.equal(hashOf(r.A.cells), page.hash, 'the file is the page\'s grid');
+    assert.deepEqual(w.view, { eye: page.eye, yaw: page.yaw, pitch: page.pitch }, 'the view is the eye');
+    assert.ok(Math.hypot(page.eye[0] - 64, page.eye[2] - 114) > 20, `the eye away from the spawn (${page.eye})`);
+    assert.equal((await s.evaluate('__destroy.lastSave')).voxels, page.count);
+    // Another arena (another seed, another mass) with debris flying in it, then the file opened through
+    // the real input: the grid saved, its mass, no debris, the walker at its view.
+    await s.evaluate(`(async () => { __destroy.settings.seed = 4; await __destroy.build(); __destroy.explode([40, 17, 40], 9, 'rocket'); __destroy.update(1 / 60); })()`);
+    const { root: doc } = await s.send('DOM.getDocument');
+    const { nodeId } = await s.send('DOM.querySelector', { nodeId: doc.nodeId, selector: '#arenaInput' });
+    await s.send('DOM.setFileInputFiles', { nodeId, files: [saved] });
+    await s.waitFor(`__destroy.built && __destroy.built.opened && __destroy.built.opened.name === 'arena-128-seed3.vdag'`, { timeout: 60000, label: 'the arena opened' });
+    const opened = await s.evaluate(`(() => { const A = __destroy.arena; return { hash: (${HASH})(A.cells), count: A.count, total: __destroy.total, opened: __destroy.built.opened,
+      bodies: __destroy.debris.bodies.length, walker: __destroy.walker && __destroy.walker.p.slice(), size: [A.X, A.Y, A.Z] }; })()`);
+    assert.equal(opened.hash, page.hash, 'opened, the arena is the saved grid');
+    assert.equal(opened.count, page.count); assert.equal(opened.total, page.count, 'the mass to keep is the file\'s');
+    assert.deepEqual(opened.size, [page.X, page.Y, page.Z]);
+    assert.ok(opened.opened.saved && opened.opened.lod === 0);
+    assert.equal(opened.bodies, 0);
+    assert.ok(opened.walker && Math.abs(opened.walker[0] - page.eye[0]) < 1e-9 && Math.abs(opened.walker[2] - page.eye[2]) < 1e-9, `the walker where the view stood (${opened.walker})`);
+    const after = await s.evaluate(`(() => { __destroy.explode([64, 18, 64], 7, 'rocket'); for (let k = 0; k < 1500 && __destroy.debris.bodies.length; k++) __destroy.update(1 / 60);
+      return { ...__destroy.mass(), left: __destroy.debris.bodies.length }; })()`);
+    assert.equal(after.left, 0); assert.equal(after.world, after.total, 'a blast in the opened arena keeps the mass');
+    // Any other world opened as the arena: Node's arenaOfWorld.
+    if (ball){
+      const want = (await arenaOfFile(ball)).r;
+      await s.send('DOM.setFileInputFiles', { nodeId, files: [ball] });
+      await s.waitFor(`__destroy.built && __destroy.built.opened && __destroy.built.opened.name === 'ball.vdag'`, { timeout: 60000, label: 'the ball opened as the arena' });
+      const got = await s.evaluate(`(() => { const A = __destroy.arena; return { hash: (${HASH})(A.cells), count: A.count, size: [A.X, A.Y, A.Z], saved: __destroy.built.opened.saved }; })()`);
+      assert.equal(got.saved, false);
+      assert.deepEqual(got.size, [want.A.X, want.A.Y, want.A.Z]);
+      assert.equal(got.count, want.A.count);
+      assert.equal(got.hash, hashOf(want.A.cells), 'the ball as the arena is Node\'s');
+    }
+  } finally { rmSync(downloads, { recursive: true, force: true }); }
+}
+test('save a wrecked arena and open it again, through the real buttons', { skip, timeout: 240000 }, async () => {
+  await saveAndOpen(browser.session, dir && join(dir, 'ball.vdag'));
+  assert.deepEqual(errors, []);
+});
+
 const PAGE_MUTANTS = [
   ['rubble lost', '} else burst(D, carved, c, r, { seed, cluster:', '} else void (D, carved, c, r, { seed, cluster:'],
   ['melt lost', '    burst(D, carved, c, r, { seed, liquid: true,', '    void (D, carved, c, r, { seed, liquid: true,'],
@@ -134,6 +226,35 @@ const PAGE_MUTANTS = [
   ['a thing uncounted', '  A.refreshBox(at, [at[0] + sx, at[1] + sy, at[2] + sz]);\n', ''],
   ['no plane', '  fillPlane(A, d.plane); A.refreshBox([0, 0, 0], [d.size, d.plane, d.size]);\n', ''],
 ];
+const SAVE_MUTANTS = [
+  ['saved with debris in flight', 'if (!p || p.started || !A || streaming || D.bodies.length) return;', 'if (!p || p.started || !A || streaming) return;'],
+  ['the save never retried', '  if (A) remesh(streaming ? 10 : 5);\n  trySave();\n', '  if (A) remesh(streaming ? 10 : 5);\n'],
+  ['no view saved', 'view: { eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch } } }, [cells.buffer]);', 'view: null } }, [cells.buffer]);'],
+  ['the save button unwired', "$('saveArena').onclick = () => saveArena().catch(() => {});\n", ''],
+  ['opened empty', 'A = createArena(o.X, o.Y, o.Z, o.cells);', 'A = createArena(o.X, o.Y, o.Z);'],
+  ['old debris kept', "    D = createDebris(); projectiles.length = 0; particles.length = 0; lights.length = 0;\n    dropMeshes();\n    streaming = null;", "    projectiles.length = 0; particles.length = 0; lights.length = 0;\n    dropMeshes();\n    streaming = null;"],
+  ['the old mass kept', '    total = A.count;\n    shadow.mat = shadowMatrix(); shadow.dirty = true;\n    const v = o.view', '    shadow.mat = shadowMatrix(); shadow.dirty = true;\n    const v = o.view'],
+  ['the walker at the edge', 'const v = o.view, eye', 'const v = null, eye'],
+];
+test('every mutant of the save and open is caught', { skip, timeout: 600000 }, async t => {
+  const src = readFileSync(join(REPO_ROOT, PAGE), 'utf8'), s = browser.session;
+  for (const [k, [name, from, to]] of SAVE_MUTANTS.entries()){
+    assert.equal(src.split(from).length, 2, `mutant ${name}: its text must occur exactly once in the page`);
+    const file = join(REPO_ROOT, 'destroy', `mutant-destroy-save-${k}.html`);
+    try {
+      writeFileSync(file, src.replace(from, to));
+      await s.send('Page.navigate', { url: `${server.origin}/destroy/mutant-destroy-save-${k}.html?test=1` });
+      let caught = null;
+      try {
+        await s.waitFor('window.__destroy && window.__destroy.ready === true', { timeout: 20000 });
+        await saveAndOpen(s, null);
+      } catch (e){ caught = e.message; }
+      assert.ok(caught, `mutant ${name} survived`);
+      t.diagnostic(`mutant ${name}: ${String(caught).split('\n')[0]}`);
+    } finally { rmSync(file, { force: true }); }
+  }
+  errors.length = 0;
+});
 test('every mutant of the page is caught', { skip, timeout: 600000 }, async t => {
   const src = readFileSync(join(REPO_ROOT, PAGE), 'utf8'), s = browser.session;
   for (const [k, [name, from, to]] of PAGE_MUTANTS.entries()){

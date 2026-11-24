@@ -120,7 +120,7 @@ export function specimenItem(seed, k){
 
 /* Math shape k: the deck is the 45 shapes shuffled by the seed. */
 export const GAMUT_LIFT = 40, GAMUT_SPAN = 215;
-const gamut = (u, v, w) => pack(GAMUT_LIFT + GAMUT_SPAN * u, GAMUT_LIFT + GAMUT_SPAN * v, GAMUT_LIFT + GAMUT_SPAN * w);
+export const gamut = (u, v, w) => pack(GAMUT_LIFT + GAMUT_SPAN * u, GAMUT_LIFT + GAMUT_SPAN * v, GAMUT_LIFT + GAMUT_SPAN * w);
 export function mathDeck(seed){
   const a = MATH_SHAPES.map((_, i) => i);
   for (let k = a.length - 1; k > 0; k--){ const r = hash4(seed, k, 9, 0x3a7) % (k + 1), t = a[k]; a[k] = a[r]; a[r] = t; }

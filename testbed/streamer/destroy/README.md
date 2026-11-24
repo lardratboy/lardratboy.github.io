@@ -25,12 +25,17 @@ Serve the repo (`npm run serve`) and open `http://localhost:8000/destroy/`.
 | M | sound |
 | Tab | the arena's settings |
 | R | rebuild the arena |
+| K | save the arena as a `.vdag` (once the debris has settled) |
 
 The settings panel holds the arena's size (256, 384 or 512 across), height,
 plane thickness, seed, how many specimens and math shapes, the `.vdag` files
 (add with the button or drop them on the page), the two blast radii, whether
 loose pieces fall, shadows, sound and mouse speed. They're kept in
 localStorage, and any of them can go in the link (`?size=256&seed=7&maths=10`).
+Under them, **Save arena as .vdag** writes the arena as it is (wrecked, say)
+to a world file, and **Open arena…** makes a `.vdag` the arena itself: a saved
+one comes back voxel for voxel, anything else is laid out to fit
+(["Saving an arena"](#saving-an-arena)).
 
 The HUD's second line is the point of the thing:
 `mass: world 4,045,161 + debris 167 = 4,045,328 ✓ conserved`.
@@ -46,6 +51,8 @@ plays sounds and moves results between the cores.
 | `debris-core.js` | bodies, their move, the bake, the burst, the push |
 | `content-core.js` | the plane, specimens, math shapes, `.vdag` worlds as items, the layout, the build |
 | `build-worker.js` | one build off the page's thread (reads the files, calls `buildArena`, posts each thing as it's placed) |
+| `file-core.js` | the arena as a `.vdag` world and a `.vdag` world as the arena |
+| `file-worker.js` | a save or an open off the page's thread |
 | `index.html` | the page: WebGL2, input, weapons, effects, sound, HUD, panel |
 | `../walk-core.js` | the player, the stream viewer's walker, imported unchanged |
 
@@ -186,31 +193,100 @@ R², `specimenPlan`'s (R·scale)²; the test holds every made thing inside its
 plan's box). An item's tries are still hashed from its index in the list,
 so most things land where they did, but a seed's arena moved a little.
 
+### Saving an arena
+
+Asked for 2026-11-23 (open question 3: "a .vdag from a wrecked arena, good
+stuff"). The grid goes back into the DAG it came from, and the file opens
+again here or in the stream viewer, which draws it in its own colours.
+
+![a saved arena in the stream viewer](images/destroy-saved-viewer.jpg)
+
+*The arena of the screenshots above, saved after the plasma and opened in the
+stream viewer from the eye it was saved at.*
+
+- **The shape** (`arenaShape`): one world of side 2^D, D the least that holds
+  every side (384 × 192 × 384 is D = 9), the arena at its low corner, y up,
+  air round it. dag-core's `fromField` builds it top down from a count
+  pyramid of the grid (8³ bricks and up; below a brick the cells are looked
+  at), so a block of rock or sky is one answer and only the surface is
+  walked to the voxel. The README's question had it as `fromDense` in 256³
+  blocks, grafted; the pyramid needs no grafting and no dense block.
+- **The colours** are a baked field, as an imported asset's are (vdag-core's
+  ATTR): a word a voxel of the skin, in Morton order. **The skin is every
+  solid voxel**, not only those that can show, because an arena's inside is
+  played: the dirt and stone under the grass and a specimen's core are what
+  the next rocket opens, so they have to come back as they were. The cost
+  is the stream viewer's far view, whose coarse cells average the skin under
+  them (grass one voxel thick over dirt reads browner from afar). Words are
+  six bits a channel: a cell's five bits widened to eight, narrowed to six and
+  widened again come back to the same five, for all 32 values (the test holds
+  each).
+- **The name** says the size, `arena 384 × 192 × 384`, which is how a reopened
+  arena gets its height back (the sky over the tallest thing isn't in the
+  DAG), and **the view** is the player's eye, so the stream viewer opens where
+  the player stood.
+- **It waits for the debris.** A body in flight holds voxels the grid
+  doesn't, so a save asked for then starts the first frame no body is left
+  (the HUD says it's waiting), and the file holds the whole mass. The grid is
+  copied as it starts, and `file-worker.js` writes it while play goes on.
+  It downloads as `arena-<size>-seed<seed>.vdag`, or after the file it was
+  opened from.
+- **Opening** (`arenaOfWorld`): a saved arena is its size, at the origin, at
+  lod 0: the same cells, the same count, the walker where the view stood.
+  Any other world is taken at the finest lod at which what's in it fits the
+  largest arena (512 × 256 × 512), each level-lod node that isn't empty a
+  cell (the any rule, as an added world's), coloured by its field or the
+  gamut, centred in a square arena with its bottom on the bedrock row and 64
+  or more of sky over it. Nothing is laid or added: the file is the arena.
+  **Add .vdag** still stands a world in a new arena on the plane; R
+  rebuilds from the settings.
+
 Sound is synthesized in WebAudio (filtered noise and swept oscillators), so
 there is nothing to load.
 
 ## Measured
 
-M2 Max, Node 22, `node` on the cores (the page's numbers are from headless
-Chrome on the GPU at 1280 × 760, where it holds 55–60 fps).
+M2 Max, Node 22, `node destroy/measure.mjs` on the cores (~10 s; the page's
+numbers are from headless Chrome on the GPU at 1280 × 760, where it holds
+55–60 fps). Last run 2026-11-23, after the build began to stream.
 
 | arena | voxels | build | mesh, all chunks | instances | grid |
 |---|---|---|---|---|---|
-| 256 × 192 × 256 | 1,971,286 | 541 ms | 149 ms | 226,798 | 25 MB |
-| 384 × 192 × 384 (default) | 4,045,328 | 334 ms | 221 ms | 352,944 | 57 MB |
-| 512 × 192 × 512 | 6,797,840 | 320 ms | 267 ms | 479,408 | 101 MB |
+| 256 × 192 × 256 | 1,971,286 | 559 ms | 152 ms | 226,798 | 25 MB |
+| 384 × 192 × 384 (default) | 4,045,328 | 315 ms | 239 ms | 352,944 | 57 MB |
+| 512 × 192 × 512 | 6,797,840 | 331 ms | 279 ms | 479,408 | 101 MB |
 
 (The 256 build is slower because the math shapes it draws first are bigger
 fractals: the layout's seed walks the deck the same way, and R is hashed
 within the room.)
 
-Blasts on the default arena's biggest specimen (a 64³ one, ~25% solid):
+Blasts on the default arena's biggest specimen (specimen 2, R 32 at ×2, a
+64³ box 48% solid), where a ray from 60 voxels in front meets its face 0.4 of
+the way up; settled is the arena's clock at 60 Hz, mass checked every step:
 
 | shot | carved | bodies | carve + burst + loose | settled | worst step |
 |---|---|---|---|---|---|
-| rocket, r 7 | 376 | 75 | 4.4 ms | 3.0 s | 1.1 ms |
-| big rocket, r 12.6 | 4,171 | 326 | 16 ms | 2.9 s | 4.1 ms |
-| plasma, r 2.5 | 13 | 13 drops | 0.6 ms | 5.0 s (they flow) | 0.2 ms |
+| rocket, r 7 | 820 | 169 | 6.6 ms | 2.8 s | 2.7 ms |
+| big rocket, r 12.6 | 4,027 | 327 | 16 ms | 3.5 s | 5.2 ms |
+| plasma, r 2.5 | 47 | 47 drops | 0.8 ms | 5.0 s (they flow) | 0.3 ms |
+
+Saving each size as built (`writeArena`: the shape, the words, vdag-core's
+write), then reading it back and opening it (`readVdag`, `arenaOfWorld`,
+which gives the grid back cell for cell):
+
+| arena | D | nodes | file | shape + words | write, all of it | read + open |
+|---|---|---|---|---|---|---|
+| 256 × 192 × 256 | 8 | 8,496 | 1.1 MB | 74 ms | 528 ms | 277 ms |
+| 384 × 192 × 384 | 9 | 10,771 | 2.1 MB | 160 ms | 1,033 ms | 571 ms |
+| 512 × 192 × 512 | 9 | 10,743 | 3.5 MB | 241 ms | 1,839 ms | 937 ms |
+
+The shape is small (about 11,000 nodes: a slab and a few dozen things); the
+file is nearly all words, 4 million of them gzipped, and the write's time is
+the six-bit pass and the gzip.
+
+The voxel counts are what they were before the streaming build: the same
+things are made, placed biggest first. The blast rows moved because the
+target did (the old ones hit a 64³ specimen about 25% solid).
 
 ## Traps hit
 
@@ -250,7 +326,7 @@ Blasts on the default arena's biggest specimen (a 64³ one, ~25% solid):
 
 ## Tests
 
-- `node --test destroy/test/*.test.js` (~35 s, in `npm test`):
+- `node --test destroy/test/*.test.js` (~40 s, in `npm test`):
   - `arena-core.test.js`: colours over every 5-bit value; counts and dirt
     (only re-meshing dirty chunks after random edits, half on chunk borders,
     gives a full re-mesh's words); every mesh word against a dense grid read
@@ -278,7 +354,18 @@ Blasts on the default arena's biggest specimen (a 64³ one, ~25% solid):
     same grid, count and per-chunk counts; placed biggest planned box first,
     each made thing inside its plan's box; a loaded world first); then
     **16 mutants**, written beside the file (as mutant-content-<k>.js, gitignored) and removed.
-- `node --test destroy/test/browser/destroy.test.js` (~35 s, in
+  - `file-core.test.js`: every 5:5:5 colour through a six-bit word and
+    back; the shape against `fromDense` of the grid padded by hand, by root
+    id, on random arenas of unequal sides and a built one; the words in a
+    Morton order made bit by bit; the file written, read and opened is the
+    grid cell for cell, with its size, count and view, for a built arena, one
+    wrecked by rockets and plasma with its debris baked, and one 256 across;
+    other worlds opened as the arena (a ragged box in the gamut, boxes too
+    wide and too tall for lod 0, a named field at lod 1 under a name that
+    lies): `boundsOf` against a scan, the lod the finest that fits, square,
+    centred, on the bedrock, room over it, and every cell dagItem's at that
+    lod; then **17 mutants** (mutant-file-<k>.js).
+- `node --test destroy/test/browser/destroy.test.js` (~45 s, in
   `npm run test:browser`): the page's `__destroy.selftest()` (a small arena
   built in the worker and streamed together on the page, which must be
   `buildArena`'s grid cell for cell and the builder's count, a rocket on everything placed, both weapons plain and
@@ -289,27 +376,59 @@ Blasts on the default arena's biggest specimen (a 64³ one, ~25% solid):
   closed by a real click on its × (in a window short enough to scroll it,
   scrolled to the end); a `.vdag` written in Node added through the real
   file input (placed first, the voxels Node's stamp gives, a blast in it
-  keeping the mass); then **11 page mutants**.
+  keeping the mass); saving and opening through the real buttons (a rocket,
+  Save with its debris flying, nothing written until it has baked; the
+  download, read in Node, is the page's grid cell for cell with the page's
+  eye as its view; another arena built with debris flying, then the file
+  opened through the real Open input is the saved grid, its mass, no debris,
+  the walker where the view stood, and a blast in it keeps the mass; the
+  ball opened as the arena is Node's `arenaOfWorld`); then **11 page
+  mutants** and **8 of the save and open** (`SAVE_MUTANTS`).
 - `node destroy/test/browser/shots.mjs [outdir]` (~20 s) screenshots the
   default arena into `destroy/images/`: the opening, a rocket's blast, debris
-  in flight, the rubble settled, the plasma's melt, the slag.
+  in flight, the rubble settled, the plasma's melt, the slag, and that arena
+  saved by the page and opened in the stream viewer.
+- `node destroy/measure.mjs` (~10 s) prints the Measured tables above as
+  markdown: each arena size built and meshed, then three shots at the
+  default arena's biggest specimen by a copy of the page's `explode()`,
+  run until every body has baked, the mass checked every step; then each
+  size saved, read and opened. It measures times, so **run it on an idle
+  machine**.
 
 ## Open questions
 
 1. **Debris against debris.** Bodies pass through each other and pile up by
    baking (the overtaken rule). Real body-body contact would let a heap of
    rubble tumble before it settles, at the cost of a broad phase. Worth it?
+
+[BPT: I think they are fine the way they behave we can address later ]
+
 2. **Toppling.** A loose piece falls straight down and lands upright (no
    rotation in the physics, only a spin for the eye on small bodies). A tower
    cut at its base doesn't tip over. Rigid-body rotation would need the bake
    to re-voxelize a turned piece. Worth it?
+
+[BPT: I think it is fine the way it is. ]
+
 3. **Saving an arena.** The grid could go back to a `.vdag`
    (`fromDense` in 256³ blocks, grafted) with its colours as a baked field,
    so a wrecked arena could be reopened here or in the stream viewer.
+
+[BPT: This is a great idea, a .vdag from a wrecked arena good stuff ]
+
+   **Built (2026-11-23):** Save and Open in the settings, `K` to save; see
+   ["Saving an arena"](#saving-an-arena). Every solid voxel keeps its colour,
+   so a saved arena reopens exactly.
+
 4. **Bigger arenas.** 512 across is 101 MB of cells. Past that, the grid
    would want to be paged by chunk (only chunks that were ever touched held
    densely, the rest read from the DAG they came from). That would be the
    first real use of the DAG as backing store for a dense working set.
+
+[BPT: I think the game demonstrates the idea well, I do want to stream eventually but it can wait ]
+
 5. **Damage to the player** (none now: it's a playground), **materials** with
    hardness (everything carves the same but bedrock), and **lights** from
    glowing slag. All are easy to add, if wanted.
+
+  [BPT: I am quite satisfied with how thing are now ]

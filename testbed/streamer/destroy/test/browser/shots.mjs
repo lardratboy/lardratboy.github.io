@@ -2,9 +2,13 @@
    builds the default arena in headless Chrome on the GPU and writes
    destroy-*.jpg: the opening view, a rocket's blast in flight, the rubble
    settled, the plasma's melt, and a tower's top cut loose and falling. The
-   shots drive the page by __destroy (headless Chrome has no pointer lock). */
-import { writeFileSync, mkdirSync } from 'node:fs';
+   shots drive the page by __destroy (headless Chrome has no pointer lock).
+   Last, the wrecked arena saved as a .vdag (the page's own save, caught as a
+   download) and opened in the stream viewer, from the eye it was saved at:
+   destroy-saved-viewer.jpg. */
+import { writeFileSync, mkdirSync, mkdtempSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { findChrome, serveStatic, launchChrome, REPO_ROOT } from '../../../test/browser/harness.js';
 
 const out = process.argv[2] || join(REPO_ROOT, 'destroy', 'images');
@@ -49,4 +53,22 @@ await run(600);
 await shot('slag');
 const m = await s.evaluate('__destroy.mass()');
 console.log('mass', m, 'errors', errors);
+// Saved, and opened in the stream viewer where the player stood.
+const downloads = mkdtempSync(join(tmpdir(), 'destroy-shots-'));
+try {
+  await s.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
+  await s.evaluate(`(async () => { for (let k = 0; k < 2000 && __destroy.debris.bodies.length; k++) __destroy.update(1 / 60); await __destroy.saveArena(); return true; })()`);
+  let file = null;
+  for (let i = 0; i < 200 && !file; i++){ const f = readdirSync(downloads).find(n => n.endsWith('.vdag')); if (f) file = join(downloads, f); else await new Promise(r => setTimeout(r, 100)); }
+  if (!file) throw new Error('no save downloaded');
+  console.log('saved', file);
+  await s.send('Page.navigate', { url: `${server.origin}/stream-viewer.html?quiet` });
+  await s.waitFor('window.__stream && window.__stream.cut && window.__stream.missing === 0', { timeout: 120000, label: 'the stream viewer' });
+  const { root } = await s.send('DOM.getDocument'), { nodeId } = await s.send('DOM.querySelector', { nodeId: root.nodeId, selector: '#fileInput' });
+  await s.send('DOM.setFileInputFiles', { nodeId, files: [file] });
+  await s.waitFor(`String(__stream.world.id).startsWith('file:') && __stream.missing === 0 && __stream.pending === 0 && __stream.holes === 0`, { timeout: 180000, label: 'the saved arena in the stream viewer' });
+  const { data } = await s.send('Page.captureScreenshot', { format: 'jpeg', quality: 85 });
+  writeFileSync(join(out, 'destroy-saved-viewer.jpg'), Buffer.from(data, 'base64'));
+  console.log('wrote saved-viewer');
+} finally { rmSync(downloads, { recursive: true, force: true }); }
 await browser.close(); await server.close();

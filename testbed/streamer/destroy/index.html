@@ -114,6 +114,7 @@
       <h3>Arena</h3>
       <span class="k"><kbd>Tab</kbd></span><span>settings: size, plane, seed, specimens, math shapes, .vdag files</span>
       <span class="k"><kbd>R</kbd></span><span>rebuild</span>
+      <span class="k"><kbd>K</kbd></span><span>save the arena as a .vdag (open one from the settings)</span>
       <span class="k"><kbd>M</kbd></span><span>sound on or off</span>
     </div>
     <div class="row">
@@ -138,6 +139,10 @@
   <div class="row"><button id="addFile">Add .vdag…</button><span class="note">or drop files on the page</span></div>
   <input type="file" id="fileInput" accept=".vdag" multiple hidden>
   <div class="row" style="margin-top:12px"><button class="primary" id="build">Build arena</button><span class="note" id="panelNote"></span></div>
+  <h2>Save and open</h2>
+  <div class="row"><button id="saveArena">Save arena as .vdag</button><button id="openArena">Open arena…</button></div>
+  <div class="note" id="fileNote" style="margin-top:6px">A saved arena opens again here voxel for voxel, and in the stream viewer. Open makes any .vdag the arena itself; Add .vdag stands it in a new one.</div>
+  <input type="file" id="arenaInput" accept=".vdag" hidden>
   <h2>Weapons</h2>
   <label>Rocket blast <span class="row"><input type="range" id="rocketR" min="3" max="16" step="0.5"><span id="rocketRv"></span></span></label>
   <label>Plasma melt <span class="row"><input type="range" id="plasmaR" min="1" max="5" step="0.25"><span id="plasmaRv"></span></span></label>
@@ -531,6 +536,7 @@ function progress(text, fraction){
 }
 function build(){
   if (builder) builder.terminate();
+  if (opener){ opener.terminate(); opener = null; }
   const w = builder = new Worker(new URL('./build-worker.js', import.meta.url), { type: 'module' });
   const desc = descOf();
   begin(desc);
@@ -569,13 +575,8 @@ function finish(info){
   streaming = null;
   if (A.count !== info.count) toast(`The arena came to ${A.count.toLocaleString()} voxels, not the builder's ${info.count.toLocaleString()}`, 8000);
   total = A.count;
-  const eye = [info.spawn[0], info.spawn[1] + WALKER.eye + 0.01, info.spawn[2]];
-  walker = createWalker(eye, WALKER); settle(walker, worldFn);
-  // From the overview down to the walker's eye (at once in a test: its shots aim from the walker).
-  const to = { eye: walkerEye(walker), yaw: info.yaw, pitch: -0.12 };
-  if (TEST){ cam.eye = to.eye; cam.yaw = to.yaw; cam.pitch = to.pitch; }
-  else glide = { t: 0, dur: 1.2, from: { eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch }, to };
-  built = { ...info };
+  spawnAt([info.spawn[0], info.spawn[1] + WALKER.eye + 0.01, info.spawn[2]], info.yaw, -0.12);
+  built = { ...info, fileBase: `arena-${d.size}-seed${d.seed}` };
   const msg = `${(A.count).toLocaleString()} voxels, ${info.placed.length} things on a ${d.size} × ${d.size} plane, built in ${(info.ms / 1000).toFixed(1)} s`;
   progress('');
   $('buildNote').textContent = msg;
@@ -585,6 +586,94 @@ function finish(info){
   $('panelNote').textContent = [...info.notes, ...files.map(l => `${l.name}: ${l.why}`), crowded ? `${crowded} thing${crowded > 1 ? 's' : ''} left out: no room` : ''].filter(Boolean).join(' · ');
   toast(msg, 3500);
 }
+// The walker at an eye, settled up out of rock, and the camera gliding down to it from where it is (at once in a test: its shots aim from the walker).
+function spawnAt(eye, yaw, pitch){
+  walker = createWalker(eye, WALKER); settle(walker, worldFn, 400);
+  const to = { eye: walkerEye(walker), yaw, pitch };
+  if (TEST){ cam.eye = to.eye; cam.yaw = to.yaw; cam.pitch = to.pitch; }
+  else glide = { t: 0, dur: 1.2, from: { eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch }, to };
+}
+
+/* ---- saving and opening ------------------------------------------------------------
+   (destroy/README.md, "Saving an arena"; every decision is file-core's, run in
+   file-worker.js.) A save is the grid as it is, so it waits for the debris:
+   a body in flight holds voxels the grid doesn't, and a file saved then
+   would be short of them. It starts the first frame no body is left (none
+   are made while it writes: the grid is copied as it starts), and the file
+   downloads as arena-<size>-seed<seed>.vdag, or after the file it was
+   opened from. Open reads a file as the arena itself (a saved arena comes
+   back as it was saved; anything else is laid out by file-core's
+   placementOf), the walker where the file's view stood, or at the near
+   edge. A build supersedes an open in flight, and an open a build. */
+let opener = null, pendingSave = null, lastSave = null;
+function fileJob(msg, transfer = []){
+  const w = new Worker(new URL('./file-worker.js', import.meta.url), { type: 'module' });
+  const job = new Promise((resolve, reject) => {
+    w.onmessage = ({ data }) => {
+      if (data.phase) return progress(`${data.phase.text}…`, data.phase.fraction);
+      w.terminate(); progress('');
+      if (data.error) reject(new Error(data.error)); else resolve(data);
+    };
+    w.onerror = e => { w.terminate(); progress(''); reject(new Error(e.message)); };
+  });
+  w.postMessage(msg, transfer);
+  return { w, job };
+}
+function saveArena(){
+  if (!A || streaming){ toast('The arena is still being built', 2500); return Promise.reject(new Error('building')); }
+  if (pendingSave) return pendingSave.promise;
+  const p = pendingSave = { started: false };
+  p.promise = new Promise((resolve, reject) => { p.resolve = resolve; p.reject = reject; }).finally(() => { if (pendingSave === p) pendingSave = null; });
+  if (D.bodies.length) toast(`Saving when the debris settles (${D.bodies.length.toLocaleString()} bodies in flight)…`);
+  trySave();
+  return p.promise;
+}
+// Each frame: the save waiting for the debris starts once there's none.
+function trySave(){
+  const p = pendingSave;
+  if (!p || p.started || !A || streaming || D.bodies.length) return;
+  p.started = true;
+  const arena = A, cells = A.cells.slice(), name = `${built?.fileBase ?? `arena-${A.X}`}.vdag`;
+  const { job } = fileJob({ save: { X: A.X, Y: A.Y, Z: A.Z, cells, view: { eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch } } }, [cells.buffer]);
+  progress('Saving the arena…', 0);
+  job.then(({ saved }) => {
+    const url = URL.createObjectURL(new Blob([saved.bytes], { type: 'application/octet-stream' })), a = document.createElement('a');
+    a.href = url; a.download = name; document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    lastSave = { name, bytes: saved.bytes.length, voxels: saved.voxels, sameArena: arena === A };
+    const msg = `Saved ${name}: ${saved.voxels.toLocaleString()} voxels in ${(saved.bytes.length / 1048576).toFixed(1)} MB (${(saved.ms / 1000).toFixed(1)} s)`;
+    $('fileNote').textContent = msg; toast(msg, 4000);
+    p.resolve(lastSave);
+  }, e => { toast(`The save failed: ${e.message}`, 8000); p.reject(e); });
+}
+function openArena(file){
+  if (builder){ builder.terminate(); builder = null; }
+  if (opener) opener.terminate();
+  const { w, job } = fileJob({ open: { file, world: 0 } });
+  opener = w;
+  progress(`Opening ${file.name}…`, 0);
+  return job.then(({ opened: o }) => {
+    if (opener !== w) return null;
+    opener = null;
+    A = createArena(o.X, o.Y, o.Z, o.cells);
+    D = createDebris(); projectiles.length = 0; particles.length = 0; lights.length = 0;
+    dropMeshes();
+    streaming = null; glide = null; walker = null;
+    total = A.count;
+    shadow.mat = shadowMatrix(); shadow.dirty = true;
+    const v = o.view, eye = v ? v.eye : [o.X / 2, topAt(Math.floor(o.X / 2), o.Z - 14) + WALKER.eye + 0.01, o.Z - 14];
+    spawnAt(eye, v ? v.yaw : SPAWN_YAW, v ? v.pitch : -0.12);
+    const plane = topAt(0, 0);
+    built = { desc: arenaDesc({ size: o.X, height: o.Y, plane, seed: settings.seed, specimens: 0, maths: 0 }), placed: [], left: [], notes: [], count: o.count,
+              spawn: walker.p.slice(), yaw: cam.yaw, opened: { name: file.name, world: o.name, D: o.D, lod: o.lod, at: o.at, saved: o.saved },
+              fileBase: file.name.replace(/\.vdag$/i, '') };
+    const msg = `Opened ${file.name}${o.saved ? '' : ` at lod ${o.lod}`}: ${A.count.toLocaleString()} voxels in a ${o.X} × ${o.Y} × ${o.Z} arena (R builds from the settings again)`;
+    $('fileNote').textContent = msg; $('buildNote').textContent = msg; toast(msg, 4000);
+    return built;
+  }, e => { if (opener === w){ opener = null; toast(`Couldn't open ${file.name}: ${e.message}`, 8000); } throw e; });
+}
+// The height of the first air over the highest solid cell of a column (0 for an empty one).
+function topAt(x, z){ for (let y = A.Y - 1; y >= 0; y--) if (A.get(x, y, z)) return y + 1; return 0; }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 /* ---- blasts ----------------------------------------------------------------------
@@ -935,6 +1024,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyT') timeScale = timeScale < 1 ? 1 : 0.25;
   if (e.code === 'KeyM'){ settings.sound = !settings.sound; $('sound').checked = settings.sound; save(); if (settings.sound) ensureAudio(); toast(settings.sound ? 'Sound on' : 'Sound off', 1200); }
   if (e.code === 'KeyR' && !e.repeat) build().catch(() => {});
+  if (e.code === 'KeyK' && !e.repeat) saveArena().catch(() => {});
 });
 addEventListener('keyup', e => keys.delete(e.code));
 addEventListener('blur', () => { keys.clear(); mouse.left = mouse.right = false; });
@@ -962,6 +1052,9 @@ $('play').onclick = play;
 $('openPanel').onclick = () => setPanel(true);
 $('closePanel').onclick = $('panelX').onclick = () => setPanel(false);
 $('addFile').onclick = () => $('fileInput').click();
+$('saveArena').onclick = () => saveArena().catch(() => {});
+$('openArena').onclick = () => $('arenaInput').click();
+$('arenaInput').onchange = () => { const f = $('arenaInput').files[0]; $('arenaInput').value = ''; if (f) openArena(f).catch(() => {}); };
 $('fileInput').onchange = () => { addFiles([...$('fileInput').files]); $('fileInput').value = ''; };
 $('files').onclick = e => { const i = e.target.dataset?.drop; if (i !== undefined){ files.splice(Number(i), 1); syncPanel(); build().catch(() => {}); } };
 function addFiles(list){
@@ -982,6 +1075,7 @@ function frame(now){
   if (raw > 0) fps += (1 / raw - fps) * 0.08;
   if (!TEST || __destroy.live) update(raw * timeScale);
   if (A) remesh(streaming ? 10 : 5);
+  trySave();
   render(now);
   hud(now);
   requestAnimationFrame(frame);
@@ -998,6 +1092,7 @@ const __destroy = window.__destroy = {
   live: false,
   get arena(){ return A; }, get debris(){ return D; }, get total(){ return total; }, get built(){ return built; }, get walker(){ return walker; }, cam, stats, settings,
   build, explode, update, render, fire, setWeapon, addFiles, files, remesh, raycast: (o, d, t) => raycast(A, o, d, t),
+  saveArena, openArena, get lastSave(){ return lastSave; }, get saving(){ return !!pendingSave; },
   mass: () => ({ world: A.count, debris: D.voxels, total }),
   async selftest(opts = {}){
     const out = { steps: 0, errors: [], frames: 0 };
