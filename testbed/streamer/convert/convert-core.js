@@ -141,19 +141,21 @@ export async function convertGlb(bytes, { name = 'asset', depths = [8, 10], bits
 }
 
 /* Each stage's time, and the page told: stage(s) closes the one before. */
-function stager(D, ms, onStage){
+export function stager(D, ms, onStage){
   const t = { at: performance.now(), stage: null };
   return s => { const now = performance.now(); if (t.stage) ms[t.stage] = now - t.at; Object.assign(t, { at: now, stage: s }); onStage(D, s); };
 }
 /* One depth's file from its store: written, read back (it must hold the
    world it was written from: its voxels and, baked, its colour), and a
    picture. Shared by the .glb and the .ply, so a world is the same file
-   whichever way its voxels came. */
-async function finishDepth({ store, root, D, M, skin, words, bits, name, slug, thumbs, stage, ms }){
+   whichever way its voxels came, and by vdb/'s OpenVDB converter (which
+   names some of its worlds and files its own way: `title`, `file`). */
+export async function finishDepth({ store, root, D, M, skin, words, bits, name, slug, thumbs, stage, ms,
+                                    title = `${name} (D = ${D})`, file: fileName = `${slug}-d${D}.vdag` }){
   const colour = words ? { kind: 'baked', skin, words, bits } : null;
   stage('writing');
   const keys = store.snapshot().keys;
-  const file = await writeVdag([{ keys, root, D, name: `${name} (D = ${D})`, colour, view: assetView(M), source: null }]);
+  const file = await writeVdag([{ keys, root, D, name: title, colour, view: assetView(M), source: null }]);
   stage('checking');
   const counts = createCounts(store), voxels = counts.of(root), { worlds: [back] } = await readVdag(file);
   if (back.voxels !== voxels || (colour ? back.colourStatus !== 'baked' : back.colour !== null))
@@ -165,7 +167,7 @@ async function finishDepth({ store, root, D, M, skin, words, bits, name, slug, t
     thumb = thumbnail(store, root, D, field);
   }
   stage(null);
-  return { D, side: M.side, file: `${slug}-d${D}.vdag`, bytes: file, voxels, nodes: prune(keys, [root]).keys.length / 9,
+  return { D, side: M.side, file: fileName, bytes: file, voxels, nodes: prune(keys, [root]).keys.length / 9,
            skin: words ? words.length : 0, bits: colour ? bits : 0, ms, thumb };
 }
 

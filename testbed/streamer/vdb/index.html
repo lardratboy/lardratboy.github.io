@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vdb to vdag</title>
+<!--
+  OpenVDB volumes to world files: drop a .vdb (or pick one), and each grid
+  it holds is listed; the converter takes a level set's inside or a fog
+  volume's density over a threshold as the shape, bakes a colour grid if
+  there is one, and saves a .vdag a depth for the stream viewer. Every
+  decision is vdb-convert.js's (and vdb-core.js's, the reader), run in
+  vdb-worker.js, one worker a file; this page only moves files and draws
+  the list. vdb/README.md.
+
+  Settings at the top apply to files added next; each file's own choices
+  (which grid, what's solid, the threshold, the colour) come back from the
+  worker as it starts, and "again" makes it over with them as they are.
+
+  Serve the repo root (npm run serve) and open /vdb/: the core imports
+  ../dag-core.js and its neighbours. No third-party code (README: licences).
+-->
+<style>
+  :root{ --bg:#07070a; --panel:#101016; --line:rgba(255,255,255,.09); --text:#a8a8ba; --dim:#62627a; --hi:#d8d8e6; --accent:#7a8ad0; --warn:#d08a5a; --bad:#d06a6a; }
+  html,body{ margin:0; background:var(--bg); color:var(--text); font:12px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  main{ max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1{ font-size:15px; font-weight:normal; color:var(--hi); margin:0 0 4px; letter-spacing:.04em; }
+  p.lede{ margin:0 0 18px; color:var(--dim); }
+  a{ color:var(--accent); }
+  button, select{ background:#16161f; color:var(--hi); font:inherit; border:1px solid rgba(255,255,255,.16); border-radius:4px; padding:3px 10px; cursor:pointer; max-width:100%; }
+  button:hover{ border-color:rgba(255,255,255,.35); }
+  button:disabled{ opacity:.4; cursor:default; }
+  input[type=number]{ background:#16161f; color:var(--hi); font:inherit; border:1px solid rgba(255,255,255,.16); border-radius:4px; padding:2px 6px; width:5.5em; }
+  #settings{ display:flex; flex-wrap:wrap; gap:10px 24px; align-items:center; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:10px 14px; margin-bottom:12px; }
+  .label{ color:var(--dim); margin-right:8px; }
+  #depths label{ margin-right:10px; white-space:nowrap; cursor:pointer; }
+  #depths input{ accent-color:var(--accent); vertical-align:-2px; }
+  #drop{ border:1px dashed rgba(255,255,255,.22); border-radius:8px; padding:34px 16px; text-align:center; color:var(--dim); margin-bottom:18px; transition:background .1s, border-color .1s; }
+  #drop.over, body.over #drop{ background:rgba(122,138,208,.08); border-color:var(--accent); color:var(--hi); }
+  #drop b{ color:var(--hi); font-weight:normal; }
+  #drop .hint{ display:block; margin-top:6px; font-size:11px; }
+  .job{ background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:10px 14px; margin-bottom:10px; }
+  .job .top{ display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+  .job .name{ color:var(--hi); overflow-wrap:anywhere; }
+  .job .size{ color:var(--dim); }
+  .job .buttons{ margin-left:auto; display:flex; gap:6px; }
+  .job .status{ margin-top:4px; }
+  .job .status.bad{ color:var(--bad); }
+  .job .status.done{ color:var(--dim); }
+  .job .about{ color:var(--dim); margin-top:2px; }
+  .job .notes{ color:var(--warn); margin-top:2px; }
+  .job .grids{ margin-top:6px; color:var(--dim); font-size:11px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .job .grids .on{ color:var(--hi); }
+  .job .choices{ display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; margin-top:8px; }
+  .job .choices[hidden]{ display:none; }
+  .worlds{ display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }
+  .world{ border:1px solid var(--line); border-radius:5px; padding:8px; width:180px; }
+  .world canvas{ display:block; width:164px; height:164px; image-rendering:pixelated; background:#16161c; border-radius:3px; margin-bottom:6px; }
+  .world .d{ color:var(--hi); }
+  .world .facts{ color:var(--dim); font-size:11px; white-space:pre; }
+  .world a{ display:inline-block; margin-top:4px; }
+  footer{ margin-top:28px; color:var(--dim); font-size:11px; }
+  @media (max-width:520px){ .world{ width:calc(50% - 23px); } .world canvas{ width:100%; height:auto; aspect-ratio:1; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>vdb → vdag</h1>
+  <p class="lede">OpenVDB volumes (level sets, fog and smoke from Houdini, Blender's fluid caches, anything OpenVDB writes) to world files for the <a href="../stream-viewer.html">stream viewer</a>, in this browser. A level set's inside, or a fog volume's density over a threshold, becomes solid voxels; a colour grid, if there is one, is baked onto the surface. Drop a saved file on the viewer, or open it there with file → open… (<kbd>H</kbd> shows the panels).</p>
+
+  <div id="settings">
+    <div id="depths"><span class="label">depths</span></div>
+    <div><span class="label">colour</span>
+      <select id="bits">
+        <option value="6">6 bits a channel</option>
+        <option value="8">8 bits a channel</option>
+      </select>
+    </div>
+    <div><span class="label">sampling</span>
+      <select id="sampling">
+        <option value="trilinear">trilinear (smooth)</option>
+        <option value="nearest">nearest voxel</option>
+      </select>
+    </div>
+    <div><span class="label">up</span>
+      <select id="up">
+        <option value="auto">auto (z for Blender)</option>
+        <option value="y">y</option>
+        <option value="z">z</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="drop">
+    <b>Drop .vdb files here</b>, or <button id="pick" type="button">choose files…</button>
+    <input id="files" type="file" accept=".vdb" multiple hidden>
+    <span class="hint">Each depth D is a world 2<sup>D</sup> voxels a side, the volume scaled to fit; <i>native</i> is one voxel a grid voxel. Nothing leaves this machine.</span>
+  </div>
+
+  <div id="jobs"></div>
+
+  <footer>Settings apply to the files you add next; a file's own choices (grid, solid, threshold, colour) show once it's read, and “again” makes it over with them and the settings as they are now.</footer>
+</main>
+
+<script type="module">
+import { DEPTHS, nameOf } from './vdb-convert.js';
+
+/* ---- settings, remembered per browser ------------------------------------------------- */
+const KEY = 'vdb-to-vdag', ALL = [...DEPTHS, 'native'], depthBox = document.getElementById('depths');
+const bitsSel = document.getElementById('bits'), samplingSel = document.getElementById('sampling'), upSel = document.getElementById('up');
+let saved = {};
+try { saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') ?? {}; } catch {}
+const chosen = new Set(Array.isArray(saved.depths) ? saved.depths.filter(d => ALL.includes(d)) : [8, 10]);
+for (const D of ALL){
+  const l = document.createElement('label'), c = document.createElement('input');
+  c.type = 'checkbox'; c.value = D; c.checked = chosen.has(D); c.id = `d${D}`;
+  l.append(c, D === 'native' ? ' native' : ` D = ${D}`);
+  depthBox.append(l);
+}
+if (['6', '8'].includes(String(saved.bits))) bitsSel.value = String(saved.bits);
+if (['trilinear', 'nearest'].includes(saved.sampling)) samplingSel.value = saved.sampling;
+if (['auto', 'y', 'z'].includes(saved.up)) upSel.value = saved.up;
+const settings = () => ({ depths: ALL.filter(D => document.getElementById(`d${D}`).checked), bits: +bitsSel.value, sampling: samplingSel.value, up: upSel.value });
+const remember = () => { try { const s = settings(); localStorage.setItem(KEY, JSON.stringify(s)); } catch {} };
+for (const e of [depthBox, bitsSel, samplingSel, upSel]) e.addEventListener('change', remember);
+
+/* ---- the queue: one file at a time, one worker each ------------------------------------ */
+const jobsEl = document.getElementById('jobs'), jobs = [];
+let running = null;
+const fmt = n => n.toLocaleString('en-US'), kb = n => n < 1024 * 1024 ? `${fmt(Math.ceil(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+const secs = ms => `${(ms / 1000).toFixed(1)} s`;
+const STAGES = { reading: 'reading the file', analysing: 'finding what\'s solid', shape: 'the shape', skin: 'the skin', words: 'baking colours',
+                 writing: 'writing the file', checking: 'reading it back', picture: 'a picture' };
+const RULES = { inside: 'inside (value below)', above: 'above the threshold', active: 'active voxels' };
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const depthText = ds => ds.map(D => D === 'native' ? 'native' : `D = ${D}`).join(', ');
+
+function addFiles(list){
+  const all = [...list], files = all.filter(f => /\.vdb$/i.test(f.name));
+  if (!files.length){ if (all.length) flash(`not a .vdb: ${all.map(f => f.name).join(', ')}`); return; }
+  const s = settings();
+  if (!s.depths.length){ flash('pick at least one depth'); return; }
+  for (const file of files) addJob(file, s);
+  next();
+}
+function flash(text){
+  const j = el('div', 'job'); j.append(el('div', 'status bad', text));
+  jobsEl.prepend(j); setTimeout(() => j.remove(), 5000);
+}
+function addJob(file, s){
+  const job = { file, s, pick: {}, name: nameOf(file.name), state: 'waiting', worlds: [], urls: [], el: el('div', 'job'), started: 0, stage: null, asset: null };
+  const top = el('div', 'top'), buttons = el('div', 'buttons');
+  job.saveAll = el('button', null, 'save all'); job.cancel = el('button', null, 'cancel'); job.again = el('button', null, 'again'); job.remove = el('button', null, '×');
+  job.remove.title = 'remove from the list';
+  buttons.append(job.saveAll, job.again, job.cancel, job.remove);
+  top.append(el('span', 'name', file.name), el('span', 'size', kb(file.size)), buttons);
+  job.status = el('div', 'status'); job.about = el('div', 'about'); job.notes = el('div', 'notes'); job.grids = el('div', 'grids'); job.list = el('div', 'worlds');
+  // The file's own choices, filled once the worker says what the file holds.
+  job.choices = el('div', 'choices'); job.choices.hidden = true;
+  job.gridSel = el('select'); job.ruleSel = el('select'); job.thrIn = el('input'); job.colourSel = el('select');
+  job.thrIn.type = 'number'; job.thrIn.step = 'any';
+  for (const [v, t] of Object.entries(RULES)){ const o = el('option', null, t); o.value = v; job.ruleSel.append(o); }
+  const lab = (t, e) => { const d = el('div'); d.append(el('span', 'label', t), e); return d; };
+  job.thrBox = lab('threshold', job.thrIn);
+  job.choices.append(lab('shape from', job.gridSel), lab('solid', job.ruleSel), job.thrBox, lab('colour', job.colourSel));
+  job.gridSel.onchange = () => {
+    // A new grid takes its own default rule and threshold.
+    const sh = job.asset?.shapes.find(x => x.name === job.gridSel.value);
+    if (sh){ job.ruleSel.value = sh.mode; job.thrIn.value = String(sh.threshold); }
+    pickFrom(job);
+  };
+  for (const e of [job.ruleSel, job.thrIn, job.colourSel]) e.onchange = () => pickFrom(job);
+  job.el.append(top, job.status, job.about, job.notes, job.grids, job.choices, job.list);
+  job.saveAll.onclick = () => saveAll(job);
+  job.cancel.onclick = () => cancel(job);
+  job.again.onclick = () => { reset(job, settings()); next(); };
+  job.remove.onclick = () => { cancel(job); clear(job); job.el.remove(); jobs.splice(jobs.indexOf(job), 1); };
+  jobs.push(job); jobsEl.append(job.el);
+  show(job);
+}
+function pickFrom(job){
+  const t = Number(job.thrIn.value);
+  job.pick = { grid: job.gridSel.value, mode: job.ruleSel.value, threshold: Number.isFinite(t) ? t : null, colour: job.colourSel.value };
+  job.thrBox.hidden = job.ruleSel.value === 'active';
+}
+function clear(job){
+  for (const u of job.urls) URL.revokeObjectURL(u);
+  job.urls = []; job.worlds = []; job.list.replaceChildren(); job.notes.textContent = '';
+}
+function reset(job, s){
+  if (!s.depths.length){ flash('pick at least one depth'); return; }
+  clear(job); Object.assign(job, { s, state: 'waiting', error: null, stage: null }); show(job);
+}
+function show(job){
+  const run = job.state === 'running', ago = run ? ` · ${secs(performance.now() - job.started)}` : '';
+  const what = `${depthText(job.s.depths)} · ${job.s.bits} bits · ${job.s.sampling}`;
+  job.status.textContent = {
+    waiting: `waiting · ${what}`,
+    running: `${job.stage?.D != null ? `D = ${job.stage.D}: ` : ''}${STAGES[job.stage?.stage] ?? 'starting'}${ago}`,
+    done: `done in ${secs(job.ms)} · ${what}`,
+    cancelled: 'cancelled',
+    failed: `failed: ${job.error}`,
+  }[job.state];
+  job.status.className = `status${job.state === 'failed' ? ' bad' : job.state === 'done' ? ' done' : ''}`;
+  job.cancel.hidden = !(run || job.state === 'waiting');
+  job.again.hidden = run || job.state === 'waiting';
+  job.saveAll.hidden = job.worlds.length < 2;
+  for (const e of [job.gridSel, job.ruleSel, job.thrIn, job.colourSel]) e.disabled = run;
+}
+setInterval(() => { if (running) show(running); }, 200);
+
+async function next(){
+  if (running) return;
+  const job = jobs.find(j => j.state === 'waiting');
+  if (!job) return;
+  running = job; Object.assign(job, { state: 'running', started: performance.now(), stage: null }); show(job);
+  try {
+    const w = job.worker = new Worker(new URL('./vdb-worker.js', import.meta.url), { type: 'module' });
+    await new Promise(resolve => {
+      job.finish = resolve;
+      w.onmessage = ({ data }) => {
+        if (data.asset) about(job, data.asset);
+        if (data.stage){ job.stage = data.stage; show(job); }
+        if (data.world) addWorld(job, data.world);
+        if (data.done){ job.state = 'done'; resolve(); }
+        if (data.error){ Object.assign(job, { state: 'failed', error: data.error }); resolve(); }
+      };
+      w.onerror = e => { e.preventDefault(); Object.assign(job, { state: 'failed', error: e.message || 'the worker failed (out of memory?)' }); resolve(); };
+      w.postMessage({ vdb: job.file, name: job.name, ...job.s, ...job.pick });
+    });
+  } catch (e){
+    if (job.state === 'running') Object.assign(job, { state: 'failed', error: String(e?.message ?? e) });
+  } finally {
+    job.worker?.terminate(); job.worker = null; job.finish = null;
+    job.ms = performance.now() - job.started;
+    running = null; show(job); next();
+  }
+}
+function cancel(job){
+  if (job.state !== 'running' && job.state !== 'waiting') return;
+  job.state = 'cancelled';
+  job.worker?.terminate();
+  job.finish?.();
+  show(job);
+}
+
+function about(job, a){
+  job.asset = a;
+  const solid = a.size ? ` · solid ${a.size.join(' × ')} grid voxels (native D = ${a.native})` : '';
+  job.about.textContent = `OpenVDB file format ${a.version} (library ${a.library.join('.')}) · ${a.grids.length} grid${a.grids.length === 1 ? '' : 's'}${a.up === 'z' ? ' · z-up' : ''}${solid}`;
+  job.notes.textContent = a.notes.join(' · ');
+  // The grids, the one the shape comes from first in its line.
+  job.grids.replaceChildren(...a.grids.map(g => {
+    const line = el('div', g.name === a.grid ? 'on' : null);
+    line.textContent = `${g.name === a.grid ? '▸ ' : '  '}${g.name}: ${g.type}${g.half ? ' (half)' : ''}, ${g.class}${g.voxels != null ? `, ${fmt(g.voxels)} active` : ''}${g.why ? ` — ${g.why}` : ''}`;
+    return line;
+  }));
+  // The choices, as the worker made them; the selects keep what the person changed.
+  const fill = (sel, items, value) => {
+    sel.replaceChildren(...items.map(([v, t]) => { const o = el('option', null, t); o.value = v; return o; }));
+    sel.value = value;
+  };
+  fill(job.gridSel, a.shapes.map(s => [s.name, s.name]), a.grid);
+  fill(job.colourSel, a.colours.map(c => [c.value, c.label]), a.colour);
+  job.ruleSel.value = a.mode; job.thrIn.value = String(a.threshold);
+  job.choices.hidden = false;
+  pickFrom(job);
+}
+function addWorld(job, w){
+  const url = URL.createObjectURL(new Blob([w.bytes], { type: 'application/octet-stream' }));
+  job.urls.push(url); job.worlds.push({ ...w, url });
+  const card = el('div', 'world'), cv = document.createElement('canvas');
+  if (w.thumb){
+    cv.width = w.thumb.w; cv.height = w.thumb.h;
+    cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(w.thumb.rgba.buffer), w.thumb.w, w.thumb.h), 0, 0);
+  }
+  const build = (w.ms.shape ?? 0) + (w.ms.skin ?? 0) + (w.ms.words ?? 0) + (w.ms.writing ?? 0);
+  const facts = `a ${w.side}³ world\n${fmt(w.voxels)} solid\n${fmt(w.nodes)} nodes${w.skin ? `\n${fmt(w.skin)} words` : ''}\n${kb(w.bytes.length)} · ${secs(build)}`;
+  const a = el('a', null, `save ${w.file}`);
+  a.href = url; a.download = w.file;
+  card.append(cv, el('div', 'd', w.native ? `native, D = ${w.D}` : `D = ${w.D}`), el('div', 'facts', facts), a);
+  job.list.append(card);
+  show(job);
+}
+async function saveAll(job){
+  for (const w of job.worlds){
+    const a = document.createElement('a');
+    a.href = w.url; a.download = w.file; a.click();
+    await new Promise(r => setTimeout(r, 250));
+  }
+}
+
+/* ---- input: the picker and drops anywhere on the page ---------------------------------- */
+const input = document.getElementById('files');
+document.getElementById('pick').onclick = () => input.click();
+input.onchange = () => { addFiles(input.files); input.value = ''; };
+let depth = 0;
+const hasFiles = e => [...(e.dataTransfer?.types ?? [])].includes('Files');
+addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); depth++; document.body.classList.add('over'); });
+addEventListener('dragleave', e => { if (!hasFiles(e)) return; if (--depth <= 0){ depth = 0; document.body.classList.remove('over'); } });
+addEventListener('dragover', e => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+addEventListener('drop', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); depth = 0; document.body.classList.remove('over');
+  addFiles(e.dataTransfer.files);
+});
+
+// For the console and vdb/test/browser/vdb.test.js: the list as data.
+window.__vdb = {
+  jobs: () => jobs.map(j => ({ name: j.file.name, state: j.state, error: j.error ?? null, settings: j.s, pick: j.pick, asset: j.asset,
+                              about: j.about.textContent, status: j.status.textContent, notes: j.notes.textContent,
+                              worlds: j.worlds.map(w => ({ D: w.D, native: w.native, file: w.file, size: w.bytes.length, voxels: w.voxels, nodes: w.nodes, skin: w.skin })) })),
+  bytes: (i, k) => { const b = jobs[i].worlds[k].bytes; let s = ''; for (let o = 0; o < b.length; o += 32768) s += String.fromCharCode(...b.subarray(o, o + 32768)); return btoa(s); },
+  idle: () => !running && !jobs.some(j => j.state === 'waiting'),
+};
+</script>
+</body>
+</html>
