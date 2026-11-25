@@ -12,6 +12,7 @@ self.onmessage = async ({ data }) => {
     await convertVdb(fileSource(data.vdb), {
       name: data.name, depths: data.depths, bits: data.bits, sampling: data.sampling, up: data.up,
       grid: data.grid ?? null, mode: data.mode ?? null, threshold: data.threshold ?? null, colour: data.colour ?? 'auto',
+      gamma: data.gamma ?? true, point: data.point ?? { shape: 'cube', r: 0 }, opacity: data.opacity ?? 0,
       onAsset: asset => post({ asset }),
       onStage: (D, stage) => post({ stage: { D, stage } }),
       onWorld: world => post({ world }, [world.bytes.buffer, ...(world.thumb ? [world.thumb.rgba.buffer] : [])]),

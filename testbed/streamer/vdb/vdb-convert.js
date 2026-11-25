@@ -47,14 +47,30 @@
      heat:<grid>, grey:<grid> a scalar through a ramp over its active range
    each in its own grid's index space (through world space when the
    transforms differ), interpolated over the active voxels only, so colour
-   doesn't fade to the background's black at the edge of the smoke. */
+   doesn't fade to the background's black at the edge of the smoke.
+   `gamma` (on by default; README question 5, 2026-11-24) is that 1/2.2:
+   off, a linear value v is the word's 255·v as it stands.
+
+   Point data grids (OpenVDB points, Houdini's VDB points; README question
+   1, 2026-11-24: "we should handle point .vdb"): the solid is the points,
+   `points` its rule, made the way convert/ makes a PLY cloud (ply-core's
+   pointsDepth): each point fills its voxel, or a cube or a ball round it
+   (`point`), points under `opacity` (by an Alpha, alpha or opacity
+   attribute) are dropped first, and a voxel's word is the mean colour of
+   its points (`attr:<a vec3 attribute>`, Cd by default, through `gamma`).
+   A depth fits the points' world positions, so a turned or stretched grid
+   comes out as it is in the world; `native` is one world voxel a grid
+   voxel, in its index space. */
 import { createStore, createCounts, EMPTY } from '../dag-core.js';
 import { rgb8 } from '../attr-core.js';
-import { inspectVdb, readGrid } from './vdb-core.js';
+import { inspectVdb, readGrid, readPoints, worldOf } from './vdb-core.js';
 import { finishDepth, stager } from '../convert/convert-core.js';
+import { pointBox, pointsDepth, kernelOf } from '../convert/ply-core.js';
 
-export const DEPTHS = [6, 7, 8, 9, 10], MAX_NATIVE_D = 12;
-export const MODES = ['inside', 'above', 'active'], SAMPLINGS = ['trilinear', 'nearest'];
+export const DEPTHS = [6, 7, 8, 9, 10], MAX_NATIVE_D = 12, MAX_POINTS_D = 10;
+export const MODES = ['inside', 'above', 'active', 'points'], SAMPLINGS = ['trilinear', 'nearest'];
+// A point attribute that's a colour, or an opacity, by its name (Houdini's Cd and Alpha first).
+export const COLOUR_NAME = /^(cd|col|color|colour|albedo|rgb|diffuse)$/i, ALPHA_NAME = /^(alpha|opacity)$/i;
 export const FOG_THRESHOLD = 0.05;
 export const nameOf = fileName => fileName.replace(/^.*[\\/]/, '').replace(/\.vdb$/i, '');
 export const slugOf = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'volume';
@@ -62,6 +78,7 @@ export const slugOf = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').rep
 /* ---- what a file offers, and what to make of it by default ---------------------- */
 const isScalar = g => !g.why && ['float', 'double', 'int32', 'int64', 'uint32', 'bool', 'mask'].includes(g.value);
 const isVec3 = g => !g.why && ['vec3s', 'vec3d', 'vec3i'].includes(g.value);
+const isPoints = g => !g.why && !!g.points;
 export function summaryOf(file){
   return file.grids.map(g => ({
     name: g.uniqueName, type: g.value ?? g.typeName, half: g.half, class: g.class, why: g.why,
@@ -70,12 +87,13 @@ export function summaryOf(file){
     map: g.transform.name, compression: g.compression,
   }));
 }
-// The grid to take the shape from: a level set, else density, else the first volume.
+// The grid to take the shape from: a level set, else density, else the first volume, else the first point grid.
 export function defaultShape(file){
   const ok = file.grids.filter(g => !g.why && (isScalar(g) || isVec3(g)));
-  return (ok.find(g => g.class === 'level set') ?? ok.find(g => /^density$/i.test(g.name)) ?? ok.find(g => g.class === 'fog volume' && isScalar(g)) ?? ok[0])?.uniqueName ?? null;
+  return (ok.find(g => g.class === 'level set') ?? ok.find(g => /^density$/i.test(g.name)) ?? ok.find(g => g.class === 'fog volume' && isScalar(g)) ?? ok[0]
+          ?? file.grids.find(isPoints))?.uniqueName ?? null;
 }
-export const modeOf = g => g.class === 'level set' ? 'inside' : g.class === 'fog volume' && !['bool', 'mask'].includes(g.value) ? 'above' : 'active';
+export const modeOf = g => g.points ? 'points' : g.class === 'level set' ? 'inside' : g.class === 'fog volume' && !['bool', 'mask'].includes(g.value) ? 'above' : 'active';
 export const thresholdOf = mode => mode === 'above' ? FOG_THRESHOLD : 0;
 /* A grid's box in the world, from the bounding box its metadata gives (null
    if it gives none, or the transform isn't affine). */
@@ -130,6 +148,7 @@ export function parseColour(spec, file){
   };
   if (spec === 'none') return null;
   let m;
+  if ((m = /^attr:(.+)$/.exec(spec))) return { kind: 'attr', name: m[1] };
   if ((m = /^grid:(.+)$/.exec(spec))){ const g = grid(m[1]); if (!isVec3(g)) throw new Error(`colour: ${m[1]} isn't a vec3 grid`); return { kind: 'vec3', grids: [g] }; }
   if ((m = /^rgb:([^,]+),([^,]+),([^/]+)(?:\/(.+))?$/.exec(spec))){
     const gs = [m[1], m[2], m[3]].map(grid), d = m[4] ? grid(m[4]) : null;
@@ -137,7 +156,7 @@ export function parseColour(spec, file){
     return { kind: 'rgb', grids: gs, divide: d };
   }
   if ((m = /^(heat|grey):(.+)$/.exec(spec))){ const g = grid(m[2]); if (!isScalar(g)) throw new Error(`colour: ${m[2]} isn't a scalar grid`); return { kind: m[1], grids: [g] }; }
-  throw new Error(`colour: ${spec}? (none, grid:<vec3>, rgb:<r>,<g>,<b>[/<divisor>], heat:<scalar> or grey:<scalar>)`);
+  throw new Error(`colour: ${spec}? (none, grid:<vec3>, rgb:<r>,<g>,<b>[/<divisor>], heat:<scalar>, grey:<scalar>, or a point grid's attr:<vec3 attribute>)`);
 }
 
 /* ---- the field g over one tree ---------------------------------------------------------
@@ -487,10 +506,12 @@ export function ramp(kind, t){
   }
   return HEAT.at(-1).slice(1);
 }
-const toSrgb = v => 255 * Math.pow(Math.min(1, Math.max(0, v)), 1 / 2.2);
+const toSrgbOn = v => 255 * Math.pow(Math.min(1, Math.max(0, v)), 1 / 2.2);
+const asIs = v => 255 * Math.min(1, Math.max(0, v));
 /* The words: the colour at each skin voxel's p, in rank order. `trees`
    are the colour source's grids, read. */
-export function wordsOf(store, skin, D, count, pointOf, colour, trees, shapeInfo, { sampling = 'trilinear' } = {}){
+export function wordsOf(store, skin, D, count, pointOf, colour, trees, shapeInfo, { sampling = 'trilinear', gamma = true } = {}){
+  const toSrgb = gamma ? toSrgbOn : asIs;
   const S = colour.grids.map((g, k) => samplerOf(trees[k], g, shapeInfo, { sampling }));
   const div = colour.divide ? samplerOf(trees[3], colour.divide, shapeInfo, { sampling }) : null;
   const words = new Uint32Array(count), v = new Float64Array(3), one = new Float64Array(1), d1 = new Float64Array(1);
@@ -521,8 +542,12 @@ export function wordsOf(store, skin, D, count, pointOf, colour, trees, shapeInfo
    (defaultShape, modeOf, thresholdOf, defaultColour, the up axis), and
    onAsset gets what was chosen, so a page can show it and let it change. */
 export async function convertVdb(src, { name = 'volume', depths = [8, 10], bits = 6, grid = null, mode = null, threshold = null, sampling = 'trilinear',
-                                        colour = 'auto', up = 'auto', thumbs = true, onAsset = () => {}, onStage = () => {}, onWorld = () => {} } = {}){
+                                        colour = 'auto', up = 'auto', gamma = true, point = { shape: 'cube', r: 0 }, opacity = 0,
+                                        thumbs = true, onAsset = () => {}, onStage = () => {}, onWorld = () => {} } = {}){
   if (bits !== 6 && bits !== 8) throw new Error('bits is 6 or 8');
+  if (typeof gamma !== 'boolean') throw new Error(`gamma is on or off, not ${gamma}`);
+  kernelOf(point.shape, point.r);
+  if (!(opacity >= 0 && opacity <= 1)) throw new Error(`opacity is 0 to 1, not ${opacity}`);
   if (!SAMPLINGS.includes(sampling)) throw new Error(`sampling: ${sampling}? (${SAMPLINGS.join(', ')})`);
   if (!['auto', 'y', 'z'].includes(up)) throw new Error(`up: ${up}? (auto, y, z)`);
   if (!depths.length) throw new Error('no depth asked for');
@@ -534,7 +559,9 @@ export async function convertVdb(src, { name = 'volume', depths = [8, 10], bits 
   const info = file.grids.find(g => g.uniqueName === shapeName);
   if (!info) throw new Error(`no grid named ${shapeName}`);
   if (info.why) throw new Error(`${shapeName}: ${info.why}`);
+  if (info.points) return convertPoints(src, file, info, { name, depths, bits, mode, colour, up, gamma, point, opacity, thumbs, onAsset, onStage, onWorld });
   mode = mode ?? modeOf(info);
+  if (mode === 'points') throw new Error(`${shapeName} is a volume: "points" is a point grid's rule`);
   threshold = threshold ?? thresholdOf(mode);
   if (!Number.isFinite(threshold)) throw new Error(`threshold: ${threshold}?`);
   const upAxis = up === 'auto' ? (isBlender(file) ? 'z' : 'y') : up;
@@ -551,8 +578,7 @@ export async function convertVdb(src, { name = 'volume', depths = [8, 10], bits 
   const asset = { grids: summaryOf(file), version: file.version, library: file.library, grid: shapeName, class: info.class, mode, threshold, sampling, up: upAxis,
                   colour: colourSpec, notes,
                   // What a page offers to change: the grids a shape can come from (each with its default rule) and the colours.
-                  shapes: file.grids.filter(g => !g.why && (isScalar(g) || isVec3(g))).map(g => ({ name: g.uniqueName, mode: modeOf(g), threshold: thresholdOf(modeOf(g)) })),
-                  colours: colourChoices(file) };
+                  shapes: shapesOf(file), colours: colourChoices(file), gamma };
   onAsset({ ...asset });
   const tree = await readGrid(src, file, info);
   onStage(null, 'analysing');
@@ -574,11 +600,111 @@ export async function convertVdb(src, { name = 'volume', depths = [8, 10], bits 
     if (C){
       stage('words');
       const counts = createCounts(b.store);
-      words = wordsOf(b.store, b.skin, D, counts.of(b.skin), b.pointOf, C, colourTrees, info, { sampling });
+      words = wordsOf(b.store, b.skin, D, counts.of(b.skin), b.pointOf, C, colourTrees, info, { sampling, gamma });
     }
     const world = await finishDepth({ store: b.store, root: b.root, D, M: frame.M, skin: C ? b.skin : undefined, words, bits, name, slug, thumbs, stage, ms,
                                       title: native ? `${name} (native, D = ${D})` : `${name} (D = ${D})`, file: native ? `${slug}-native-d${D}.vdag` : `${slug}-d${D}.vdag` });
     world.native = native;
+    worlds.push(world); onWorld(world);
+  }
+  return { asset, worlds };
+}
+
+// The grids a shape can come from, each with its own rule and threshold.
+const shapesOf = file => file.grids.filter(g => !g.why && (isScalar(g) || isVec3(g) || g.points)).map(g => ({ name: g.uniqueName, mode: modeOf(g), threshold: thresholdOf(modeOf(g)), points: !!g.points }));
+
+/* ---- a point data grid ------------------------------------------------------------------
+   Its points as convert/'s cloud: `xyz` in the viewer's frame (y up; a
+   z-up grid turned (x, y, z) → (x, z, −y), a rotation), world positions
+   for a fitted depth, the points' voxels for native; `rgb` 0–255 and
+   `alpha` from the attributes asked for. */
+export function cloudOf(tree, info, { colourAttr = null, alphaAttr = null, gamma = true, up = 'y', native = false } = {}){
+  const n = tree.count, xyz = new Float64Array(3 * n), w = [0, 0, 0], m = info.transform.matrix, turn = up === 'z';
+  if (!native && !m) throw new Error(`${info.uniqueName}: a frustum transform; only native places it`);
+  for (let k = 0; k < n; k++){
+    let x, y, z;
+    if (native){ x = tree.voxel[3 * k]; y = tree.voxel[3 * k + 1]; z = tree.voxel[3 * k + 2]; }
+    else { worldOf(tree, m, k, w); [x, y, z] = w; }
+    xyz[3 * k] = x; xyz[3 * k + 1] = turn ? z : y; xyz[3 * k + 2] = turn ? -y : z;
+  }
+  const attr = name => tree.attributes.find(a => a.name === name);
+  let rgb = null, alpha = null;
+  if (colourAttr){
+    const A = attr(colourAttr);
+    if (!A || A.comps !== 3 || A.stride !== 1 || !A.values) throw new Error(`colour: ${colourAttr} isn't a vec3 attribute of ${info.uniqueName}`);
+    const f = gamma ? toSrgbOn : asIs;
+    rgb = new Float32Array(3 * n);
+    for (let i = 0; i < 3 * n; i++) rgb[i] = f(A.values[i]);
+  }
+  if (alphaAttr){
+    const A = attr(alphaAttr);
+    if (!A || A.comps !== 1 || A.stride !== 1 || !A.values) throw new Error(`opacity: ${alphaAttr} isn't a scalar attribute of ${info.uniqueName}`);
+    alpha = Float32Array.from(A.values);
+  }
+  return { xyz, rgb, alpha, n };
+}
+/* Native: one world voxel a grid voxel, the points' voxel box placed as
+   frameOf places a volume's (centred in x and z, 4% off the floor). */
+export function nativeFit(cloud){
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity], { xyz, n } = cloud;
+  for (let k = 0; k < n; k++) for (let a = 0; a < 3; a++){ const v = xyz[3 * k + a]; if (v < lo[a]) lo[a] = v; if (v > hi[a]) hi[a] = v; }
+  const box = { lo, hi }, D = nativeDepth(box), F = frameOf(box, D, { native: true });
+  // frameOf's voxel v reads grid lo + v − off, so a point's voxel g lands in g − lo + off.
+  const off = [0, 1, 2].map(a => F.F[a].off - lo[a] + 0.5);
+  return { D, fit: { side: F.side, s: 1, off, lo: F.M.lo, hi: F.M.hi } };
+}
+async function convertPoints(src, file, info, { name, depths, bits, mode, colour, up, gamma, point, opacity, thumbs, onAsset, onStage, onWorld }){
+  if (mode != null && mode !== 'points') throw new Error(`${info.uniqueName} is a point grid: its rule is "points", not "${mode}"`);
+  const upAxis = up === 'auto' ? (isBlender(file) ? 'z' : 'y') : up, notes = [];
+  if (colour !== 'auto' && colour !== 'none' && !/^attr:./.test(colour)) throw new Error(`colour: ${colour}? (a point grid's colour is auto, none or attr:<a vec3 attribute>)`);
+  const asset = { grids: summaryOf(file), version: file.version, library: file.library, grid: info.uniqueName, class: info.class, mode: 'points', threshold: 0,
+                  sampling: null, up: upAxis, colour, notes, shapes: shapesOf(file), gamma, point, opacity,
+                  colours: [{ value: 'auto', label: 'auto (Cd if it has one)' }, { value: 'none', label: 'none (the shape alone)' }] };
+  onAsset({ ...asset });
+  // Read only what a colour or an opacity could be (P always comes).
+  const want = colour.startsWith('attr:') ? colour.slice(5) : null;
+  const tree = await readPoints(src, file, info, { want: n => n === want || COLOUR_NAME.test(n) || ALPHA_NAME.test(n) });
+  onStage(null, 'analysing');
+  if (!tree.count) throw new Error(`${info.uniqueName} holds no points`);
+  // A colour can be any float vec3 attribute but the positions, decoded or not (the menu; a choice is decoded the next time).
+  const vec3s = tree.attributes.filter(a => a.name !== 'P' && a.comps === 3 && a.stride === 1 && !a.why && /^vec3[sdh]$/.test(a.valueType));
+  const colourAttr = colour === 'auto' ? (vec3s.find(a => COLOUR_NAME.test(a.name))?.name ?? null) : colour === 'none' ? null : colour.slice(5);
+  if (colourAttr && !vec3s.some(a => a.name === colourAttr && a.values)) throw new Error(`colour: ${colourAttr} isn't a vec3 attribute of ${info.uniqueName}`);
+  const alphaAttr = opacity > 0 ? (tree.attributes.find(a => ALPHA_NAME.test(a.name) && a.comps === 1 && a.stride === 1 && a.values)?.name ?? null) : null;
+  if (opacity > 0 && !alphaAttr) notes.push('no Alpha or opacity attribute: every point kept');
+  if (colour === 'auto' && !colourAttr) notes.push('no Cd or other colour attribute: the shape alone');
+  const skipped = tree.attributes.filter(a => a.why).map(a => `${a.name} (${a.why})`);
+  if (skipped.length) notes.push(`not read: ${skipped.join(', ')}`);
+  Object.assign(asset, { colour: colourAttr ? `attr:${colourAttr}` : 'none', points: tree.count, leaves: tree.leafCount, alpha: alphaAttr,
+                         attributes: tree.attributes.map(a => ({ name: a.name, type: a.valueType, codec: a.codec, stride: a.stride })), groups: tree.groups.map(g => g.name),
+                         colours: [{ value: 'none', label: 'none (the shape alone)' }, ...vec3s.map(a => ({ value: `attr:${a.name}`, label: `${a.name} (RGB)` }))] });
+  const fitted = depths.filter(D => D !== 'native'), wantNative = depths.includes('native');
+  const cloud = fitted.length ? cloudOf(tree, info, { colourAttr, alphaAttr, gamma, up: upAxis }) : null;
+  const ncloud = wantNative ? cloudOf(tree, info, { colourAttr, alphaAttr, gamma, up: upAxis, native: true }) : null;
+  const nf = ncloud ? nativeFit(ncloud) : null;
+  if (nf){
+    asset.native = nf.D;
+    const mm = info.transform.matrix;
+    if (mm && Math.abs(mm[1]) + Math.abs(mm[2]) + Math.abs(mm[4]) + Math.abs(mm[6]) + Math.abs(mm[8]) + Math.abs(mm[9]) > 1e-9 * Math.hypot(mm[0], mm[1], mm[2])) notes.push('native: in its own index space, not turned as it is in the world');
+  }
+  const box = cloud ? pointBox(cloud, { opacity }) : null, nbox = ncloud ? pointBox(ncloud, { opacity }) : null;
+  const kept = (box ?? nbox).kept, faint = (box ?? nbox).faint;
+  if (!kept) throw new Error(faint ? `every point is fainter than the opacity ${opacity}` : 'no point with a finite place');
+  if (faint) notes.push(`${faint.toLocaleString('en-US')} points under opacity ${opacity} dropped`);
+  asset.kept = kept;
+  if (cloud) asset.size = [0, 1, 2].map(a => +(box.hi[a] - box.lo[a]).toPrecision(4));
+  else asset.size = [0, 1, 2].map(a => nbox.hi[a] - nbox.lo[a] + 1);
+  onAsset({ ...asset });
+  const slug = slugOf(name), worlds = [];
+  for (const want of depths){
+    const native = want === 'native', D = native ? nf.D : want;
+    if (native && D > MAX_POINTS_D) throw new Error(`native: the points need D = ${D}, past ${MAX_POINTS_D}; pick a depth instead`);
+    const ms = {}, stage = stager(D, ms, onStage), store = createStore();
+    stage('points');
+    const r = pointsDepth(native ? ncloud : cloud, native ? nbox : box, D, store, { bake: !!colourAttr, point, fit: native ? nf.fit : null });
+    const world = await finishDepth({ store, root: r.root, D, M: r.M, skin: r.words ? r.skin : undefined, words: r.words, bits, name, slug, thumbs, stage, ms,
+                                      title: native ? `${name} (native, D = ${D})` : `${name} (D = ${D})`, file: native ? `${slug}-native-d${D}.vdag` : `${slug}-d${D}.vdag` });
+    world.native = native; world.points = r.points;
     worlds.push(world); onWorld(world);
   }
   return { asset, worlds };

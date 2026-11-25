@@ -529,10 +529,12 @@ export function fromMorton(store, keys, n, D){
    `bake`) a word a voxel in rank order. `point` is what a point fills
    (convert.md §PLY Q1): its own voxel (r = 0, the default), or a cube of
    side 2r + 1 or a ball of radius r + ½ round it (`growCloud`). The box's
-   `opacity` drops the same points here. */
-export function pointsDepth(P, box, D, store, { bake = true, point = { shape: 'cube', r: 0 } } = {}){
+   `opacity` drops the same points here. `fit` replaces fitPoints' scale and
+   offsets (vdb/'s OpenVDB points, placed one world voxel a grid voxel). */
+export function pointsDepth(P, box, D, store, { bake = true, point = { shape: 'cube', r: 0 }, fit = null } = {}){
   if (D > 10) throw new Error('points: D ≤ 10 (the keys are 30 bits)');
-  const F = fitPoints(box, D), { s, off, side } = F, { xyz, rgb, n } = P, top = side - 1, A = box.opacity > 0 ? P.alpha : null;
+  // `fit` ({ side, s, off, lo, hi }) places the points another way: vdb/'s native, one voxel a grid voxel.
+  const F = fit ?? fitPoints(box, D), { s, off, side } = F, { xyz, rgb, n } = P, top = side - 1, A = box.opacity > 0 ? P.alpha : null;
   const keys = new Uint32Array(box.kept), idx = new Uint32Array(box.kept);
   let m = 0;
   for (let i = 0; i < n; i++){

@@ -13,6 +13,12 @@
   vdb-worker.js, one worker a file; this page only moves files and draws
   the list. vdb/README.md.
 
+  The settings bar's gamma box is README question 5's answer (2026-11-24):
+  linear colour (a Cd grid, Blender's channels, a point grid's Cd) goes to
+  sRGB by 1/2.2 when it's ticked, as it always did, and as it stands when
+  not. Point data grids (question 1) are made the way convert/'s PLY clouds
+  are, with its two choices: what a point fills, and the opacity under
+  which points are dropped.
   Settings at the top apply to files added next; each file's own choices
   (which grid, what's solid, the threshold, the colour) come back from the
   worker as it starts, and "again" makes it over with them as they are.
@@ -66,7 +72,7 @@
 <body>
 <main>
   <h1>vdb → vdag</h1>
-  <p class="lede">OpenVDB volumes (level sets, fog and smoke from Houdini, Blender's fluid caches, anything OpenVDB writes) to world files for the <a href="../stream-viewer.html">stream viewer</a>, in this browser. A level set's inside, or a fog volume's density over a threshold, becomes solid voxels; a colour grid, if there is one, is baked onto the surface. Drop a saved file on the viewer, or open it there with file → open… (<kbd>H</kbd> shows the panels).</p>
+  <p class="lede">OpenVDB volumes and points (level sets, fog and smoke from Houdini, Blender's fluid caches, VDB points, anything OpenVDB writes) to world files for the <a href="../stream-viewer.html">stream viewer</a>, in this browser. A level set's inside, or a fog volume's density over a threshold, becomes solid voxels; a colour grid, if there is one, is baked onto the surface. A point grid's points become voxels as <a href="../convert/">convert/</a>'s clouds do, coloured by their Cd. Drop a saved file on the viewer, or open it there with file → open… (<kbd>H</kbd> shows the panels).</p>
 
   <div id="settings">
     <div id="depths"><span class="label">depths</span></div>
@@ -89,6 +95,19 @@
         <option value="z">z</option>
       </select>
     </div>
+    <div><label title="Cd grids, Blender's colour channels and a point grid's Cd are linear: ticked, they go to sRGB by 1/2.2 (heat and grey ramps never do)"><input id="gamma" type="checkbox" checked> linear colour to sRGB (1/2.2)</label></div>
+    <div><span class="label">points: a point fills</span>
+      <select id="point">
+        <option value="cube:0">its voxel</option>
+        <option value="cube:1">a cube, 3³</option>
+        <option value="cube:2">a cube, 5³</option>
+        <option value="cube:3">a cube, 7³</option>
+        <option value="ball:1">a ball, radius 1½</option>
+        <option value="ball:2">a ball, radius 2½</option>
+        <option value="ball:3">a ball, radius 3½</option>
+      </select>
+    </div>
+    <div><label class="label" for="opacity">drop points fainter than</label><input id="opacity" type="number" min="0" max="1" step="0.05" value="0"></div>
   </div>
 
   <div id="drop">
@@ -108,6 +127,7 @@ import { DEPTHS, nameOf } from './vdb-convert.js';
 /* ---- settings, remembered per browser ------------------------------------------------- */
 const KEY = 'vdb-to-vdag', ALL = [...DEPTHS, 'native'], depthBox = document.getElementById('depths');
 const bitsSel = document.getElementById('bits'), samplingSel = document.getElementById('sampling'), upSel = document.getElementById('up');
+const gammaBox = document.getElementById('gamma'), pointSel = document.getElementById('point'), opacityIn = document.getElementById('opacity');
 let saved = {};
 try { saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') ?? {}; } catch {}
 const chosen = new Set(Array.isArray(saved.depths) ? saved.depths.filter(d => ALL.includes(d)) : [8, 10]);
@@ -120,18 +140,24 @@ for (const D of ALL){
 if (['6', '8'].includes(String(saved.bits))) bitsSel.value = String(saved.bits);
 if (['trilinear', 'nearest'].includes(saved.sampling)) samplingSel.value = saved.sampling;
 if (['auto', 'y', 'z'].includes(saved.up)) upSel.value = saved.up;
-const settings = () => ({ depths: ALL.filter(D => document.getElementById(`d${D}`).checked), bits: +bitsSel.value, sampling: samplingSel.value, up: upSel.value });
+if (typeof saved.gamma === 'boolean') gammaBox.checked = saved.gamma;
+if (saved.point && [...pointSel.options].some(o => o.value === `${saved.point.shape}:${saved.point.r}`)) pointSel.value = `${saved.point.shape}:${saved.point.r}`;
+if (Number.isFinite(saved.opacity) && saved.opacity >= 0 && saved.opacity <= 1) opacityIn.value = String(saved.opacity);
+const opacityOf = () => { const v = Number(opacityIn.value); return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0; };
+const settings = () => { const [shape, r] = pointSel.value.split(':');
+  return { depths: ALL.filter(D => document.getElementById(`d${D}`).checked), bits: +bitsSel.value, sampling: samplingSel.value, up: upSel.value,
+           gamma: gammaBox.checked, point: { shape, r: +r }, opacity: opacityOf() }; };
 const remember = () => { try { const s = settings(); localStorage.setItem(KEY, JSON.stringify(s)); } catch {} };
-for (const e of [depthBox, bitsSel, samplingSel, upSel]) e.addEventListener('change', remember);
+for (const e of [depthBox, bitsSel, samplingSel, upSel, gammaBox, pointSel, opacityIn]) e.addEventListener('change', remember);
 
 /* ---- the queue: one file at a time, one worker each ------------------------------------ */
 const jobsEl = document.getElementById('jobs'), jobs = [];
 let running = null;
 const fmt = n => n.toLocaleString('en-US'), kb = n => n < 1024 * 1024 ? `${fmt(Math.ceil(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
 const secs = ms => `${(ms / 1000).toFixed(1)} s`;
-const STAGES = { reading: 'reading the file', analysing: 'finding what\'s solid', shape: 'the shape', skin: 'the skin', words: 'baking colours',
+const STAGES = { reading: 'reading the file', analysing: 'finding what\'s solid', shape: 'the shape', skin: 'the skin', words: 'baking colours', points: 'sorting the points into voxels',
                  writing: 'writing the file', checking: 'reading it back', picture: 'a picture' };
-const RULES = { inside: 'inside (value below)', above: 'above the threshold', active: 'active voxels' };
+const RULES = { inside: 'inside (value below)', above: 'above the threshold', active: 'active voxels', points: 'the points' };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const depthText = ds => ds.map(D => D === 'native' ? 'native' : `D = ${D}`).join(', ');
 
@@ -179,9 +205,13 @@ function addJob(file, s){
   show(job);
 }
 function pickFrom(job){
-  const t = Number(job.thrIn.value);
-  job.pick = { grid: job.gridSel.value, mode: job.ruleSel.value, threshold: Number.isFinite(t) ? t : null, colour: job.colourSel.value };
-  job.thrBox.hidden = job.ruleSel.value === 'active';
+  const t = Number(job.thrIn.value), pts = !!job.asset?.shapes.find(x => x.name === job.gridSel.value)?.points;
+  // A point grid's one rule is its points; a volume's are the other three.
+  for (const o of job.ruleSel.options) o.disabled = (o.value === 'points') !== pts;
+  if (pts) job.ruleSel.value = 'points';
+  else if (job.ruleSel.value === 'points') job.ruleSel.value = 'active';
+  job.pick = { grid: job.gridSel.value, mode: job.ruleSel.value, threshold: pts ? null : Number.isFinite(t) ? t : null, colour: job.colourSel.value };
+  job.thrBox.hidden = job.ruleSel.value === 'active' || pts;
 }
 function clear(job){
   for (const u of job.urls) URL.revokeObjectURL(u);
@@ -193,7 +223,7 @@ function reset(job, s){
 }
 function show(job){
   const run = job.state === 'running', ago = run ? ` · ${secs(performance.now() - job.started)}` : '';
-  const what = `${depthText(job.s.depths)} · ${job.s.bits} bits · ${job.s.sampling}`;
+  const what = `${depthText(job.s.depths)} · ${job.s.bits} bits · ${job.s.sampling}${job.s.gamma ? '' : ' · linear colour as it stands'}`;
   job.status.textContent = {
     waiting: `waiting · ${what}`,
     running: `${job.stage?.D != null ? `D = ${job.stage.D}: ` : ''}${STAGES[job.stage?.stage] ?? 'starting'}${ago}`,
@@ -246,13 +276,17 @@ function cancel(job){
 
 function about(job, a){
   job.asset = a;
-  const solid = a.size ? ` · solid ${a.size.join(' × ')} grid voxels (native D = ${a.native})` : '';
+  const fills = a.point?.r ? (a.point.shape === 'cube' ? `a point a ${2 * a.point.r + 1}³ cube` : `a point a ball of radius ${a.point.r}½`) : 'a point its voxel';
+  const solid = !a.size ? '' : a.mode === 'points'
+    ? ` · ${fmt(a.points)} points${a.kept < a.points ? ` (${fmt(a.kept)} kept)` : ''} in ${fmt(a.leaves)} leaves, ${a.size.join(' × ')} across${a.native ? ` (native D = ${a.native})` : ''} · ${fills}`
+    : ` · solid ${a.size.join(' × ')} grid voxels (native D = ${a.native})`;
   job.about.textContent = `OpenVDB file format ${a.version} (library ${a.library.join('.')}) · ${a.grids.length} grid${a.grids.length === 1 ? '' : 's'}${a.up === 'z' ? ' · z-up' : ''}${solid}`;
   job.notes.textContent = a.notes.join(' · ');
   // The grids, the one the shape comes from first in its line.
   job.grids.replaceChildren(...a.grids.map(g => {
     const line = el('div', g.name === a.grid ? 'on' : null);
-    line.textContent = `${g.name === a.grid ? '▸ ' : '  '}${g.name}: ${g.type}${g.half ? ' (half)' : ''}, ${g.class}${g.voxels != null ? `, ${fmt(g.voxels)} active` : ''}${g.why ? ` — ${g.why}` : ''}`;
+    const pts = g.type === 'ptdataidx32', attrs = g.name === a.grid && a.attributes ? `: ${a.attributes.map(x => x.name).join(', ')}` : '';
+    line.textContent = `${g.name === a.grid ? '▸ ' : '  '}${g.name}: ${pts ? `points${attrs}` : `${g.type}${g.half ? ' (half)' : ''}, ${g.class}`}${g.voxels != null ? `, ${fmt(g.voxels)} active voxels` : ''}${g.why ? ` — ${g.why}` : ''}`;
     return line;
   }));
   // The choices, as the worker made them; the selects keep what the person changed.
@@ -262,7 +296,7 @@ function about(job, a){
   };
   fill(job.gridSel, a.shapes.map(s => [s.name, s.name]), a.grid);
   fill(job.colourSel, a.colours.map(c => [c.value, c.label]), a.colour);
-  job.ruleSel.value = a.mode; job.thrIn.value = String(a.threshold);
+  job.ruleSel.value = a.mode; job.thrIn.value = String(a.threshold ?? 0);
   job.choices.hidden = false;
   pickFrom(job);
 }
@@ -275,7 +309,8 @@ function addWorld(job, w){
     cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(w.thumb.rgba.buffer), w.thumb.w, w.thumb.h), 0, 0);
   }
   const build = (w.ms.shape ?? 0) + (w.ms.skin ?? 0) + (w.ms.words ?? 0) + (w.ms.writing ?? 0);
-  const facts = `a ${w.side}³ world\n${fmt(w.voxels)} solid\n${fmt(w.nodes)} nodes${w.skin ? `\n${fmt(w.skin)} words` : ''}\n${kb(w.bytes.length)} · ${secs(build)}`;
+  const build2 = build + (w.ms.points ?? 0);
+  const facts = `a ${w.side}³ world\n${fmt(w.voxels)} solid\n${fmt(w.nodes)} nodes${w.skin ? `\n${fmt(w.skin)} words` : ''}\n${kb(w.bytes.length)} · ${secs(build2)}`;
   const a = el('a', null, `save ${w.file}`);
   a.href = url; a.download = w.file;
   card.append(cv, el('div', 'd', w.native ? `native, D = ${w.D}` : `D = ${w.D}`), el('div', 'facts', facts), a);
