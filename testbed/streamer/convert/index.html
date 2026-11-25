@@ -3,10 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>glb and ply to vdag</title>
+<title>glb, ply and vox to vdag</title>
 <!--
-  experiments/mesh-vdag.mjs with a page: drop a glTF binary or a PLY file (or
-  pick one), pick the depths, and save world files the stream viewer opens.
+  experiments/mesh-vdag.mjs with a page: drop a glTF binary, a PLY file or a
+  MagicaVoxel .vox (or pick one), pick the depths, and save world files the
+  stream viewer opens.
   Every decision is convert-core.js's (and ply-core.js's), run in
   convert-worker.js, one worker an asset; this page only moves files and
   draws the list. A .ply goes to the worker as the File itself and is read
@@ -17,6 +18,13 @@
   dropped, and whether a mesh's colour comes from its triangles or its
   vertices. A textured .ply's images are dropped or picked with it, as a
   .glb's are. Their defaults write the files written before them.
+
+  The VOX row (convert.md §VOX, 2026-11-25): a .vox is voxels already
+  (vox-core.js), so a depth is the model scaled by a power of two, and
+  "native" adds one world voxel a .vox voxel (past D = 10 if it needs to).
+  With native ticked a .vox needs no depth. The answers (§VOX, 2026-11-25):
+  "keep hidden" keeps hidden objects and layers, and an animation is every
+  frame, a world a frame in each depth's file.
 
   Serve the repo root (npm run serve) and open /convert/: the core imports
   ../dag-core.js and its neighbours.
@@ -36,7 +44,8 @@
   #settings .row{ display:flex; flex-wrap:wrap; gap:10px 24px; align-items:center; width:100%; }
   #settings input[type=number]{ background:#16161f; color:var(--hi); font:inherit; border:1px solid rgba(255,255,255,.16); border-radius:4px; padding:2px 6px; width:4.5em; }
   #depths label{ margin-right:10px; white-space:nowrap; cursor:pointer; }
-  #depths input{ accent-color:var(--accent); vertical-align:-2px; }
+  #depths input, #settings .check input{ accent-color:var(--accent); vertical-align:-2px; }
+  #settings .check{ cursor:pointer; color:var(--text); }
   #drop{ border:1px dashed rgba(255,255,255,.22); border-radius:8px; padding:34px 16px; text-align:center; color:var(--dim); margin-bottom:18px; transition:background .1s, border-color .1s; }
   #drop.over, body.over #drop{ background:rgba(122,138,208,.08); border-color:var(--accent); color:var(--hi); }
   #drop b{ color:var(--hi); font-weight:normal; }
@@ -63,8 +72,8 @@
 </head>
 <body>
 <main>
-  <h1>glb, ply → vdag</h1>
-  <p class="lede">A glTF binary or a PLY mesh or point cloud to world files for the <a href="../stream-viewer.html">stream viewer</a>, made as <code>experiments/mesh-vdag.mjs</code> makes them, in this browser. Drop a saved file on the viewer, or open it there with file → open… (<kbd>H</kbd> shows the panels). <a href="../export/">vdag → glb</a> goes back the other way.</p>
+  <h1>glb, ply, vox → vdag</h1>
+  <p class="lede">A glTF binary, a PLY mesh or point cloud, or a MagicaVoxel model to world files for the <a href="../stream-viewer.html">stream viewer</a>, made as <code>experiments/mesh-vdag.mjs</code> makes them, in this browser. Drop a saved file on the viewer, or open it there with file → open… (<kbd>H</kbd> shows the panels). <a href="../export/">vdag → glb</a> goes back the other way.</p>
 
   <div id="settings">
     <div class="row">
@@ -98,11 +107,17 @@
         </select>
       </div>
     </div>
+    <div class="row">
+      <span class="label">VOX</span>
+      <label class="check"><input id="voxNative" type="checkbox" checked> and at its native depth, a voxel a voxel</label>
+      <label class="check"><input id="voxHidden" type="checkbox"> keep hidden objects and layers</label>
+      <span class="label">(a depth scales a model by a power of two, so its voxels stay cubes)</span>
+    </div>
   </div>
 
   <div id="drop">
-    <b>Drop .glb or .ply files here</b>, or <button id="pick" type="button">choose files…</button>
-    <input id="files" type="file" accept=".glb,.ply,.png,.jpg,.jpeg,model/gltf-binary" multiple hidden>
+    <b>Drop .glb, .ply or .vox files here</b>, or <button id="pick" type="button">choose files…</button>
+    <input id="files" type="file" accept=".glb,.ply,.vox,.png,.jpg,.jpeg,model/gltf-binary" multiple hidden>
     <span class="hint">Each depth D is a world 2<sup>D</sup> voxels a side. D = 10 can take a minute an asset. A textured .ply's images go with it. Nothing leaves this machine.</span>
   </div>
 
@@ -116,7 +131,7 @@ import { DEPTHS, nameOf } from './convert-core.js';
 
 /* ---- settings, remembered per browser ------------------------------------------------- */
 const KEY = 'glb-to-vdag', depthBox = document.getElementById('depths'), colourSel = document.getElementById('colour');
-const pointSel = document.getElementById('point'), opacityIn = document.getElementById('opacity'), meshSel = document.getElementById('meshColour');
+const pointSel = document.getElementById('point'), opacityIn = document.getElementById('opacity'), meshSel = document.getElementById('meshColour'), voxBox = document.getElementById('voxNative'), hiddenBox = document.getElementById('voxHidden');
 let saved = {};
 try { saved = JSON.parse(localStorage.getItem(KEY) ?? '{}') ?? {}; } catch {}
 const chosen = new Set(Array.isArray(saved.depths) ? saved.depths.filter(d => DEPTHS.includes(d)) : [8, 10]);
@@ -130,28 +145,32 @@ if (['6', '8', '0'].includes(String(saved.colour))) colourSel.value = String(sav
 if ([...pointSel.options].some(o => o.value === saved.point)) pointSel.value = saved.point;
 if (Number.isFinite(saved.opacity) && saved.opacity >= 0 && saved.opacity <= 1) opacityIn.value = String(saved.opacity);
 if (saved.meshColour === 'vertices' || saved.meshColour === 'triangles') meshSel.value = saved.meshColour;
+if (typeof saved.voxNative === 'boolean') voxBox.checked = saved.voxNative;
+if (typeof saved.voxHidden === 'boolean') hiddenBox.checked = saved.voxHidden;
 const opacityOf = () => { const v = Number(opacityIn.value); return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0; };
 const settings = () => {
   const depths = DEPTHS.filter(D => document.getElementById(`d${D}`).checked), c = +colourSel.value, [shape, r] = pointSel.value.split(':');
-  return { depths, bake: c !== 0, bits: c || 6, point: { shape, r: +r }, opacity: opacityOf(), meshColour: meshSel.value };
+  return { depths, bake: c !== 0, bits: c || 6, point: { shape, r: +r }, opacity: opacityOf(), meshColour: meshSel.value, voxNative: voxBox.checked, voxHidden: hiddenBox.checked };
 };
-const remember = () => { try { localStorage.setItem(KEY, JSON.stringify({ depths: settings().depths, colour: +colourSel.value, point: pointSel.value, opacity: opacityOf(), meshColour: meshSel.value })); } catch {} };
-for (const e of [depthBox, colourSel, pointSel, opacityIn, meshSel]) e.addEventListener('change', remember);
+const remember = () => { try { localStorage.setItem(KEY, JSON.stringify({ depths: settings().depths, colour: +colourSel.value, point: pointSel.value, opacity: opacityOf(), meshColour: meshSel.value, voxNative: voxBox.checked, voxHidden: hiddenBox.checked })); } catch {} };
+for (const e of [depthBox, colourSel, pointSel, opacityIn, meshSel, voxBox, hiddenBox]) e.addEventListener('change', remember);
+// A .vox with its native depth ticked has something to make with no depth ticked.
+const isVox = f => /\.vox$/i.test(f.name), hasWork = (s, file) => s.depths.length > 0 || (isVox(file) && s.voxNative);
 
 /* ---- the queue: one asset at a time, one worker each ----------------------------------- */
 const jobsEl = document.getElementById('jobs'), jobs = [];
 let running = null;
 const fmt = n => n.toLocaleString('en-US'), many = (n, one, more = `${one}s`) => `${fmt(n)} ${n === 1 ? one : more}`, kb = n => n < 1024 * 1024 ? `${fmt(Math.ceil(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
 const secs = ms => `${(ms / 1000).toFixed(1)} s`;
-const STAGES = { reading: 'reading the file', analysing: 'welding, finding what\'s solid', shape: 'voxelizing the shape', skin: 'the skin', points: 'sorting the points into voxels',
+const STAGES = { reading: 'reading the file', placing: 'placing the scene\'s voxels', voxels: 'the voxels at this depth', analysing: 'welding, finding what\'s solid', shape: 'voxelizing the shape', skin: 'the skin', points: 'sorting the points into voxels',
                  words: 'baking colours', writing: 'writing the file', checking: 'reading it back', picture: 'a picture' };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 
 function addFiles(list){
-  const all = [...list], models = all.filter(f => /\.(glb|ply)$/i.test(f.name)), others = all.filter(f => !/\.(glb|ply)$/i.test(f.name));
-  if (!models.length){ if (all.length) flash(`not a .glb or .ply: ${all.map(f => f.name).join(', ')}`); return; }
+  const all = [...list], models = all.filter(f => /\.(glb|ply|vox)$/i.test(f.name)), others = all.filter(f => !/\.(glb|ply|vox)$/i.test(f.name));
+  if (!models.length){ if (all.length) flash(`not a .glb, .ply or .vox: ${all.map(f => f.name).join(', ')}`); return; }
   const s = settings();
-  if (!s.depths.length){ flash('pick at least one depth'); return; }
+  if (!models.every(f => hasWork(s, f))){ flash('pick at least one depth'); return; }
   for (const file of models) addJob(file, others, s);
   next();
 }
@@ -180,7 +199,7 @@ function clear(job){
   job.urls = []; job.worlds = []; job.list.replaceChildren(); job.about.textContent = ''; job.notes.textContent = '';
 }
 function reset(job, s){
-  if (!s.depths.length){ flash('pick at least one depth'); return; }
+  if (!hasWork(s, job.file)){ flash('pick at least one depth'); return; }
   clear(job); Object.assign(job, { s, state: 'waiting', error: null, stage: null }); show(job);
 }
 const pointText = p => p.r ? (p.shape === 'cube' ? `a point a ${2 * p.r + 1}³ cube` : `a point a ball of radius ${p.r}½`) : '';
@@ -188,9 +207,10 @@ function show(job){
   const run = job.state === 'running', ago = run ? ` · ${secs(performance.now() - job.started)}` : '';
   // A .ply's settings, where they differ from the defaults.
   const plyBits = /\.ply$/i.test(job.file.name) ? [pointText(job.s.point), job.s.opacity ? `opacity ≥ ${job.s.opacity}` : '', job.s.meshColour === 'vertices' && job.s.bake ? 'a mesh coloured from its vertices' : ''].filter(Boolean) : [];
-  const colour = [job.s.bake ? `baked, ${job.s.bits} bits` : 'no colour', ...plyBits].join(' · ');
+  const colour = [job.s.bake ? `baked, ${job.s.bits} bits` : 'no colour', ...plyBits, ...(isVox(job.file) && job.s.voxHidden ? ['hidden kept'] : [])].join(' · ');
+  const depths = [...job.s.depths.map(D => `D = ${D}`), ...(isVox(job.file) && job.s.voxNative ? ['native'] : [])].join(', ');
   const text = {
-    waiting: `waiting · D = ${job.s.depths.join(', ')} · ${colour}`,
+    waiting: `waiting · ${depths} · ${colour}`,
     running: `${job.stage?.D != null ? `D = ${job.stage.D}: ` : ''}${STAGES[job.stage?.stage] ?? 'starting'}${job.stage?.frac != null ? ` ${Math.floor(100 * job.stage.frac)}%` : ''}${ago}`,
     done: `done in ${secs(job.ms)} · ${colour}`,
     cancelled: 'cancelled',
@@ -212,8 +232,9 @@ async function next(){
   try {
     // A .ply isn't read here: the worker gets the File and reads it a slice at a time.
     // Its images go with it (a .glb's beside it, a .ply's TextureFiles), read here: they're small.
-    const ply = /\.ply$/i.test(job.file.name), opts = { name: job.name, depths: job.s.depths, bits: job.s.bits, bake: job.s.bake };
+    const ply = /\.ply$/i.test(job.file.name), vox = isVox(job.file), opts = { name: job.name, depths: job.s.depths, bits: job.s.bits, bake: job.s.bake };
     if (ply) Object.assign(opts, { point: job.s.point, opacity: job.s.opacity, meshColour: job.s.meshColour });
+    if (vox) Object.assign(opts, { native: job.s.voxNative, hidden: job.s.voxHidden });
     const [glb, files] = await Promise.all([ply ? null : job.file.arrayBuffer(), Promise.all(job.others.map(async f => [f.name, new Uint8Array(await f.arrayBuffer())]))]);
     if (job.state !== 'running') return;
     const w = job.worker = new Worker(new URL('./convert-worker.js', import.meta.url), { type: 'module' });
@@ -228,6 +249,7 @@ async function next(){
       };
       w.onerror = e => { e.preventDefault(); Object.assign(job, { state: 'failed', error: e.message || 'the worker failed (out of memory?)' }); resolve(); };
       if (ply) w.postMessage({ ply: job.file, files, ...opts }, files.map(([, b]) => b.buffer));
+      else if (vox) w.postMessage({ vox: glb, ...opts }, [glb]);
       else w.postMessage({ glb, files, ...opts }, [glb, ...files.map(([, b]) => b.buffer)]);
     });
   } catch (e){
@@ -249,6 +271,12 @@ function cancel(job){
 function about(job, a){
   job.notes.textContent = a.notes.join(' · ');
   const kind = a.format === 'ascii' ? 'ASCII' : 'binary';
+  if (a.kind === 'vox'){
+    const copies = a.instances !== a.models ? `, ${many(a.instances, 'copy', 'copies')}` : '';
+    const native = a.native ? `native at D = ${a.native}` : `native past D = 16`, frames = a.frames > 1 ? ` · ${a.frames} frames` : '';
+    job.about.textContent = `a MagicaVoxel model (.vox ${a.version}): ${many(a.voxels, 'voxel')} in ${many(a.models, 'model')}${copies}, ${a.size.join(' × ')}${frames} · ${native}${a.palette === 'default' ? ' · the default palette' : ''}`;
+    return;
+  }
   if (a.kind === 'points'){
     const colour = { vertex: 'coloured', splat: 'Gaussian splats (their centres, their base colour)' }[a.colour] ?? 'no colour';
     const kept = a.faint ? `, ${fmt(a.kept)} kept` : '', fill = pointText(a.point);
@@ -272,11 +300,13 @@ function addWorld(job, w){
     cv.width = w.thumb.w; cv.height = w.thumb.h;
     cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(w.thumb.rgba.buffer), w.thumb.w, w.thumb.h), 0, 0);
   }
-  const build = (w.ms.shape ?? 0) + (w.ms.skin ?? 0) + (w.ms.words ?? 0) + (w.ms.writing ?? 0);
-  const facts = `a ${w.side}³ world\n${fmt(w.voxels)} solid\n${fmt(w.nodes)} nodes${w.skin ? `\n${fmt(w.skin)} words` : ''}\n${kb(w.bytes.length)} · ${secs(build)}`;
+  const build = (w.ms.shape ?? 0) + (w.ms.voxels ?? 0) + (w.ms.skin ?? 0) + (w.ms.words ?? 0) + (w.ms.writing ?? 0);
+  // A .vox's depth is a scale: a voxel a voxel, each voxel a cube of k³, or cells of k³ voxels.
+  const scale = w.scale == null ? '' : `\n${w.scale === 0 ? 'a voxel a voxel' : w.scale > 0 ? `each voxel ${2 ** w.scale}³` : `cells of ${2 ** -w.scale}³ voxels`}`;
+  const facts = `a ${w.side}³ world${scale}${w.frames > 1 ? `\n${w.frames} frames, the first:` : ''}\n${fmt(w.voxels)} solid\n${fmt(w.nodes)} nodes${w.skin ? `\n${fmt(w.skin)} words` : ''}\n${kb(w.bytes.length)} · ${secs(build)}`;
   const a = el('a', null, `save ${w.file}`);
   a.href = url; a.download = w.file;
-  card.append(cv, el('div', 'd', `D = ${w.D}`), el('div', 'facts', facts), a);
+  card.append(cv, el('div', 'd', w.native ? `native, D = ${w.D}` : `D = ${w.D}`), el('div', 'facts', facts), a);
   job.list.append(card);
   show(job);
 }
@@ -306,7 +336,8 @@ addEventListener('drop', e => {
 // For the console and test/browser/convert.test.js: the list as data.
 window.__convert = {
   jobs: () => jobs.map(j => ({ name: j.file.name, state: j.state, error: j.error ?? null, depths: j.s.depths, bits: j.s.bits, bake: j.s.bake,
-                              point: j.s.point, opacity: j.s.opacity, meshColour: j.s.meshColour, about: j.about.textContent, status: j.status.textContent, notes: j.notes.textContent, worlds: j.worlds.map(w => ({ D: w.D, file: w.file, size: w.bytes.length, voxels: w.voxels, nodes: w.nodes, skin: w.skin })) })),
+                              point: j.s.point, opacity: j.s.opacity, meshColour: j.s.meshColour, voxNative: j.s.voxNative, voxHidden: j.s.voxHidden, about: j.about.textContent, status: j.status.textContent, notes: j.notes.textContent,
+                              worlds: j.worlds.map(w => ({ D: w.D, native: w.native ?? false, scale: w.scale ?? null, frames: w.frames ?? 1, file: w.file, size: w.bytes.length, voxels: w.voxels, nodes: w.nodes, skin: w.skin })) })),
   bytes: (i, k) => { const b = jobs[i].worlds[k].bytes; let s = ''; for (let o = 0; o < b.length; o += 32768) s += String.fromCharCode(...b.subarray(o, o + 32768)); return btoa(s); },
   idle: () => !running && !jobs.some(j => j.state === 'waiting'),
 };

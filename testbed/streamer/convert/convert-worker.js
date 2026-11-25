@@ -13,8 +13,14 @@
    and this reads it a slice at a time (8 MB), so a 190 MB file is never in
    memory whole, on either thread. While it reads, the fraction read goes to
    the page at most ten times a second. Its settings (point, opacity, mesh
-   colour) and the images dropped with it (its TextureFiles) come with it. */
+   colour) and the images dropped with it (its TextureFiles) come with it.
+
+   A .vox (MagicaVoxel, docs/convert.md §VOX) comes as its bytes, as a .glb
+   does: they're voxels already, a few MB at most. Its one setting of its
+   own are `native` (one world voxel a .vox voxel, besides the depths) and
+   `hidden` (keep hidden objects and layers). */
 import { convertGlb, convertPly } from './convert-core.js';
+import { convertVox } from './vox-core.js';
 
 const SLICE = 8 << 20;
 async function* slices(file){
@@ -41,6 +47,16 @@ self.onmessage = async ({ data }) => {
         onAsset: asset => post({ asset }),
         onStage: (D, stage) => post({ stage: { D, stage } }),
         onProgress: frac => { const now = performance.now(); if (now - last >= 100 || frac === 1){ last = now; post({ stage: { D: null, stage: 'reading', frac } }); } },
+        onWorld: world => post({ world }, [world.bytes.buffer, ...(world.thumb ? [world.thumb.rgba.buffer] : [])]),
+      });
+      post({ done: true });
+      return;
+    }
+    if (data.vox){
+      await convertVox(new Uint8Array(data.vox), {
+        name: data.name, depths: data.depths, native: data.native, hidden: data.hidden, bits: data.bits, bake: data.bake,
+        onAsset: asset => post({ asset }),
+        onStage: (D, stage) => post({ stage: { D, stage } }),
         onWorld: world => post({ world }, [world.bytes.buffer, ...(world.thumb ? [world.thumb.rgba.buffer] : [])]),
       });
       post({ done: true });

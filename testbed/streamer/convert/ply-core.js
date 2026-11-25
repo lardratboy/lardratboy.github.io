@@ -490,7 +490,7 @@ function unmorton(key, out){
   out[0] = x; out[1] = y; out[2] = z;
 }
 /* LSD radix sort of uint32 keys, carrying a payload, 11 bits a pass. */
-function radixSort(keys, vals, bits){
+export function radixSort(keys, vals, bits){
   const n = keys.length, count = new Uint32Array(2048);
   let k = keys, v = vals, k2 = new Uint32Array(n), v2 = new Uint32Array(n);
   for (let shift = 0; shift < bits; shift += 11){

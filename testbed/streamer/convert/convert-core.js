@@ -44,8 +44,8 @@ import { pngParts, pngPixels, concatBytes, parseGlb, glbImages, glbMesh, analyse
 // the script, and D = 12 minutes and over a gigabyte, so the page stops at 10.
 export const DEPTHS = [6, 7, 8, 9, 10];
 
-// The script's names: the file's name without .glb (or .ply), and a slug of it for the file.
-export const nameOf = fileName => fileName.replace(/^.*[\\/]/, '').replace(/\.(glb|ply)$/i, '');
+// The script's names: the file's name without .glb (or .ply, or .vox), and a slug of it for the file.
+export const nameOf = fileName => fileName.replace(/^.*[\\/]/, '').replace(/\.(glb|ply|vox)$/i, '');
 export const slugOf = name => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'asset';
 
 async function inflate(bytes){
@@ -151,24 +151,33 @@ export function stager(D, ms, onStage){
    whichever way its voxels came, and by vdb/'s OpenVDB converter (which
    names some of its worlds and files its own way: `title`, `file`). */
 export async function finishDepth({ store, root, D, M, skin, words, bits, name, slug, thumbs, stage, ms,
-                                    title = `${name} (D = ${D})`, file: fileName = `${slug}-d${D}.vdag` }){
-  const colour = words ? { kind: 'baked', skin, words, bits } : null;
+                                    title = `${name} (D = ${D})`, file = `${slug}-d${D}.vdag` }){
+  return finishWorlds({ store, D, worlds: [{ root, M, skin, words, title }], bits, thumbs, stage, ms, file });
+}
+/* Several worlds of one depth in one file, from one store, so they share
+   nodes (a .vox animation's frames, docs/convert.md §VOX): each written,
+   each read back and held to the world written, the picture the first's.
+   `voxels` and `skin` are the first world's, `nodes` every world's shapes
+   together, `frames` how many. One world is finishDepth, byte for byte. */
+export async function finishWorlds({ store, D, worlds, bits, thumbs, stage, ms, file: fileName }){
   stage('writing');
-  const keys = store.snapshot().keys;
-  const file = await writeVdag([{ keys, root, D, name: title, colour, view: assetView(M), source: null }]);
+  const keys = store.snapshot().keys, colourOf = w => w.words ? { kind: 'baked', skin: w.skin, words: w.words, bits } : null;
+  const file = await writeVdag(worlds.map(w => ({ keys, root: w.root, D, name: w.title, colour: colourOf(w), view: assetView(w.M), source: null })));
   stage('checking');
-  const counts = createCounts(store), voxels = counts.of(root), { worlds: [back] } = await readVdag(file);
-  if (back.voxels !== voxels || (colour ? back.colourStatus !== 'baked' : back.colour !== null))
-    throw new Error(`D = ${D}: the file doesn't read back as the world written`);
+  const counts = createCounts(store), { worlds: back } = await readVdag(file);
+  for (const [i, w] of worlds.entries())
+    if (back[i].voxels !== counts.of(w.root) || (w.words ? back[i].colourStatus !== 'baked' : back[i].colour !== null))
+      throw new Error(`D = ${D}: the file doesn't read back as the world written`);
+  const [first] = worlds;
   let thumb = null;
   if (thumbs){
     stage('picture');
-    const field = words ? createBaked(store, skin, D, words, { counts }) : null;
-    thumb = thumbnail(store, root, D, field);
+    const field = first.words ? createBaked(store, first.skin, D, first.words, { counts }) : null;
+    thumb = thumbnail(store, first.root, D, field);
   }
   stage(null);
-  return { D, side: M.side, file: fileName, bytes: file, voxels, nodes: prune(keys, [root]).keys.length / 9,
-           skin: words ? words.length : 0, bits: colour ? bits : 0, ms, thumb };
+  return { D, side: first.M.side, file: fileName, bytes: file, voxels: counts.of(first.root), nodes: prune(keys, worlds.map(w => w.root)).keys.length / 9,
+           skin: first.words ? first.words.length : 0, bits: first.words ? bits : 0, frames: worlds.length, ms, thumb };
 }
 
 /* A PLY file (ply-core.js): a point cloud, each point the voxel it falls in
