@@ -299,7 +299,8 @@ td.best{color:#e6faff!important;font-weight:600}
       <li><a href="#s8" data-nav="s8">8 Rays</a></li>
       <li><a href="#s9" data-nav="s9">9 Path</a></li>
       <li><a href="#s10" data-nav="s10">10 Frame</a></li>
-      <li><a href="#s11" data-nav="s11">11 Read</a></li>
+      <li><a href="#s11" data-nav="s11">11 Universe</a></li>
+      <li><a href="#s12" data-nav="s12">12 Read</a></li>
     </ol>
     <div class="pick"><span>WORLD</span><select id="worldSel" aria-label="The world every demo on this page uses"></select></div>
   </div>
@@ -321,13 +322,18 @@ td.best{color:#e6faff!important;font-weight:600}
     <div><div class="n">64³</div><div class="l">the unit of everything</div></div>
     <div><div class="n">4 + 4 B</div><div class="l">a cube: record, colour</div></div>
     <div><div class="n">0.3–15 M</div><div class="l">cubes a view</div></div>
-    <div><div class="n">1.4–13 ms</div><div class="l">a frame, Apple GPU benches</div></div>
+    <div><div class="n">18</div><div class="l">indices a cube: three faces</div></div>
   </div>
 
   <div class="formula"><span class="d">which chunks?  </span>selectChunks   the cut: a partition of the world, finer near the eye      <span class="d">when the eye moves</span>
 <span class="d">what's ready?  </span>coverOf        the cover: the finest complete tiling of what's resident   <span class="d">and when a chunk lands</span>
-<span class="d">which path?    </span>chooseKinds    raster or ray, per chunk, from its density                 <span class="d">and when a chunk lands</span>
-<span class="d">which pixels?  </span>renderView     raster, stencil, ray, blit                                 <span class="d">every frame</span></div>
+<span class="d">which path?    </span>chooseKinds    raster or ray, per chunk, from its density (opt-in)        <span class="d">and when a chunk lands</span>
+<span class="d">which pixels?  </span>renderView     raster (three faces a cube), stencil, ray, blit            <span class="d">every frame</span></div>
+
+  <p class="aside" id="matches"><b>This page matches the viewer at commit <code>3d7894a</code> (2026-11-26).</b> Its cores are imported, so they're always today's,
+  and §12's line numbers are looked up as the page loads. Its drawing lab is a shortened copy of <code>renderView</code>, and its prose describes the viewer as it was at that commit.
+  The page is refreshed when the renderer changes a lot, not kept in step line by line. The first version was 2026-11-06. This refresh adds
+  the faster job (§4), three faces a cube (§5), the shadow rule and the locked lod (§3, §4), the viewer's defaults in every demo, and universes (§11).</p>
 </header>
 
 <!-- ============================ 1 ============================ -->
@@ -336,11 +342,15 @@ td.best{color:#e6faff!important;font-weight:600}
 
   <p>This is the page's most important section, so start with the viewer's own frame function. Here it is with its details removed:</p>
 <div class="loop"><span class="k">function</span> frame(){
+  <span class="k">if</span> (W.endless) endlessTick();          <span class="c">// §11    the endless lattice: re-centre the window, take the worlds that landed</span>
   <span class="k">if</span> (eye moved) streamer.update(eye);   <span class="c">// §3 §9  re-cut the world, re-cover it, choose paths, order the job queue</span>
   pool.dispatch();                       <span class="c">// §4     hand jobs to idle workers, and don't wait for them</span>
   streamer.service();                    <span class="c">// §7     admit finished jobs, under a time and a byte budget</span>
-  renderView();                          <span class="c">// §10    draw whatever is resident, right now</span>
+  editFlipped();                         <span class="c">// §7     if an edit's results all landed this frame, the page follows the new root</span>
+  draw();                                <span class="c">// §10    renderView: draw whatever is resident, right now; then the passes after it</span>
 }</div>
+  <p>The middle four lines are the whole renderer. The first and the fifth do nothing unless you're in an endless lattice or editing, and
+  <code>draw()</code> is <code>renderView</code> followed by passes that never touch the frame it made: SSAO, the wireframe, and edit mode's preview and outline (§10).</p>
 
   <p>Five facts explain almost everything else in the code:</p>
   <ol class="five">
@@ -354,8 +364,9 @@ td.best{color:#e6faff!important;font-weight:600}
       mostly reading the doing.</li>
     <li><b>Nothing waits.</b> A frame draws what is resident, coarser than wanted if it has to. No frame ever blocks on a job, so
       flying too fast costs detail. It doesn't cost frame rate, and it doesn't leave holes.</li>
-    <li><b>There are two ways to draw a chunk, and one depth buffer joins them.</b> Cubes cost per cube, and rays cost per pixel. Each chunk takes
-      whichever is cheaper, and the ray pass stops at the raster's depth.</li>
+    <li><b>Cubes are the default, and a cube is three faces.</b> The raster pass costs per cube, not per pixel, so the viewer draws of each axis's two faces only the one
+      on the eye's side, which halved the pass (§5). A second path, rays, costs per pixel instead. It is built and tested, and joined to the raster by one depth buffer,
+      but the viewer has drawn raster only since 2026-11-09 (it felt snappier), so the ray path is opt-in (<code>?ray=density</code>, §8, §9).</li>
   </ol>
 
   <div class="stage">
@@ -384,8 +395,8 @@ td.best{color:#e6faff!important;font-weight:600}
     <div class="read" id="rdWorld"></div>
   </div>
   <p class="aside">The demos below all share one world, one eye and one streamer, with real workers, so what you do in one section
-  shows up in the others. The drawing lab in §7, §9 and §10 is <em>not</em> the viewer. It is a smaller
-  copy of its passes, built on the same <code>GLSL_DECODE</code> and <code>GLSL_RAY</code> and the same cores. §11 lists what it leaves out.</p>
+  shows up in the others. They start at the viewer's defaults: the shadow rule, detail 4, raster only. The drawing lab in §7, §9 and §10 is <em>not</em> the viewer. It is a smaller
+  copy of its passes, built on the same <code>GLSL_DECODE</code> and <code>GLSL_RAY</code> and the same cores. §12 lists what it leaves out.</p>
 </section>
 
 <!-- ============================ 2 ============================ -->
@@ -438,17 +449,25 @@ td.best{color:#e6faff!important;font-weight:600}
   rule compares distance with size, so a leaf always spans about the same angle on screen, whatever its lod. That is <code>ifsandwhats.md</code>'s clipmap,
   as a cut through an octree.</p>
 
-<pre class="code"><span class="c">// selectChunks, without the heap and the cap</span>
-<span class="k">if</span> (c.lod &gt; minLod &amp;&amp; c.dist &lt; detail * c.size) c.kids = childrenOf(world, c);   <span class="c">// split</span>
-<span class="k">else</span> leaves.push(c);                                                           <span class="c">// a leaf of the cut</span></pre>
+<pre class="code"><span class="c">// selectChunks, without the heap and the cap. splitsAt is the rule, exported so a universe's cut (§11) asks the same one.</span>
+<span class="k">const</span> splitsAt = (c, { detail, minLod, lock }) =&gt; lock == <span class="k">null</span> ? c.lod &gt; minLod &amp;&amp; c.dist &lt; detail * c.size : c.lod &gt; lock;
+<span class="k">if</span> (splitsAt(c, cfg)) c.kids = childrenOf(world, c);   <span class="c">// split</span>
+<span class="k">else</span> leaves.push(c);                                 <span class="c">// a leaf of the cut</span></pre>
+  <p>The viewer's <code>detail</code> is 4 (the core's default is 2): a chunk is split until it is four of its own sides away, so a cell spans about half as many pixels as at 2.
+  The <b>locked lod</b> (2026-11-20, <code>lod-locked.md</code>) is the other branch of <code>splitsAt</code>: every chunk is split down to one lod wherever it is, and no further,
+  which is for looking at one lod at a time. The viewer's lod rule menu calls it <code>locked</code>, its cells drawn by the shadow rule (§4), and a slider moves it with no reload.</p>
 
   <div class="stage">
     <div class="ctrls">
       <div class="cgroup"><label class="lbl">Looking</label><div class="chips" id="cutPlane"></div></div>
       <div class="cgroup"><label class="lbl">Zoom on the eye</label><div class="chips" id="cutZoom"></div></div>
       <div class="cgroup">
-        <label class="lbl" for="kS">Detail K <span class="val" id="kV">2</span></label>
-        <input type="range" id="kS" min="1" max="4" step="0.25" value="2">
+        <label class="lbl" for="kS">Detail K <span class="val" id="kV">4</span></label>
+        <input type="range" id="kS" min="1" max="6" step="0.25" value="4">
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="lockS">Locked lod <span class="val" id="lockV">off</span></label>
+        <input type="range" id="lockS" min="-1" max="10" step="1" value="-1">
       </div>
       <div class="cgroup">
         <label class="lbl" for="capS">maxChunks <span class="val" id="capV">1,024</span></label>
@@ -477,16 +496,19 @@ td.best{color:#e6faff!important;font-weight:600}
   had a neighbour two lods finer. That neighbour's parent, of side S/2, was split, so it is under K·S/2 from the eye. It lies within S/2 of the
   leaf, so the leaf is under K·S/2 + S/2 away. But as a leaf it is at least K·S away, which needs K &lt; 1. The seam tail (§6) relies on this,
   and it's why the K slider stops at 1. <code>maxChunks</code> refuses splits in order of <code>dist / size</code>, so a cap costs detail where it shows
-  least, but past the cap the one-lod promise no longer holds.</p>
+  least, but past the cap the one-lod promise no longer holds. A lock keeps the promise trivially (every leaf at one lod) until the cap refuses the far chunks,
+  which a lock fine enough always makes it do: try lod 0 on a kit.</p>
 </section>
 
 <!-- ============================ 4 ============================ -->
 <section id="s4">
   <div class="shead"><span class="snum">04</span><h2>A job: from one DAG node to bytes</h2></div>
 
-  <p>A worker receives <code>{ lod, cx, cy, cz, kind, lodRule, root }</code> and returns buffers. A records job is one call of
-  <span class="ref" data-f="chunk-core.js" data-q="export function expandChunk"></span>. Below is a real call, on the chunk you picked in §3, in one
-  horizontal layer of its 64 cell layers. Everything it does comes down to answering three questions per cell: <b>is it kept</b>, <b>can anything see it</b>,
+  <p>A worker receives <code>{ lod, cx, cy, cz, kind, lodRule, root }</code> and returns buffers. What a records job makes is defined by one function,
+  <span class="ref" data-f="chunk-core.js" data-q="export function expandChunk"></span> with <code>seams: true</code>, and computed by a faster twin,
+  <span class="ref" data-f="job-core.js" data-q="export function fastChunk"></span>, which gives the same bytes (more below the demo).
+  Below is a real <code>expandChunk</code> call on the chunk you picked in §3, in one
+  horizontal layer of its 64 cell layers, with <code>fastChunk</code> run beside it and held to its bytes. Everything a job does comes down to answering three questions per cell: <b>is it kept</b>, <b>can anything see it</b>,
   and <b>what does its record say</b>?</p>
 
   <div class="stage">
@@ -520,21 +542,36 @@ td.best{color:#e6faff!important;font-weight:600}
       records come out sorted.</li>
     <li><b>Pick which coarse cells to keep.</b> At lod 0 a cell is a voxel, with nothing to decide. At coarser lods a rule looks at each 8³ brick of cells.
       <code>any</code> keeps every occupied cell, which fills porous content in solid (specimens bloat 1.2–6.8×). <code>adaptive</code> keeps the
-      fullest k cells, with k chosen so the brick blocks about as much light as it did at full detail (<code>coverage-findings.md</code>). Try both on a far chunk of a kit.</li>
+      fullest k cells, with k chosen so the brick blocks about as much light as it did at full detail (<code>coverage-findings.md</code>), but it opens
+      see-through holes in content one voxel thick: <b>lod acne</b> (<code>lodacne.md</code>, seen on a converted character's cape and belt). <code>shadow</code>, the viewer's rule since 2026-11-10,
+      is adaptive plus, for every column of the brick along x, y and z, the best cell in it, so no axis-aligned hole can open: its slab coverage is exactly any's, with fewer cells.
+      Try all three on a far chunk of a kit. Each is a function of the brick's node alone, which the brick dedup of §8 and the job's mask cache below both rest on.</li>
     <li><b>Walk the apron.</b> One slab of each of the six neighbours at the same lod, so a cell on the boundary knows what's next to it. Without it, solid shapes get
       106–225% more faces (<code>expand-findings.md</code> §3). Move the layer slider to −1 or 64 to see an apron slab.</li>
     <li><b>Make the masks.</b> For each kept cell, one bit per neighbour that is empty. A cell with all six neighbours occupied shows nothing and gets no record:
       that's the buried cell, and most of a solid.</li>
     <li><b>Keep the tail.</b> A boundary cell the <em>apron alone</em> buried gets a record anyway, after all the others, with a mask of 0. §6 is what it's for.</li>
+    <li><b>Colour each record.</b> One 32-bit word a record: the field at the voxel, or at a coarse cell the count-weighted mean of its cells one level down
+      (<code>cellAttr</code>, <code>meanDepth</code> 1). A world's colour is named (a descriptor each worker turns back into a function) or <b>baked</b>: a converted asset's words,
+      one per skin voxel in Morton order, travel to the workers in the snapshot, and a coarse cell's mean is a range sum over them (<code>baked-core.js</code>).</li>
   </ul>
+
+  <p class="aside"><b>What the workers run: <code>fastChunk</code></b> (2026-11-07, <code>job-speed-log.md</code>). The same records, words, counts and tail as
+  <code>expandChunk</code>, byte for byte, with three exact changes. <b>A full node lists only its shell</b>: its block of the grid is filled at once and its interior, which can't show a face,
+  is added to <code>occupied</code> as a number. <b>A per-brick rule's kept cells are a 512-bit mask</b> made once per (rule, lod, node) and kept for the snapshot's life, so a repeated
+  brick is walked by its mask with no sort. <b>The seam test starts from the neighbouring chunk's node</b>, 5 child reads instead of D − lod − 1, and each answer is cached for the job.
+  Without colour that's 4–12× on every world benched (warm medians of 1.3–4.3 ms a job). With colour it's 1.4–3.7×, because colour is now most of a job: the kit's warm job is about
+  1.5 ms of walk and 12–13 ms of words. <code>expandChunk</code> stays the plain reference, and <code>test/job-core.test.js</code> holds the two equal on every chunk of a dozen worlds,
+  with 18 mutants. The table's last rows are the two run here, on this thread: cold (a fresh mask cache) and warm (the same cache, again).</p>
 
   <p class="aside"><b>Why it's 3.5× to 150× smaller than block-showroom's record.</b> A centre takes 12 bytes, and the shader can rebuild it from the cell index, the
   chunk's origin and the cell size, so the 14-byte record drops to 4. That's the 3.5×, and skipping buried voxels is the rest: 6.7 MB against 441 MB over the shapes corpus
-  (<code>expand-findings.md</code>). A job takes 2–19 ms (median, per world), so 4 workers expand 90–1,500 chunks a second, and <b>the workers are the bottleneck in flight, not the
-  bookkeeping</b>, which takes 0.1–2.5 ms a frame (<code>stream-findings.md</code>).</p>
+  (<code>expand-findings.md</code>). <b>The workers are the bottleneck in flight, not the
+  bookkeeping</b>, which takes 0.1–2.5 ms a frame (<code>stream-findings.md</code>). That was measured when a job took 2–19 ms. With <code>fastChunk</code> it's still true of coloured worlds,
+  where a D = 13 city's view is 1,290 jobs and about 6 s on four workers (<code>city-frame-cost.md</code> §5).</p>
 
   <p class="aside"><b>The shortcut.</b> A chunk that is completely full, with all six neighbours completely full too, expands to nothing, and
-  <code>createJobRunner</code> says so without walking its 262,144 cells. That's most of a terrain's cut underground. It lives in the runner, not in <code>expandChunk</code>, so the dense
+  <code>createJobRunner</code> says so without walking its 262,144 cells. That's most of a terrain's cut underground. It lives in the runner, and <code>fastChunk</code>'s shells in job-core, not in <code>expandChunk</code>, so the dense
   oracles keep testing the plain code. And ask <code>isFull</code>, never a count: voxel counts are float64, so past level 17 a count can't feel one missing voxel.</p>
 </section>
 
@@ -543,19 +580,29 @@ td.best{color:#e6faff!important;font-weight:600}
   <div class="shead"><span class="snum">05</span><h2>A draw: one chunk, one instanced call</h2></div>
 
   <p>The chunk from §4, drawn the way the raster pass draws it. There is no vertex data per cube. A chunk is <b>one buffer of records and one
-  <code>drawElementsInstanced</code> of a shared 36-index cube</b>, and the vertex shader builds the rest from the record, <code>gl_VertexID</code> and three uniforms.
-  (The viewer itself draws the first 18 of those indices since 2026-11-18: of each axis's two faces, the one on the eye's side, as the other can't face it. This page's copy draws all six.)
-  It's the real <code>GLSL_DECODE</code> from <span class="ref" data-f="chunk-glsl.js" data-q="export const GLSL_DECODE"></span>:</p>
+  <code>drawElementsInstanced</code> of a shared cube index</b>, 18 of its 36 indices, and the vertex shader builds the rest from the record, <code>gl_VertexID</code> and three uniforms.
+  The decode is the real <code>GLSL_DECODE</code> from <span class="ref" data-f="chunk-glsl.js" data-q="export const GLSL_DECODE"></span>, and the face choice is
+  <span class="ref" data-f="stream-viewer.html" data-q="const rasterVS = "></span>'s:</p>
 
-<pre class="code"><span class="c">// in rasterVS. aRec: this instance's record. A cube has 24 corners, four per face.</span>
-<span class="k">uint</span> corner = uint(gl_VertexID), face = corner / 4u;
-<span class="k">vec3</span> p = recCentre(aRec) + CORNER[corner] * uCellSize;   <span class="c">// recCentre = uOrigin + (cell + 0.5) * uCellSize</span>
+<pre class="code"><span class="c">// in rasterVS. aRec: this instance's record. A cube has 24 corners, four a face, and 12 of them are run.</span>
+<span class="k">vec3</span> c = recCentre(aRec);                      <span class="c">// uOrigin + (cell + 0.5) * uCellSize: the centre, eye-relative</span>
+<span class="k">uint</span> v = uint(gl_VertexID), k = v / 4u;        <span class="c">// k: an axis, 0, 1 or 2</span>
+<span class="k">uint</span> face = 2u * k + (c[k] &lt; 0.0 ? 0u : 1u);   <span class="c">// of its two faces, the one on the eye's side</span>
+<span class="k">vec3</span> p = c + CORNER[4u * face + v % 4u] * uCellSize;
 gl_Position = uViewProj * vec4(p, 1.0);
 <span class="k">if</span> (!faceShown(aRec, face)) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);   <span class="c">// a hidden face collapses outside clip space</span></pre>
+
+  <p class="aside"><b>Three faces a cube</b> (2026-11-18, <code>city-frame-cost.md</code>). A cube has at most three faces toward the eye, one an axis, and which one is the sign of its
+  centre from the eye: the +x face can face the eye only if the cube is at negative x from it. So of each axis's two faces the shader draws only that one, 12 vertices instead of 24.
+  When the eye is inside a cube's slab on an axis, both of that axis's faces are back-facing, so either choice is culled, which is why the raster pass needs <code>CULL_FACE</code> on.
+  The frame is the same byte for byte: <code>facesSelftest()</code> holds it to the six-face shader on four worlds, three eyes and six headings each. It halved the pass,
+  because the pass is bound by geometry, not pixels: the same view at 1 and at 7.7 million pixels cost the same. In Chrome on the M2 Max, the D = 14 kit's opening view went from 5.8 to 3.9 ms,
+  and a D = 13 city seen from 600 up from 26–31 ms to 15.</p>
 
   <div class="stage">
     <div class="ctrls">
       <div class="cgroup"><label class="lbl">Draw</label><div class="chips" id="drawMode"></div></div>
+      <div class="cgroup"><label class="lbl">Faces a cube</label><div class="chips" id="drawFaces"></div></div>
       <div class="cgroup"><label class="lbl">Open sides (uOpenSides)</label><div class="chips" id="drawOpen"></div></div>
       <div class="cgroup"><label class="lbl">Colour</label><div class="chips" id="drawCol"></div></div>
     </div>
@@ -566,13 +613,14 @@ gl_Position = uViewProj * vec4(p, 1.0);
 
   <p>Things to notice:</p>
   <ul class="plain">
-    <li><b>Every cube sends 12 triangles, whatever it shows.</b> The collapse happens after the vertices are sent, so the draw's cost is per cube, not per face. Wireframe mode shows
-      only what's exposed. In the viewer that's about one in six on a test block (<code>wireframe.md</code>). Per-face instances would send 0.19–0.85× as many triangles at 1.2–5× the bytes,
+    <li><b>Every cube sends 6 triangles, whatever it shows</b> (12 with six faces: switch "faces a cube" and compare "lines: all sent"). The collapse happens after the vertices are shaded,
+      so the draw's cost is per cube, not per face. Wireframe mode shows only what's exposed. Per-face instances would send fewer triangles at 1.2–5× the bytes,
       and that hasn't been worth it yet (<code>expand-findings.md</code> §2).</li>
     <li><b>The origin is eye-relative.</b> The eye is a double in voxels, and each chunk's <code>uOrigin</code> is (origin − eye) in float32. At 65,536 voxels from the origin, a float32 can only
       hold steps of 1/128 of a voxel. Near the eye, an eye-relative position is small, so it keeps far finer steps (<code>ifsandwhats.md</code> §2).</li>
-    <li><b>A chunk's cost on the GPU is its cubes.</b> About 3.4 ns a cube on the Apple GPU benches (<code>path-occupancy.md</code> §1), so 15M cubes is about 50 ms. That's the number that
-      makes the ray path necessary.</li>
+    <li><b>A chunk's cost on the GPU is its cubes.</b> About 3.4 ns a cube on the Apple GPU benches in Safari with six faces (<code>path-occupancy.md</code> §1), and 3.6–4.5 in Chrome; three faces
+      halved both. That's the number the ray path was built to beat on dense porous content (§8), and the one the insides of a city's buildings spend: 55–62% of its cubes in a low view,
+      kept at every lod for now (<code>city-frame-cost.md</code> §4).</li>
   </ul>
 </section>
 
@@ -669,7 +717,11 @@ gl_Position = uViewProj * vec4(p, 1.0);
   <p class="aside"><b>Where edits fit in.</b> A click makes a new root in the same store. <code>setRoot</code> doesn't flush anything. It opens a transaction: a second cut of the new root, and jobs only
   for what that cut would draw wrongly, 2 to 14 chunks on the worlds measured. Their results are held until the last one lands, and then they all install in one frame, the <em>flip</em>, so
   <b>every frame draws one root</b>. What lets the cache keep everything else is the <b>stamp</b>: a chunk's job reads exactly seven nodes (its own and six neighbours), and equal ids mean equal voxels, so an entry built from the
-  same seven ids is still right, whatever else changed. <code>edit-stream-log.md</code> has the rest. The "Follow a click" tour in §1 walks it through the map.</p>
+  same seven ids is still right, whatever else changed. <code>edit-stream-log.md</code> has the rest. The "Follow a click" tour in §1 walks it through the map.
+  Since then: <b>one log</b> carries both blocks and dropped worlds, in one order, and its delta is what a worker's tail carries (<code>onelog-log.md</code>).
+  <b>The flip installs what the new plan draws, not only what its cut wants</b>: a chunk held as a leaf and merged away by a jump of the eye mid-edit is still drawn, as the fallback
+  child of its absent parent, and the first flip missed it (<code>onelog-log.md</code> §5). And a world built in workers is made real at the first edit with
+  <code>setStore</code>, a store holding the same ids, so nothing flushes (<code>gizmo-log.md</code> §14).</p>
 </section>
 
 <!-- ============================ 8 ============================ -->
@@ -677,7 +729,8 @@ gl_Position = uViewProj * vec4(p, 1.0);
   <div class="shead"><span class="snum">08</span><h2>Rays: the other way to draw a chunk</h2></div>
 
   <p>Cubes cost per cube. A dense porous row is 15M cubes and 103 MB in a single view. But the same row is a DAG of under 250 nodes, so its content has very few distinct pieces. The ray path
-  stores a chunk as a <b>page</b> and walks it per pixel. The cost moves from cubes to pixels, and the storage can share pieces between chunks.</p>
+  stores a chunk as a <b>page</b> and walks it per pixel. The cost moves from cubes to pixels, and the storage can share pieces between chunks. The viewer has drawn raster only by default since 2026-11-09, so this path is opt-in (<code>?ray=density</code>, or a fixed <code>?ray=&lt;lod&gt;</code>);
+  this section builds real pages whichever path is chosen above.</p>
 
   <table class="dt" style="max-width:860px"><thead><tr><th>structure</th><th>layout</th><th>where</th><th>what it's for</th></tr></thead><tbody>
     <tr><td class="k">page</td><td>512 words: each brick's atlas slot, 0 if empty</td><td>R32UI, a row per page</td><td>one chunk, its 8³ grid of bricks</td></tr>
@@ -732,6 +785,11 @@ gl_Position = uViewProj * vec4(p, 1.0);
 <!-- ============================ 9 ============================ -->
 <section id="s9">
   <div class="shead"><span class="snum">09</span><h2>The path: raster or ray, chunk by chunk</h2></div>
+
+  <p class="aside"><b>Opt-in since 2026-11-09.</b> The viewer draws raster only unless the link says <code>?ray=density</code>: by density measured at or near the best on the benches below,
+  but raster only felt snappier, faster to follow the mouse (<code>lodacne.md</code>, the decisions). This section's demos start raster only too; pick "by density" to see the rule work.
+  <b>The cost model predates three faces a cube</b> (§5): it was fitted to a raster pass that sent 36 indices a cube, which now costs about half as much, so the line below traces
+  more than a refit would. Neither the benches nor the fit have been redone since (<code>path-occupancy.md</code>).</p>
 
   <p>Neither path wins everywhere, so each chunk is priced. Raster costs <code>cubes · c_cube</code>. A ray costs <code>footprint · c_px</code>, the pixels its box covers on screen, and a ray stops sooner in a fuller chunk.
   Dividing gives one number and one line. <b>A chunk is traced when its cubes per footprint pixel exceed a threshold that falls as the chunk fills</b>, from 0.27 when empty to 0.025 when full, fitted to the real-GPU benches.
@@ -808,12 +866,19 @@ gl_Position = uViewProj * vec4(p, 1.0);
   </div>
 
   <ol class="five">
-    <li><b>Raster, into an offscreen target.</b> Near chunks first, so the depth test rejects as much as it can. A frustum test drops whole chunks. Traced chunks are skipped here, and read as empty space to it.</li>
+    <li><b>Raster, into an offscreen target.</b> Near chunks first, so the depth test rejects as much as it can. A frustum test drops whole chunks. Traced chunks are skipped here, and read as empty space to it.
+      Three faces a cube (§5), 18 indices. Then, in the viewer, the occlusion queries, then <b>actors</b> (<code>?actors=N</code>, one draw a body), after the queries so a flier can't hide a chunk
+      from them and before the ray pass so a ray stops at a flier as at any raster surface. With no actors it's the frame it always was, call for call. The near plane is half the clearance,
+      or half the way to the nearest actor if that's nearer.</li>
     <li><b>Read the depth as a texture.</b> The depth attachment is a texture, so the next stages can sample it. That's why the canvas has no MSAA: a blit can't write into a multisampled framebuffer, and a resolved depth would put a dark fringe around raster silhouettes.</li>
     <li><b>Mark the traced chunks in a stencil.</b> Each traced chunk's box, grown by one cell, is drawn with no culling. Its fragment shader finds where the pixel's ray enters the box and discards if the raster's surface comes first.</li>
     <li><b>The ray pass, on marked pixels only.</b> One full-screen triangle, stencil-tested. Each ray marches from the near plane to the raster's surface, so a hit is always nearer than the raster: <b>a hit simply overwrites, with no depth test and no <code>gl_FragDepth</code></b>.</li>
     <li><b>Blit to the canvas.</b> The colour renderbuffer holds both paths by now.</li>
   </ol>
+  <p>That is <code>renderView</code>, and every test that compares frames byte for byte compares what it made. The viewer's <code>draw()</code> then runs passes that read the frame but never
+  change it, so they can't break a comparison: <b>SSAO</b> (<code>Y</code>, off by default: GTAO on the raster's depth, normals rebuilt from it; <code>vdagssao.md</code>), <b>the wireframe</b>
+  (<code>T</code>: the same vertices as lines, 30 a cube, with a triangle count), and in edit mode <b>the preview</b> of a world being placed, solid in front of the raster's depth and faint behind,
+  and <b>the outline</b> or the placement box's handles. None of them is in this lab.</p>
 
   <div class="fbgrid">
     <div class="fb"><h4>T.fb: the raster pass draws here</h4>
@@ -837,39 +902,104 @@ gl_Position = uViewProj * vec4(p, 1.0);
   <p>After the raster pass, each raster chunk's box, grown by a cell, is drawn inside an occlusion query, depth-tested with every write off. If no sample passes, later frames skip its cubes and keep asking. It doesn't change a frame at rest:
   <code>occlusion.test.js</code> holds the frame to the one drawn without, byte for byte. A cube inside the grown box is at least a cell behind the box's front faces, so wherever the cube would win the depth test, the box would have passed first.
   The price is a late answer: a query can't return before the page goes back to the event loop, so a chunk revealed by a move can be missing for a frame or two. In the caves' start chamber it skips 93% of the cubes at D = 10, and takes the frame from 2.63 to 1.57 ms at D = 12.
-  On an open view it's pure cost, so only the caves and the kit default to it. The decisions are in <span class="ref" data-f="occlusion-core.js" data-q="export function createOcclusion"></span>.</p>
+  On an open view it's pure cost, so the caves, the kit, the dungeon (where it cut the frame to a quarter) and the city default to it, and nothing else. The decisions are in <span class="ref" data-f="occlusion-core.js" data-q="export function createOcclusion"></span>.</p>
 </section>
 
 <!-- ============================ 11 ============================ -->
 <section id="s11">
-  <div class="shead"><span class="snum">11</span><h2>Reading order for the code</h2></div>
+  <div class="shead"><span class="snum">11</span><h2>Many worlds: one cut over a forest</h2></div>
 
-  <p>With the map in your head, read the code in this order. It skips a lot on purpose: <code>stream-viewer.html</code> is 4,400 lines, and most of them are worlds, controls, tests and benches. Line numbers below are looked up from the files as this page loads, so they stay right. Click one to copy it, and paste it into your editor's quick-open.</p>
+  <p>A <b>universe</b> (2026-11-19, <code>universe-plan.md</code>, <code>universe-log.md</code>) is worlds drawn as <em>instances</em>, never baked into one DAG. An instance is
+  <code>{ world, at, turn, scale }</code>: the world's cube corner in whole universe voxels, one of the 48 turns of the cube, and 2<sup>scale</sup> universe voxels a world voxel.
+  Those three keep every box a box in both frames, so the cut, collision and occlusion stay exact, with nothing approximated. The viewer's <code>universe:&lt;seed&gt;</code> lays nine tiles on a plane,
+  and <code>endless:&lt;seed&gt;</code> an endless lattice of 512-voxel cells, built as you go. Every section above still holds inside each world. What's new is the cut, the cache key and the draw.</p>
+
+<pre class="code"><span class="c">// selectForest, without the bookkeeping: each instance's top chunk is a tree, and every tree's chunks go in ONE heap.</span>
+<span class="k">for</span> (inst <span class="k">of</span> universe.instances) push(topChunk(inst), dist from toLocal(inst.frame, eye));   <span class="c">// the eye, in that world's own voxels</span>
+<span class="k">while</span> (heap.length){ c = pop();                                    <span class="c">// the smallest dist / size, whichever world it's in</span>
+  <span class="k">if</span> (splitsAt(c, cfg) &amp;&amp; count + kids &lt;= maxChunks) push(...kids); <span class="k">else</span> leaf(c); }</pre>
+
+  <p><b>Nothing new is needed for the lods to be right</b>, because <code>dist / size</code> is the same number in either frame: a scale multiplies both, and a turn moves neither.
+  So a near chunk of a small world and a far chunk of a big one are compared as they look, worlds of different depths and scales each get the right lod, and <b>one <code>maxChunks</code> is spent where it
+  shows most across the whole universe</b>. Each tree is exactly what <code>selectChunks</code> would cut for its instance alone, which <code>test/stream-core.test.js</code> holds key for key.</p>
+
+  <div class="stage">
+    <div class="ctrls">
+      <div class="cgroup">
+        <label class="lbl" for="uniK">Detail K <span class="val" id="uniKV">4</span></label>
+        <input type="range" id="uniK" min="1" max="6" step="0.25" value="4">
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="uniCap">maxChunks <span class="val" id="uniCapV">1,024</span></label>
+        <input type="range" id="uniCap" min="6" max="12" step="1" value="10">
+      </div>
+      <div class="cgroup">
+        <label class="lbl" for="uniY">Eye height <span class="val" id="uniYV">40</span></label>
+        <input type="range" id="uniY" min="2" max="900" step="1" value="40">
+      </div>
+    </div>
+    <div class="legend" id="uniLeg"></div>
+    <canvas id="cvUni" class="paint" data-h="640" tabindex="0" aria-label="Six instances of three kit worlds seen from above, each with the forest cut's chunks at the eye's height, coloured by lod. Drag to move the eye; hover a chunk to see its copies."></canvas>
+    <div class="read" id="rdUni"></div>
+    <div class="verdict" id="vdUni"></div>
+  </div>
+  <p class="chipnote">Built on this page with the real <code>buildKit</code>, <code>createUniverse</code> and <code>selectForest</code>: six instances of three kits. A D = 10 kit three times (as it is, turned a quarter about y, mirrored), once more at ×2,
+  another D = 10 kit, and a D = 12 kit at ¼, so the same size on the plane. From above, at the eye's height: each instance's leaves that cross that plane, in the universe, by lod.
+  Drag anywhere to move the eye. Hover a chunk to outline every copy of it.</p>
+
+  <p><b>The cache holds world chunks, not instance chunks.</b> The streamer keys an entry <code>world/lod:x,y,z</code> (<code>forestKey</code>), so copies of a world that want the same chunk want it once,
+  one job builds it, and <code>coverForest</code> lists it once an instance to draw, all from one entry. A world chunk two trees want takes the nearer one's distance, so it's built in its turn.
+  The pool posts each world's snapshot to the workers once, under its key, and a job names its world (<code>setUniverse</code>).</p>
+
+<pre class="code"><span class="c">// rasterVS(…, turned): a universe's raster program. The records stay in their world's frame.</span>
+uOrigin = chunk corner − toLocal(frame, eye);     <span class="c">// in the world's own voxels, so §5's face choice is made where it's right</span>
+<span class="k">vec3</span> q = uTurn * p;                                <span class="c">// turnMatrix: the turn, times 2^scale, eye-relative world to eye-relative universe</span>
+vNormal = uTurn * NORMAL[face] / uScale;
+gl.frontFace(mirrored ? gl.CW : gl.CCW);          <span class="c">// a mirror reverses every face's winding, so CULL_FACE needs the other order</span></pre>
+
+  <p><b>The draw is a turned twin of the raster program</b>, set once an instance: <code>placeChunk</code> puts each drawn chunk's box in the universe for culling, sorting and occlusion
+  (keyed instance and chunk), and <code>instanceUniforms</code> sets the turn, the scale, the mirror's winding, the world's gamut and a tint for the far view. A plain world keeps the plain program, so its frames
+  don't change: <code>universeSelftest()</code> holds one identity instance through the turned program to the plain frame, byte for byte, and turned and mirrored instances to the same worlds baked into one DAG.</p>
+  <p><b>The endless lattice moves without a flush.</b> <code>setUniverse(u, { keep: true })</code> swaps one window of cells for the next: a world under the same key, store, root and depth keeps its
+  entries, jobs and results, and any other world's are dropped at once. The coordinates roll with the eye (<code>shiftOrigin</code>, by whole voxels), so float32 stays fine however far you fly.
+  A universe has no ray path, no edits and no export yet, and the viewer says why when you ask for one.</p>
+</section>
+
+<!-- ============================ 12 ============================ -->
+<section id="s12">
+  <div class="shead"><span class="snum">12</span><h2>Reading order for the code</h2></div>
+
+  <p>With the map in your head, read the code in this order. It skips a lot on purpose: <code>stream-viewer.html</code> is <span id="viewerLines">nearly 10,000</span> lines, and most of them are worlds, controls, tests and benches. Line numbers below are looked up from the files as this page loads, so they stay right. Click one to copy it, and paste it into your editor's quick-open.</p>
 
   <table class="dt" id="tbRead"><thead><tr><th>#</th><th>read</th><th>where</th><th>for</th></tr></thead><tbody>
-    <tr><td class="n">1</td><td class="k">the viewer's frame</td><td><span class="ref" data-f="stream-viewer.html" data-q="function frame({"></span></td><td>the four lines at the top of this page, in the original</td></tr>
+    <tr><td class="n">1</td><td class="k">the viewer's frame</td><td><span class="ref" data-f="stream-viewer.html" data-q="function frame({"></span></td><td>the loop at the top of this page, in the original, and <code>draw()</code> below it</td></tr>
     <tr><td class="n">2</td><td class="k">chunk addresses</td><td><span class="ref" data-f="stream-core.js" data-q="export function createWorld"></span></td><td>header comment just above it: lod, level, chunk (§2)</td></tr>
-    <tr><td class="n">3</td><td class="k">selectChunks</td><td><span class="ref" data-f="stream-core.js" data-q="export function selectChunks"></span></td><td>the cut; the proof of the one-lod rule is in the comment above it (§3)</td></tr>
+    <tr><td class="n">3</td><td class="k">selectChunks</td><td><span class="ref" data-f="stream-core.js" data-q="export function selectChunks"></span></td><td>the cut and <code>splitsAt</code>; the proof of the one-lod rule is in the comment above it (§3)</td></tr>
     <tr><td class="n">4</td><td class="k">coverOf</td><td><span class="ref" data-f="stream-core.js" data-q="export function coverOf"></span></td><td>complete beats finer, and how <code>open</code> sides are found (§6, §7)</td></tr>
     <tr><td class="n">5</td><td class="k">chooseKinds</td><td><span class="ref" data-f="stream-core.js" data-q="export function chooseKinds"></span></td><td>with <code>kindFor</code> and the long comment above it (§9)</td></tr>
     <tr><td class="n">6</td><td class="k">recover, nextJob, service</td><td><span class="ref" data-f="stream-core.js" data-q="function recover()"></span></td><td>job order, admission, then <code>installItem</code>, in that order. Skip the edit branches at first (§7)</td></tr>
     <tr><td class="n">7</td><td class="k">StreamPool.dispatch</td><td><span class="ref" data-f="stream-pool.js" data-q="  dispatch(){"></span></td><td>how little the threads do</td></tr>
-    <tr><td class="n">8</td><td class="k">createJobRunner</td><td><span class="ref" data-f="stream-core.js" data-q="export function createJobRunner"></span></td><td>what a worker runs: one call, plus the buried shortcut (§4)</td></tr>
-    <tr><td class="n">9</td><td class="k">expandChunk</td><td><span class="ref" data-f="chunk-core.js" data-q="export function expandChunk"></span></td><td>walk, apron, masks, tail (§4). Header comment first: the record</td></tr>
-    <tr><td class="n">10</td><td class="k">GLSL_DECODE</td><td><span class="ref" data-f="chunk-glsl.js" data-q="export const GLSL_DECODE"></span></td><td>the same record from the other side (§5)</td></tr>
-    <tr><td class="n">11</td><td class="k">renderView</td><td><span class="ref" data-f="stream-viewer.html" data-q="function renderView("></span></td><td>the passes, in order (§10). Ignore <code>occl</code> and <code>timed</code> on a first read</td></tr>
-    <tr><td class="n">12</td><td class="k">install / dispose</td><td><span class="ref" data-f="stream-viewer.html" data-q="function install(entry)"></span></td><td>the streamer's only two GL hooks</td></tr>
-    <tr><td class="n">13</td><td class="k">ray-core's header</td><td><span class="ref" data-f="ray-core.js" data-q="export const PAGE_WORDS"></span></td><td>page, brick, cover tree layouts (§8), then <code>traceCPU</code>, which is easier than the GLSL</td></tr>
-    <tr><td class="n">14</td><td class="k">GLSL_RAY</td><td><span class="ref" data-f="ray-glsl.js" data-q="export const GLSL_RAY = "></span></td><td>the same march, line for line</td></tr>
-    <tr><td class="n">15</td><td class="k">markTraced</td><td><span class="ref" data-f="stream-viewer.html" data-q="function markTraced("></span></td><td>the stencil (§10)</td></tr>
-    <tr><td class="n">16</td><td class="k">frameChecker</td><td><span class="ref" data-f="test/stream-core.test.js" data-q="function frameChecker"></span></td><td>every promise the streamer makes, written as a check. It's the best summary of the rules</td></tr>
+    <tr><td class="n">8</td><td class="k">createJobRunner</td><td><span class="ref" data-f="stream-core.js" data-q="export function createJobRunner"></span></td><td>what a worker runs: <code>fastChunk</code>, plus the buried shortcut (§4)</td></tr>
+    <tr><td class="n">9</td><td class="k">expandChunk</td><td><span class="ref" data-f="chunk-core.js" data-q="export function expandChunk"></span></td><td>walk, apron, masks, tail (§4): what a job makes, the plain way. Header comment first: the record</td></tr>
+    <tr><td class="n">10</td><td class="k">fastChunk</td><td><span class="ref" data-f="job-core.js" data-q="export function fastChunk"></span></td><td>the same bytes, faster; read job-core's header for the three changes (§4)</td></tr>
+    <tr><td class="n">11</td><td class="k">GLSL_DECODE</td><td><span class="ref" data-f="chunk-glsl.js" data-q="export const GLSL_DECODE"></span></td><td>the same record from the other side (§5)</td></tr>
+    <tr><td class="n">12</td><td class="k">rasterVS</td><td><span class="ref" data-f="stream-viewer.html" data-q="const rasterVS = "></span></td><td>three faces a cube, and the comment above it (§5); <code>turned</code> is a universe's (§11)</td></tr>
+    <tr><td class="n">13</td><td class="k">renderView</td><td><span class="ref" data-f="stream-viewer.html" data-q="function renderView("></span></td><td>the passes, in order (§10). Ignore <code>occl</code>, <code>places</code> and <code>timed</code> on a first read</td></tr>
+    <tr><td class="n">14</td><td class="k">install / dispose</td><td><span class="ref" data-f="stream-viewer.html" data-q="function install(entry)"></span></td><td>the streamer's only two GL hooks</td></tr>
+    <tr><td class="n">15</td><td class="k">ray-core's header</td><td><span class="ref" data-f="ray-core.js" data-q="export const PAGE_WORDS"></span></td><td>page, brick, cover tree layouts (§8), then <code>traceCPU</code>, which is easier than the GLSL</td></tr>
+    <tr><td class="n">16</td><td class="k">GLSL_RAY</td><td><span class="ref" data-f="ray-glsl.js" data-q="export const GLSL_RAY = "></span></td><td>the same march, line for line</td></tr>
+    <tr><td class="n">17</td><td class="k">markTraced</td><td><span class="ref" data-f="stream-viewer.html" data-q="function markTraced("></span></td><td>the stencil (§10)</td></tr>
+    <tr><td class="n">18</td><td class="k">selectForest</td><td><span class="ref" data-f="stream-core.js" data-q="export function selectForest"></span></td><td>a universe's cut, and <code>coverForest</code> below it (§11); universe-core's header for the frames</td></tr>
+    <tr><td class="n">19</td><td class="k">frameChecker</td><td><span class="ref" data-f="test/stream-core.test.js" data-q="function frameChecker"></span></td><td>every promise the streamer makes, written as a check. It's the best summary of the rules</td></tr>
   </tbody></table>
 
   <h3 style="margin-top:30px">What's where, and which side of the line</h3>
   <table class="dt" style="max-width:940px"><thead><tr><th>file</th><th>runs on</th><th>what it holds</th></tr></thead><tbody>
     <tr><td class="k">dag-core.js</td><td><span class="tag main">main</span><span class="tag worker">workers</span></td><td>the world: store, counts, classes, <code>storeView</code></td></tr>
     <tr><td class="k">stream-core.js</td><td><span class="tag main">main</span><span class="tag worker">workers</span></td><td><b>every streaming decision</b>, pure. Its job runner is what the workers call</td></tr>
-    <tr><td class="k">chunk-core.js</td><td><span class="tag worker">workers</span></td><td><code>expandChunk</code>: a node to records. Pure</td></tr>
+    <tr><td class="k">chunk-core.js</td><td><span class="tag worker">workers</span></td><td><code>expandChunk</code>: a node to records, the reference. The lod rules. Pure</td></tr>
+    <tr><td class="k">job-core.js</td><td><span class="tag worker">workers</span></td><td><code>fastChunk</code>: the same records, 4–12× faster without colour. Pure</td></tr>
+    <tr><td class="k">universe-core.js</td><td><span class="tag main">main</span></td><td>instances, frames, the plane, the endless lattice's cells. Pure</td></tr>
     <tr><td class="k">ray-core.js</td><td><span class="tag worker">workers</span><span class="tag main">main</span></td><td>pages in workers; brick pool, heap and cover tree on main; CPU twins for the tests</td></tr>
     <tr><td class="k">stream-pool.js + chunk-worker.js</td><td><span class="tag main">main</span><span class="tag worker">workers</span></td><td>threads and messages. No decisions</td></tr>
     <tr><td class="k">chunk-glsl.js, ray-glsl.js</td><td><span class="tag gpu">GPU</span></td><td>the decode and the march, as strings every program prepends</td></tr>
@@ -879,15 +1009,16 @@ gl_Position = uViewProj * vec4(p, 1.0);
 
   <h3 style="margin-top:30px">What this page's lab leaves out</h3>
   <ul class="plain">
-    <li>Its passes are a shorter copy of <code>renderView</code>, with the same order, targets and uniforms. <code>GLSL_DECODE</code>, <code>GLSL_ATTR</code>, <code>GLSL_RAY</code> and <code>GLSL_RAY_ATTR</code> are imported, not copied; the raster, box and ray-pass wrappers around them are copied, so <b>a later change to the viewer's passes won't reach this page</b>. It adds a steps-heat mode and a bound switch for §10.</li>
-    <li>No depth readback, no wireframe in the lab (§5 has one), no edit mode, no gamepad, no bench, no <code>?raymiss=discard</code>. Its texture pools are smaller than the viewer's, so a ray-only view of a dense row may run out of attribute heap and draw grey, as the viewer's HUD warns.</li>
+    <li>Its passes are a shorter copy of <code>renderView</code> as it was at commit <code>3d7894a</code>, with the same order, targets and uniforms and three faces a cube. <code>GLSL_DECODE</code>, <code>GLSL_ATTR</code>, <code>GLSL_RAY</code> and <code>GLSL_RAY_ATTR</code> are imported, not copied; the raster, box and ray-pass wrappers around them are copied, so <b>a later change to the viewer's passes won't reach this page</b> until it's refreshed. It adds a steps-heat mode and a bound switch for §10.</li>
+    <li>No universe or turned program in the lab (§11 shows the cut, and the shader's lines), no actors, SSAO, wireframe (§5 has one), preview or outline, no edit mode, no walking or orbit camera, no gamepad, no bench, no depth readback, no <code>?raymiss=discard</code>.
+      Occlusion queries start off, where the viewer has them on in the kit. Its texture pools are smaller than the viewer's, so a ray-only view of a dense row may run out of attribute heap and draw grey, as the viewer's HUD warns.</li>
     <li>§6's seam picture and the bench table are what they say: a 2D model, and numbers copied from the docs. Everything else is measured here, on your machine, with the repo's own cores.</li>
   </ul>
-  <p>The docs for each part: <code>stream-plan.md</code>, <code>stream-findings.md</code>, <code>ray-plan.md</code>, <code>ray-depth-findings.md</code>, <code>path-occupancy.md</code>, <code>stencil-pass.md</code>, <code>occlusion.md</code>, <code>edit-stream-log.md</code>. <code>docs/README.md</code> is the index.</p>
+  <p>The docs for each part: <code>stream-plan.md</code>, <code>stream-findings.md</code>, <code>ray-plan.md</code>, <code>ray-depth-findings.md</code>, <code>path-occupancy.md</code>, <code>stencil-pass.md</code>, <code>occlusion.md</code>, <code>edit-stream-log.md</code>, <code>job-speed-log.md</code>, <code>lodacne.md</code>, <code>city-frame-cost.md</code>, <code>lod-locked.md</code>, <code>universe-log.md</code>. <code>docs/README.md</code> is the index.</p>
 </section>
 
 <footer>
-  renderer-explainer.html · imports dag-core.js, chunk-core.js, chunk-glsl.js, stream-core.js, stream-pool.js, ray-core.js, ray-glsl.js, occlusion-core.js, kit-core.js, colours.js and the shapes unchanged.<br>
+  renderer-explainer.html · matches the viewer at 3d7894a (2026-11-26) · imports dag-core.js, chunk-core.js, job-core.js, chunk-glsl.js, stream-core.js, stream-pool.js, ray-core.js, ray-glsl.js, occlusion-core.js, universe-core.js, kit-core.js, colours.js and the shapes unchanged.<br>
   Serve the folder over HTTP (<code>npm run serve</code>). The companion page on the DAG itself is <a href="dagskits-explainer.html">dagskits-explainer.html</a>; the real thing is <a href="stream-viewer.html" id="toViewer">stream-viewer.html</a>.
 </footer>
 
@@ -914,7 +1045,9 @@ if (location.protocol === 'file:') document.addEventListener('DOMContentLoaded',
    repo's own code:
      - the drawing lab's passes (a shorter copy of renderView, around the real
        GLSL_DECODE, GLSL_ATTR, GLSL_RAY and GLSL_RAY_ATTR). They can drift from
-       the viewer's, and §11 says so;
+       the viewer's, and §12 says so. The page names the viewer commit it matches
+       (under the header, in §12 and the footer) and is refreshed on major
+       renderer changes rather than kept in step (2026-11-26);
      - the job throttle in §7, which exists so a person can watch;
      - §6's seam picture, a 2D model.
    logMarch in §8 is traceCPU with a log in it, and the page checks that it lands
@@ -925,7 +1058,7 @@ if (location.protocol === 'file:') document.addEventListener('DOMContentLoaded',
    and one set of textures however many sections show it. */
 import { createStore, createCounts, createClasses, OH48, EMPTY, FIRST_NODE } from './dag-core.js';
 import { CHUNK_SIDE, expandChunk, nodeAt, mortonOf, mortonXYZ, cellOf, maskOf, poseOf, quadsShown, boundaryBits } from './chunk-core.js';
-import { createWorld, createStreamer, createJobRunner, worldSnapshot, selectChunks, keyOf, DEFAULTS, chunkFootprint, densityThreshold, clearance as clearanceOf } from './stream-core.js';
+import { createWorld, createStreamer, createJobRunner, worldSnapshot, selectChunks, selectForest, forestKey, keyOf, DEFAULTS, chunkFootprint, densityThreshold, clearance as clearanceOf } from './stream-core.js';
 import { StreamPool } from './stream-pool.js';
 import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
 import { GLSL_RAY, GLSL_RAY_ATTR, TREE_TEXELS, TREE_W, BRICK_ROW } from './ray-glsl.js';
@@ -935,6 +1068,8 @@ import { SHAPES, fieldOf } from './experiments/shapes.mjs';
 import { colourOf } from './colours.js';
 import { attrRGB } from './attr-core.js';
 import { createOcclusion, nearRadius, nearEye } from './occlusion-core.js';
+import { fastChunk, createJobCache } from './job-core.js';
+import { createUniverse, boxToUniverse, toLocal } from './universe-core.js';
 
 /* ---- small things ---------------------------------------------------------- */
 const $ = id => document.getElementById(id);
@@ -1101,8 +1236,13 @@ const glslVec3s = a => a.map(v => `vec3(${v.map(x => x.toFixed(1)).join(',')})`)
 const BOX_CORNERS = [];
 for (let f = 0; f < 6; f++) for (const i of [0, 1, 2, 0, 2, 3]) BOX_CORNERS.push(FACE_OFF[4 * f + i].map(v => v + 0.5));
 
-/* rasterVS, with a condition slot as the viewer's has for its wireframe. */
-const rasterVS = hide => `#version 300 es
+/* rasterVS, with a condition slot as the viewer's has for its wireframe, and
+   three faces a cube as the viewer's draws (docs/city-frame-cost.md): of each
+   axis's two faces, the one on the eye's side, by the sign of the cube's
+   eye-relative centre; 18 indices. `all` is the six faces of before (36), which
+   §5 offers to compare. The viewer's `turned` (a universe's) isn't copied: §11
+   shows its lines. */
+const rasterVS = (hide, all = false) => `#version 300 es
 precision highp float;
 precision highp int;
 ${GLSL_DECODE}
@@ -1117,11 +1257,14 @@ out vec3 vNormal;
 flat out uint vPose;
 flat out uint vAttr;
 flat out int vInst;
+const bool ALL_SIX = ${all};
 void main(){
   vInst = gl_InstanceID;
   vAttr = aAttr;
-  uint corner = uint(gl_VertexID), face = corner / 4u;
-  vec3 p = recCentre(aRec) + CORNER[corner] * uCellSize;
+  vec3 c = recCentre(aRec);
+  uint v = uint(gl_VertexID), k = v / 4u;
+  uint face = ALL_SIX ? k : 2u * k + (c[k] < 0.0 ? 0u : 1u), corner = 4u * face + v % 4u;
+  vec3 p = c + CORNER[corner] * uCellSize;
   vRel = p;
   vNormal = NORMAL[face];
   vPose = recPose(aRec);
@@ -1466,8 +1609,10 @@ function dispose(entry){
 
 /* ---- the streamer, the pool, the throttle --------------------------------------
    The rule is computed for the whole window, not the lab's small canvas: the same
-   footprints the viewer would use if it were open in this window. */
-const app = { path: 'density', density: [0.27, 0.025], workers: Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1)), cap: Infinity, tokens: 0, fly: 0, flyAt: null };
+   footprints the viewer would use if it were open in this window. The viewer's
+   defaults: raster only (path 'off'), lod 0 'any' and 'shadow' above it, detail 4
+   (stream-core's own defaults are adaptive and 2; docs/lodacne.md's decisions). */
+const app = { path: 'off', density: [0.27, 0.025], workers: Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1)), cap: Infinity, tokens: 0, fly: 0, flyAt: null };
 function pathOptions(path){
   if (path === 'density') return { rayLod: Infinity, rayDensity: app.density[0], rayDensityFull: app.density[1], kindRule: null };
   if (path === 'checker') return { rayLod: Infinity, rayDensity: Infinity, kindRule: c => ((c.x + c.y + c.z + c.lod) & 1) ? 'page' : 'records' };
@@ -1477,7 +1622,7 @@ const windowOptions = () => {
   const dpr = Math.min(devicePixelRatio || 1, 2), w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
   return { pxPerRadian: h / (2 * Math.tan(0.45)), screenPixels: w * h };
 };
-const streamer = createStreamer({ install, dispose, lodRuleOf: lod => lod === 0 ? 'any' : 'adaptive', ...pathOptions(app.path), ...windowOptions() });
+const streamer = createStreamer({ install, dispose, detail: 4, lodRuleOf: lod => lod === 0 ? 'any' : 'shadow', ...pathOptions(app.path), ...windowOptions() });
 // What the pool sees as its streamer: the real one, with a tap on nextJob. The
 // viewer has nothing like this; it's here so a person can watch a world load.
 const gate = {
@@ -1690,8 +1835,8 @@ function renderLab(){
       gl.uniform3fv(RU.uLodColor, LOD_COLORS[d.lod]);
       gl.uniform3fv(RU.uChunkColor, chunkColor(d));
       gl.bindVertexArray(e.gpu.vao);
-      gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_BYTE, 0, n);
-      lab.draws++; lab.cubes += n; lab.sent += 12 * n; lab.exposed += 2 * quadsShown(e.quads, e.openQuads, d.open);
+      gl.drawElementsInstanced(gl.TRIANGLES, 18, gl.UNSIGNED_BYTE, 0, n);
+      lab.draws++; lab.cubes += n; lab.sent += 6 * n; lab.exposed += 2 * quadsShown(e.quads, e.openQuads, d.open);
     }
     gl.bindVertexArray(null);
     if (occ){ occAsk(M, asks); lab.queried = asks.length; occ.end(); }
@@ -1779,13 +1924,13 @@ const N = {
   setWorld:{ c: 3, r: 0, th: 'main', t: 'setWorld', s: 'streamer + pool', rate: 'once per world', f: 'stream-core.js', q: 'function setWorld(world)',
              p: 'The streamer forgets every chunk and the pool posts the snapshot to each worker, once, by structured clone. So each worker has its own copy of the DAG, and from then on jobs are just addresses.' },
   eye:     { c: 0, r: 1, th: 'main', t: 'the eye', s: 'doubles, in voxels', rate: 'every frame', f: 'stream-viewer.html', q: 'function move(dt)',
-             p: 'Speed and the near plane follow <code>clearance</code>, a best-first search of the DAG for the nearest voxel. That is how a 65,536³ world crosses in seconds and a one-voxel gap is still flyable. A move of over 0.25 voxels triggers the row to its right.' },
+             p: 'Speed and the near plane follow <code>clearance</code>, a best-first search of the DAG for the nearest voxel. That is how a 65,536³ world crosses in seconds and a one-voxel gap is still flyable. Inside rock, where clearance is 0, speed follows <code>solidDepth</code>, how deep in it the eye is. The keys fly it, the mouse orbits, pans and dollies it (<code>camera-core.js</code>), and a walker (<code>walk-core.js</code>) can carry it; whatever moved it, a move of over 0.25 voxels triggers the row to its right.' },
   cut:     { c: 1, r: 1, th: 'main', t: 'selectChunks', s: 'the cut', rate: 'when the eye moves', f: 'stream-core.js', q: 'export function selectChunks', sec: 's3',
-             p: 'Which chunks the eye wants: split any chunk closer than <code>detail</code> of its own sides. It reads only the DAG, and <code>maxChunks</code> caps it at 1,024 leaves.' },
+             p: 'Which chunks the eye wants: split any chunk closer than <code>detail</code> of its own sides (4 in the viewer), or with a locked lod every chunk down to that lod. It reads only the DAG, and <code>maxChunks</code> caps it at 1,024 leaves. A universe\'s is <code>selectForest</code>, every instance in one heap (§11).' },
   cover:   { c: 2, r: 1, th: 'main', t: 'coverOf', s: 'the cover', rate: 'eye moved, or a chunk landed', f: 'stream-core.js', q: 'export function coverOf', sec: 's7',
              p: 'What to draw from what is resident: the finest <em>complete</em> tiling. A region never mixes a chunk with its own descendants, so nothing is drawn twice. It also finds each drawn chunk\'s open sides.' },
   kinds:   { c: 3, r: 1, th: 'main', t: 'chooseKinds', s: 'raster or ray', rate: 'eye moved, or a chunk landed', f: 'stream-core.js', q: 'export function chooseKinds', sec: 's9',
-             p: 'Each chunk\'s path, from the cubes it reported, its footprint on screen, and how full it is. With hysteresis, because each flip is a job.' },
+             p: 'Each chunk\'s path, from the cubes it reported, its footprint on screen, and how full it is. With hysteresis, because each flip is a job. Off in the viewer since 2026-11-09, which draws raster only unless the link says <code>?ray=density</code>.' },
   queue:   { c: 4, r: 1, th: 'main', t: 'recover', s: 'the job queue', rate: 'eye moved, or a chunk landed', f: 'stream-core.js', q: 'function recover()', sec: 's7',
              p: 'Puts the top three together, and orders the queue: pinned top chunk, holes, then everything missing by <code>dist / size</code>, then kind switches. It also evicts, LRU, never touching what\'s wanted.' },
   dispatch:{ c: 4, r: 2, th: 'main', t: 'pool.dispatch', s: 'nextJob → idle worker', rate: 'every frame, and on every worker message', f: 'stream-pool.js', q: '  dispatch(){', sec: 's7',
@@ -1798,24 +1943,24 @@ const N = {
              p: 'The cover again, as an octree a shader can walk: 12 words a node. Only a few KB, rebuilt and uploaded whenever the streamer\'s frame changes.' },
   render:  { c: 0, r: 2, th: 'main', t: 'renderView', s: 'the draw list: sort, cull', rate: 'every frame', f: 'stream-viewer.html', q: 'function renderView(', sec: 's10',
              p: 'The draw list, near first, frustum tested. Everything to its right was deciding, and this is the part that does. The eye-relative origin is computed here.' },
-  records: { c: 4, r: 3, th: 'worker', t: 'expandChunk', s: 'a records job', rate: 'once per job, 2–19 ms', f: 'chunk-core.js', q: 'export function expandChunk', sec: 's4',
-             p: 'One chunk to 4-byte records and their attribute words. Transferred back, not copied. It reads exactly seven DAG nodes: its own and six neighbours.' },
+  records: { c: 4, r: 3, th: 'worker', t: 'fastChunk', s: 'a records job', rate: 'once per job, ~1–16 ms', f: 'job-core.js', q: 'export function fastChunk', sec: 's4',
+             p: 'One chunk to 4-byte records and their attribute words: <code>expandChunk</code>\'s bytes, computed faster (full nodes as shells, a mask cache, a nearer seam test), 4–12× without colour and 1.4–3.7× with it, where colour is now most of the job. Transferred back, not copied. It reads exactly seven DAG nodes: its own and six neighbours.' },
   page:    { c: 3, r: 3, th: 'worker', t: 'pageJob', s: 'a page job', rate: 'once per job', f: 'ray-core.js', q: 'export function pageJob', sec: 's8',
              p: 'The same chunk as a ray page: a grid of brick node ids and each distinct brick\'s bits, once. It also reports <code>recordCount</code>, so the path rule can price the chunk whichever way it was built.' },
   textures:{ c: 2, r: 4, th: 'gpu', t: 'pages, bricks, heap', s: 'five integer textures', rate: 'as pages are admitted', f: 'stream-viewer.html', q: 'const ray = {', sec: 's8',
              p: 'A page is one row of a texture. Bricks live in a shared atlas keyed by (node id, lod), counted by the pages using them. Attribute words are in a first-fit heap.' },
   vao:     { c: 3, r: 4, th: 'gpu', t: 'a VAO per chunk', s: 'records + words', rate: 'as records are admitted', f: 'stream-viewer.html', q: 'function install(entry)', sec: 's5',
              p: 'One buffer per resident chunk: records, then attribute words, read as two integer instance attributes. An empty chunk owns nothing.' },
-  occl:    { c: 0, r: 5, th: 'gpu', t: 'occlusion queries', s: 'boxes vs depth', rate: 'caves and kit, by default', f: 'stream-viewer.html', q: 'function queryRunner(', sec: 's10',
-             p: 'After the raster pass, each raster chunk\'s box against the frame\'s depth. The answer comes frames later and skips that chunk\'s cubes. The decisions are in <code>occlusion-core.js</code>.' },
+  occl:    { c: 0, r: 5, th: 'gpu', t: 'occlusion queries', s: 'boxes vs depth', rate: 'caves, kit, dungeon, city', f: 'stream-viewer.html', q: 'function queryRunner(', sec: 's10',
+             p: 'After the raster pass, each raster chunk\'s box against the frame\'s depth. The answer comes frames later and skips that chunk\'s cubes. On by default in the caves, the kit, the dungeon and the city. The decisions are in <code>occlusion-core.js</code>.' },
   raster:  { c: 1, r: 5, th: 'gpu', t: 'raster pass', s: 'instanced cubes', rate: 'every frame', f: 'stream-viewer.html', q: 'function renderView(', sec: 's5',
-             p: 'One instanced draw per raster chunk, into an offscreen target whose depth is a texture. About 3.4 ns a cube on the Apple GPU benches.' },
+             p: 'One instanced draw per raster chunk, into an offscreen target whose depth is a texture: 18 indices a cube, of each axis\'s two faces the one on the eye\'s side. The pass is bound by geometry, so that halved it (§5). Actors, when there are any, are drawn after the occlusion queries and before the ray pass.' },
   mark:    { c: 2, r: 5, th: 'gpu', t: 'markTraced', s: 'stencil the boxes', rate: 'if anything is traced', f: 'stream-viewer.html', q: 'function markTraced(', sec: 's10',
              p: 'Each traced chunk\'s box into a stencil, depth-tested by hand against the raster. On a terrain\'s 82 traced chunks that left 0% of the pixels to march.' },
   ray:     { c: 3, r: 5, th: 'gpu', t: 'ray pass', s: 'GLSL_RAY, on the mask', rate: 'if anything is traced', f: 'ray-glsl.js', q: 'export const GLSL_RAY = ', sec: 's8',
              p: 'A full-screen triangle, stencil-tested. Each pixel marches the cover tree from the near plane to the raster\'s surface, and a hit overwrites.' },
   blit:    { c: 4, r: 5, th: 'gpu', t: 'blit', s: 'colour → canvas', rate: 'every frame', f: 'stream-viewer.html', q: 'gl.blitFramebuffer(0, 0, w, h', sec: 's10',
-             p: 'The shared colour renderbuffer goes to the canvas. Single-sampled on purpose: a blit can\'t write into a multisampled framebuffer, and a resolved depth would fringe the silhouettes.' },
+             p: 'The shared colour renderbuffer goes to the canvas. Single-sampled on purpose: a blit can\'t write into a multisampled framebuffer, and a resolved depth would fringe the silhouettes. That ends <code>renderView</code>; SSAO, the wireframe and edit mode\'s preview and outline draw after it, onto the canvas.' },
 };
 const E = [
   ['build', 'counts'], ['counts', 'snapshot'], ['snapshot', 'setWorld'],
@@ -1836,16 +1981,16 @@ const TOURS = {
     { n: ['dispatch', 'records', 'page'], h: 'Hand out work, and don\'t wait', p: '<code>pool.dispatch()</code> gives each idle worker its next job and returns. The workers run whenever they run. This is why a frame is never held up by a job.' },
     { n: ['service', 'cache', 'vao', 'textures'], h: 'Admit what\'s finished', p: '<code>streamer.service()</code> installs finished results, nearest first, under 1 ms and 8 MB. This is the only place GPU memory changes. If anything was admitted, the cover is recomputed.' },
     { n: ['tree', 'render'], h: 'Sort and cull', p: '<code>renderView</code> takes the cover as its draw list, sorts it near first, and uploads the cover tree if it changed.' },
-    { n: ['raster'], h: 'Raster pass', p: 'One instanced draw per raster chunk in the frustum. Colour and a depth texture.' },
+    { n: ['raster'], h: 'Raster pass', p: 'One instanced draw per raster chunk in the frustum, three faces a cube. Colour and a depth texture.' },
     { n: ['occl'], h: 'Occlusion, if it\'s on', p: 'Each raster chunk\'s box against that depth, in a query. The answers arrive in a later frame.' },
-    { n: ['mark'], h: 'Stencil', p: 'The traced chunks\' boxes, but only where the raster doesn\'t already cover them.' },
+    { n: ['mark'], h: 'Stencil', p: 'The traced chunks\' boxes, but only where the raster doesn\'t already cover them. With raster only, the viewer\'s default, there are none, and this and the ray pass don\'t run.' },
     { n: ['ray'], h: 'Ray pass', p: 'Marked pixels march to the raster\'s depth. Hits overwrite; misses leave the raster.' },
-    { n: ['blit'], h: 'Show it', p: 'Colour to the canvas. On the Apple GPU benches all of this takes 1.4 ms in the caves and 12 ms on a kit street at 2560 × 1357.' },
+    { n: ['blit'], h: 'Show it', p: 'Colour to the canvas. On the Apple GPU benches all of this took 1.4 ms in the caves and 12 ms on a kit street at 2560 × 1357, with six faces a cube; three faces since have halved the raster pass.' },
   ] },
   chunk: { label: 'a chunk\'s life', steps: [
     { n: ['cut'], h: 'Wanted', p: 'The eye came near, so the chunk is in the cut, as a leaf or a split. Either way it\'s wanted: split chunks stay resident as fallbacks.' },
     { n: ['kinds', 'queue'], h: 'Priced and queued', p: 'With no report yet, it takes its parent\'s kind. It goes in the queue by <code>dist / size</code>, or to the front if its absence leaves a hole.' },
-    { n: ['dispatch', 'records'], h: 'Built', p: 'A worker expands it, 2–19 ms, and transfers the buffers back. Only the address crossed over: the worker already has the DAG.' },
+    { n: ['dispatch', 'records'], h: 'Built', p: 'A worker builds it with <code>fastChunk</code>, about 1–4 ms without colour and more with it, and transfers the buffers back. Only the address crossed over: the worker already has the DAG.' },
     { n: ['service'], h: 'Waiting', p: 'The result waits in <code>S.results</code> until a frame has budget for it. If the eye has moved on and the chunk has left the cut, it\'s thrown away here.' },
     { n: ['cache', 'vao'], h: 'Resident', p: 'Uploaded. The entry now holds a GPU handle and the chunk\'s own report: how many cubes, how full.' },
     { n: ['cover'], h: 'Drawn, maybe', p: 'Now the cover may use it, but only if its whole region can be tiled. Its siblings may hold it back, with their parent drawn instead, so the image only changes once a replacement is whole.' },
@@ -1860,11 +2005,11 @@ const TOURS = {
     { n: ['blit'], h: 'Done', p: 'Whichever path won is in the colour renderbuffer. <code>raySelftest</code> holds the two paths to each other on the same cell, up to sub-pixel grazes.' },
   ] },
   click: { label: 'a click (edit mode)', steps: [
-    { n: ['build'], h: 'A new root', p: 'A placed or broken block is one path of new nodes, about 10 µs, interned in the same store. The old root is still whole, so undo is just the old id. <code>edit-core.js</code> makes the decisions.' },
+    { n: ['build'], h: 'A new root', p: 'A placed or broken block is one path of new nodes, about 10 µs, interned in the same store; a dropped world is a bake into it. The old root is still whole, so undo is just the old id. Both go in one log (<code>log-core.js</code>), and <code>edit-core.js</code> makes a click\'s decisions.' },
     { n: ['cut', 'cover'], h: 'A second cut, on the side', p: '<code>setRoot</code> opens a transaction: a cut of the new root, and a cover run as if chunks that were empty in the shown root were resident. Whatever that would draw wrongly is <code>need</code>: 2 to 14 chunks a click.' },
-    { n: ['queue', 'dispatch', 'records'], h: 'Only those jobs', p: 'Each worker first gets a tail: the new nodes, their counts and the colour ops, under 1 KB, on the same port as its jobs, so a job always runs with exactly what it was dispatched with. While an edit is open, nothing else is dispatched.' },
+    { n: ['queue', 'dispatch', 'records'], h: 'Only those jobs', p: 'Each worker first gets a tail: the new nodes, their counts and the log\'s new ops, under 1 KB for a block, on the same port as its jobs, so a job always runs with exactly what it was dispatched with. While an edit is open, nothing else is dispatched.' },
     { n: ['service'], h: 'Held', p: 'Results are held, not installed. The screen still shows the old root, whole. A second click during this waits, and the next edit jumps straight to the latest root.' },
-    { n: ['cache', 'cover', 'vao'], h: 'The flip', p: 'When the last one lands, they all install in one frame, past the usual budgets, and the cut moves to the new root. Every frame draws one root.' },
+    { n: ['cache', 'cover', 'vao'], h: 'The flip', p: 'When the last one lands, they all install in one frame, past the usual budgets, and the cut moves to the new root. Every frame draws one root. The flip installs every held result the new cut wants or its plan draws, so a jump of the eye mid-edit can\'t leave a merged chunk out.' },
     { n: ['cache'], h: 'Why nothing flushes', p: 'A chunk\'s job reads seven nodes, and equal id means equal voxels. So an entry whose seven ids match is still right, even after an undo. That\'s the stamp. Colour has its own revision, because ids can\'t see colour.' },
   ] },
 };
@@ -2215,7 +2360,10 @@ function makeMap(cv, { mode }){
   const tipFor = c => {
     const K = streamer.S.cfg.detail, sel = streamer.sel, e = streamer.entry(c.key), lines = [`<b>${c.key}</b> · ${c.size.toLocaleString('en-US')} voxels a side · node ${c.id}`];
     const dist = c.dist ?? 0;
-    if (M.mode === 'cut'){
+    const lock = streamer.S.cfg.lock;
+    if (M.mode === 'cut' && lock != null){
+      lines.push(c.lod > lock ? `locked at lod ${lock}: wanted to split, refused by maxChunks` : `at the locked lod ${lock}: a leaf, however near or far`);
+    } else if (M.mode === 'cut'){
       if (c.lod === 0) lines.push('lod 0 is the finest: it can\'t split');
       else if (dist < K * c.size) lines.push(`dist ${fmt(dist)} &lt; K · size = ${fmt(K * c.size)}: wanted to split, refused by maxChunks`);
       else lines.push(`dist ${fmt(dist)} ≥ K · size = ${fmt(K * c.size)}: stays a leaf`);
@@ -2262,7 +2410,8 @@ function paintCutRead(){
   $('rdCut').innerHTML = `<span>leaves <b>${fmt(sel.leaves.length)}</b></span><span>split above them <b>${fmt(sel.nodes.size - sel.leaves.length)}</b></span>` +
     `<span>refused by the cap <b>${fmt(sel.capped)}</b></span><span>re-cut in <b>${streamer.S.stats.selectMs.toFixed(2)} ms</b></span>`;
   $('vdCut').textContent = 'Leaves per lod: ' + lods.map(l => `lod ${l}: ${by.get(l)}`).join(' · ') +
-    `. Each lod covers about the same number of chunks, because each is twice the size at twice the distance.${sel.capped ? ' The cap is binding, so the one-lod rule may not hold.' : ''}`;
+    (streamer.S.cfg.lock != null ? `. Locked at lod ${streamer.S.cfg.lock}: every leaf is there unless the cap refused it, so the far world costs as much a chunk as the near.${sel.capped ? ` The cap refused ${fmt(sel.capped)} splits, nearest first kept.` : ''}`
+      : `. Each lod covers about the same number of chunks, because each is twice the size at twice the distance.${sel.capped ? ' The cap is binding, so the one-lod rule may not hold.' : ''}`);
   const max = cutMap ? cutMap.maxLod || 0 : 0;
   $('cutLeg').innerHTML = `<span>the cut's leaves in the slice through the eye, by lod:</span>` +
     Array.from({ length: Math.min(max + 1, 8) }, (_, i) => { const l = Math.round(i * max / Math.max(1, Math.min(max, 7))); return `<span><i class="swatch" style="background:${lodRamp(l, max)}"></i>${l}</span>`; }).join('') +
@@ -2274,6 +2423,14 @@ function initCut(){
   chipRow($('cutZoom'), [[1, 'whole world'], [4, '×4'], [16, '×16'], [64, '×64']].map(([z, l]) => [z, l]), z => { cutMap.zoom = z; cutMap.paint(); }, 1);
   $('kS').oninput = () => { const k = +$('kS').value; $('kV').textContent = k; streamer.setOptions({ detail: k }); dirty = true; };
   $('capS').oninput = () => { const c = 2 ** +$('capS').value; $('capV').textContent = fmt(c); streamer.setOptions({ maxChunks: c }); dirty = true; };
+  // The locked lod (docs/lod-locked.md): the cut's other branch, moved with no flush, as the viewer's slider.
+  const lockSet = () => {
+    const v = +$('lockS').value, lock = v < 0 ? null : v;
+    $('lockV').textContent = lock == null ? 'off' : lock;
+    streamer.setOptions({ lock }); dirty = true;
+  };
+  $('lockS').oninput = lockSet;
+  onWorld(() => { $('lockS').max = W.top; if (+$('lockS').value > W.top){ $('lockS').value = W.top; lockSet(); } });
   addEventListener('resize', () => cutMap.paint());
   // The depth table: real kits, built once, when the table comes into view.
   let done = false;
@@ -2283,7 +2440,7 @@ function initCut(){
     setTimeout(() => {
       const rows = [10, 12, 14, 16].map(D => {
         const desc = kitDesc({ D }), b = buildKit(desc), counts = createCounts(b.store), world = createWorld(b.store, b.root, D), s = 2 ** D;
-        const t0 = performance.now(), sel = selectChunks(world, [0.02 * s, 0.12 * s, 0.02 * s], { detail: 2, maxChunks: 1 << 14 }), ms = performance.now() - t0;
+        const t0 = performance.now(), sel = selectChunks(world, [0.02 * s, 0.12 * s, 0.02 * s], { detail: 4, maxChunks: 1 << 14 }), ms = performance.now() - t0;
         const lods = sel.leaves.map(c => c.lod);
         return `<tr><td class="k">kit, D = ${D}</td><td class="n">${s.toLocaleString('en-US')}</td><td class="n">${si(counts.of(b.root))}</td><td class="n">${fmt(b.store.size)}</td><td class="n">${fmt(sel.leaves.length)}</td><td class="n">${fmt(sel.nodes.size - sel.leaves.length)}</td><td>${Math.min(...lods)}–${Math.max(...lods)}</td><td class="n">${ms.toFixed(2)}</td></tr>`;
       });
@@ -2294,7 +2451,7 @@ function initCut(){
 
 /* ================= §4: a job ================= */
 let picked = null;            // { lod, x, y, z }: the chunk §4 and §5 show
-const job = { rule: 'adaptive', layer: 32, r: null, hover: null, pin: null, geo: null };
+const job = { rule: 'shadow', layer: 32, r: null, hover: null, pin: null, geo: null };
 const CELL = { EMPTY: 0, DROPPED: 1, BURIED: 2, SHOWN: 3, TAIL: 4, APRON: 5 };
 const JOB_COL = { [CELL.DROPPED]: '#49334a', [CELL.BURIED]: '#2c3446', [CELL.TAIL]: '#c060d8', [CELL.APRON]: '#3c566b' };
 const G66 = 66, gi = (x, y, z) => (x + 1) + G66 * ((y + 1) + G66 * (z + 1));
@@ -2308,7 +2465,7 @@ function pickNearestBusy(){
   let tried = 0;
   for (const c of leaves){
     if (++tried > 16) break;
-    const ex = expandChunk(W.store, W.root, W.D, { lod: c.lod, cx: c.x, cy: c.y, cz: c.z }, { counts: W.counts, lodRule: c.lod ? 'adaptive' : 'any' });
+    const ex = expandChunk(W.store, W.root, W.D, { lod: c.lod, cx: c.x, cy: c.y, cz: c.z }, { counts: W.counts, lodRule: c.lod ? 'shadow' : 'any' });
     if (ex.count > 200){ pickChunk(c); return; }
   }
   if (leaves[0]) pickChunk(leaves[0]);
@@ -2319,6 +2476,12 @@ function runJob(){
   const t0 = performance.now();
   const ex = expandChunk(store, root, D, ch, { counts, classes, lodRule: rule, seams: true, colour: W.colourFn, meanDepth: 1, cells: true });
   const ms = performance.now() - t0;
+  // What the workers run (job-core's fastChunk, through createJobRunner), cold with a
+  // fresh mask cache and warm on the same cache, held to the reference's bytes.
+  const fopts = { counts, classes, lodRule: rule, colour: W.colourFn, meanDepth: 1, cache: createJobCache() };
+  const f0 = performance.now(), fc = fastChunk(store, root, D, ch, fopts), f1 = performance.now();
+  fastChunk(store, root, D, ch, fopts);
+  const fast = { cold: f1 - f0, warm: performance.now() - f1, same: sameJob(ex, fc) };
   const any = rule === 'any' ? ex : expandChunk(store, root, D, ch, { counts, lodRule: 'any', cells: true });
   const closed = expandChunk(store, root, D, ch, { counts, lodRule: rule, border: 'closed' });
   const grid = new Uint8Array(G66 ** 3), rec = new Int32Array(64 ** 3).fill(-1);
@@ -2345,12 +2508,18 @@ function runJob(){
     for (let k = 0; k < 64; k++) if (perLayer[k] > perLayer[bestY]) bestY = k;
     job.layer = bestY; $('jobLayer').value = bestY; $('jobLayerV').textContent = bestY;
   }
-  job.r = { ex, any, closed, grid, rec, ms, rule, lod };
+  job.r = { ex, any, closed, grid, rec, ms, fast, rule, lod };
   job.hover = null;
   paintJob();
   paintJobRead();
   showCell(job.pin);
   drawChunkLoad();
+}
+// The job's bytes, as test/job-core.test.js compares them: records, words, counts, tail, faces.
+function sameJob(a, b){
+  const eq = (x, y) => (!x && !y) || (x && y && x.length === y.length && x.every((v, i) => v === y[i]));
+  return eq(a.records, b.records) && eq(a.attrs, b.attrs) && a.count === b.count && a.borderStart === b.borderStart &&
+         a.quads === b.quads && eq(a.openQuads, b.openQuads) && a.occupied === b.occupied;
 }
 function paintJob(){
   const cv = $('cvJob');
@@ -2383,7 +2552,7 @@ function paintJob(){
   for (const [p, col] of [[job.hover, '#ffffff'], [job.pin, '#ffc44f']]) if (p && p[1] === y){ g.strokeStyle = col; g.lineWidth = 2; g.strokeRect(ox + (p[0] + 1) * c - .5, oy + (p[2] + 1) * c - .5, c + 1, c + 1); }
 }
 function paintJobRead(){
-  const { ex, any, closed, ms, rule, lod } = job.r, side = 64 * 2 ** lod;
+  const { ex, any, closed, ms, fast, rule, lod } = job.r, side = 64 * 2 ** lod;
   $('jobWhich').innerHTML = `<b>${keyOf(lod, picked.x, picked.y, picked.z)}</b> · ${side.toLocaleString('en-US')} voxels a side · cells ${2 ** lod}<br>rule <b>${rule}</b>${lod === 0 ? ' (lod 0 has nothing to decide)' : ''}`;
   const rows = [
     ['occupied cells (any)', any.occupied],
@@ -2392,10 +2561,13 @@ function paintJobRead(){
     ['  shown: records', ex.count],
     ['  seam tail', ex.borderCount],
     ['faces exposed', ex.quads],
-    ['triangles sent, 12 a cube', 12 * ex.count],
+    ['triangles sent, 6 a cube', 6 * ex.count],
     ['bytes: records + words', 8 * ex.records.length],
     ['faces with closed borders', closed.quads],
-    ['this job, on this thread', ms.toFixed(1) + ' ms'],
+    ['expandChunk, the reference', ms.toFixed(1) + ' ms'],
+    ['fastChunk, cold', fast.cold.toFixed(1) + ' ms'],
+    ['fastChunk, warm', fast.warm.toFixed(1) + ' ms'],
+    ['fastChunk\'s bytes', fast.same ? 'the same ✓' : '<b style="color:#e8505c">DIFFERENT</b>'],
   ];
   document.querySelector('#tbJob tbody').innerHTML = rows.map(([k, v]) => `<tr><td class="k" style="white-space:pre">${k}</td><td class="n">${typeof v === 'number' ? fmt(v) : v}</td></tr>`).join('');
   const dropped = any.occupied - ex.occupied, extra = ex.quads ? 100 * (closed.quads - ex.quads) / ex.quads : 0;
@@ -2413,7 +2585,11 @@ function showCell(p){
   const at = `cell <b>(${x}, ${y}, ${z})</b>`;
   if (out){ box.innerHTML = `${at}: in the apron, the neighbouring chunk's facing slab. ${st === CELL.APRON ? 'It is occupied, so it can hide a boundary cell\'s face here.' : 'Empty: it hides nothing.'} It isn't part of this job's output.`; return; }
   if (st === CELL.EMPTY){ box.innerHTML = `${at}: empty. The walk never visits it, and it never needs to.`; return; }
-  if (st === CELL.DROPPED){ box.innerHTML = `${at}: occupied, but the <b>${job.r.rule}</b> rule kept the fullest k cells of its 8³ brick, and this isn't one of them. No record, and the neighbours treat it as empty.`; return; }
+  if (st === CELL.DROPPED){
+    const why = { adaptive: 'kept the fullest k cells of its 8³ brick', shadow: 'kept the fullest k cells of its 8³ brick and the best cell of each of the brick\'s columns along x, y and z',
+                  volume: 'kept the fullest k cells of its 8³ brick, k its voxels over a cell\'s', majority: 'keeps a cell only when at least half of it is solid' }[job.r.rule] || 'didn\'t keep it';
+    box.innerHTML = `${at}: occupied, but the <b>${job.r.rule}</b> rule ${why}, and this isn't one of them. No record, and the neighbours treat it as empty.`; return;
+  }
   if (st === CELL.BURIED){ box.innerHTML = `${at}: kept, with all six neighbours occupied, so no face can show. No record, 0 bytes. A ray page still has its bit, since a ray can start inside anything.`; return; }
   const i = rec[mortonOf(x, y, z)], r = ex.records[i], m = maskOf(r), pose = poseOf(r), index = cellOf(r);
   let bits = '';
@@ -2436,7 +2612,7 @@ function initJob(){
     `<span><i class="swatch" style="background:${JOB_COL[CELL.TAIL]}"></i>seam tail</span>`, `<span><i class="swatch" style="background:${JOB_COL[CELL.BURIED]}"></i>buried</span>`,
     `<span><i class="swatch" style="background:${JOB_COL[CELL.DROPPED]}"></i>dropped by the rule</span>`, `<span><i class="swatch" style="background:${JOB_COL[CELL.APRON]}"></i>apron</span>`, '<span>white ticks: faces shown</span>'].join('');
   $('jobLayer').oninput = () => { job.layer = +$('jobLayer').value; $('jobLayerV').textContent = job.layer; paintJob(); };
-  chipRow($('jobRule'), [['adaptive', 'adaptive'], ['any', 'any'], ['majority', 'majority'], ['volume', 'volume']], k => { job.rule = k; runJob(); }, job.rule);
+  chipRow($('jobRule'), [['shadow', 'shadow'], ['adaptive', 'adaptive'], ['any', 'any'], ['majority', 'majority'], ['volume', 'volume']], k => { job.rule = k; runJob(); }, job.rule);
   $('jobNearest').onclick = pickNearestBusy;
   const cellAt = ev => {
     if (!job.geo) return null;
@@ -2454,14 +2630,17 @@ let pendingPick = true;
 
 /* ================= §5: a draw ==================================================
    Its own small context: one chunk, the viewer's decode, orbited. */
-const dv = { gl: null, on: false, mode: 'solid', open: 0, col: 8, yaw: 0.7, pitch: 0.5, dist: 2.1, vao: null, buf: null, n: 0, count: 0, res: 0, dirty: true };
+const dv = { gl: null, on: false, mode: 'solid', faces: 3, open: 0, col: 8, yaw: 0.7, pitch: 0.5, dist: 2.1, vao: null, buf: null, n: 0, count: 0, res: 0, dirty: true };
 function drawInit(){
   const cv = $('cvDraw'), g2 = dv.gl = cv.getContext('webgl2', { antialias: true, alpha: false });
   if (!g2){ $('rdDraw').textContent = 'No WebGL2 here.'; return; }
-  const shownVS = rasterVS('!faceShown(aRec, face)');
-  dv.solid = programOf(g2, shownVS, RASTER_FS);
-  dv.all = programOf(g2, rasterVS('false'), RASTER_FS);
-  dv.wireShown = programOf(g2, rasterVS('!faceShown(aRec, face) || dot(NORMAL[face], p) >= 0.0'), RASTER_FS);
+  // Each mode with three faces a cube (the viewer's) and six (before 2026-11-18).
+  dv.progs = {};
+  for (const six of [false, true]) dv.progs[six ? 6 : 3] = {
+    solid: programOf(g2, rasterVS('!faceShown(aRec, face)', six), RASTER_FS),
+    all: programOf(g2, rasterVS('false', six), RASTER_FS),
+    shown: programOf(g2, rasterVS('!faceShown(aRec, face) || dot(NORMAL[face], p) >= 0.0', six), RASTER_FS),
+  };
   dv.cube = g2.createBuffer();
   g2.bindBuffer(g2.ELEMENT_ARRAY_BUFFER, dv.cube);
   g2.bufferData(g2.ELEMENT_ARRAY_BUFFER, cubeIndices(), g2.STATIC_DRAW);
@@ -2514,7 +2693,7 @@ function drawFrame(){
   const size = 64 * job.r.ex.cellSize, f = fwdOf(dv.yaw, -dv.pitch), dist = dv.dist * size;
   const rel0 = [-size / 2 + f[0] * dist, -size / 2 + f[1] * dist, -size / 2 + f[2] * dist];
   const M = viewProj(dv.yaw, -dv.pitch, w / H2, size * 0.01, size * 12);
-  const wire = dv.mode !== 'solid', { p, U } = dv.mode === 'solid' ? dv.solid : dv.mode === 'shown' ? dv.wireShown : dv.all;
+  const wire = dv.mode !== 'solid', { p, U } = dv.progs[dv.faces][dv.mode];
   g2.useProgram(p);
   g2.enable(g2.DEPTH_TEST);
   if (wire) g2.disable(g2.CULL_FACE); else g2.enable(g2.CULL_FACE);
@@ -2529,20 +2708,24 @@ function drawFrame(){
   g2.uniform3f(U.uChunkColor, 0.6, 0.7, 0.8);
   const n = dv.open ? dv.n : dv.count;
   g2.bindVertexArray(dv.vao);
-  if (wire) g2.drawElementsInstanced(g2.LINES, 60, g2.UNSIGNED_BYTE, 36, n);
-  else g2.drawElementsInstanced(g2.TRIANGLES, 36, g2.UNSIGNED_BYTE, 0, n);
+  // The first three faces' indices are the eye's three: the shader picks which face each axis's four vertices make.
+  const six = dv.faces === 6;
+  if (wire) g2.drawElementsInstanced(g2.LINES, six ? 60 : 30, g2.UNSIGNED_BYTE, 36, n);
+  else g2.drawElementsInstanced(g2.TRIANGLES, six ? 36 : 18, g2.UNSIGNED_BYTE, 0, n);
   g2.bindVertexArray(null);
-  const { quads, openQuads } = job.r.ex, shown = quadsShown(quads, openQuads, dv.open), bytes = 8 * n;
-  $('rdDraw').innerHTML = `<span>instances <b>${fmt(n)}</b></span><span>triangles sent <b>${fmt(12 * n)}</b></span><span>exposed <b>${fmt(2 * shown)}</b></span><span>sent per exposed <b>${shown ? (6 * n / shown).toFixed(1) : '–'}</b></span><span>buffer <b>${kb(bytes)}</b></span><span>draw calls <b>1</b></span>`;
+  const { quads, openQuads } = job.r.ex, shown = quadsShown(quads, openQuads, dv.open), bytes = 8 * n, tri = six ? 12 : 6;
+  $('rdDraw').innerHTML = `<span>instances <b>${fmt(n)}</b></span><span>indices a cube <b>${six ? 36 : 18}</b></span><span>triangles sent <b>${fmt(tri * n)}</b></span><span>exposed <b>${fmt(2 * shown)}</b></span><span>sent per exposed <b>${shown ? (tri * n / (2 * shown)).toFixed(1) : '–'}</b></span><span>buffer <b>${kb(bytes)}</b></span><span>draw calls <b>1</b></span>`;
   $('vdDraw').textContent = dv.open
     ? `Open sides draw the tail too: ${fmt(dv.n - dv.count)} more cubes, and ${fmt(2 * (shown - quads))} more triangles exposed. Only the uniform changed: no job ran and no buffer moved. Try the tail colour.`
-    : dv.mode === 'all' ? `Every line here is a triangle edge the GPU is sent: 12 a cube, faces hidden or not. This is the raster path's vertex cost.`
+    : dv.mode === 'all' ? (six ? `Every line here is a triangle edge the GPU is sent: 12 triangles a cube, faces hidden or not, half of them facing away. That was the raster path's vertex cost until 2026-11-18.`
+                                : `Every line here is a triangle edge the GPU is sent: 6 triangles a cube, the three faces toward the eye, hidden or not. Orbit: each cube's three change with the side you see it from.`)
     : dv.mode === 'shown' ? `Only the faces that can reach the screen. The rest were collapsed by the vertex shader, after being sent.`
     : `One draw call and ${kb(bytes)}, for ${fmt(n)} cubes. Drag to orbit. Click the canvas, then the wheel zooms.`;
 }
 function initDraw(){
   drawInit();
   chipRow($('drawMode'), [['solid', 'solid'], ['shown', 'lines: exposed'], ['all', 'lines: all sent']], k => { dv.mode = k; dv.dirty = true; }, dv.mode);
+  chipRow($('drawFaces'), [[3, 'three (the viewer)'], [6, 'six (before)']], k => { dv.faces = +k; dv.dirty = true; }, dv.faces);
   chipRow($('drawCol'), [[8, 'word'], [1, 'pose'], [0, 'lod'], [12, 'seam tail']], k => { dv.col = +k; dv.dirty = true; }, dv.col);
   const host = $('drawOpen');
   FACES.forEach((name, f) => {
@@ -2767,7 +2950,7 @@ async function buildPages(){
   const index = new Map(), grids = [null];
   let cubes = 0, gridUsed = 0, t0 = performance.now(), buildMs = 0;
   for (let i = 0; i < leaves.length; i++){
-    const c = leaves[i], pg = run({ lod: c.lod, cx: c.x, cy: c.y, cz: c.z, kind: 'page', lodRule: c.lod ? 'adaptive' : 'any' });
+    const c = leaves[i], pg = run({ lod: c.lod, cx: c.x, cy: c.y, cz: c.z, kind: 'page', lodRule: c.lod ? 'shadow' : 'any' });
     pages.set(installPage(pagePool, c.lod, pg, (slot, bits) => bricks.set(bits, BRICK_WORDS * slot)), PAGE_WORDS * (i + 1));
     index.set(c.key, i + 1); grids.push(pg.grid);
     cubes += pg.recordCount || 0;
@@ -2949,7 +3132,7 @@ function initRay(){
    One series per kind on one chart: occupancy across, cubes per footprint pixel up
    (log), the rule's own line through it. Chunks with no report aren't plotted, and
    a chunk with 0 cubes sits on the bottom edge. Fixed hues: raster warm, traced cool. */
-const PATH_ITEMS = [['density', 'by density'], ['off', 'raster only'], ['0', 'ray only'], ['1', 'ray ≥ lod 1'], ['3', 'ray ≥ lod 3'], ['checker', 'checkerboard']];
+const PATH_ITEMS = [['off', 'raster only (the viewer)'], ['density', 'by density'], ['0', 'ray only'], ['1', 'ray ≥ lod 1'], ['3', 'ray ≥ lod 3'], ['checker', 'checkerboard']];
 let markPath1 = null, markPath2 = null;
 function setPath(k){
   app.path = k;
@@ -2961,13 +3144,13 @@ function paintDensity(){
   if (!W || !streamer.sel) return;
   const host = $('chDens'), w = host.clientWidth || 500, h = 340, m = { l: 54, r: 14, t: 12, b: 38 }, cfg = streamer.S.cfg;
   const lo = 5e-4, hi = 30, X = o => m.l + (w - m.l - m.r) * o, Y = d => { const v = clamp(Math.log10(Math.max(d, lo)), Math.log10(lo), Math.log10(hi)); return h - m.b - (h - m.t - m.b) * (v - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)); };
-  const pts = [];
+  const pts = [], th = { ...cfg, rayDensity: app.density[0], rayDensityFull: app.density[1] };
   let traced = 0, raster = 0, wrong = 0;
   for (const c of streamer.sel.leaves){
     const e = streamer.entry(c.key);
     if (!e || e.recordCount == null) continue;
     const fp = chunkFootprint(c, cfg), d = e.recordCount / fp, o = e.occupancy ?? 0, wants = streamer.kindOf(c.key);
-    pts.push({ c, e, fp, d, o, wants, th: densityThreshold(o, cfg) });
+    pts.push({ c, e, fp, d, o, wants, th: densityThreshold(o, th) });
     if (e.kind === 'page') traced++; else raster++;
     if (wants !== e.kind) wrong++;
   }
@@ -2975,11 +3158,13 @@ function paintDensity(){
   for (const v of [1e-3, 1e-2, 1e-1, 1, 10]) s += `<line x1="${m.l}" x2="${w - m.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(120,150,190,.12)"/><text x="${m.l - 7}" y="${Y(v) + 3}" fill="#5a627a" text-anchor="end">${v}</text>`;
   for (const v of [0, .25, .5, .75, 1]) s += `<text x="${X(v)}" y="${h - m.b + 15}" fill="#5a627a" text-anchor="middle">${100 * v}%</text>`;
   s += `<text x="${(m.l + w - m.r) / 2}" y="${h - 6}" fill="#5a627a" text-anchor="middle">occupancy: kept cells over 64³</text><text x="12" y="${(m.t + h - m.b) / 2}" fill="#5a627a" text-anchor="middle" transform="rotate(-90 12 ${(m.t + h - m.b) / 2})">cubes per footprint pixel (log)</text>`;
+  // The rule's line is drawn whatever the path: with raster only (the viewer's default) it's
+  // where "by density" would draw the line, from the sliders, and the points are only priced.
   const rule = app.path === 'density';
-  if (rule){
-    const line = k => [0, 1].map(o => `${X(o)},${Y(densityThreshold(o, cfg) * k)}`).join(' ');
-    s += `<polyline points="${line(cfg.densityBand)}" fill="none" stroke="#6f7a90" stroke-width="1" stroke-dasharray="3 4"/><polyline points="${line(1 / cfg.densityBand)}" fill="none" stroke="#6f7a90" stroke-width="1" stroke-dasharray="3 4"/>`;
-    s += `<polyline points="${line(1)}" fill="none" stroke="#c3c9d6" stroke-width="2"/><text x="${X(0.97)}" y="${Y(densityThreshold(0.97, cfg)) - 14}" fill="#c3c9d6" text-anchor="end">traced above the line</text>`;
+  {
+    const line = k => [0, 1].map(o => `${X(o)},${Y(densityThreshold(o, th) * k)}`).join(' '), ink = rule ? '#c3c9d6' : '#6f7a90';
+    if (rule) s += `<polyline points="${line(cfg.densityBand)}" fill="none" stroke="#6f7a90" stroke-width="1" stroke-dasharray="3 4"/><polyline points="${line(1 / cfg.densityBand)}" fill="none" stroke="#6f7a90" stroke-width="1" stroke-dasharray="3 4"/>`;
+    s += `<polyline points="${line(1)}" fill="none" stroke="${ink}" stroke-width="2"${rule ? '' : ' stroke-dasharray="6 4"'}/><text x="${X(0.97)}" y="${Y(densityThreshold(0.97, th)) - 14}" fill="${ink}" text-anchor="end">${rule ? 'traced above the line' : 'by density would trace above this line'}</text>`;
   }
   // Rings keep overlapping marks apart; a hollow mark is a chunk waiting to switch.
   for (const p of pts){
@@ -2989,7 +3174,7 @@ function paintDensity(){
   }
   host.innerHTML = s + '</svg>';
   host._pts = pts; host._X = X; host._Y = Y;
-  $('densLeg').innerHTML = `<span><i class="swatch" style="background:#c07f26"></i>raster (${raster})</span><span><i class="swatch" style="background:#4a8ee0"></i>traced (${traced})</span><span>hollow: waiting to switch (${wrong})</span>${rule ? '<span>solid line: threshold. Dashed: ×1.5 and ÷1.5</span>' : ''}`;
+  $('densLeg').innerHTML = `<span><i class="swatch" style="background:#c07f26"></i>raster (${raster})</span><span><i class="swatch" style="background:#4a8ee0"></i>traced (${traced})</span><span>hollow: waiting to switch (${wrong})</span>${rule ? '<span>solid line: threshold. Dashed: ×1.5 and ÷1.5</span>' : '<span>dashed line: the rule, not asked (raster only)</span>'}`;
   const v = viewStats();
   $('rdPath').innerHTML = `<span>leaves priced <b>${pts.length}</b></span><span>traced <b>${traced}</b></span><span>raster <b>${raster}</b></span><span>cubes in the frustum <b>${si(v.cubes)}</b></span><span>rule computed for <b>${innerWidth}×${innerHeight}</b> @${Math.min(devicePixelRatio || 1, 2)}x</span>`;
   $('vdPath').textContent = !rule ? (app.path === 'off' ? 'Raster only: every chunk stays cubes, whatever its density.' : app.path === '0' ? 'Everything traced. Chunks are still priced, but the rule is not asked.' : app.path === 'checker' ? 'A checkerboard of kinds: raySelftest uses this so that raster and ray chunks meet everywhere, with ray content in front of raster.' : `A fixed split: every chunk at lod ${app.path} or above is traced. A single rayLod can\'t suit both a sparse row and a dense one.`)
@@ -3049,6 +3234,139 @@ function initFrame(){
   toggle($('tStencil'), lab.stencil, on => { lab.stencil = on; });
   toggle($('tBound'), lab.bound, on => { lab.bound = on; });
   toggle($('tOcc'), lab.occOn, on => { lab.occOn = on; lab.occ = on ? createOcclusion() : null; });
+}
+
+/* ================= §11: a universe ==============================================
+   Its own small universe, built when the section is first seen and cut on this
+   thread: the real createUniverse and selectForest, nothing streamed or drawn in
+   GL. Six instances of three kits, laid out by hand on two rows (createUniverse
+   refuses overlapping content, so every instance has a gap). The D = 12 kit at a
+   scale of −2 is 1,024 universe voxels a side, as big as the D = 10 ones: the same
+   size on the plane, four times the detail. */
+const UNI_WORLDS = [['kit:1', 10, 1], ['kit:2', 10, 2], ['kit:3 D12', 12, 3]];
+const UNI_INSTANCES = [
+  { world: 'kit:1', at: [0, 0, 0], name: 'kit:1', tag: 'kit:1' },
+  { world: 'kit:1', at: [1152, 0, 0], turn: 41, name: 'kit:1, turned ¼ about y', tag: 'kit:1 ↻¼' },
+  { world: 'kit:1', at: [2304, 0, 0], turn: 1, name: 'kit:1, mirrored', tag: 'kit:1 mirror' },
+  { world: 'kit:2', at: [0, 0, 1152], name: 'kit:2', tag: 'kit:2' },
+  { world: 'kit:3 D12', at: [1152, 0, 1152], scale: -2, name: 'kit:3, D = 12 at ¼', tag: 'kit:3 D12 ×¼' },
+  { world: 'kit:1', at: [2304, 0, 1152], scale: 1, name: 'kit:1 at ×2', tag: 'kit:1 ×2' },
+];
+const uni = { u: null, eye: [1088, 40, 512], detail: 4, cap: 1024, fsel: null, ms: 0, hover: null, drag: false, geo: null, rects: [], building: false };
+function buildUniverse(){
+  if (uni.u || uni.building) return;
+  uni.building = true;
+  setTimeout(() => {
+    const t0 = performance.now(), worlds = new Map();
+    for (const [key, D, seed] of UNI_WORLDS){ const b = buildKit(kitDesc({ D, seed })); worlds.set(key, { store: b.store, root: b.root, D }); }
+    uni.u = createUniverse(worlds, UNI_INSTANCES);
+    uni.buildMs = performance.now() - t0;
+    cutUniverse();
+  }, 20);
+}
+function cutUniverse(){
+  if (!uni.u) return;
+  const t0 = performance.now();
+  uni.fsel = selectForest(uni.u, uni.eye, { detail: uni.detail, maxChunks: uni.cap });
+  uni.ms = performance.now() - t0;
+  // How many trees want each world chunk (as a leaf or a split): the copies the cache holds once.
+  uni.wanted = new Map();
+  for (const t of uni.fsel.trees) for (const c of t.sel.nodes.values()){ const k = forestKey(t.key, c.key); uni.wanted.set(k, (uni.wanted.get(k) || 0) + 1); }
+  paintUni(); paintUniRead();
+}
+function paintUni(){
+  const cv = $('cvUni');
+  if (!uni.fsel || !cv.clientWidth) return;
+  const { g, w, h } = fit(cv), { box } = uni.u, pad = 60;
+  const sx = (w - 2 * 12) / (box.hi[0] - box.lo[0] + 2 * pad), sz = (h - 2 * 12) / (box.hi[2] - box.lo[2] + 2 * pad), sc = Math.min(sx, sz);
+  const ox = (w - (box.hi[0] - box.lo[0]) * sc) / 2, oz = (h - (box.hi[2] - box.lo[2]) * sc) / 2;
+  const X = x => ox + (x - box.lo[0]) * sc, Z = z => oz + (z - box.lo[2]) * sc;
+  uni.geo = { X, Z, invX: px => (px - ox) / sc + box.lo[0], invZ: pz => (pz - oz) / sc + box.lo[2] };
+  g.fillStyle = '#0a0a11'; g.fillRect(0, 0, w, h);
+  const y = uni.eye[1];
+  let maxLod = 0;
+  for (const t of uni.fsel.trees) for (const c of t.sel.leaves) maxLod = Math.max(maxLod, c.lod);
+  uni.maxLod = maxLod;
+  // Each instance's cube, and its name.
+  for (const inst of uni.u.instances){
+    const c = inst.cube;
+    g.fillStyle = '#0d0f18'; g.fillRect(X(c.lo[0]), Z(c.lo[2]), (c.hi[0] - c.lo[0]) * sc, (c.hi[2] - c.lo[2]) * sc);
+  }
+  uni.rects = [];
+  const hoverKey = uni.hover ? uni.hover.fkey : null;
+  for (const t of uni.fsel.trees){
+    const f = t.inst.frame;
+    for (const c of t.sel.leaves){
+      const b = boxToUniverse(f, c.lo, [c.lo[0] + c.size, c.lo[1] + c.size, c.lo[2] + c.size]);
+      if (!(b.lo[1] <= y && y < b.hi[1])) continue;
+      const r = [X(b.lo[0]), Z(b.lo[2]), (b.hi[0] - b.lo[0]) * sc, (b.hi[2] - b.lo[2]) * sc];
+      const fkey = forestKey(t.key, c.key);
+      uni.rects.push({ r, t, c, b, fkey });
+      g.fillStyle = lodRamp(c.lod, maxLod); g.fillRect(...r);
+      if (r[2] > 3){ g.strokeStyle = 'rgba(5,5,8,.7)'; g.lineWidth = 1; g.strokeRect(r[0] + .5, r[1] + .5, r[2] - 1, r[3] - 1); }
+    }
+  }
+  if (hoverKey){
+    g.strokeStyle = '#ffc44f'; g.lineWidth = 2;
+    for (const q of uni.rects) if (q.fkey === hoverKey) g.strokeRect(q.r[0] + 1, q.r[1] + 1, q.r[2] - 2, q.r[3] - 2);
+    g.strokeStyle = '#fff'; g.lineWidth = 1.5; const r = uni.hover.r; g.strokeRect(r[0], r[1], r[2], r[3]);
+  }
+  g.font = '11px ui-monospace, SF Mono, Menlo, monospace'; g.textBaseline = 'top';
+  uni.u.instances.forEach((inst, i) => {
+    const c = inst.cube;
+    g.strokeStyle = 'rgba(160,190,220,.45)'; g.lineWidth = 1; g.strokeRect(X(c.lo[0]) + .5, Z(c.lo[2]) + .5, (c.hi[0] - c.lo[0]) * sc - 1, (c.hi[2] - c.lo[2]) * sc - 1);
+    const label = `${i} · ${UNI_INSTANCES[i].tag}`, tw = g.measureText(label).width, cw = (c.hi[0] - c.lo[0]) * sc;
+    g.save(); g.beginPath(); g.rect(X(c.lo[0]), Z(c.lo[2]), cw, 24); g.clip();
+    g.fillStyle = 'rgba(5,5,10,.78)'; g.fillRect(X(c.lo[0]) + 3, Z(c.lo[2]) + 3, tw + 8, 16);
+    g.fillStyle = '#c9d6e6'; g.fillText(label, X(c.lo[0]) + 7, Z(c.lo[2]) + 5);
+    g.restore();
+  });
+  const ex = X(uni.eye[0]), ez = Z(uni.eye[2]);
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(ex, ez, 5, 0, 7); g.fill();
+  g.strokeStyle = '#05070c'; g.lineWidth = 2; g.beginPath(); g.arc(ex, ez, 5, 0, 7); g.stroke();
+  $('uniLeg').innerHTML = `<span>the forest's leaves at y = ${fmt(y)}, by lod:</span>` +
+    Array.from({ length: maxLod + 1 }, (_, l) => `<span><i class="swatch" style="background:${lodRamp(l, maxLod)}"></i>${l}</span>`).join('') +
+    `<span style="margin-left:6px"><i class="swatch" style="background:#ffc44f"></i>every copy of the hovered world chunk</span>`;
+}
+function paintUniRead(){
+  const F = uni.fsel, per = F.trees.map(t => t.sel.leaves.length), sum = per.reduce((a, b) => a + b, 0);
+  const shared = [...uni.wanted.values()].filter(v => v > 1).length, near = F.trees.map((t, i) => [i, Math.hypot(...[0, 1, 2].map(a => uni.eye[a] - (t.inst.cube.lo[a] + t.inst.cube.hi[a]) / 2))]).sort((a, b) => a[1] - b[1]);
+  $('rdUni').innerHTML = `<span>instances <b>${F.trees.length}</b> of <b>${uni.u.worlds.size}</b> worlds</span><span>leaves a tree <b>${per.join(' · ')}</b></span><span>leaves in all <b>${fmt(sum)}</b></span>` +
+    `<span>world chunks to build <b>${fmt(F.leaves.length)}</b> leaves, <b>${fmt(F.nodes.size)}</b> with the splits</span><span>wanted by more than one copy <b>${fmt(shared)}</b></span>` +
+    `<span>refused by the cap <b>${fmt(F.capped)}</b></span><span>cut in <b>${uni.ms.toFixed(1)} ms</b></span><span>three kits built in <b>${fmt(uni.buildMs)} ms</b></span>`;
+  $('vdUni').textContent = `${F.capped ? `The cap binds: ${fmt(uni.cap)} leaves for the whole universe, and the instance nearest the eye (${near[0][0]}) took ${per[near[0][0]]} of them while the farthest (${near[near.length - 1][0]}) took ${per[near[near.length - 1][0]]}, because a split is ranked by dist / size, whatever world it's in. `
+    : `The cap doesn't bind at this detail: every instance is cut as it would be alone. `}` +
+    `${fmt(sum)} leaves across the trees are ${fmt(F.leaves.length)} world chunks, since a copy that wants a chunk another copy wants doesn't make a second job or a second entry. Hover a chunk to see its copies.`;
+}
+function uniTip(q){
+  const { t, c, b } = q, k = t.inst.frame.k, n = uni.wanted.get(q.fkey) || 1, here = toLocal(t.inst.frame, uni.eye).map(v => v.toFixed(0)).join(', ');
+  return [`<b>${q.fkey}</b> · instance ${t.index}, ${esc(UNI_INSTANCES[t.index].name)}`,
+    `${fmt(c.size)} world voxels a side = ${fmt(c.size * k)} in the universe`,
+    `dist ${fmt(c.dist)} / size ${fmt(c.size)} in the world = ${fmt(c.dist * k)} / ${fmt(c.size * k)} in the universe: <b>${(c.dist / c.size).toFixed(3)}</b> either way`,
+    `the eye, in this world's voxels: ${here}`,
+    n > 1 ? `wanted by <b>${n}</b> copies (as a leaf or a split): one job and one entry for all of them` : 'wanted by this copy alone',
+    `universe box x ${fmt(b.lo[0])}–${fmt(b.hi[0])}, z ${fmt(b.lo[2])}–${fmt(b.hi[2])}`].join('<br>');
+}
+function initUniverse(){
+  const cv = $('cvUni');
+  new IntersectionObserver(es => { if (es[0].isIntersecting) buildUniverse(); }).observe(cv);
+  $('uniK').oninput = () => { uni.detail = +$('uniK').value; $('uniKV').textContent = uni.detail; cutUniverse(); };
+  $('uniCap').oninput = () => { uni.cap = 2 ** +$('uniCap').value; $('uniCapV').textContent = fmt(uni.cap); cutUniverse(); };
+  $('uniY').oninput = () => { uni.eye[1] = +$('uniY').value; $('uniYV').textContent = uni.eye[1]; cutUniverse(); };
+  const at = ev => { const r = cv.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; };
+  const moveTo = ev => { const [mx, my] = at(ev); uni.eye[0] = uni.geo.invX(mx); uni.eye[2] = uni.geo.invZ(my); cutUniverse(); };
+  cv.addEventListener('pointerdown', ev => { if (!uni.geo) return; uni.drag = true; cv.setPointerCapture(ev.pointerId); hideTip(); moveTo(ev); });
+  cv.addEventListener('pointermove', ev => {
+    if (!uni.geo) return;
+    if (uni.drag){ moveTo(ev); return; }
+    const [mx, my] = at(ev), q = uni.rects.find(({ r }) => mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]) || null;
+    // The rects are made again on every paint, so compare what they stand for.
+    if ((q && q.fkey + '|' + q.t.index) !== (uni.hover && uni.hover.fkey + '|' + uni.hover.t.index)){ uni.hover = q; paintUni(); }
+    if (q) showTip(uniTip(q), ev); else hideTip();
+  });
+  cv.addEventListener('pointerup', () => { uni.drag = false; });
+  cv.addEventListener('pointerleave', () => { uni.hover = null; hideTip(); paintUni(); });
+  addEventListener('resize', paintUni);
 }
 
 /* ================= the lab's canvas: where it lives, how it flies ================= */
@@ -3160,8 +3478,9 @@ function boot(){
   const sel = $('worldSel');
   sel.innerHTML = WORLDS.map(w => `<option value="${w.id}">${esc(w.label)}</option>`).join('');
   for (const cv of document.querySelectorAll('canvas[data-h]')) cv.style.height = cv.dataset.h + 'px';
-  initMap(); initNest(); initCut(); initJob(); initDraw(); initSeam(); initStream(); initRay(); initPath(); initFrame(); initFly();
+  initMap(); initNest(); initCut(); initJob(); initDraw(); initSeam(); initStream(); initRay(); initPath(); initFrame(); initUniverse(); initFly();
   fillRefs();
+  sourceOf('stream-viewer.html').then(t => { if (t) $('viewerLines').textContent = t.split('\n').length.toLocaleString('en-US'); });
   const navLinks = [...document.querySelectorAll('nav a[data-nav]')];
   const sections = [...document.querySelectorAll('section')];
   const visible = new Map();
@@ -3184,7 +3503,7 @@ function boot(){
   paintSizes();
   loadWorld(WORLDS[0].id);
   requestAnimationFrame(tick);
-  window.__renderer = { streamer, pool, lab, app, cam, get W(){ return W; }, get picked(){ return picked; }, job, rd, loadWorld, setPath, get error(){ return firstError; } };
+  window.__renderer = { streamer, pool, lab, app, cam, uni, dv, drawFrame, runJob, pickChunk, get W(){ return W; }, get picked(){ return picked; }, job, rd, loadWorld, setPath, get error(){ return firstError; } };
 }
 boot();
 </script>
