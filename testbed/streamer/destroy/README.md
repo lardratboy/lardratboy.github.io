@@ -233,6 +233,20 @@ stream viewer from the eye it was saved at.*
   opened from.
 - **Opening** (`arenaOfWorld`): a saved arena is its size, at the origin, at
   lod 0: the same cells, the same count, the walker where the view stood.
+  An arena the stream viewer saved again (edited there, so `, edited` on its
+  name) is still a saved arena. **Built over its top, it grows** to hold what
+  was built (the height what's in it and 64 over, rounded up to 32, at most
+  `OPEN_HEIGHT` = 512, past the 256 a build may be) rather than opening at
+  half the detail: the file of 2026-11-27 had 2,029 voxels to y = 290 over a
+  256-tall arena, and opens as 512 × 384 × 512 (192 MB of grid, 128 MB for
+  the largest build), every voxel kept, in about a second. Only the height
+  grows: a name whose X or Z doesn't hold what's in it is laid out as any
+  world. **The view
+  is kept only if its eye is inside the arena** (`viewInArena`, mapped into
+  the arena's cells first, by the lod and offset the world opened at): the
+  viewer saves its own camera, which is as often out over the edge looking
+  in, and a walker put there fell off the world (found 2026-11-27, an arena
+  edited in the viewer). Otherwise the walker starts at the near edge.
   Any other world is taken at the finest lod at which what's in it fits the
   largest arena (512 × 256 × 512), each level-lod node that isn't empty a
   cell (the any rule, as an added world's), coloured by its field or the

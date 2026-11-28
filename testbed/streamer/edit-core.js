@@ -354,11 +354,29 @@ export function createRepeat(interval = REPEAT_MS){
    **It only ever grows.** An entry overwrites the one before it on the same
    cell, so undo can't be done in place: the log is the truth, and an undo
    rebuilds this from the log (see `sync`). A rebuild of 100,000 ops is a few
-   milliseconds, in a worker, and undo is rare (docs/edit-log.md). */
-export function createBlockTable(){
-  let cap = 1 << 12, keys = new Int32Array(cap * 4).fill(-1), vals = new Int32Array(cap * 2);
-  let used = 0, seen = 0, epoch = 0, hit = -1;
-  const sizes = [];
+   milliseconds, in a worker, and undo is rare (docs/edit-log.md).
+
+   **A coarse cell's latest block** (`latestIn`, docs/edit-saved-log.md §5,
+   "A″", 2026-11-27). A baked world's coarse cell is coloured once, as a
+   whole (scene-core's `scene.mean`), and asking which block lies over its
+   centre loses every block smaller than the cell that misses the centre: a
+   row of 2³ blocks drew the baked world's fallback brown at lod 2. So a
+   block owns a coarse cell as a drop does, by any voxel in it, and the latest
+   such block wins. Blocks sit on their own grids, so a block and a cell are
+   nested or apart: a block coarser than the cell holding it is one probe per
+   size, as `lookup` does, and blocks inside the cell would be 8^(l − k)
+   probes for each size k below l (4,096 for a 2³ block in a lod-5 cell). So
+   an index keeps, for every cell at every level above each block, the latest
+   block inside it: one probe. It is built at the first `latestIn` (a named
+   world's workers never ask, and pay nothing) and kept by `add` after.
+   An entry per level per block, but neighbours share their parents: 20,000
+   blocks in a clump add 2,932 entries, a seventh again (the test). Scattered
+   is the worst: 100,000 single voxels strewn over 1024³ add 416,466 (31 MB
+   with the table) and take 62 ms to index, once, in a worker.
+   Coordinates that reach 0 stop the climb: the cell at the origin of every
+   level above is kept in `originSeq`. */
+function createCellMap(){
+  let cap = 1 << 12, keys = new Int32Array(cap * 4).fill(-1), vals = new Int32Array(cap * 2), used = 0;
   const slot = (l, X, Y, Z) => {
     let h = Math.imul(X, 73856093) ^ Math.imul(Y, 19349663) ^ Math.imul(Z, 83492791) ^ Math.imul(l, 2654435761);
     h = (h ^ (h >>> 15)) & (cap - 1);
@@ -367,19 +385,48 @@ export function createBlockTable(){
       if (keys[i] === -1 || (keys[i] === l && keys[i + 1] === X && keys[i + 2] === Y && keys[i + 3] === Z)) return h;
     }
   };
-  const put = (l, X, Y, Z, colour, seq) => {
+  // Overwrite (`latest` false: the table, which hears ops in order) or keep the later (the index).
+  const put = (l, X, Y, Z, colour, seq, latest) => {
     const h = slot(l, X, Y, Z);
     if (keys[h * 4] === -1){ keys[h * 4] = l; keys[h * 4 + 1] = X; keys[h * 4 + 2] = Y; keys[h * 4 + 3] = Z; used++; }
+    else if (latest && vals[h * 2] >= seq) return;
     vals[h * 2] = seq; vals[h * 2 + 1] = colour;
+  };
+  return {
+    put(l, X, Y, Z, colour, seq, latest = false){
+      if ((used + 1) * 2 > cap){
+        const k0 = keys, v0 = vals, c0 = cap;
+        cap *= 2; keys = new Int32Array(cap * 4).fill(-1); vals = new Int32Array(cap * 2); used = 0;
+        for (let h = 0; h < c0; h++) if (k0[h * 4] !== -1) put(k0[h * 4], k0[h * 4 + 1], k0[h * 4 + 2], k0[h * 4 + 3], v0[h * 2 + 1], v0[h * 2], false);
+      }
+      put(l, X, Y, Z, colour, seq, latest);
+    },
+    // The entry's index into `vals` (seq at 2i, colour at 2i + 1), or −1.
+    find(l, X, Y, Z){ const h = slot(l, X, Y, Z); return keys[h * 4] === -1 ? -1 : h; },
+    each(f){ for (let h = 0; h < cap; h++) if (keys[h * 4] !== -1) f(keys[h * 4], keys[h * 4 + 1], keys[h * 4 + 2], keys[h * 4 + 3], vals[h * 2 + 1], vals[h * 2]); },
+    get vals(){ return vals; },
+    get used(){ return used; },
+    bytes: () => keys.byteLength + vals.byteLength,
+  };
+}
+const TOP_LEVEL = 32;
+export function createBlockTable(){
+  let map = createCellMap(), seen = 0, epoch = 0, hit = -1, index = null;
+  const sizes = [], originSeq = new Int32Array(TOP_LEVEL), originColour = new Int32Array(TOP_LEVEL);
+  // Into the index: each cell above the block, the latest kept (its own cell is the table's).
+  const climb = (l, X, Y, Z, colour, seq) => {
+    for (let m = l; m < TOP_LEVEL; m++, X >>= 1, Y >>= 1, Z >>= 1){
+      if ((X | Y | Z) === 0){
+        for (let k = m; k < TOP_LEVEL; k++) if (seq > originSeq[k]){ originSeq[k] = seq; originColour[k] = colour; }
+        return;
+      }
+      if (m > l) index.put(m, X, Y, Z, colour, seq, true);
+    }
   };
   const add = (l, X, Y, Z, colour, seq) => {
     if (!sizes.includes(l)) sizes.push(l);
-    if ((used + 1) * 2 > cap){
-      const k0 = keys, v0 = vals, c0 = cap;
-      cap *= 2; keys = new Int32Array(cap * 4).fill(-1); vals = new Int32Array(cap * 2); used = 0;
-      for (let h = 0; h < c0; h++) if (k0[h * 4] !== -1) put(k0[h * 4], k0[h * 4 + 1], k0[h * 4 + 2], k0[h * 4 + 3], v0[h * 2 + 1], v0[h * 2]);
-    }
-    put(l, X, Y, Z, colour, seq);
+    map.put(l, X, Y, Z, colour, seq);
+    if (index) climb(l, X, Y, Z, colour, seq);
   };
   return {
     add,
@@ -390,11 +437,38 @@ export function createBlockTable(){
     lookup(x, y, z){
       hit = -1;
       if (!sizes.length) return -1;
-      const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+      const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z), vals = map.vals;
       let best = -1, colour = -1;
       for (let n = 0; n < sizes.length; n++){
-        const l = sizes[n], h = slot(l, xi >> l, yi >> l, zi >> l);
-        if (keys[h * 4] !== -1 && vals[h * 2] > best){ best = vals[h * 2]; colour = vals[h * 2 + 1]; }
+        const l = sizes[n], h = map.find(l, xi >> l, yi >> l, zi >> l);
+        if (h >= 0 && vals[h * 2] > best){ best = vals[h * 2]; colour = vals[h * 2 + 1]; }
+      }
+      hit = best;
+      return colour;
+    },
+    /* The colour of the latest block with a voxel in the level-l cell (X, Y, Z),
+       in cells of that level, or −1; `seq` as lookup's. At l = 0 it is
+       lookup at the voxel. (The note above.) */
+    latestIn(l, X, Y, Z){
+      hit = -1;
+      if (!sizes.length) return -1;
+      if (!index){
+        index = createCellMap(); originSeq.fill(-1);
+        map.each(climb);
+      }
+      let best = -1, colour = -1;
+      if ((X | Y | Z) === 0){ best = originSeq[l]; colour = best >= 0 ? originColour[l] : -1; }
+      else {
+        const h = index.find(l, X, Y, Z);
+        if (h >= 0){ best = index.vals[h * 2]; colour = index.vals[h * 2 + 1]; }
+      }
+      // Blocks the cell's size or coarser: the one holding it, as lookup.
+      const vals = map.vals;
+      for (let n = 0; n < sizes.length; n++){
+        const k = sizes[n];
+        if (k < l) continue;
+        const h = map.find(k, X >> (k - l), Y >> (k - l), Z >> (k - l));
+        if (h >= 0 && vals[h * 2] > best){ best = vals[h * 2]; colour = vals[h * 2 + 1]; }
       }
       hit = best;
       return colour;
@@ -407,20 +481,27 @@ export function createBlockTable(){
     sync({ epoch: e, from, count, ops }){
       if (e !== epoch){
         if (from !== 0) throw new Error(`table.sync: a new epoch has to start at op 0, not ${from}`);
-        cap = 1 << 12; keys = new Int32Array(cap * 4).fill(-1); vals = new Int32Array(cap * 2);
-        used = 0; sizes.length = 0; epoch = e;
+        map = createCellMap(); index = null; sizes.length = 0; epoch = e;
       } else if (from !== seen) throw new Error(`table.sync: this table has ${seen} ops, the delta starts at ${from}`);
       for (let i = 0, s = from; s < count; s++, i += OP_WORDS)
         if (ops[i + 4] !== BREAK) add(ops[i], ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4], s);
       seen = count;
     },
     get seen(){ return seen; }, get epoch(){ return epoch; },
-    get used(){ return used; }, get sizes(){ return sizes.slice(); },
-    bytes: () => keys.byteLength + vals.byteLength,
+    get used(){ return map.used; }, get sizes(){ return sizes.slice(); },
+    get indexed(){ return index ? index.used : 0; },
+    bytes: () => map.bytes() + (index ? index.bytes() : 0),
   };
 }
 
-/* A world's colour field with the blocks over it. */
+/* A world's colour field with the blocks over it. The engine no longer uses it:
+   since the one log (2026-11-27) the runner, the eyedropper and the flatten all
+   colour edits through log-core's createOneTable, which is scene-core's
+   sceneField with this table folded in, and that is the field that keeps a
+   baked base's `mean` (docs/edit-saved-plan.md). It stays, four lines, because
+   colorfields-explainer.html imports it live to teach the block wrapper, which it
+   shows more plainly than the one table (plan Q5). It has no `mean`: never hand
+   it a baked base. */
 // The sample's level (chunk-core's cellAttr) goes through to the base untouched.
 export const editedField = (base, table) => (x, y, z, level) => {
   const c = table.lookup(x, y, z);

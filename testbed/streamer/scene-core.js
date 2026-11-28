@@ -42,8 +42,10 @@
    And the road a drop takes to the workers (step 3): createSceneLog holds
    the drops as an edit log holds blocks (root, undo, redo, a paint for
    setRoot, an epoch, a delta), and createSceneTable is a worker's copy of
-   it, which builds the scene field. stream-core's tailer and runner carry
-   one to the other.
+   it, which builds the scene field. stream-core's tailer and runner carried
+   one to the other until the one log (log-core.js) took the road for blocks
+   and drops together; the scene road went on 2026-11-27, and both stay as
+   the one log's oracles (test/one-log.test.js).
 
    And where a drop lands (step 4, at the very end): dropAt puts a child's
    box against the face the crosshair hits, snapRef says which copy a snap
@@ -679,12 +681,38 @@ export function compositeWorld(parent, placements, { stats = null } = {}){
    one 6-bit quantization, where the child drawn alone quantizes its mean
    once. Measured by the test against the dense oracle, which rounds the same.
 
-   **The scene field has no `mean`.** A field with one is asked it at every
-   lod, and a named parent has none to give. So a parent with `mean` (a baked
-   parent) is refused: forwarding a rounded mean would draw its unplaced
-   cells unlike the world alone, and no baked world can be placed into yet
-   (files are views, CLAUDE.md's editedField note). An empty list hands the
-   base back, so undoing every drop draws the parent's own bytes.
+   **A baked parent: the field keeps a `mean`** (docs/edit-saved-plan.md,
+   option A, built 2026-11-27, so a saved world can be edited again). A field
+   with `mean` is asked it at every lod, lod 0 included (chunk-core's
+   cellAttr), and a field without one is sampled at points. A baked base is
+   only right through its mean: a point reads one voxel, and an inside voxel
+   has no word. And the chunk cache needs more than right: a chunk no op
+   painted keeps the bytes the base made before the first op, so any chunk
+   rebuilt after it (a lod switch, a chunk scrolling in, a restarted worker)
+   must make those same bytes. Hence the rule the tests hold, `===`:
+
+     for every cell no op touches, at every lod, the scene's mean is the
+     base's mean.
+
+   So over a base with `mean`, `scene.mean(l, corner, out)` asks the same
+   owner as the point road (ownerOf, below), once, for the whole cell at its
+   centre: no owner (or a colourless child) gives `base.mean` itself; a
+   block, its colour; a baked child, its exact skin mean of the child cell,
+   unrounded into `out`, so it is quantized once, as the child drawn alone
+   is (better than the point road's rgb8); a named child, its field at the
+   child cell's centre. A coarse cell straddling a drop's edge is all drop,
+   where a named parent's walk would blend its sub-cells (meanDepth): A′ in
+   the plan, kept for if the edges bother. A block owns a coarse cell the
+   same way, by any voxel in it (A″, built 2026-11-27, edit-saved-log §5):
+   asked at the centre, a 2³ block in a 4³ cell missed it, no op owned the
+   cell, and it drew the base's mean, which over air is baked-core's
+   fallback, so a row of small blocks went brown at lod 2. The table's
+   `latestIn` answers it in one probe. The owner reads only what the
+   point road reads, so the stamp rule below holds as it does. The point
+   road stays for lod-0 callers that sample (the eyedropper, the flatten of
+   a named world). Over a named base there is no `mean`, and nothing about
+   a named parent changed. An empty list hands the base back, so undoing
+   every op draws the parent's own bytes.
 
    **The stamp rule** (stream-core §2c: a word reads only inside its own
    chunk's box) holds in the sense it exists for: the owner test reads T
@@ -699,7 +727,8 @@ export function compositeWorld(parent, placements, { stats = null } = {}){
    log): `blocks` is edit-core's createBlockTable, filled with the log's
    places, and every entry of `list` then carries `seq`, its op's place in
    the same log. A cell takes the later of the latest block over its centre
-   (the table's rule) and the latest placement solid in it (the rule above).
+   (the table's rule; on the mean road's coarse cells, the latest block with
+   a voxel in it) and the latest placement solid in it (the rule above).
    The list is latest first, so the walk stops at the first placement older
    than the block. A break colours nothing (a voxel solid after a break was
    filled by a later op), which is why neither side needs breaks. Without
@@ -723,7 +752,6 @@ function placedBounds(store, T, Dt){
 }
 export function sceneField(store, base, list, blocks = null){
   if (typeof base !== 'function') throw new Error('sceneField: needs the parent\'s field (a colourless parent has nothing to fall back on)');
-  if (base.mean) throw new Error('sceneField: a parent with `mean` (a baked parent) can\'t be placed into yet; see the note above sceneField');
   if (!list.length && !blocks) return base;
   const kids = list.map(e => {
     checkPlacement({ world: { D: e.D }, at: e.at, turn: e.turn, scale: e.scale });
@@ -750,7 +778,9 @@ export function sceneField(store, base, list, blocks = null){
     for (const c of all) if (meetsBox(c, blo, bhi)) near.push(c);
     return near;
   }
-  function childColour(c, l){
+  /* The child's colour for the level-l cell centred at `pt`: as rgb8, or with
+     `out` (the mean road) as three unrounded 8-bit floats in it. */
+  function childColour(c, l, out = null){
     const lc = Math.min(c.D, Math.max(0, l - c.s)), cs = 2 ** lc, n = 2 ** (c.D - lc);
     for (let i = 0; i < 3; i++){
       // The centre on the placed child's own grid: parent voxels less `at`, in child voxels.
@@ -758,27 +788,53 @@ export function sceneField(store, base, list, blocks = null){
       src[c.P[i]] = c.fl[i] ? n - 1 - K : K;
     }
     if (c.colour.mean){
-      c.colour.mean(lc, src[0] * cs, src[1] * cs, src[2] * cs, mean);
-      return rgb8(mean[0], mean[1], mean[2]);
+      c.colour.mean(lc, src[0] * cs, src[1] * cs, src[2] * cs, out ?? mean);
+      return out ? 0 : rgb8(mean[0], mean[1], mean[2]);
     }
-    return c.colour((src[0] + 0.5) * cs, (src[1] + 0.5) * cs, (src[2] + 0.5) * cs, lc);
+    const w = c.colour((src[0] + 0.5) * cs, (src[1] + 0.5) * cs, (src[2] + 0.5) * cs, lc);
+    if (out){ out[0] = w & 255; out[1] = w >> 8 & 255; out[2] = w >> 16 & 255; }
+    return w;
   }
-  return function scene(x, y, z, l = 0){
+  /* The owner of the level-l cell centred at (x, y, z): the latest placement
+     solid in the cell, unless a later block lies over its centre (the point
+     road) or has any voxel in the cell (`whole`, the mean road's coarse
+     cells: A″, the note above). Returns the placement, OWN_BLOCK (its colour
+     in `block`), or OWN_BASE. Both roads ask it, so they can't disagree on who
+     owns a cell, and at lod 0 the two block rules are one. */
+  let block = -1;
+  function ownerOf(x, y, z, l, whole = false){
     const side = 2 ** l, h = side / 2;
     pt[0] = x; pt[1] = y; pt[2] = z;
     for (let i = 0; i < 3; i++){ lo[i] = pt[i] - h; hi[i] = lo[i] + side; }
-    const list = nearOf(l), block = blocks ? blocks.lookup(x, y, z) : -1, after = block >= 0 ? blocks.seq : -1;
+    const list = nearOf(l);
+    block = !blocks ? -1 : whole && l ? blocks.latestIn(l, lo[0] / side, lo[1] / side, lo[2] / side) : blocks.lookup(x, y, z);
+    const after = block >= 0 ? blocks.seq : -1;
     for (let k = 0; k < list.length; k++){
       const c = list[k];
       if (c.seq < after) break;
       if (c.empty || lo[0] >= c.hi[0] || lo[1] >= c.hi[1] || lo[2] >= c.hi[2] || hi[0] <= c.lo[0] || hi[1] <= c.lo[1] || hi[2] <= c.lo[2]) continue;
       if (!boxHits(store, c.T, c.Dt, c.at[0], c.at[1], c.at[2], lo, hi)) continue;
-      return c.colour ? childColour(c, l) : base(x, y, z, l);
+      return c;
     }
-    if (block >= 0) return block;
-    return base(x, y, z, l);
+    return block >= 0 ? OWN_BLOCK : OWN_BASE;
+  }
+  function scene(x, y, z, l = 0){
+    const c = ownerOf(x, y, z, l);
+    if (c === OWN_BLOCK) return block;
+    if (c === OWN_BASE) return base(x, y, z, l);
+    return c.colour ? childColour(c, l) : base(x, y, z, l);
+  }
+  // Option A (the note above): the owner at the cell, the base's own mean underneath.
+  if (base.mean) scene.mean = (l, x, y, z, out = new Float64Array(3)) => {
+    const h = 2 ** l / 2, c = ownerOf(x + h, y + h, z + h, l, true);
+    if (c === OWN_BLOCK){ out[0] = block & 255; out[1] = block >> 8 & 255; out[2] = block >> 16 & 255; return out; }
+    if (c === OWN_BASE || !c.colour) return base.mean(l, x, y, z, out);
+    childColour(c, l, out);
+    return out;
   };
+  return scene;
 }
+const OWN_BASE = 0, OWN_BLOCK = 1;
 
 
 /* ---- the scene log (docs/scene-plan.md §1.4, step 3) --------------------------
@@ -920,7 +976,8 @@ export function createSceneLog(base){
 }
 
 /* ---- the follower: a scene log's deltas on the other side ----------------------
-   What a chunk worker (stream-core's createJobRunner) keeps of a scene: the
+   What a chunk worker kept of a scene while drops had a road of their own
+   (log-core's createOneTable does it now, and holds itself to this): the
    worlds with their fields, built once a world by `fieldOf(desc, D)` (the
    runner's colourOf over its own view, so a baked child reads its skin
    through the parent's ids), and the live drops as sceneField's list. The

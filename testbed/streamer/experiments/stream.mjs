@@ -1,6 +1,6 @@
 /* Step 4: the chunk virtualiser, measured (docs/stream-plan.md, decision 14).
 
-     node experiments/stream.mjs            # ~4 min, ~1.5 GB; writes docs/stream-results.md and docs/data/stream.json
+     node experiments/stream.mjs            # ~4.5 min, ~1.5 GB; writes docs/stream-results.md and docs/data/stream.json
      node experiments/stream.mjs --quick    # small worlds, prints only (~20 s)
 
    Everything runs the real streamer (stream-core.js) and real chunk jobs

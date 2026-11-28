@@ -4,7 +4,7 @@
      { save: { X, Y, Z, cells, view } }  the grid (a copy, transferred) and
                                          the player's view → { saved: { bytes, voxels, ms } }
      { open: { file, world } }           a File and which of its worlds →
-                                         { opened: { X, Y, Z, cells, count, lod, at, saved, view, name, D, worlds, ms } }
+                                         { opened: { X, Y, Z, cells, count, lod, at, saved, grown, view, name, D, worlds, ms } }
    or { error }. Writing the default arena takes about a second, mostly
    the words' six-bit pass and the gzip (the README's Measured table). */
 import { readVdag } from '../vdag-core.js';
@@ -35,7 +35,7 @@ self.onmessage = async ({ data }) => {
       const r = arenaOfWorld({ store, counts, root: w.root, D: w.D, name: w.name }, colour);
       if (!r) throw new Error(`${file.name} is empty`);
       const { X, Y, Z, cells, count } = r.A;
-      post({ opened: { X, Y, Z, cells, count, lod: r.lod, at: r.at, saved: r.saved, view: w.view, name: w.name, D: w.D,
+      post({ opened: { X, Y, Z, cells, count, lod: r.lod, at: r.at, saved: r.saved, grown: r.grown, view: w.view, name: w.name, D: w.D,
                        worlds: worlds.length, ms: performance.now() - t0 } }, [cells.buffer]);
     }
   } catch (e){

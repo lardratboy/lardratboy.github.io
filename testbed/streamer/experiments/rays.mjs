@@ -1,6 +1,6 @@
 /* Step 5: the ray path, measured (docs/ray-plan.md).
 
-     node experiments/rays.mjs            # ~3 min; writes docs/ray-results.md and docs/data/ray.json
+     node experiments/rays.mjs            # ~2 min; writes docs/ray-results.md and docs/data/ray.json
      node experiments/rays.mjs --quick    # small worlds, prints only (~20 s)
 
    For each world, at step 4's default detail (2) with the whole cut

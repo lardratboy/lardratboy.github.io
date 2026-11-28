@@ -1,6 +1,6 @@
 /* The scatter world, measured (docs/scatter-plan.md, phase 6).
 
-     node experiments/scatter.mjs           # ~2 min; writes docs/scatter-results.md and docs/data/scatter.json
+     node experiments/scatter.mjs           # ~50 s; writes docs/scatter-results.md and docs/data/scatter.json
      node experiments/scatter.mjs --quick   # D = 10 only, prints (~5 s)
 
    It measures job times, so run it on an idle machine.

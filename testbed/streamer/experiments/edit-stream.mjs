@@ -12,7 +12,8 @@
 import os from 'node:os';
 import { createStore, createCounts } from '../dag-core.js';
 import { createWorld, worldSnapshot, createTailer } from '../stream-core.js';
-import { aimAt, pick, createEditLog } from '../edit-core.js';
+import { aimAt, pick } from '../edit-core.js';
+import { createOneLog } from '../log-core.js';
 import { buildClay, clayDesc } from '../clay-core.js';
 import { SHAPES, fieldOf } from './shapes.mjs';
 import { createSim, still } from './stream-sim.mjs';
@@ -47,10 +48,10 @@ console.log('|---|---|---:|---|---:|---|---:|---:|---:|---:|---|---:|');
 for (const def of WORLDS) for (const placing of [true, false]){
   const { store, root, D, colour, eye, dir } = def.build();
   const counts = createCounts(store), snap = worldSnapshot(store, root, D, { counts, colour });
-  const log = createEditLog(root), tailer = createTailer(store, { counts, log });
+  const log = createOneLog(root), tailer = createTailer(store, { counts, oneLog: log });
   const sim = createSim({ world: createWorld(store, root, D), snap });
   let tailBytes = 0;
-  const st = sim.makeStreamer({ publish: () => { const t = tailer(); tailBytes = t.keys.byteLength + t.counts.byteLength + (t.edits ? t.edits.ops.byteLength : 0); sim.tail(t); } });
+  const st = sim.makeStreamer({ publish: () => { const t = tailer(); tailBytes = t.keys.byteLength + t.counts.byteLength + (t.ops ? t.ops.ops.byteLength : 0); sim.tail(t); } });
   const rand = mulberry(7);
 
   // Settled first, at the measured job times, in one flight with the clicks: a

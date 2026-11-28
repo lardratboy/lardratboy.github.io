@@ -1,8 +1,8 @@
 /* docs/vdagplacement.md's numbers: dropping a world file into worlds other than
    the kit (hills, the scatter, flat ground), and turning it more ways than about y.
    A sketch, not the engine: it prints, writes nothing, and has no tests of its
-   own. Everything it calls is scene-core's, scatter-core's and edit-core's,
-   unchanged.
+   own. Everything it calls is scene-core's, scatter-core's, edit-core's and
+   log-core's, unchanged.
 
      node experiments/placement-sketch.mjs                 ~2 min (a and b at D = 10, 11)
      node --max-old-space-size=8192 experiments/placement-sketch.mjs --only=ab --D=12
@@ -40,8 +40,9 @@ import { clayDesc, buildClay } from '../clay-core.js';
 import { createTailer } from '../stream-core.js';
 import { pick } from '../edit-core.js';
 import { readVdag } from '../vdag-core.js';
-import { bakeScene, prepared, createSceneLog, childFrame, dropAt, snapRef, Y_TURNS, placeMemoSize } from '../scene-core.js';
+import { bakeScene, prepared, childFrame, dropAt, snapRef, Y_TURNS, placeMemoSize } from '../scene-core.js';
 import { mix } from '../actor-core.js';
+import { createOneLog } from '../log-core.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = k => process.argv.find(a => a.startsWith(`--${k}=`))?.slice(k.length + 3);
@@ -252,8 +253,8 @@ if (ONLY.includes('d')){
   for (const name of ['flat', 'hills', 'scatter', 'kit']){
     const P = parentOf(name);
     for (const world of [specimenWorld(0), ...(knight ? [knight] : [])]){
-      const S = fresh(P), log = createSceneLog(S.root), counts = createCounts(S.store), classes = P.classes ? createClasses(S.store, OH48) : null;
-      const tail = createTailer(S.store, { counts, classes, scene: log });
+      const S = fresh(P), log = createOneLog(S.root), counts = createCounts(S.store), classes = P.classes ? createClasses(S.store, OH48) : null;
+      const tail = createTailer(S.store, { counts, classes, oneLog: log });
       tail();
       const X = Math.floor(P.side * 0.47), Z = Math.floor(P.side * 0.22);
       const a = drop(S, log, world, X, Z);
@@ -295,7 +296,7 @@ if (ONLY.includes('e')){
   console.log(`\nquarter turns about x, y, z: elements ${gens.join(', ')}; composed (MUL) they reach ${seen.size} turns; Y_TURNS = ${Y_TURNS.join(', ')}`);
 
   for (const world of [specimenWorld(0), ...(knight ? [knight] : [])]){
-    const P = parentOf('flat'), S = fresh(P), log = createSceneLog(S.root);
+    const P = parentOf('flat'), S = fresh(P), log = createOneLog(S.root);
     const X0 = P.side / 2 - 6000, Z0 = P.side / 2;
     const rows = [];
     let k = 0;

@@ -1,7 +1,7 @@
 /* Step 5's Node numbers (docs/scene-plan.md §2, docs/scene-log.md §5): the knight
    dropped into the D = 14 kit the way the viewer drops it, without the viewer.
    The aim is edit-core's pick straight down at a spot, the landing scene-core's
-   dropAt and snapRef, the bake the scene log's drop: the page's path, call for
+   dropAt and snapRef, the bake the one log's drop: the page's path, call for
    call, on a real store holding the kit's pruned keys as themselves.
 
      node experiments/scene-try.mjs            ~1 min, prints only
@@ -26,8 +26,9 @@ import { createTailer } from '../stream-core.js';
 import { kitDesc, buildKit } from '../kit-core.js';
 import { pick } from '../edit-core.js';
 import { readVdag } from '../vdag-core.js';
-import { createSceneLog, childFrame, dropAt, snapRef, Y_TURNS, placeMemoSize } from '../scene-core.js';
+import { childFrame, dropAt, snapRef, Y_TURNS, placeMemoSize } from '../scene-core.js';
 import { mix } from '../actor-core.js';
+import { createOneLog } from '../log-core.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FILES = (process.env.SCENE_FILES || 'worlds/scene/knight-d8.vdag,worlds/scene/knight-d10.vdag').split(',');
@@ -86,11 +87,11 @@ const fmt = n => n.toLocaleString('en-US');
     if (world.D + scale > D) continue;
     const row = [];
     for (const grid of [16, 1]){
-      const S = freshKit(), log = createSceneLog(S.root);
+      const S = freshKit(), log = createOneLog(S.root);
       // The page's tailer for the kit: counts and poses of the new nodes, and the
       // drop. Its time is most of what the HUD calls setRoot. Made before the drop,
       // as the page's is made with the snapshot, so the kit's own nodes aren't in it.
-      const counts = createCounts(S.store), classes = createClasses(S.store, OH48), tail = createTailer(S.store, { counts, classes, scene: log });
+      const counts = createCounts(S.store), classes = createClasses(S.store, OH48), tail = createTailer(S.store, { counts, classes, oneLog: log });
       const plain = createTailer(S.store, { counts: createCounts(S.store) });
       tail(); plain();
       const a = drop(S, log, world, X, Z, { turn, scale, grid });
@@ -118,7 +119,7 @@ const fmt = n => n.toLocaleString('en-US');
   const world = children[0];
   let first = null;
   for (const [grid, turns] of [[16, 1], [1, 1], [16, 4], [1, 4]]){
-    const S = freshKit(), log = createSceneLog(S.root), n0 = S.store.size, r0 = reach(S.store, S.root), ms = [], ys = new Set();
+    const S = freshKit(), log = createOneLog(S.root), n0 = S.store.size, r0 = reach(S.store, S.root), ms = [], ys = new Set();
     for (let i = 0; i < N; i++){
       const x = 300 + mix(7, i, 1) % (SIDE - 600), z = 300 + mix(7, i, 2) % (SIDE - 600);
       const r = drop(S, log, world, x, z, { turn: turns > 1 ? mix(7, i, 3) % turns : 0, grid });

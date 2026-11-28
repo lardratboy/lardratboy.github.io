@@ -339,6 +339,7 @@ import { createStore, createClasses, createCounts, prune, storeView, importSame,
 import { mortonXYZ, shownMask, quadsShown, expandChunk } from './chunk-core.js';
 import { childFrame, dropAt, snapRef, bakeScene, placeMemoSize, Y_TURNS } from './scene-core.js';
 import { createOneLog, createOneTable, replayLog } from './log-core.js';
+import { flattenSteps, flatWorld, FLAT_MAX } from './flatten-core.js';
 import * as gizmo from './gizmo-core.js';
 import * as camera from './camera-core.js';
 import { GLSL_DECODE, GLSL_ATTR } from './chunk-glsl.js';
@@ -1807,18 +1808,20 @@ const isShape = id => id.startsWith('shape:');
    2^19 is about 150 ms, inside a load that already stops to prepare the nodes. The
    scatter, the lattice and the caves (views of up to two million nodes) and larger
    files are made real when B is first pressed, in slices with the toast (`makeReal`,
-   step 5). Not yet: a file with baked colour (scene-core's sceneField refuses a parent
-   with `mean`) or with none (a drop needs the parent's colour for everything it isn't).
+   step 5). A file with baked colour takes edits too (docs/edit-saved-plan.md, 2026-11-27:
+   a saved world, or an imported glTF, PLY or .vox): scene-core's sceneField keeps the
+   baked base's `mean`, the base's own wherever no op touches. Not yet: a file with no
+   colour (a drop needs the parent's colour for everything it isn't).
    A drop of a child over `bakeAsync` nodes bakes in steps, `bakeMs` a frame, with the
    toast (`bakeInSteps`): the D = 10 knight (100,314 nodes) is about 0.9 s of baking,
    the D = 12 scatter (1.7 million) 7.5 s off the grid, and one go of either held the
    page. Smaller ones bake in the click, as they always did, so a test's drop has
-   landed when editStep returns. */
-const tool = { importMax: 2 ** 19, slice: 2 ** 16, bakeAsync: 2 ** 16, bakeMs: 24 };
+   landed when editStep returns. `flatMax` is the largest skin a save of an edited
+   world flattens (flatten-core's FLAT_MAX); saveSelftest lowers it to see the refusal. */
+const tool = { importMax: 2 ** 19, slice: 2 ** 16, bakeAsync: 2 ** 16, bakeMs: 24, flatMax: FLAT_MAX };
 function fileWhyNot(e){
   if (!e) return 'not on the shelf';
   if (!e.colour) return 'a world with no colour can\'t take worlds yet: a drop needs its parent\'s colour for everything the child isn\'t';
-  if (e.colour.kind === 'baked') return 'a world with baked colour can\'t take worlds yet: the scene\'s colour needs a parent with a named one';
   return null;
 }
 const takesWorlds = id => isKit(id) || isShape(id) || isRow(id) || isScatter(id) || isMath(id) || isLattice(id) || isCaves(id) || isDungeon(id) || isCity(id) || (isFile(id) && !fileWhyNot(shelfEntry(id)));
@@ -2126,6 +2129,7 @@ function bindSeed(){
 const isFile = id => id.startsWith('file:');
 const shelf = [];
 let shelfSerial = 0, openSerial = 0;
+let flattening = null;            // a save of an edited world under way (flattenThis)
 const shelfEntry = id => shelf.find(e => e.id === id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const mbOf = n => n >= 1e6 ? `${(n / 1e6).toFixed(2)} MB` : n >= 1e4 ? `${(n / 1e3).toFixed(1)} KB` : `${n.toLocaleString()} B`;
@@ -2151,15 +2155,17 @@ function showFile(html = ''){
 }
 function fillShelf(){
   const onShelf = isFile(state.world);
-  // Neither a file nor the shelf can hold edits yet (realtimecsg.md §11.8 step 9),
-  // and writing the shape without its block colours would look right and be wrong.
-  const edited = hasEdits();
-  $('shelfAdd').disabled = !W || !!W.file || !!W.universe || edited;
+  // An edited world saves flattened (below), a file's too, as a new world; nothing
+  // saves while a flatten runs.
+  const edited = hasEdits(), busy = !!flattening;
+  $('shelfAdd').disabled = !W || !!W.universe || (!!W.file && !edited) || busy;
   $('shelfUniverse').disabled = !W || !W.file || state.uniFiles.includes(W.id);
   $('shelfRemove').disabled = !onShelf;
   $('shelfExport').disabled = !shelf.length;
   $('shelfExport').textContent = shelf.length ? `export all (${shelf.length})` : 'export all';
-  $('fileExport').disabled = !W || !!W.universe || edited;
+  $('fileExport').disabled = !W || !!W.universe || busy;
+  $('fileExport').title = edited ? 'save the world on screen as one .vdag file, its edits flattened in (a baked world: no undo)' : 'save the world on screen as one .vdag file';
+  $('shelfAdd').title = edited ? 'keep the world on screen on the shelf, its edits flattened in (a baked world: no undo)' : 'keep the world on screen, and this view of it, on the shelf';
 }
 const currentView = () => ({ eye: cam.eye.slice(), yaw: cam.yaw, pitch: cam.pitch });
 const worldName = () => `${W.label}${isSeeded(W.id) ? `, seed ${seedOf(W.id)}` : ''}, D=${W.D}`;
@@ -2229,7 +2235,7 @@ async function openFiles(fileList){
   return { added, problems };
 }
 const fileSlug = world => (world.source?.world ?? world.name).replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase().slice(0, 60) || 'world';
-async function exportWorlds(worlds, fileName){
+async function exportWorlds(worlds, fileName, note = ''){
   try {
     setBuilding(`writing ${fileName} …`, null, true);
     const { file } = await fileJob({ op: 'write', worlds }, [], (t, frac) => setBuilding(`writing ${fileName} … ${t}`, frac));
@@ -2237,7 +2243,7 @@ async function exportWorlds(worlds, fileName){
     a.href = url; a.download = fileName;
     document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
-    showFile(`exported ${worlds.length} world${worlds.length > 1 ? 's' : ''} to ${esc(fileName)}, ${mbOf(file.length)}`);
+    showFile(`exported ${worlds.length} world${worlds.length > 1 ? 's' : ''} to ${esc(fileName)}, ${mbOf(file.length)}${note}`);
     return file;
   } catch (e){
     console.warn('world file:', e.message);
@@ -2247,8 +2253,12 @@ async function exportWorlds(worlds, fileName){
     fileToastDone();
   }
 }
-function exportThis(){
-  if (!W) return Promise.resolve(null);
+async function exportThis(){
+  if (!W) return null;
+  if (hasEdits()){
+    const w = await flattenThis();
+    return w && exportWorlds([w], `${fileSlug(w)}-edited-d${w.D}.vdag`, `\n${flatNote(w)}`);
+  }
   const w = onScreen();
   return exportWorlds([w], `${fileSlug(w)}-d${w.D}.vdag`);
 }
@@ -2259,15 +2269,89 @@ function exportShelf(){
   return exportWorlds(worlds, worlds.length === 1 ? `${fileSlug(worlds[0])}-d${worlds[0].D}.vdag` : `worlds-${worlds.length}.vdag`);
 }
 /* Keep the world on screen. Pruned, one sweep down the ids: a world built on
-   this thread may hold nodes its root doesn't reach. */
+   this thread may hold nodes its root doesn't reach. An edited one is flattened
+   first, so it's a promise of the entry (null if refused or superseded). */
 function addToShelf(){
-  if (!W || W.file) return null;
+  if (!W || W.universe) return null;
+  if (hasEdits()) return addEdited();
+  if (W.file) return null;
   const { keys, map } = prune(W.store.snapshot().keys, [W.root]);
   const e = shelve({ ...onScreen(), keys, root: map[W.root], colourStatus: 'same', voxels: W.voxels, nodes: keys.length / 9, fileName: null, fileBytes: null });
   fillWorlds();
   showFile(`added to the shelf: ${esc(e.name)}\n${shelf.length} world${shelf.length > 1 ? 's' : ''}, ${(shelf.reduce((a, s) => a + s.keys.byteLength, 0) / 1e6).toFixed(1)} MB in memory`);
   return e;
 }
+async function addEdited(){
+  const w = await flattenThis();
+  if (!w) return null;
+  const e = shelve({ ...w, colourStatus: 'baked', fileName: null, fileBytes: null });
+  fillWorlds();
+  showFile(`added to the shelf: ${esc(e.name)}\n${flatNote(w)}\n${shelf.length} world${shelf.length > 1 ? 's' : ''}, ${(shelf.reduce((a, s) => a + s.keys.byteLength + (s.colour?.words?.byteLength ?? 0), 0) / 1e6).toFixed(1)} MB in memory`);
+  return e;
+}
+
+/* ---- saving an edited world (docs/open-questions.md §1, road 2, chosen 2026-11-27;
+   flatten-core.js, docs/save-edits-log.md) ------------------------------------------
+   An edited world saves flattened: its shape, and a word for every voxel that can
+   show, baked from the field the workers draw (createOneTable over the one log, each
+   dropped world's field built as the runner builds it, as takeColour does). So
+   "export this world" writes, and "add this world" keeps, a plain baked world that
+   opens wherever an imported asset does. The undo stack and the way it was made stay
+   behind (the answers: no undo across a save; bake and prune). At lod 0 it draws the
+   session's frame; a coarse cell is the mean of the skin under it. The saved world
+   takes edits again, as any baked file does (docs/edit-saved-plan.md), and saves
+   again the same way: the field is then the one table over the baked base, with
+   its `mean`, which flatten-core samples as the job does (plan §6).
+   It runs `tool.bakeMs` a frame with the toast, as a large drop does, on the log's
+   root at the click: edits made meanwhile are the session's, not the file's. A drop
+   baking in steps isn't in the log yet, so a save waits for it to land. A new world
+   ends it. A skin over FLAT_MAX voxels is refused with its count before any word is
+   made: the "depth limit" the answer accepted, which is a limit on the skin, not on
+   D (clay at D = 20 is a 170,000-voxel skin, flat ground's top alone 2^40). */
+const FLAT_PHASES = { prune: 'pruning', skin: 'finding the voxels that can show', words: 'baking their colours' };
+const flatNote = w => `flattened: ${w.skinVoxels.toLocaleString()} voxels that can show, each with its colour, in ${(w.ms / 1000).toFixed(1)} s (a baked world, which takes edits again)`;
+function flattenThis(){
+  if (flattening) return flattening.promise;
+  const w = W, E = w.edit, gen = buildGen, ours = () => W === w && buildGen === gen;
+  if (E.baking){ showFile(`<span class="warn">still dropping ${esc(E.baking.name)}: save once it has landed</span>`); return Promise.resolve(null); }
+  const t0 = performance.now(), root = E.log.root;
+  // The counts first: a baked child's field reads counts of the nodes its import added.
+  w.counts.update();
+  const table = createOneTable(w.store, (desc, D) => colourOf(desc, { store: w.store, counts: w.counts, D }));
+  table.sync(E.log.delta());
+  const field = table.field(colourOf(w.colour, { store: w.store, counts: w.counts, D: w.D }));
+  const meta = { name: `${w.file ? w.file.name : worldName()}, edited`, view: currentView(), source: w.file ? w.file.source ?? null : w.source };
+  const steps = flattenSteps(w.store, root, w.D, field, { max: tool.flatMax }), job = { promise: null };
+  flattening = job;
+  fillShelf();
+  job.promise = (async () => {
+    try {
+      let fresh = true, r;
+      for (;;){
+        const t = performance.now();
+        do r = steps.next(); while (!r.done && performance.now() - t < tool.bakeMs);
+        if (r.done) break;
+        const { phase, done, total } = r.value;
+        setBuilding(`saving the edited world: ${FLAT_PHASES[phase] ?? phase}`, phase === 'words' && total ? done / total : null, fresh);
+        fresh = false;
+        await new Promise(res => requestAnimationFrame(() => setTimeout(res, 0)));
+        if (!ours()) return null;
+      }
+      const f = r.value;
+      return { ...flatWorld(f, meta), voxels: f.voxels, skinVoxels: f.skinVoxels, nodes: f.nodes, ms: performance.now() - t0 };
+    } catch (e){
+      console.warn('saving an edited world:', e.message);
+      if (ours()) showFile(`<span class="warn">${esc(e.message)}</span>`);
+      return null;
+    } finally {
+      if (flattening === job) flattening = null;
+      if (ours()) setBuilding('');
+      fillShelf();
+    }
+  })();
+  return job.promise;
+}
+
 /* Back to where it was built from when the shelf has nothing left to show. */
 function goToSource(src){
   const id = src?.world;
@@ -2751,8 +2835,10 @@ async function buildWorld(signal, gen){
         // Made with the snapshot, as a tailer starts from what the snapshot holds.
         // Every editable world has one log (docs/onelog-plan.md step 3) and a real store,
         // here, with an interner. Clay takes blocks and worlds, with Tab between (plan
-        // Q1); the kit, the shapes, the rows and files take worlds alone. A clay world or
-        // a kit off the shelf is a read-only view until it's made real at install.
+        // Q1), and so does every file that takes edits (docs/edit-saved-plan.md Q1 (a),
+        // 2026-11-27: a saved clay world is a file, and you asked for blocks on it); the
+        // live kit, the shapes and the rows take worlds alone. A clay world or a kit off
+        // the shelf is a read-only view until it's made real at install.
         // A shape takes worlds (gizmo-plan §7 step 2; vdagplacement §2.1): fromField
         // built it here in a real store, and its colour is named, which is all a drop
         // needs. Its keys as built are the snapshot's own copy. A row is the same, and a
@@ -2763,7 +2849,7 @@ async function buildWorld(signal, gen){
         edit: clay || dungeon || city ? newEdit(store, root, counts, classes, snap.keys, ['blocks', 'scene'])
             : kit ? newEdit(store, root, counts, classes, kit.baseKeys, ['scene'])
             : shaped ? newEdit(store, root, counts, classes, snap.keys, ['scene'])
-            : sceneKeys ? newEdit(store, root, counts, classes, sceneKeys, ['scene']) : null,
+            : sceneKeys ? newEdit(store, root, counts, classes, sceneKeys, ['blocks', 'scene']) : null,
         lazy: lazy ? { keys: snap.keys, poses: !!classes } : null, importing: null, noEdit };
   ray.frame = null;
   streamer.setWorld(createWorld(store, root, D));
@@ -3605,7 +3691,8 @@ function makeReal(){
       const classes = w.lazy.poses ? createClasses(real, OH48) : null;
       streamer.setStore(real);
       w.store = real; w.counts = counts; w.realMs = performance.now() - t0; w.lazy = null;
-      w.edit = newEdit(real, w.root, counts, classes, keys, ['scene']);
+      // A file has both tools, as at install; the scatter, the lattice and the caves worlds alone.
+      w.edit = newEdit(real, w.root, counts, classes, keys, w.file ? ['blocks', 'scene'] : ['scene']);
       return true;
     } finally {
       w.importing = null;
@@ -3615,7 +3702,7 @@ function makeReal(){
 }
 function setEditMode(on){
   if (on && !W?.edit && W?.lazy){ makeReal().then(made => { if (made && W.edit) setEditMode(true); }); return false; }
-  if (on && !W?.edit){ say(`<span class="warn">${esc(W?.noEdit ?? 'edit mode works on clay and flat ground (blocks and worlds), and on every world with a named colour (worlds) so far')}</span>`, 4000); return false; }
+  if (on && !W?.edit){ say(`<span class="warn">${esc(W?.noEdit ?? 'edit mode works on clay, flat ground, the dungeon, the city and files (blocks and worlds), and on every other world with a colour (worlds) so far')}</span>`, 4000); return false; }
   edit.on = on;
   edit.repeat.clear(); edit.wheel = 0;
   edit.box = null; edit.press = null; edit.hot = null; edit.pointer = null;
@@ -3646,7 +3733,7 @@ function editKey(e){
     e.preventDefault();
     const E = W.edit, other = E.tools.find(k => k !== E.kind);
     if (other){ setTool(other); say(other === 'scene' ? 'the world tool: a click opens a box for the shelf world (Tab for blocks)' : 'the block tool: left breaks, right places (Tab for worlds)'); }
-    else say('blocks go on clay and flat ground: here it\'s worlds alone (onelog-plan Q1)');
+    else say('blocks go on clay, flat ground, the dungeon, the city and files: here it\'s worlds alone (onelog-plan Q1)');
     return true;
   }
   if (isScene()){
@@ -6614,6 +6701,13 @@ window.universeSelftest = async function universeSelftest(opts = {}){
           const A = actors.A;
           if (!A) err(`no actors in the universe: ${actors.note}`);
           else {
+            // The twin below is made by makePopulation too, so a wrong kind is
+            // in both and their bytes still agree: an all-flier crowd passed
+            // every other check here (maintenance.md §4). The mix's rule
+            // written out instead: slot i of a mixed crowd is kind i mod 3.
+            let wrongKind = 0;
+            for (let i = 0; i < A.N; i++) if (A.kind[i] !== i % 3) wrongKind++;
+            if (wrongKind) err(`actors in the universe: ${wrongKind} of ${A.N} slots aren't the mix's kind (slot i is kind i mod 3)`);
             const world = actorWorld(), twin = makePopulation(world, 60, eyeVoxel());
             tickActors(world, twin, actorParams());
             let rock = 0;
@@ -7797,8 +7891,193 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       const back = await clickExport('fileExport');
       report.baked.rewriteSame = back.bytes.length === bakedFile.length && back.bytes.every((v, i) => v === bakedFile[i]); }
   };
+  /* 11. An edited world, saved (docs/open-questions.md §1, road 2, flatten-core.js;
+     docs/save-edits-log.md). Run alone with { only: 'saved' }. Clay at D = 12 (a 64
+     ball, no ground), edited through the one log as editStep edits it: a block over
+     the ball, one on its side, one broken out of its top, and the D = 8 sphere off the
+     shelf dropped into its other side, turned. Then:
+     a. The page's flatten against the workers. The pool's main-thread runner, fed
+        every tail, is the workers' code over the workers' data: a runner over the
+        flattened world's snapshot must make every lod-0 chunk with skin with the same
+        records, and the same word for every main record.
+     b. Both buttons on with edits; both off while a flatten runs (one step a frame).
+     c. The export downloads as …-edited-d12.vdag.
+     d. "Add this world" keeps a baked entry with the session's voxels.
+     e. A skin over tool.flatMax: no download, and the page says how many voxels.
+     f. The file, opened by a real drop, is baked, has the session's voxels, and with
+        the lod locked at 0 draws the session's frame byte for byte, raster only and
+        ray only.
+     g. It takes edits again (docs/edit-saved-plan.md, 2026-11-27), with both tools:
+        a block, breaks into its insides and into its side, the sphere dropped half
+        into its top. Its chunks were cached from the baked base before the ops, at
+        the view's own lods (both paths drawn first), and they are what the plan's
+        trap is about (§2.2): the frame then, at the view's lods and locked at 0,
+        must be a fresh install's of the same file with the same ops, byte for byte.
+     h. The main-thread runner, fed the tails, against a runner given a fresh
+        snapshot and the whole log at once, on every chunk of lods 0–2.
+     i. Saved again (the fresh install's): a against the workers again, and the
+        second file, opened by a real drop, draws the second session's lod-0 frame
+        byte for byte. */
+  const savedStep = async () => {
+    const saved = { bakeMs: tool.bakeMs, flatMax: tool.flatMax, rule: state.rule, lock: state.lock };
+    const lock = on => { state.rule = on ? 'locked' : saved.rule; state.lock = on ? 0 : saved.lock; showLock(); streamer.setOptions({ lock: lockOf() }); dirty = true; };
+    const out = report.saved = {};
+    try {
+      state.world = 'shape:sphere'; state.depth = 8; fillWorlds(); fillDepth();
+      await loadWorld(true);
+      const kid = addToShelf();
+      state.world = 'clay'; state.clay = clayDesc({ D: 12, lump: 64, ground: false }); fillWorlds(); fillDepth();
+      await loadWorld(true);
+      const E = W.edit, P = clayPlace(W.clay), [x, y, z] = P.centre, r = P.r;
+      out.kid = { D: kid.D, voxels: kid.voxels }; out.base = W.voxels;
+      const land = (kind, step) => { if (!step) throw new Error(`savedStep: the ${kind} changed nothing`); editLanded(kind, step, performance.now(), frameTick); };
+      land('place', E.log.place(W.store, W.D, { level: 2, X: x >> 2, Y: (y + r + 8) >> 2, Z: z >> 2 }, PALETTE[1]));
+      land('place', E.log.place(W.store, W.D, { level: 0, X: x - r - 1, Y: y, Z: z }, PALETTE[3]));
+      land('break', E.log.erase(W.store, W.D, { level: 3, X: x >> 3, Y: (y + r - 4) >> 3, Z: z >> 3 }));
+      land('drop', E.log.drop(W.store, W.D, { world: childOf(kid), at: [x + 10, y - 128, z - 128], turn: PROPER[5], scale: 0 }));
+      cam.eye = [x - 70, y + 60, z - 90]; cam.yaw = Math.atan2(70, 90); cam.pitch = Math.atan2(-60, Math.hypot(70, 90));
+      view.clear = clearance();
+      const view0 = currentView(), root = E.log.root;
+      W.counts.update();
+      out.voxels = W.counts.of(root); out.ops = E.log.count;
+      lock(true);
+      const before = await frames();
+      lock(false);
+      await settle();
+      // a. Flattened by hand (flattenThis, as the buttons do), against the workers' runner.
+      // The chunks of `store` under `root` at lod `lod` (a level-(6 + lod) node each).
+      const chunksOf = (store, root, D, lod) => {
+        const list = [];
+        const gather = (id, level, cx, cy, cz) => {
+          if (id === EMPTY) return;
+          if (level === 6 + lod){ list.push([cx, cy, cz]); return; }
+          for (let o = 0; o < 8; o++) gather(store.child(id, o), level - 1, 2 * cx + (o & 1), 2 * cy + (o >> 1 & 1), 2 * cz + (o >> 2));
+        };
+        gather(root, D, 0, 0, 0);
+        return list;
+      };
+      // Records without their pose bits (24–29): a baked file has poses (classes, a debug
+      // colour mode) where the clay it was saved from had none, and a file saves no pose.
+      const againstRunner = (f, root) => {
+        const session = pool._runnerOf({}), fv = storeView({ keys: f.keys }), fc = createCounts(fv);
+        const flat = createJobRunner(worldSnapshot(fv, f.root, f.D, { counts: fc, colour: f.colour }), colourOf), chunks = chunksOf(fv, f.colour.skin, f.D, 0);
+        let records = 0, words = 0, mains = 0;
+        for (const [cx, cy, cz] of chunks){
+          const a = session({ lod: 0, cx, cy, cz, lodRule: 'any', kind: 'records', root }), b = flat({ lod: 0, cx, cy, cz, lodRule: 'any', kind: 'records' });
+          if (a.count !== b.count || a.borderStart !== b.borderStart || a.records.some((v, i) => i < a.count && (v & 0xffffff) !== (b.records[i] & 0xffffff))) records++;
+          for (let i = 0; i < a.borderStart; i++) if (a.attrs[i] !== b.attrs[i]){ words++; break; }
+          mains += a.borderStart;
+        }
+        return { chunks: chunks.length, recordsDiffer: records, wordsDiffer: words, mains, skinVoxels: f.skinVoxels, flatVoxels: f.voxels, name: f.name };
+      };
+      const f = await flattenThis();
+      Object.assign(out, againstRunner(f, root));
+      // b, c. The buttons, then the export, one step a frame so the flatten is seen running.
+      out.enabled = !$('fileExport').disabled && !$('shelfAdd').disabled;
+      tool.bakeMs = 0;
+      const n = caught.length;
+      click('fileExport');
+      out.busy = $('fileExport').disabled && $('shelfAdd').disabled;
+      if (!await until(() => caught.length > n)) throw new Error(`no download of the edited world: ${$('fileInfo').textContent}`);
+      const file = { name: caught[n].name, bytes: new Uint8Array(await caught[n].blob.arrayBuffer()) };
+      tool.bakeMs = saved.bakeMs;
+      await until(() => !flattening);
+      out.fileName = file.name; out.fileBytes = file.bytes.length; out.afterEnabled = !$('fileExport').disabled && !$('shelfAdd').disabled;
+      out.exportSaid = $('fileInfo').textContent;
+      // d. The shelf.
+      const size = shelf.length, e = await addToShelf();
+      out.shelf = { added: shelf.length - size, status: e?.colourStatus, kind: e?.colour?.kind, voxels: e?.voxels, words: e?.colour?.words?.length };
+      // e. The refusal.
+      tool.flatMax = 1000;
+      const m = caught.length;
+      click('fileExport');
+      await until(() => !flattening);
+      await sleep(200);
+      out.refused = { downloads: caught.length - m, said: $('fileInfo').textContent };
+      tool.flatMax = saved.flatMax;
+      // f. The file, by a real drop.
+      out.dropSaid = await opened(viaDrop, [[file.name, file.bytes]]);
+      Object.assign(out, { status: W.file?.colourStatus, openedVoxels: W.voxels, noEdit: W.noEdit, edit: !!W.edit, tools: W.edit?.tools.slice() ?? null });
+      const toView = () => { cam.eye = view0.eye.slice(); cam.yaw = view0.yaw; cam.pitch = view0.pitch; view.clear = clearance(); };
+      toView();
+      lock(true);
+      const after = await frames();
+      out.converged = [before, after].every(q => q.convergedoff && q.converged0);
+      out.differRaster = differ(after.off, before.off); out.differRay = differ(after['0'], before['0']); out.lit = lit(before.off);
+      // g. The saved file edited again: the ops over chunks cached from the baked base,
+      // then the same ops on a fresh install of the file.
+      if (!W.edit) return;
+      const A = out.again = {}, savedId = W.id;
+      lock(false);
+      const cached = await frames();                         // the view's own lods, both paths, from the base
+      const ops = [
+        ['place', { level: 2, X: (x >> 2) + 3, Y: (y + r + 8) >> 2, Z: z >> 2 }, PALETTE[5]],   // in the air by the first block
+        ['break', { level: 3, X: x >> 3, Y: (y + r - 12) >> 3, Z: z >> 3 }],                   // under the first break: insides
+        ['break', { level: 2, X: (x - r + 2) >> 2, Y: y >> 2, Z: z >> 2 }],                    // into the side
+        ['drop', [x - 40, y + r - 24, z + 8]],                                                 // the sphere at ¼, half in the top
+        ['place', { level: 0, X: x - r - 2, Y: y + 1, Z: z }, PALETTE[2]],
+      ];
+      const apply = () => {
+        const E2 = W.edit;
+        for (const [kind, t, c] of ops) land(kind, kind === 'place' ? E2.log.place(W.store, W.D, t, c) : kind === 'break' ? E2.log.erase(W.store, W.D, t)
+                                                 : E2.log.drop(W.store, W.D, { world: childOf(kid), at: t, turn: PROPER[2], scale: -2 }));
+        toView();
+      };
+      apply();
+      A.ops = W.edit.log.count;
+      const edited = await frames();
+      lock(true);
+      const edited0 = await frames();
+      lock(false);
+      // h. The main-thread runner against one given a fresh snapshot and the whole log.
+      { const E2 = W.edit, root2 = E2.log.root, main = pool._runnerOf({});
+        W.counts.update();
+        const fresh = createJobRunner(worldSnapshot(W.store, root2, W.D, { counts: W.counts, classes: E2.classes, colour: W.colour }), (d, v) => {
+          const t = createOneTable(v.store, (cd, cD) => colourOf(cd, { ...v, D: cD }));
+          t.sync(E2.log.delta());
+          return t.field(colourOf(d, v));
+        });
+        let n = 0, bad = 0;
+        for (const lod of [0, 1, 2]) for (const [cx, cy, cz] of chunksOf(W.store, root2, W.D, lod)){
+          const job = { lod, cx, cy, cz, lodRule: lod ? 'shadow' : 'any', kind: 'records', root: root2 }, a = main(job), b = fresh(job);
+          if (a.count !== b.count || a.borderStart !== b.borderStart || a.records.some((v, i) => i < a.count && v !== b.records[i]) || a.attrs.some((v, i) => i < a.count && v !== b.attrs[i])) bad++;
+          n++;
+        }
+        Object.assign(A, { runnerChunks: n, runnerDiffer: bad }); }
+      // The fresh install: the same file, the same ops, nothing cached from before them.
+      state.world = savedId; fillWorlds();
+      await loadWorld(true);
+      A.reinstalled = W.id === savedId && !!W.edit;
+      apply();
+      const fresh = await frames();
+      lock(true);
+      const fresh0 = await frames();
+      lock(false);
+      Object.assign(A, { converged: [cached, edited, edited0, fresh, fresh0].every(q => q.convergedoff && q.converged0), shown: differ(edited.off, cached.off), lit: lit(edited.off),
+                         differRaster: differ(edited.off, fresh.off), differRay: differ(edited['0'], fresh['0']), differRaster0: differ(edited0.off, fresh0.off), differRay0: differ(edited0['0'], fresh0['0']) });
+      // i. Saved again, and the second file opened by a real drop.
+      const f2 = await flattenThis();
+      A.flat = againstRunner(f2, W.edit.log.root);
+      const n2 = caught.length;
+      click('fileExport');
+      if (!await until(() => caught.length > n2)) throw new Error(`no download of the world edited again: ${$('fileInfo').textContent}`);
+      const file2 = { name: caught[n2].name, bytes: new Uint8Array(await caught[n2].blob.arrayBuffer()) };
+      await until(() => !flattening);
+      A.dropSaid = await opened(viaDrop, [[file2.name, file2.bytes]]);
+      Object.assign(A, { status: W.file?.colourStatus, openedVoxels: W.voxels, flatVoxels: f2.voxels, edit: !!W.edit });
+      toView();
+      lock(true);
+      const reopened = await frames();
+      A.reopenedConverged = reopened.convergedoff && reopened.converged0;
+      A.reopenedRaster = differ(reopened.off, fresh0.off); A.reopenedRay = differ(reopened['0'], fresh0['0']);
+    } finally {
+      Object.assign(tool, { bakeMs: saved.bakeMs, flatMax: saved.flatMax });
+      lock(false);
+    }
+  };
   try {
     if (opts.only === 'baked'){ await bakedStep(); report.mode = pool.mode; report.glError = gl.getError(); return report; }
+    if (opts.only === 'saved'){ await savedStep(); report.mode = pool.mode; report.glError = gl.getError(); return report; }
     const CASES = opts.cases || [
       { world: 'kit:1', kit: kitDesc({ D: 10 }), pin: [76250785, 3092] },
       { world: 'scatter:1', depth: 9, pin: [1343365, 31748] },
@@ -7923,7 +8202,9 @@ window.fileSelftest = async function fileSelftest(opts = {}){
       report.small = { said, refused: /D = 5/.test(said) && /empty/.test(said) }; }
     // 10. Baked worlds (glb-colour step 5): below, in bakedStep.
     await bakedStep();
-    // 11. Supersession. A file opened while a slow build runs wins and the
+    // 11. An edited world, saved: above, in savedStep.
+    await savedStep();
+    // 12. Supersession. A file opened while a slow build runs wins and the
     // build never lands; a world asked for while a file reads wins, and the
     // file's worlds wait on the shelf.
     { state.world = 'lattice:1'; state.lattice = latticeDesc({ R: 64, n: 4 }); fillWorlds(); fillDepth();
@@ -8557,7 +8838,8 @@ window.editSelftest = async function editSelftest(opts = {}){
         r.paintOnly = { red, opened, gone, blue, sameBlock: hit?.X === at.X && hit?.Y === at.Y && hit?.Z === at.Z && again?.X === at.X && again?.Y === at.Y && again?.Z === at.Z };
         await settle(name + ' paint rest'); }
       r.ops = W.edit.log.count; r.done = done; r.misses = misses; r.flips = streamer.S.stats.flips;
-      r.exportDisabled = $('fileExport').disabled && $('shelfAdd').disabled;
+      // With edits both save, flattened (flattenThis).
+      r.exportEnabled = !$('fileExport').disabled && !$('shelfAdd').disabled;
       r.voxels = W.voxels; r.voxelsEqualLog = W.voxels === W.counts.of(W.edit.log.root);
       r.samples = W.edit.samples.length;
       const edited = await frames(name + ' edited');
@@ -8777,13 +9059,14 @@ window.sceneSelftest = async function sceneSelftest(opts = {}){
     }
     cam.eye = [x, top + 90.5, z]; cam.yaw = 0; cam.pitch = -1.05;
     setEditMode(true);
+    setTool('scene');                // a file opens in blocks (both tools, docs/edit-saved-plan.md Q1): Tab, as a person would
     dirty = true;
     return { yaw: cam.yaw, pitch: cam.pitch, eye: cam.eye.slice(), top };
   };
   const kids = sceneChildren(), ids = kids.map(k => k.id);
   try {
     const look = await openKit(), E0 = W.edit;
-    report.kit = { id: W.id, file: !!W.file, param: W.kit ? kitParam(W.kit.desc) : null, kind: E0?.kind, realMs: W.kit?.realMs ?? W.file?.realMs ?? null, nodes: W.nodes, top: look.top, mode: pool.mode };
+    report.kit = { id: W.id, file: !!W.file, param: W.kit ? kitParam(W.kit.desc) : null, kind: E0?.kind, tools: E0?.tools.slice() ?? null, realMs: W.kit?.realMs ?? W.file?.realMs ?? null, nodes: W.nodes, top: look.top, mode: pool.mode };
     const root0 = W.root, voxels0 = W.voxels, base = await frames('kit');
     await settle('kit density');
     const rootsHeld = new Set([root0]), drops = opts.drops ?? 12, killAt = pool.liveWorkers > 1 ? drops >> 1 : -1;
@@ -8857,7 +9140,7 @@ window.sceneSelftest = async function sceneSelftest(opts = {}){
     }
     // The frames below are from where the kit's were.
     cam.yaw = look.yaw; cam.pitch = look.pitch; dirty = true;
-    Object.assign(report, { done, misses, missWhy, afterUndo, boxed, mirrors, turns: turnsUsed.size, drops: W.edit.log.count, worlds: W.edit.log.worldCount, exportDisabled: $('fileExport').disabled && $('shelfAdd').disabled });
+    Object.assign(report, { done, misses, missWhy, afterUndo, boxed, mirrors, turns: turnsUsed.size, drops: W.edit.log.count, worlds: W.edit.log.worldCount, exportEnabled: !$('fileExport').disabled && !$('shelfAdd').disabled });
     // An undo picks the last drop up into a box where it stood; baked again unmoved, it's the root it was.
     if (W.edit.log.count){
       const E = W.edit, before = E.log.root, n = E.log.count, last = E.log.placements()[n - 1], picked = undoKey(), B = edit.box;
@@ -9074,7 +9357,7 @@ window.mixedSelftest = async function mixedSelftest(opts = {}){
     await settle('back', { oneRoot: false });
     await settle('mixed rest');
     report.ops = W.edit.log.count; report.drops = W.edit.log.placements().length; report.blocks = report.ops - report.drops; report.worlds = W.edit.log.worldCount;
-    report.exportDisabled = $('fileExport').disabled && $('shelfAdd').disabled;
+    report.exportEnabled = !$('fileExport').disabled && !$('shelfAdd').disabled;
     report.voxelsEqualLog = (W.counts.update(), W.voxels === W.counts.of(W.edit.log.root));
     const edited = await frames('edited');
     report.changed = differ(edited.off, base.off);
@@ -9110,26 +9393,29 @@ window.mixedSelftest = async function mixedSelftest(opts = {}){
 /* ---- toolSelftest: which worlds take worlds (docs/gizmo-plan.md §7 step 4) ---------
    test/browser/scene.test.js. Quick, and what sceneSelftest's row and file runs
    don't say: who is refused, and why.
-     - a testbed row and a file with a named colour (a D = 6 sphere) have the scene
-       tool, the button and the picker; the file's store is real, with the file's
-       root and exactly its nodes; a blob dropped into it at ½ reaches the frame's
-       root with no job failed, and undone it's the file's root again;
-     - a file with baked colour, one with none, one over the size limit (lowered
-       to 100 nodes for the one load) and one that holds a node twice (the
-       sphere's keys with its root written again, and the copy named as the root:
-       a fine view, which an import would renumber) have no tool; B is refused
-       and the bar says which of the four it is; and each still draws its voxels;
+     - a testbed row has the scene tool alone, and a file with a named colour (a
+       D = 6 sphere) both tools (docs/edit-saved-plan.md Q1 (a)), the button and
+       the picker; the file's store is real, with the file's root and exactly its
+       nodes; a blob dropped into it at ½ (Tab to the world tool first) reaches the
+       frame's root with no job failed, and undone it's the file's root again;
+     - a file with baked colour (the same sphere, its words baked) takes edits too
+       (2026-11-27): both tools, a sphere dropped into it and a block placed on it,
+       each reaching the frame with no job failed and undone to its root;
+     - a file with no colour, one over the size limit (lowered to 100 nodes for
+       the one load) and one that holds a node twice (the sphere's keys with its
+       root written again, and the copy named as the root: a fine view, which an
+       import would renumber) have no tool; B is refused and the bar says which
+       of the three it is; and each still draws its voxels;
      - flat ground at D = 20 has both tools, and added to the shelf and opened
-       from there it takes a sphere with the world tool alone: a file of it is a
-       named world like any other (onelog-plan Q1 gives both tools to clay itself,
-       not to files of it), and the deepest parent there is;
+       from there it has both again, as every file does, and takes a sphere with
+       the world tool: the deepest parent there is;
      - the scatter (D = 9), the lattice stream.test.js pins and the D = 10 caves are
        views until B (step 5): then they're made real, id for id, with no chunk
        flushed, and the scatter and the caves take a drop that reaches the frame and
        undo back to their roots; the scatter added to the shelf and opened from there
        is a file of 31,748 nodes, made real at install;
      - a file over the limit (lowered to 100 nodes) is made real at B the same way,
-       and one that holds a node twice is found there, and says so;
+       with both tools, and one that holds a node twice is found there, and says so;
      - **a drop baked in steps** (2026-11-24): that scatter file dropped on flat
        ground at D = 20 (the user's case at D = 9) with every child baking in steps
        a sliver of a millisecond a frame: the click says yes, the log, the world
@@ -9147,14 +9433,14 @@ window.toolSelftest = async function toolSelftest(){
     state.world = id; if (depth) state.depth = depth;
     fillWorlds(); fillDepth();
     await loadWorld(true);
-    const r = { kind: W.edit?.kind ?? null, why: W.noEdit ?? null, button: !$('editL').hidden, picker: !$('placeL').hidden, voxels: W.voxels, root: W.root, nodes: W.store.size,
+    const r = { kind: W.edit?.kind ?? null, tools: W.edit?.tools.slice() ?? null, why: W.noEdit ?? null, button: !$('editL').hidden, picker: !$('placeL').hidden, voxels: W.voxels, root: W.root, nodes: W.store.size,
                 lazy: !!W.lazy, entered: setEditMode(true) === true, bar: $('editBar').hidden ? null : $('editBar').textContent };
     // A view is made real by that B (step 5): wait for it, then ask again.
     if (r.lazy){
       const w = W, root = W.root, revision = streamer.revision;
       r.importing = !!W.importing; r.enteredAtOnce = r.entered;
       await W.importing;
-      Object.assign(r, { kind: W.edit?.kind ?? null, why: W.noEdit ?? null, entered: edit.on, bar: $('editBar').hidden ? null : $('editBar').textContent,
+      Object.assign(r, { kind: W.edit?.kind ?? null, tools: W.edit?.tools.slice() ?? null, why: W.noEdit ?? null, entered: edit.on, bar: $('editBar').hidden ? null : $('editBar').textContent,
                          real: typeof W.store.intern === 'function', sameWorld: W === w, sameRoot: W.root === root && streamer.S.world.root === root,
                          streamerStore: streamer.S.world.store === W.store, kept: streamer.revision === revision,
                          nodes: W.store.size, realMs: W.realMs ?? null, lazyAfter: !!W.lazy });
@@ -9166,6 +9452,7 @@ window.toolSelftest = async function toolSelftest(){
   // started from.
   const dropDown = async r => {
     const root = W.root, c = W.side / 2;
+    r.toScene = setTool('scene');           // a file opens in blocks (both tools); the rest have worlds alone
     setEntry(ids[0]); setTurn(0); setScale(-1); setGrid(1); setUnder(false);
     let a = null;
     for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [-1, 0], [0, -1]]){
@@ -9184,6 +9471,7 @@ window.toolSelftest = async function toolSelftest(){
     { const e = kids[0], r = report.file = await open(e.id);
       r.sameRoot = W.root === e.root; r.sameNodes = W.store.size === e.keys.length / 9; r.real = typeof W.store.intern === 'function'; r.realMs = W.file?.realMs ?? null;
       cam.eye = [32.5, 90.5, 32.5]; cam.yaw = 0; cam.pitch = -1.5; dirty = true; edit.pointer = null;
+      r.toScene = setTool('scene');
       setEntry(ids[3]); setTurn(0); setScale(-1); setGrid(1); setUnder(false);
       const a = updateAim();
       r.aim = a?.drop ? a.drop.at : a?.why ?? null;
@@ -9191,7 +9479,24 @@ window.toolSelftest = async function toolSelftest(){
       r.grew = W.voxels > e.voxels; r.failed = streamer.S.stats.failed;
       r.undone = editStep('undo') && await flip(60000) && W.root === e.root && W.voxels === e.voxels;
       setEditMode(false); }
-    report.baked = await open(ids[1]);
+    // The baked sphere, as a file (docs/edit-saved-plan.md, 2026-11-27: every baked
+    // file takes edits, with both tools): a drop into it and a block on it, each
+    // through the frame and undone back to its root.
+    { const e = kids[1], r = report.baked = await open(e.id);
+      r.sameRoot = W.root === e.root; r.real = typeof W.store.intern === 'function';
+      cam.eye = [32.5, 90.5, 32.5]; cam.yaw = 0; cam.pitch = -1.5; dirty = true; edit.pointer = null;
+      r.toScene = setTool('scene');
+      setEntry(ids[0]); setTurn(0); setScale(-1); setGrid(1); setUnder(false);
+      const a = updateAim();
+      r.aim = a?.drop ? a.drop.at : a?.why ?? null;
+      r.dropped = editStep('drop'); r.flipped = r.dropped && await flip(60000);
+      r.grew = W.voxels > e.voxels; r.failed = streamer.S.stats.failed;
+      r.undone = editStep('undo') && await flip(60000) && W.root === e.root && W.voxels === e.voxels;
+      r.toBlocks = setTool('blocks'); setLevel(1);
+      r.placed = editStep('place'); r.placeFlipped = r.placed && await flip(60000);
+      r.placeGrew = W.voxels > e.voxels; r.placeFailed = streamer.S.stats.failed;
+      r.placeUndone = editStep('undo') && await flip(60000) && W.root === e.root;
+      setEditMode(false); }
     report.bare = await open(ids[3]);
     tool.importMax = 100;
     report.big = await open(ids[2]);
@@ -9219,6 +9524,7 @@ window.toolSelftest = async function toolSelftest(){
       groundId = e.id;
       r.blocks = blocks; r.clayTools = tools; r.D = W.D; r.sameRoot = W.root === e.root;
       cam.eye = [c + 3.5, c + 70.5, c + 5.5]; cam.yaw = 0; cam.pitch = -1.5; dirty = true; edit.pointer = null;
+      r.toScene = setTool('scene');
       setEntry(ids[0]); setTurn(0); setScale(0); setGrid(16); setUnder(false);
       const a = updateAim();
       r.aim = a?.drop ? a.drop.at : a?.why ?? null;
@@ -9253,6 +9559,7 @@ window.toolSelftest = async function toolSelftest(){
       // That file dropped on flat ground, baked in steps.
       const g = report.steps = await open(groundId), mid = W.side / 2, base = W.root;
       cam.eye = [mid + 300.5, mid + 900.5, mid + 200.5]; cam.yaw = 0; cam.pitch = -1.5; dirty = true; edit.pointer = null;
+      setTool('scene');
       setEntry(e.id); setTurn(Y_TURNS[1]); setScale(0); setGrid(1); setUnder(false);
       const a = updateAim();
       g.aim = a?.drop ? a.drop.at : a?.why ?? null;

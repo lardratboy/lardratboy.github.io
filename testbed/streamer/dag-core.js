@@ -405,6 +405,54 @@ export function pruneWorld(store, root){
   return { store: fresh, root: map[root], dropped: store.size - kept };
 }
 
+/* ---- the surface ------------------------------------------------------------
+   The voxels of `root` that can show: solid, with at least one of the six
+   face neighbours empty, outside the world counting as empty (chunk-core's
+   apron reads EMPTY past the world's edge, so a voxel on the edge shows its
+   outer face). It is the skin a saved edited world bakes its words over
+   (flatten-core.js, docs/save-edits-log.md): exactly the voxels that get a
+   lod-0 record, as a bit DAG interned into `store`, children first.
+
+   Built top down, a node at a time with its six face neighbours at the same
+   level (+x, −x, +y, −y, +z, −z; EMPTY past the edge). A child's neighbour
+   is a sibling across the node's middle, or the neighbour node's child on
+   the near side. Two answers need no walk: an empty node has no surface, and
+   a solid node with six solid neighbours (rock inside rock) has none either,
+   which is what keeps a world's buried bulk at the price of its top levels.
+   The rest are memoized on the seven ids, since a hash-consed world repeats
+   whole neighbourhoods (a flat slab is one neighbourhood a level, so the
+   2^40 voxels of D = 20 ground's top come out as a node a level, and are
+   counted, not walked). The memo is an Interner of the seven words, ~10×
+   a string-keyed Map's speed, and its values are the results in step. */
+export function surfaceOf(store, root, D){
+  if (root === EMPTY) return EMPTY;
+  const memo = new Interner(7, 0), key = new Uint32Array(7), bufs = Array.from({ length: D + 1 }, () => new Uint32Array(8));
+  let out = new Uint32Array(1 << 16);
+  const ch = (id, o) => id === EMPTY ? EMPTY : store.child(id, o);
+  function rec(level, n, px, mx, py, my, pz, mz){
+    if (n === EMPTY) return EMPTY;
+    if (level === 0) return px && mx && py && my && pz && mz ? EMPTY : FULL;
+    const S = store.solid(level);
+    if (n === S && px === S && mx === S && py === S && my === S && pz === S && mz === S) return EMPTY;
+    key[0] = n; key[1] = px; key[2] = mx; key[3] = py; key[4] = my; key[5] = pz; key[6] = mz;
+    const before = memo.size, slot = memo.intern(key);
+    if (slot < before) return out[slot];
+    const c = bufs[level];
+    for (let o = 0; o < 8; o++){
+      const bx = o & 1, by = o & 2, bz = o & 4;
+      c[o] = rec(level - 1, ch(n, o),
+        bx ? ch(px, o ^ 1) : ch(n, o | 1), bx ? ch(n, o ^ 1) : ch(mx, o | 1),
+        by ? ch(py, o ^ 2) : ch(n, o | 2), by ? ch(n, o ^ 2) : ch(my, o | 2),
+        bz ? ch(pz, o ^ 4) : ch(n, o | 4), bz ? ch(n, o ^ 4) : ch(mz, o | 4));
+    }
+    const id = store.intern(level, c);
+    if (slot >= out.length){ const grown = new Uint32Array(out.length * 2); grown.set(out); out = grown; }
+    out[slot] = id;
+    return id;
+  }
+  return rec(D, root, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY);
+}
+
 /* ---- a read-only store ----------------------------------------------------
    The store as a chunk worker sees it (docs/stream-plan.md, decision 9):
    child, levelOf and query over a snapshot's keys, and nothing that

@@ -18,7 +18,13 @@
        multiple of 32), every cell where its place says against dagItem's
        cells at the same lod (the any rule and the colour, which
        content-core's test holds to a dense oracle), a gamut world and a
-       named field at lod 1, a world too big for lod 0, a name that lies;
+       named field at lod 1, a world too big for lod 0, a name that lies,
+       an arena saved again by the stream viewer (`, edited` on its name),
+       a saved arena built over its top grown to hold it (64 over, at most
+       OPEN_HEIGHT) cell for cell, one taller than a build reopened, one
+       past the cap laid out as any world;
+     - the view: viewInArena by arithmetic (p / 2^lod + at, kept only
+       inside the arena), with the viewer's camera of 2026-11-27 outside;
    then mutants of file-core.js's text, written beside it and removed after. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -183,6 +189,64 @@ async function suite(M, { quick = false } = {}){
   assert.equal(M.arenaOfWorld({ ...box(5, [0, 0, 0], [0, 0, 0]), name: '' }, null), null, 'an empty world');
   assert.deepEqual(M.sizeOfName('arena 384 × 192 × 384'), [384, 192, 384]);
   assert.equal(M.sizeOfName('arena 384 × 192'), null);
+  // The stream viewer's save of an edited arena: its name and `, edited`, once a save.
+  assert.deepEqual(M.sizeOfName('arena 512 × 256 × 512, edited'), [512, 256, 512]);
+  assert.deepEqual(M.sizeOfName('arena 512 × 256 × 512, edited, edited'), [512, 256, 512]);
+  assert.equal(M.sizeOfName('arena 512 × 256 × 512, edited by hand'), null);
+  {
+    const A = randomArena(32, 64, 96, 7), store = createStore(), { root, D } = M.arenaShape(A, store), counts = createCounts(store);
+    assert.deepEqual(M.placementOf(store, root, D, 'arena 32 × 64 × 96, edited', counts), { lod: 0, X: 32, Y: 64, Z: 96, at: [0, 0, 0], grown: null }, 'an edited arena that fits is itself');
+  }
+
+  /* Built over the top (in the stream viewer): a saved arena grows to hold
+     it, at lod 0 at the origin, its height what's in it and 64 over rounded
+     up to 32, at most OPEN_HEIGHT (512); every cell where it was. */
+  assert.equal(M.OPEN_HEIGHT, 512);
+  await roundTrip(M, randomArena(32, 320, 32, 11), 'a saved arena taller than a build');
+  for (const [top, said, want] of [[150, 96, 224], [500, 256, 512], [96, 96, null]]){
+    const what = `an arena ${said} tall, built to ${top}`, H = Math.max(top, said) + (-Math.max(top, said) & 31);
+    const A = randomArena(64, H, 64, top);
+    for (let y = 0; y < H; y++) for (let z = 0; z < 64; z++) for (let x = 0; x < 64; x++){
+      const i = A.idx(x, y, z);
+      if (y >= said) A.cells[i] = 0;                                                     // the arena as saved,
+      if (x >= 20 && x < 23 && z >= 30 && z < 34 && y < top) A.cells[i] = AC.SOLID_BIT | 0x1234 | y;   // and a tower to `top`
+    }
+    A.recount();
+    const store = createStore(), { root, D } = M.arenaShape(A, store), counts = createCounts(store);
+    const r = M.arenaOfWorld({ store, counts, root, D, name: `arena 64 × ${said} × 64, edited` }, null);
+    const Y = want ?? said;
+    assert.deepEqual([r.lod, r.at, r.A.X, r.A.Y, r.A.Z, r.saved, r.grown], [0, [0, 0, 0], 64, Y, 64, true, want === null ? null : said], `${what}: grown to ${Y}`);
+    for (let y = 0; y < Y; y++) for (let z = 0; z < 64; z++) for (let x = 0; x < 64; x++){
+      const a = A.get(x, y, z), b = r.A.get(x, y, z);
+      if (!!a !== !!b) assert.fail(`${what}: cell (${x}, ${y}, ${z}) is ${b ? 'solid' : 'air'}`);
+    }
+    assert.equal(r.A.count, A.count, `${what}: every voxel`);
+  }
+  {
+    const w = box(10, [0, 0, 0], [100, 600, 100]);
+    const p = M.placementOf(w.store, w.root, w.D, 'arena 128 × 96 × 128', w.counts);
+    assert.ok(p.lod > 0 && !p.grown, `taller than OPEN_HEIGHT: laid out as any world (lod ${p.lod})`);
+  }
+
+  /* The view (viewInArena), by arithmetic of its own: a world point p is the
+     arena point p / 2^lod + at, kept only inside [0, X) × [0, Y) × [0, Z). */
+  {
+    const P = { lod: 0, at: [0, 0, 0], X: 512, Y: 256, Z: 512 }, at = (eye, p = P) => M.viewInArena({ eye, yaw: 1.5, pitch: -0.25 }, p);
+    assert.deepEqual(at([10.5, 20.25, 500]), { eye: [10.5, 20.25, 500], yaw: 1.5, pitch: -0.25 }, 'a saved arena\'s view is itself');
+    assert.deepEqual(at([0, 0, 0]).eye, [0, 0, 0], 'the low corner is inside');
+    for (let a = 0; a < 3; a++){
+      const lo = [10, 20, 30], hi = [10, 20, 30];
+      lo[a] = -0.001; hi[a] = [512, 256, 512][a];
+      assert.equal(at(lo), null, `below 0 on axis ${a}`);
+      assert.equal(at(hi), null, `at the far side on axis ${a}`);
+    }
+    // The file of 2026-11-27: an arena edited in the stream viewer, its view the viewer's camera out over the edge.
+    assert.equal(at([697.1834577116257, 267.4630839456872, -154.71807014752017]), null, 'the viewer\'s camera outside the arena');
+    const L = { lod: 2, at: [10, 0, 20], X: 256, Y: 128, Z: 256 };
+    assert.deepEqual(at([100, 50, 60], L).eye, [35, 12.5, 35], 'lod 2, moved by at');
+    assert.equal(at([0, 0, -81], L), null, 'past the near side once moved');
+    assert.equal(M.viewInArena(null, P), null, 'no view');
+  }
 }
 
 test('file-core against its oracles', { timeout: 240000 }, async () => { await suite(REAL); });
@@ -198,7 +262,17 @@ const MUTANTS = [
     'for (let o = 0; o < 8; o++) walk(store.child(id, o), level - 1, 2 * x + (o >> 2), 2 * y + (o >> 1 & 1), 2 * z + (o & 1));\n  };\n  walk(root, D, 0, 0, 0);\n  if (r'],
   ['channels swapped', 'return (r | g << 8 | b << 16) >>> 0; };', 'return (b | g << 8 | r << 16) >>> 0; };'],
   ['no view', "name: arenaName(A.X, A.Y, A.Z), view,", "name: arenaName(A.X, A.Y, A.Z), view: null,"],
-  ['a name believed', '&& b.hi.every((v, a) => v <= size[a]))', ')'],
+  ['an edited arena a stranger', '(\\d+) × (\\d+)(?:, edited)*$/', '(\\d+) × (\\d+)$/'],
+  ['any view believed', "if (!eye.every((v, a) => Number.isFinite(v) && v >= 0 && v < size[a])) return null;", ''],
+  ['the far side inside', '&& v >= 0 && v < size[a])) return null;', '&& v >= 0 && v <= size[a])) return null;'],
+  ['the view not scaled', 'eye = e.map((v, a) => v / s + at[a])', 'eye = e.map((v, a) => v + at[a])'],
+  ['the view not moved', 'eye = e.map((v, a) => v / s + at[a])', 'eye = e.map((v, a) => v / s)'],
+  ['a name believed', '&& b.hi[0] <= size[0] && b.hi[2] <= size[2]){', '){'],
+  ['a tall arena a stranger', 'size[1] <= OPEN_HEIGHT && b.hi[0]', 'size[1] <= maxY && b.hi[0]'],
+  ['never grown', ': Math.min(OPEN_HEIGHT, up32(b.hi[1] + 64));', ': size[1];'],
+  ['no room over the grown', 'up32(b.hi[1] + 64)', 'up32(b.hi[1])'],
+  ['grown past the cap', 'Math.min(OPEN_HEIGHT, up32(b.hi[1] + 64))', 'up32(b.hi[1] + 64)'],
+  ['grown, not said', 'grown: Y > size[1] ? size[1] : null', 'grown: null'],
   ['a full node a voxel', 'if (level === 0 || isFull(store, counts, id, level)){', 'if (level <= 1 || isFull(store, counts, id, level)){'],
   ['too tall kept', "ext(lod)[2] > maxXZ || ext(lod)[1] > maxY)) lod++;", "ext(lod)[2] > maxXZ)) lod++;"],
   ['no room over it', 'up32(e[1] + 64)', 'up32(e[1])'],

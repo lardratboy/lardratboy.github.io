@@ -53,9 +53,12 @@ const BRICK = 3, B = 1 << BRICK;
 // The least D with 2^D ≥ every side.
 export const depthOf = (X, Y, Z) => Math.max(BRICK, Math.ceil(Math.log2(Math.max(X, Y, Z))));
 export const arenaName = (X, Y, Z) => `arena ${X} × ${Y} × ${Z}`;
-// [X, Y, Z] from a saved arena's name, or null.
+/* [X, Y, Z] from a saved arena's name, or null. The stream viewer saves an
+   edited world under its name and `, edited` (once a save: flattenThis), so
+   an arena edited there is still an arena; whether it still fits its size
+   is placementOf's to ask (an edit may build over the top). */
 export function sizeOfName(name){
-  const m = /^arena (\d+) × (\d+) × (\d+)$/.exec(String(name ?? ''));
+  const m = /^arena (\d+) × (\d+) × (\d+)(?:, edited)*$/.exec(String(name ?? ''));
   return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
 }
 // A cell's colour as an rgb8 word (r | g << 8 | b << 16, colours.js's packing).
@@ -142,10 +145,21 @@ export function boundsOf(store, root, D, counts = createCounts(store)){
   return { lo, hi };
 }
 const up32 = v => Math.ceil(v / CHUNK) * CHUNK;
+/* A saved arena built over its top (in the stream viewer, whose world is
+   the 2^D cube: 2,029 voxels to y = 290 over a 256-tall arena, 2026-11-27)
+   GROWS to hold it rather than opening at half the detail: its height
+   becomes what's in it and 64 over, as any other world's, up to
+   OPEN_HEIGHT, past the 256 a build may be. 512 is a D = 9 world's side,
+   so nothing edited into a saved 384 or 512 arena is too tall. The grid
+   is then 512 × 384 × 512 × 2 bytes, 192 MB (256 MB at the cap), against
+   128 MB for the largest build. Only the height: a name whose X or Z
+   doesn't hold what's in it is still a name that lies. */
+export const OPEN_HEIGHT = 512;
 /* Where a world goes in an arena: { lod, X, Y, Z, at } (at: the arena cell
    of the world's cell (0, 0, 0) at that lod), or null for an empty world.
    A saved arena (its name gives a size it fits at lod 0 from the origin)
-   is that size at the origin. Anything else: the finest lod at which its
+   is that size at the origin, taller if what's in it goes over the top
+   (`grown`, the name's height, else null). Anything else: the finest lod at which its
    box fits ARENA_LIMITS' largest arena, a square of the larger side
    rounded up to 32, at least 128, centred; Y the box's height and 64 over
    it, rounded up to 32, 96 to 256; its bottom on y = 0. */
@@ -153,8 +167,10 @@ export function placementOf(store, root, D, name, counts = createCounts(store)){
   const b = boundsOf(store, root, D, counts);
   if (!b) return null;
   const size = sizeOfName(name), [maxXZ, maxY] = [ARENA_LIMITS.size[1], ARENA_LIMITS.height[1]];
-  if (size && size.every(v => v > 0 && v % CHUNK === 0) && size[0] <= maxXZ && size[2] <= maxXZ && size[1] <= maxY && b.hi.every((v, a) => v <= size[a]))
-    return { lod: 0, X: size[0], Y: size[1], Z: size[2], at: [0, 0, 0] };
+  if (size && size.every(v => v > 0 && v % CHUNK === 0) && size[0] <= maxXZ && size[2] <= maxXZ && size[1] <= OPEN_HEIGHT && b.hi[0] <= size[0] && b.hi[2] <= size[2]){
+    const Y = b.hi[1] <= size[1] ? size[1] : Math.min(OPEN_HEIGHT, up32(b.hi[1] + 64));
+    if (b.hi[1] <= Y) return { lod: 0, X: size[0], Y, Z: size[2], at: [0, 0, 0], grown: Y > size[1] ? size[1] : null };
+  }
   let lod = 0;
   const ext = l => [0, 1, 2].map(a => Math.ceil(b.hi[a] / 2 ** l) - Math.floor(b.lo[a] / 2 ** l));
   while (lod < D && (ext(lod)[0] > maxXZ || ext(lod)[2] > maxXZ || ext(lod)[1] > maxY)) lod++;
@@ -162,7 +178,23 @@ export function placementOf(store, root, D, name, counts = createCounts(store)){
   const XZ = Math.max(ARENA_LIMITS.size[0], up32(Math.max(e[0], e[2]))), Y = Math.min(maxY, Math.max(ARENA_LIMITS.height[0], up32(e[1] + 64)));
   return { lod, X: XZ, Y, Z: XZ, at: [Math.floor((XZ - e[0]) / 2) - lo[0], -lo[1], Math.floor((XZ - e[2]) / 2) - lo[2]] };
 }
-/* A world { store, counts, root, D, name } as an arena: { A, lod, at } (A
+/* A file's view { eye, yaw, pitch } (the world's voxels) as the arena's,
+   or null when there's none or its eye isn't inside the arena (vdag-core's
+   reader has already made the numbers finite). Opened at
+   `lod` with the world's cell 0 at arena cell `at`, a world point p is the
+   arena point p / 2^lod + at. Inside is [0, X) × [0, Y) × [0, Z): a view
+   saved here always is (it's the player's eye), but the stream viewer's
+   is its camera, which is as often out over the edge looking in (an arena
+   edited there and saved, 2026-11-27: the eye at (697, 267, -155) over a
+   512 × 256 × 512 arena), and a walker put there falls off the world. */
+export function viewInArena(view, { lod, at, X, Y, Z }){
+  const e = view?.eye;
+  if (!Array.isArray(e) || e.length !== 3) return null;
+  const s = 2 ** lod, eye = e.map((v, a) => v / s + at[a]), size = [X, Y, Z];
+  if (!eye.every((v, a) => Number.isFinite(v) && v >= 0 && v < size[a])) return null;
+  return { eye, yaw: view.yaw, pitch: view.pitch };
+}
+/* A world { store, counts, root, D, name } as an arena: { A, lod, at, saved, grown } (A
    recounted, every chunk dirty), or null when it's empty. colour is its
    field or null (the gamut of each cell's place in the world). */
 export function arenaOfWorld(world, colour){
@@ -185,5 +217,5 @@ export function arenaOfWorld(world, colour){
   };
   walk(root, D, 0, 0, 0);
   A.recount();
-  return { A, lod, at, saved: lod === 0 && !!sizeOfName(name) && at.every(v => v === 0) };
+  return { A, lod, at, saved: lod === 0 && !!sizeOfName(name) && at.every(v => v === 0), grown: p.grown ?? null };
 }

@@ -24,7 +24,11 @@
        (a hash) with the page's eye as its view; another arena built, with
        debris flying, then the file opened through the real Open input is the
        saved grid again with its mass and no debris, the walker where the
-       view stood, and a blast in it keeps the mass;
+       view stood, and a blast in it keeps the mass; the same file as the
+       stream viewer saves an edited arena (`, edited` on the name, a tower
+       over its top, its camera outside the arena as the view) opens as a
+       saved arena grown to hold the tower, Node's cell for cell, with the
+       walker at the near edge;
        and the ball opened as the arena is Node's arenaOfWorld, cell for
        cell. Then SAVE_MUTANTS, run through the same check.
    The selftest also holds: every projectile fired (1 + 1 rockets, 1 + 7
@@ -42,7 +46,8 @@ import { findChrome, serveStatic, launchChrome, REPO_ROOT } from '../../../test/
 import { createStore, createCounts, storeView } from '../../../dag-core.js';
 import { writeVdag } from '../../../vdag-core.js';
 import { dagItem, fitLod, itemVoxels, arenaDesc } from '../../content-core.js';
-import { arenaOfWorld } from '../../file-core.js';
+import { arenaOfWorld, arenaWorld } from '../../file-core.js';
+import { createArena, SOLID_BIT } from '../../arena-core.js';
 import { readVdag } from '../../../vdag-core.js';
 import { colourOf } from '../../../colours.js';
 
@@ -195,6 +200,26 @@ async function saveAndOpen(s, ball){
     const after = await s.evaluate(`(() => { __destroy.explode([64, 18, 64], 7, 'rocket'); for (let k = 0; k < 1500 && __destroy.debris.bodies.length; k++) __destroy.update(1 / 60);
       return { ...__destroy.mass(), left: __destroy.debris.bodies.length }; })()`);
     assert.equal(after.left, 0); assert.equal(after.world, after.total, 'a blast in the opened arena keeps the mass');
+    // The same arena as the stream viewer saves it edited (2026-11-27): `, edited` on its name, a tower
+    // built over its top (to y = 130 over 96), and its view the viewer's camera, out over the edge looking
+    // in. Still a saved arena, grown to hold the tower (130 + 64 up to 32: 224), the walker at the near edge.
+    const edited = join(downloads, 'arena-128-seed3-edited.vdag'), tall = createArena(page.X, 160, page.Z);
+    tall.cells.set(r.A.cells);
+    for (let y = 0; y < 130; y++) for (let z = 50; z < 54; z++) for (let x = 30; x < 33; x++) tall.cells[tall.idx(x, y, z)] = SOLID_BIT | 0x2a5 | y;
+    tall.recount();
+    writeFileSync(edited, await writeVdag([{ ...arenaWorld(tall), name: `${w.name}, edited`, view: { eye: [170.5, 120, -40.25], yaw: -0.98, pitch: -0.43 } }]));
+    const grown = (await arenaOfFile(edited)).r;
+    assert.deepEqual([grown.A.X, grown.A.Y, grown.A.Z, grown.grown], [page.X, 224, page.Z, page.Y], 'Node grows it');
+    await s.send('DOM.setFileInputFiles', { nodeId, files: [edited] });
+    await s.waitFor(`__destroy.built && __destroy.built.opened && __destroy.built.opened.name === 'arena-128-seed3-edited.vdag'`, { timeout: 60000, label: 'the edited arena opened' });
+    const outside = await s.evaluate(`(() => { const A = __destroy.arena; return { hash: (${HASH})(A.cells), count: A.count, total: __destroy.total, opened: __destroy.built.opened,
+      walker: __destroy.walker && __destroy.walker.p.slice(), size: [A.X, A.Y, A.Z], note: document.getElementById('fileNote').textContent }; })()`);
+    assert.equal(outside.hash, hashOf(grown.A.cells), 'the edited arena is Node\'s, cell for cell');
+    assert.equal(outside.count, tall.count); assert.equal(outside.total, tall.count, 'every voxel, the tower\'s too');
+    assert.ok(outside.opened.saved && outside.opened.lod === 0 && outside.opened.grown === page.Y, 'an arena edited in the viewer opens as a saved arena, grown');
+    assert.deepEqual(outside.size, [page.X, 224, page.Z]);
+    assert.match(outside.note, /grown from 96 tall/);
+    assert.ok(outside.walker && outside.walker[0] === page.X / 2 && outside.walker[2] === page.Z - 14, `a view outside the arena: the walker at the near edge (${outside.walker})`);
     // Any other world opened as the arena: Node's arenaOfWorld.
     if (ball){
       const want = (await arenaOfFile(ball)).r;
@@ -233,8 +258,9 @@ const SAVE_MUTANTS = [
   ['the save button unwired', "$('saveArena').onclick = () => saveArena().catch(() => {});\n", ''],
   ['opened empty', 'A = createArena(o.X, o.Y, o.Z, o.cells);', 'A = createArena(o.X, o.Y, o.Z);'],
   ['old debris kept', "    D = createDebris(); projectiles.length = 0; particles.length = 0; lights.length = 0;\n    dropMeshes();\n    streaming = null;", "    projectiles.length = 0; particles.length = 0; lights.length = 0;\n    dropMeshes();\n    streaming = null;"],
-  ['the old mass kept', '    total = A.count;\n    shadow.mat = shadowMatrix(); shadow.dirty = true;\n    const v = o.view', '    shadow.mat = shadowMatrix(); shadow.dirty = true;\n    const v = o.view'],
-  ['the walker at the edge', 'const v = o.view, eye', 'const v = null, eye'],
+  ['the old mass kept', '    total = A.count;\n    shadow.mat = shadowMatrix(); shadow.dirty = true;\n    // The file\'s view', '    shadow.mat = shadowMatrix(); shadow.dirty = true;\n    // The file\'s view'],
+  ['the walker at the edge', 'const v = viewInArena(o.view, o), eye', 'const v = null, eye'],
+  ['any view trusted', 'const v = viewInArena(o.view, o), eye', 'const v = o.view, eye'],
 ];
 test('every mutant of the save and open is caught', { skip, timeout: 600000 }, async t => {
   const src = readFileSync(join(REPO_ROOT, PAGE), 'utf8'), s = browser.session;

@@ -159,6 +159,7 @@
 import { createArena, meshChunk, raycast, blast, looseAround, detach, mixCell, hash4, rgbOf, CHUNK } from './arena-core.js';
 import { createDebris, stepDebris, burst, pushBodies, makeBody, addBody, bodyInside } from './debris-core.js';
 import { arenaDesc, ARENA_DEFAULTS, fillPlane, stampItem, buildArena, SPAWN_YAW } from './content-core.js';
+import { viewInArena } from './file-core.js';
 import { WALK, createWalker, stepWalk, walkerEye, wishOf, settle } from '../walk-core.js';
 
 const $ = id => document.getElementById(id);
@@ -602,9 +603,10 @@ function spawnAt(eye, yaw, pitch){
    are made while it writes: the grid is copied as it starts), and the file
    downloads as arena-<size>-seed<seed>.vdag, or after the file it was
    opened from. Open reads a file as the arena itself (a saved arena comes
-   back as it was saved; anything else is laid out by file-core's
-   placementOf), the walker where the file's view stood, or at the near
-   edge. A build supersedes an open in flight, and an open a build. */
+   back as it was saved, taller if something was built over its top;
+   anything else is laid out by file-core's
+   placementOf), the walker where the file's view stood if that's inside
+   the arena (file-core's viewInArena), or at the near edge. A build supersedes an open in flight, and an open a build. */
 let opener = null, pendingSave = null, lastSave = null;
 function fileJob(msg, transfer = []){
   const w = new Worker(new URL('./file-worker.js', import.meta.url), { type: 'module' });
@@ -661,13 +663,14 @@ function openArena(file){
     streaming = null; glide = null; walker = null;
     total = A.count;
     shadow.mat = shadowMatrix(); shadow.dirty = true;
-    const v = o.view, eye = v ? v.eye : [o.X / 2, topAt(Math.floor(o.X / 2), o.Z - 14) + WALKER.eye + 0.01, o.Z - 14];
+    // The file's view, in the arena's cells, if its eye is inside (a stream viewer's camera often isn't); else the near edge.
+    const v = viewInArena(o.view, o), eye = v ? v.eye : [o.X / 2, topAt(Math.floor(o.X / 2), o.Z - 14) + WALKER.eye + 0.01, o.Z - 14];
     spawnAt(eye, v ? v.yaw : SPAWN_YAW, v ? v.pitch : -0.12);
     const plane = topAt(0, 0);
     built = { desc: arenaDesc({ size: o.X, height: o.Y, plane, seed: settings.seed, specimens: 0, maths: 0 }), placed: [], left: [], notes: [], count: o.count,
-              spawn: walker.p.slice(), yaw: cam.yaw, opened: { name: file.name, world: o.name, D: o.D, lod: o.lod, at: o.at, saved: o.saved },
+              spawn: walker.p.slice(), yaw: cam.yaw, opened: { name: file.name, world: o.name, D: o.D, lod: o.lod, at: o.at, saved: o.saved, grown: o.grown },
               fileBase: file.name.replace(/\.vdag$/i, '') };
-    const msg = `Opened ${file.name}${o.saved ? '' : ` at lod ${o.lod}`}: ${A.count.toLocaleString()} voxels in a ${o.X} × ${o.Y} × ${o.Z} arena (R builds from the settings again)`;
+    const msg = `Opened ${file.name}${o.saved ? '' : ` at lod ${o.lod}`}: ${A.count.toLocaleString()} voxels in a ${o.X} × ${o.Y} × ${o.Z} arena${o.grown ? ` (grown from ${o.grown} tall to hold what was built over the top)` : ''}${o.view && !v ? ', from the near edge (its view is outside the arena)' : ''} (R builds from the settings again)`;
     $('fileNote').textContent = msg; $('buildNote').textContent = msg; toast(msg, 4000);
     return built;
   }, e => { if (opener === w){ opener = null; toast(`Couldn't open ${file.name}: ${e.message}`, 8000); } throw e; });

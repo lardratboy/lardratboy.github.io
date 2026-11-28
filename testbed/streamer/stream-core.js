@@ -22,10 +22,9 @@
 
    Edits come in through setRoot and §3b, and a worker follows them through
    tails (§4b). docs/edit-stream-log.md has the reasoning. A world dropped into
-   a world (scene-core.js) is an edit too: the same setRoot, flip and tails, with
-   the drops in the tail's `scene` (docs/scene-plan.md §1.4–1.5). Blocks and drops
-   in one world come as one log (log-core.js), its delta in the tail's `ops`
-   (docs/onelog-plan.md step 2).
+   a world (scene-core.js) is an edit too: the same setRoot, flip and tails
+   (docs/scene-plan.md §1.4–1.5). Blocks and drops come as one log
+   (log-core.js), its delta in the tail's `ops` (docs/onelog-plan.md).
 
    A universe (universe-core.js, docs/universe-plan.md) is many worlds drawn as
    instances: selectForest and coverForest (§1b) are the cut and the cover over
@@ -41,9 +40,7 @@ import { EMPTY, FULL, FIRST_NODE, storeView, isFull } from './dag-core.js';
 import { CHUNK_LEVELS, CHUNK_SIDE, chunkNode, expandChunk } from './chunk-core.js';
 import { fastChunk, createJobCache } from './job-core.js';
 import { pageJob, RUN_HEAD, ATTR_NONE } from './ray-core.js';
-import { createBlockTable, editedField } from './edit-core.js';
 import { toLocal } from './universe-core.js';
-import { createSceneTable } from './scene-core.js';
 import { createOneTable } from './log-core.js';
 
 // Face order of the record's mask and of uOpenSides: +X −X +Y −Y +Z −Z.
@@ -1165,7 +1162,7 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
   // among the keys, so colourOf builds it over this side's own view and counts.
   // A named field ignores them.
   const base = snap.colour && colourOf ? colourOf(snap.colour, { store, counts, D: snap.D }) : null;
-  let colour = base, table = null, scenes = null, one = null;
+  let colour = base, one = null;
   // A dropped world's field, built once over this side's view and counts, at
   // the child's own depth (its words and skin are about the child's grid).
   const fieldOf = (desc, D) => colourOf(desc, { store, counts, D });
@@ -1200,21 +1197,21 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
      keeps its plain field and doesn't pay a lookup. A world with no colour ignores
      the ops, as it has no words for them to change.
 
-     A scene's drops come the same way (`scene`, scene-core's createSceneLog delta;
-     docs/scene-plan.md §1.5): the follower builds each new world's field once, over
-     this side's view and counts, after the keys above have grown it (a baked
-     child's skin is among them), and the scene field is rebuilt over the base on
-     every delta, a few bounds a drop.
+     **Blocks and drops come as one log** (`ops`, log-core's createOneLog delta;
+     docs/onelog-plan.md). Its follower, createOneTable, keeps a block table and a
+     drop list numbered in one sequence, so a voxel takes the latest op that made
+     it solid, whichever kind. It builds each dropped world's field once, over this
+     side's view and counts, after the keys above have grown it (a baked child's
+     skin is among them), and the field is rebuilt over the base on every delta, a
+     few bounds an op.
 
-     **Blocks and drops in one world come as one log** (`ops`, log-core's
-     createOneLog delta; docs/onelog-plan.md step 2). Its follower, createOneTable,
-     keeps a block table and a drop list numbered in one sequence, so a voxel takes
-     the latest op that made it solid, whichever kind. The two old roads (`edits`,
-     `scene`) stay until the page moves to the one log (step 3), and they still
-     refuse each other: two tables wrapped either way round would each be wrong
-     somewhere. A world follows one road, so mixing the one log with either old
-     one is refused too. */
-  run.tail = ({ from, keys, counts: c, poses: p, edits, scene, ops }) => {
+     There were two roads before it, `edits` (edit-core's block log) and `scene`
+     (scene-core's drop log), which had to refuse each other: two tables wrapped
+     either way round would each be wrong somewhere. The page moved to the one log
+     in onelog step 3, and the old roads went on 2026-11-27 (maintenance.md §7),
+     so a world follows one road because there is one. The old logs stay as
+     one-log.test.js's oracles. */
+  run.tail = ({ from, keys, counts: c, poses: p, ops }) => {
     store.grow(from, keys);                 // throws if a tail was lost
     const top = store.maxId;
     if (top >= C.length){
@@ -1223,20 +1220,7 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
     }
     C.set(c, from);
     if (P && p) P.set(p, from);
-    if ((edits || scene) && one) throw new Error('tail: this world follows one log; a block or scene log can\'t join it');
-    if (edits && base){
-      if (scenes) throw new Error('tail: blocks in a world with drops in it need one log for both (scene-plan §4 Q3)');
-      if (!table){ table = createBlockTable(); colour = editedField(base, table); }
-      table.sync(edits);
-    }
-    if (scene && base){
-      if (table) throw new Error('tail: drops in a world with blocks in it need one log for both (scene-plan §4 Q3)');
-      scenes ??= createSceneTable(store, fieldOf);
-      scenes.sync(scene);
-      colour = scenes.field(base);
-    }
     if (ops && base){
-      if (table || scenes) throw new Error('tail: this world follows a block or scene log; the one log can\'t join it');
       one ??= createOneTable(store, fieldOf);
       one.sync(ops);
       colour = one.field(base);
@@ -1263,37 +1247,30 @@ export function createJobRunner(snap, colourOf = null, { meanDepth = MEAN_DEPTH 
    Make the tailer alongside worldSnapshot, as it starts from what the snapshot
    holds. Each worker gets every tail.
 
-   `scene` is a scene log (scene-core's createSceneLog), followed the way `log` is,
-   by epoch and count, plus the worlds it has registered: a baked child's words go
-   in the first tail after its first drop, and never again (scene-plan §1.5).
+   `oneLog` is log-core's createOneLog, blocks and drops in one list, followed by
+   epoch and count into the tail's `ops`, plus the worlds it has registered: a
+   baked child's words go in the first tail after its first drop, and never again
+   (scene-plan §1.5). The epoch is what tells "undo a drop, then place a block"
+   (the same count, a different op on the end) from nothing new. With no oneLog
+   (a world nobody edits) a tail carries nodes only.
 
-   `oneLog` is log-core's createOneLog, blocks and drops in one list, followed the
-   same way into the tail's `ops`. The epoch is what tells "undo a drop, then place
-   a block" (the same count, a different op on the end) from nothing new. Give a
-   tailer one of `log`, `scene` or `oneLog`: the runner follows one road a world. */
-export function createTailer(store, { counts, classes = null, log = null, scene = null, oneLog = null }){
-  let next = store.maxId + 1, epoch = 0, seen = 0, sEpoch = 0, sSeen = 0, sWorlds = 0, oEpoch = 0, oSeen = 0, oWorlds = 0;
+   `log` and `scene`, the block and drop logs' roads, are gone (maintenance.md
+   §7). A caller still passing one would get tails without its ops, and colours
+   that never change, so they throw. */
+export function createTailer(store, { counts, classes = null, oneLog = null, ...old }){
+  if ('log' in old || 'scene' in old) throw new Error('createTailer: the block and scene roads are gone; hand it the one log (log-core\'s createOneLog) as oneLog');
+  let next = store.maxId + 1, oEpoch = 0, oSeen = 0, oWorlds = 0;
   return () => {
     counts.update(); classes?.update();
     const from = next, top = store.maxId, n = top - from + 1;
     const c = new Float64Array(n), p = classes ? new Uint8Array(n) : null;
     for (let i = 0; i < n; i++){ c[i] = counts.of(from + i); if (p) p[i] = classes.pose(from + i); }
-    let edits = null;
-    if (log && (log.epoch !== epoch || log.count !== seen)){
-      edits = log.delta(epoch, seen);
-      epoch = edits.epoch; seen = edits.count;
-    }
-    let drops = null;
-    if (scene && (scene.epoch !== sEpoch || scene.count !== sSeen || scene.worldCount !== sWorlds)){
-      drops = scene.delta(sEpoch, sSeen, sWorlds);
-      sEpoch = drops.epoch; sSeen = drops.count; sWorlds += drops.worlds.length;
-    }
     let ops = null;
     if (oneLog && (oneLog.epoch !== oEpoch || oneLog.count !== oSeen || oneLog.worldCount !== oWorlds)){
       ops = oneLog.delta(oEpoch, oSeen, oWorlds);
       oEpoch = ops.epoch; oSeen = ops.count; oWorlds += ops.worlds.length;
     }
     next = top + 1;
-    return { from, keys: store.keysFrom(from), counts: c, poses: p, edits, scene: drops, ops };
+    return { from, keys: store.keysFrom(from), counts: c, poses: p, ops };
   };
 }
